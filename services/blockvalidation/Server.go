@@ -17,7 +17,6 @@ package blockvalidation
 import (
 	"context"
 	"fmt"
-	"math"
 	"net/http"
 	"net/url"
 	"sync"
