@@ -2108,24 +2108,26 @@ func New(ctx context.Context, logger ulogger.Logger, tSettings *settings.Setting
 }
 
 func (sm *SyncManager) startKafkaListeners(ctx context.Context, _ error) {
-	kafkaControlChan := make(chan bool) // true = start, false = stop
+	blockControlChan := make(chan bool)  // control channel for block announcements
+	txControlChan := make(chan bool)     // control channel for transaction announcements
 
-	// start a go routine to control the kafka listener, using the FSM state of the node
+	// start a go routine to control the kafka listeners based on FSM state
+	// Block announcements: enabled when NOT in LEGACYSYNCING state
+	// Transaction announcements: enabled only when in RUNNING state
 	go func() {
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			default:
-				// get the FSM state, only turn on the listener if we are in RUN mode
-				// TODO it would be better to be able to listen somehow to state changes in the FSM
-				isState, _ := sm.blockchainClient.IsFSMCurrentState(sm.ctx, teranodeblockchain.FSMStateRUNNING)
+				// Block announcements: enable when NOT in LEGACYSYNCING
+				isLegacySyncing, _ := sm.blockchainClient.IsFSMCurrentState(sm.ctx, teranodeblockchain.FSMStateLEGACYSYNCING)
+				blockEnabled := !isLegacySyncing
+				blockControlChan <- blockEnabled
 
-				if isState {
-					kafkaControlChan <- true // start or continue the listener
-				} else {
-					kafkaControlChan <- false // stop the listener
-				}
+				// Transaction announcements: enable only when RUNNING
+				isRunning, _ := sm.blockchainClient.IsFSMCurrentState(sm.ctx, teranodeblockchain.FSMStateRUNNING)
+				txControlChan <- isRunning
 
 				// wait 1 second before checking again
 				time.Sleep(1 * time.Second)
@@ -2133,9 +2135,10 @@ func (sm *SyncManager) startKafkaListeners(ctx context.Context, _ error) {
 		}
 	}()
 
-	var kafkaControlListenersCh []chan bool
+	var blockListenersCh []chan bool  // channels for block-related listeners
+	var txListenersCh []chan bool     // channels for tx-related listeners
 
-	// Kafka for INV messages
+	// Kafka for INV messages (responds to requests from other nodes)
 	legacyInvConfigURL := sm.settings.Kafka.LegacyInvConfig
 	if legacyInvConfigURL != nil {
 		sm.legacyKafkaInvCh = make(chan *kafka.Message, 10_000)
@@ -2151,25 +2154,29 @@ func (sm *SyncManager) startKafkaListeners(ctx context.Context, _ error) {
 			producer.Start(sm.ctx, sm.legacyKafkaInvCh)
 		}()
 
+		// INV listener processes requests from other nodes, so it should always be running
+		// It doesn't announce anything, it just responds to requests
 		controlCh := make(chan bool)
-		kafkaControlListenersCh = append(kafkaControlListenersCh, controlCh)
+		blockListenersCh = append(blockListenersCh, controlCh)
 
 		go kafka.StartKafkaControlledListener(ctx, sm.logger, "inv.legacy"+"."+sm.settings.ClientName, controlCh, legacyInvConfigURL, sm.kafkaINVListener)
 	}
 
+	// Kafka for blocks final messages (announces blocks to peers)
 	blocksFinalConfigURL := sm.settings.Kafka.BlocksFinalConfig
 	if blocksFinalConfigURL != nil {
 		controlCh := make(chan bool)
-		kafkaControlListenersCh = append(kafkaControlListenersCh, controlCh)
+		blockListenersCh = append(blockListenersCh, controlCh)
 
 		go kafka.StartKafkaControlledListener(ctx, sm.logger, "blocksfinal.legacy"+"."+sm.settings.ClientName, controlCh, blocksFinalConfigURL, sm.kafkaBlocksFinalListener)
 	}
 
+	// Kafka for txmeta messages (announces transactions to peers)
 	txmetaKafkaURL := sm.settings.Kafka.TxMetaConfig
 
 	if txmetaKafkaURL != nil {
 		controlCh := make(chan bool)
-		kafkaControlListenersCh = append(kafkaControlListenersCh, controlCh)
+		txListenersCh = append(txListenersCh, controlCh)
 
 		// disable replay for txmeta in the legacy service, we do not have to replay anything, ever
 		values := txmetaKafkaURL.Query()
@@ -2180,6 +2187,7 @@ func (sm *SyncManager) startKafkaListeners(ctx context.Context, _ error) {
 		go kafka.StartKafkaControlledListener(ctx, sm.logger, "txmeta.legacy"+"."+sm.settings.ClientName, controlCh, txmetaKafkaURL, sm.kafkaTXmetaListener)
 	}
 
+	// Listen to blockchain notifications for subtree announcements
 	go func() {
 		// will never return an error
 		blockchainSubscription, _ := sm.blockchainClient.Subscribe(ctx, "legacy/manager")
@@ -2225,14 +2233,28 @@ func (sm *SyncManager) startKafkaListeners(ctx context.Context, _ error) {
 		}
 	}()
 
+	// Control block listeners based on blockControlChan
 	go func() {
-		// listen to the control channel and send the control signal to all listeners
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case control := <-kafkaControlChan:
-				for _, ch := range kafkaControlListenersCh {
+			case control := <-blockControlChan:
+				for _, ch := range blockListenersCh {
+					ch <- control
+				}
+			}
+		}
+	}()
+
+	// Control transaction listeners based on txControlChan
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case control := <-txControlChan:
+				for _, ch := range txListenersCh {
 					ch <- control
 				}
 			}
