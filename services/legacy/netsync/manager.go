@@ -2108,8 +2108,8 @@ func New(ctx context.Context, logger ulogger.Logger, tSettings *settings.Setting
 }
 
 func (sm *SyncManager) startKafkaListeners(ctx context.Context, _ error) {
-	blockControlChan := make(chan bool)  // control channel for block announcements
-	txControlChan := make(chan bool)     // control channel for transaction announcements
+	blockControlChan := make(chan bool) // control channel for block announcements
+	txControlChan := make(chan bool)    // control channel for transaction announcements
 
 	// start a go routine to control the kafka listeners based on FSM state
 	// Block announcements: enabled when NOT in LEGACYSYNCING state
@@ -2135,8 +2135,8 @@ func (sm *SyncManager) startKafkaListeners(ctx context.Context, _ error) {
 		}
 	}()
 
-	var blockListenersCh []chan bool  // channels for block-related listeners
-	var txListenersCh []chan bool     // channels for tx-related listeners
+	var blockListenersCh []chan bool // channels for block-related listeners
+	var txListenersCh []chan bool    // channels for tx-related listeners
 
 	// Kafka for INV messages (responds to requests from other nodes)
 	legacyInvConfigURL := sm.settings.Kafka.LegacyInvConfig
