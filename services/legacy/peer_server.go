@@ -2658,6 +2658,8 @@ func newServer(ctx context.Context, logger ulogger.Logger, tSettings *settings.S
 
 	if tSettings.ChainCfgParams.Name == "testnet" {
 		activeNetParams = &testNetParams
+	} else if tSettings.ChainCfgParams.Name == "teratestnet" {
+		activeNetParams = &teraTestNetParams
 	} else if tSettings.ChainCfgParams.Name == "regtest" {
 		activeNetParams = &regressionNetParams
 	}
