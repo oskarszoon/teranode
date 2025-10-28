@@ -2108,29 +2108,36 @@ func New(ctx context.Context, logger ulogger.Logger, tSettings *settings.Setting
 }
 
 func (sm *SyncManager) startKafkaListeners(ctx context.Context, _ error) {
-	blockControlChan := make(chan bool) // control channel for block announcements
-	txControlChan := make(chan bool)    // control channel for transaction announcements
+	blockControlChan := make(chan bool, 1) // control channel for block-related listeners (buffered to prevent blocking)
+	txControlChan := make(chan bool, 1)    // control channel for transaction-related listeners (buffered to prevent blocking)
 
 	// start a go routine to control the kafka listeners based on FSM state
-	// Block announcements: enabled when NOT in LEGACYSYNCING state
-	// Transaction announcements: enabled only when in RUNNING state
+	// Block-related listeners (INV, blocks final): enabled when NOT in LEGACYSYNCING state
+	// Transaction-related listeners (txmeta): enabled only when in RUNNING state
 	go func() {
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			default:
-				// Block announcements: enable when NOT in LEGACYSYNCING
+			case <-time.After(1 * time.Second):
+				// Block-related listeners: enable when NOT in LEGACYSYNCING
 				isLegacySyncing, _ := sm.blockchainClient.IsFSMCurrentState(sm.ctx, teranodeblockchain.FSMStateLEGACYSYNCING)
 				blockEnabled := !isLegacySyncing
-				blockControlChan <- blockEnabled
 
-				// Transaction announcements: enable only when RUNNING
+				// Non-blocking send to avoid deadlock if no one is reading
+				select {
+				case blockControlChan <- blockEnabled:
+				default:
+				}
+
+				// Transaction-related listeners: enable only when RUNNING
 				isRunning, _ := sm.blockchainClient.IsFSMCurrentState(sm.ctx, teranodeblockchain.FSMStateRUNNING)
-				txControlChan <- isRunning
 
-				// wait 1 second before checking again
-				time.Sleep(1 * time.Second)
+				// Non-blocking send to avoid deadlock if no one is reading
+				select {
+				case txControlChan <- isRunning:
+				default:
+				}
 			}
 		}
 	}()
@@ -2154,8 +2161,8 @@ func (sm *SyncManager) startKafkaListeners(ctx context.Context, _ error) {
 			producer.Start(sm.ctx, sm.legacyKafkaInvCh)
 		}()
 
-		// INV listener processes requests from other nodes, so it should always be running
-		// It doesn't announce anything, it just responds to requests
+		// INV listener receives inventory messages from other nodes
+		// Disabled during LEGACYSYNCING to reduce processing load during catch-up
 		controlCh := make(chan bool)
 		blockListenersCh = append(blockListenersCh, controlCh)
 
