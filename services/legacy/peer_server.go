@@ -934,16 +934,9 @@ func (sp *serverPeer) OnGetHeaders(_ *peer.Peer, msg *wire.MsgGetHeaders) {
 		return
 	}
 
-	blockHeaders, _, err := sp.server.blockchainClient.GetBlockHeadersToCommonAncestor(sp.ctx, bestHeader.Hash(), msg.BlockLocatorHashes, wire.MaxBlockHeadersPerMsg)
+	blockHeaders, _, err := sp.server.blockchainClient.GetBlockHeadersFromCommonAncestor(sp.ctx, bestHeader.Hash(), util.HashPointersToValues(msg.BlockLocatorHashes), wire.MaxBlockHeadersPerMsg)
 	if err != nil {
-		sp.server.logger.Errorf("Failed to fetch block headers to common ancestor: %v", err)
-	}
-
-	// GetBlockHeadersToCommonAncestor returns headers in reverse order (newest first)
-	// but Bitcoin protocol expects them in forward order (oldest first)
-	// So we need to reverse the slice
-	for i, j := 0, len(blockHeaders)-1; i < j; i, j = i+1, j-1 {
-		blockHeaders[i], blockHeaders[j] = blockHeaders[j], blockHeaders[i]
+		sp.server.logger.Errorf("Failed to fetch block headers from common ancestor: %v", err)
 	}
 
 	// Send found headers to the requesting peer.
