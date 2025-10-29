@@ -1,4 +1,5 @@
 SHELL=/bin/bash
+.SHELLFLAGS=-o pipefail -c
 
 DEBUG_FLAGS=
 TXMETA_TAG=
@@ -144,12 +145,12 @@ build-dashboard:
 .PHONY: install-tools
 install-tools:
 	go install github.com/ctrf-io/go-ctrf-json-reporter/cmd/go-ctrf-json-reporter@latest
+	go install gotest.tools/gotestsum@latest
 
-# make test will run all tests in the project except for the ones in the test directory
 .PHONY: test
 test:
-	@mkdir -p /tmp/teranode-test-results
-	set -o pipefail && go list ./... | grep -v github.com/bsv-blockchain/teranode/test/ | SETTINGS_CONTEXT=test xargs go test -v -race -tags "testtxmetacache" -count=1 -timeout=10m -coverprofile=coverage.out 2>&1 | tee /tmp/teranode-test-results/test-results.txt | grep -v "ld: warning:"
+	@command -v gotestsum >/dev/null 2>&1 || { echo "gotestsum not found. Installing..."; $(MAKE) install-tools; }
+	go list ./... | grep -v github.com/bsv-blockchain/teranode/test/ | SETTINGS_CONTEXT=test xargs gotestsum --format pkgname -- -race -tags "testtxmetacache" -count=1 -timeout=10m -coverprofile=coverage.out
 
 # run tests in the test/longtest directory
 .PHONY: longtest
