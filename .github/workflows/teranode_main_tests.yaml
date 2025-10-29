@@ -57,7 +57,7 @@ jobs:
 
   smoketest:
     name: smoketest
-    runs-on: ubuntu-latest
+    runs-on: teranode-runner-8-core
     continue-on-error: true
     steps:
       - name: Workflow Telemetry
@@ -96,7 +96,7 @@ jobs:
 
   sonarqube:
     name: Sonarqube
-    runs-on: teranode-runner-4-core
+    runs-on: teranode-runner-8-core
     needs: go-test
     timeout-minutes: 15
     steps:

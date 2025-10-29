@@ -16,7 +16,7 @@ env:
 jobs:
   smoketest:
     name: smoketest
-    runs-on: ubuntu-latest
+    runs-on: teranode-runner-8-core
     steps:
       - name: Workflow Telemetry
         uses: catchpoint/workflow-telemetry-action@f974e0c5942f8f37973c4cc395704165fbe629ba # v2
@@ -57,7 +57,7 @@ jobs:
 
   sequential-sqlite:
     name: sequential-sqlite
-    runs-on: teranode-runner-4-core
+    runs-on: teranode-runner-8-core
     steps:
       - name: Workflow Telemetry
         uses: catchpoint/workflow-telemetry-action@f974e0c5942f8f37973c4cc395704165fbe629ba # v2
@@ -96,7 +96,7 @@ jobs:
 
   sequential-postgres:
     name: sequential-postgres
-    runs-on: teranode-runner-4-core
+    runs-on: teranode-runner-8-core
     steps:
       - name: Workflow Telemetry
         uses: catchpoint/workflow-telemetry-action@f974e0c5942f8f37973c4cc395704165fbe629ba # v2
@@ -135,7 +135,7 @@ jobs:
 
   sequential-aerospike:
     name: sequential-aerospike
-    runs-on: teranode-runner-4-core
+    runs-on: teranode-runner-8-core
     steps:
       - name: Workflow Telemetry
         uses: catchpoint/workflow-telemetry-action@f974e0c5942f8f37973c4cc395704165fbe629ba # v2
