@@ -41,6 +41,12 @@ go test -v ./test/chaos/...
 
 # Scenario 2: Kafka Broker Failure
 ./test/chaos/run_scenario_02.sh
+
+# Scenario 3: Network Partition
+./test/chaos/run_scenario_03.sh
+
+# Scenario 4: Intermittent Connection Drops
+./test/chaos/run_scenario_04.sh
 ```
 
 The helper scripts will:
@@ -61,6 +67,9 @@ go test -v ./test/chaos -run TestScenario02_KafkaBrokerFailure
 
 # Scenario 3: Network Partition
 go test -v ./test/chaos -run TestScenario03_NetworkPartition
+
+# Scenario 4: Intermittent Connection Drops
+go test -v ./test/chaos -run TestScenario04_IntermittentDrops
 ```
 
 ### Run in Verbose Mode
@@ -177,6 +186,44 @@ go test -v ./test/chaos -run TestScenario03_NetworkPartition
 - ✅ Services automatically recover when partition heals
 - ✅ No data loss or corruption in either service
 - ✅ Both PostgreSQL and Kafka fully operational after recovery
+
+### Scenario 4: Intermittent Connection Drops
+**File:** `scenario_04_intermittent_drops_test.go`
+
+**What it tests:**
+- System behavior under unstable network conditions with random connection drops
+- Probabilistic failure handling (30% and 60% drop rates)
+- Application retry logic effectiveness under intermittent failures
+- Data consistency despite random connection failures
+- Both PostgreSQL and Kafka resilience to intermittent drops
+
+**How to run:**
+```bash
+# Using helper script (recommended)
+./test/chaos/run_scenario_04.sh
+
+# Using go test directly
+go test -v ./test/chaos -run TestScenario04_IntermittentDrops
+```
+
+**Test phases:**
+1. Establish baseline connectivity to both services
+2. Inject 30% intermittent drops (low toxicity)
+3. Test PostgreSQL operations with low drop rate
+4. Test Kafka operations with low drop rate
+5. Increase to 60% intermittent drops (high toxicity)
+6. Validate retry logic under high drop rate
+7. Remove drops and verify full recovery
+8. Confirm data consistency after intermittent failures
+
+**Expected results:**
+- ✅ Some operations fail randomly, others succeed (probabilistic)
+- ✅ Success rate correlates with drop rate (70% success at 30% drops)
+- ✅ Retry logic improves eventual success rate significantly
+- ✅ At least 60% eventual success even with 60% drop rate and retries
+- ✅ 100% success rate after drops removed (full recovery)
+- ✅ No data corruption despite intermittent failures
+- ✅ Both services handle unstable networks gracefully
 
 ## Test Structure
 
@@ -345,7 +392,8 @@ Chaos tests take longer than unit tests:
 - Scenario 1 (Database Latency): ~30-45 seconds
 - Scenario 2 (Kafka Broker Failure): ~40-60 seconds
 - Scenario 3 (Network Partition): ~35-50 seconds
-- Full suite: ~2-3 minutes (grows with more scenarios)
+- Scenario 4 (Intermittent Drops): ~2-3 minutes (includes retry logic with delays; Kafka operations take longer)
+- Full suite: ~3-4 minutes (grows with more scenarios)
 
 ## Troubleshooting
 
@@ -414,7 +462,7 @@ curl -X POST http://localhost:8474/reset
 
 - [x] Scenario 2: Kafka Broker Failure ✅ **Implemented**
 - [x] Scenario 3: Network Partition ✅ **Implemented**
-- [ ] Scenario 4: Intermittent Connection Drops
+- [x] Scenario 4: Intermittent Connection Drops ✅ **Implemented**
 - [ ] Scenario 5: Bandwidth Constraints
 - [ ] Scenario 6: Slow Close Connections
 - [ ] Scenario 7: Combined Failures (DB + Kafka)
