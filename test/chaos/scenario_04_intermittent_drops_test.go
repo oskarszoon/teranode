@@ -1139,8 +1139,8 @@ func TestScenario04_LoadUnderFailures(t *testing.T) {
 		err = kafkaToxiClient.RemoveAllToxics(kafkaProxy)
 		require.NoError(t, err, "should remove kafka toxics")
 
-		// Immediate recovery test
-		time.Sleep(1 * time.Second)
+		// Allow time for connection pools to recover
+		time.Sleep(3 * time.Second)
 
 		start := time.Now()
 		results := runConcurrentOps(baselineConcurrency, operationsPerWorker, true, true)
