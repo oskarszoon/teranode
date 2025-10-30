@@ -48,20 +48,36 @@ jobs:
           sleep 10  # Extra wait for Kafka to be fully ready
         continue-on-error: false
 
-      - name: Run Chaos Test Scenario 04 (Intermittent Connection Drops)
+      - name: Run Chaos Test Scenario 04A (Intermittent Connection Drops)
         run: |
           set -o pipefail
           mkdir -p /tmp/teranode-test-results
-          go test -v ./test/chaos -run TestScenario04_IntermittentDrops 2>&1 | tee /tmp/teranode-test-results/chaostest-scenario-04-results.txt
+          go test -v ./test/chaos -run TestScenario04_IntermittentDrops 2>&1 | tee /tmp/teranode-test-results/chaostest-scenario-04a-results.txt
         continue-on-error: false
         timeout-minutes: 10
+
+      - name: Run Chaos Test Scenario 04B (Cascading Effects)
+        run: |
+          set -o pipefail
+          mkdir -p /tmp/teranode-test-results
+          go test -v ./test/chaos -run TestScenario04_CascadingEffects 2>&1 | tee /tmp/teranode-test-results/chaostest-scenario-04b-results.txt
+        continue-on-error: false
+        timeout-minutes: 2
+
+      - name: Run Chaos Test Scenario 04C (Load Under Failures)
+        run: |
+          set -o pipefail
+          mkdir -p /tmp/teranode-test-results
+          go test -v ./test/chaos -run TestScenario04_LoadUnderFailures 2>&1 | tee /tmp/teranode-test-results/chaostest-scenario-04c-results.txt
+        continue-on-error: false
+        timeout-minutes: 2
 
       - name: Upload chaostest results
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: chaostest2-results
-          path: /tmp/teranode-test-results/chaostest-scenario-04-results.txt
+          path: /tmp/teranode-test-results/chaostest-scenario-04*.txt
           retention-days: 2
           if-no-files-found: warn
 
