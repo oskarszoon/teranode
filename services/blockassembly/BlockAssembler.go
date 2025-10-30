@@ -121,6 +121,8 @@ type BlockAssembler struct {
 	bestBlock atomic.Pointer[BestBlockInfo]
 
 	// stateChangeCh notifies listeners of state changes
+	// Protected by stateChangeMu to prevent race conditions
+	stateChangeMu sync.RWMutex
 	stateChangeCh chan BestBlockInfo
 
 	// lastPersistedHeight tracks the last block height processed by block persister
@@ -698,8 +700,13 @@ func (b *BlockAssembler) setBestBlockHeader(bestBlockchainBlockHeader *model.Blo
 		Height: height,
 	})
 
-	if b.stateChangeCh != nil {
-		b.stateChangeCh <- BestBlockInfo{
+	// Send state change notification if a listener is registered
+	b.stateChangeMu.RLock()
+	stateChangeCh := b.stateChangeCh
+	b.stateChangeMu.RUnlock()
+
+	if stateChangeCh != nil {
+		stateChangeCh <- BestBlockInfo{
 			Header: bestBlockchainBlockHeader,
 			Height: height,
 		}
@@ -1038,6 +1045,8 @@ func (b *BlockAssembler) SetState(ctx context.Context) error {
 }
 
 func (b *BlockAssembler) SetStateChangeCh(ch chan BestBlockInfo) {
+	b.stateChangeMu.Lock()
+	defer b.stateChangeMu.Unlock()
 	b.stateChangeCh = ch
 }
 
