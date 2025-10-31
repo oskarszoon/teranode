@@ -50,6 +50,10 @@ type PeerInfo struct {
 	SyncAttemptCount     int       // Number of sync attempts with this peer
 	LastReputationReset  time.Time // When reputation was last reset for recovery
 	ReputationResetCount int       // How many times reputation has been reset (for exponential cooldown)
+
+	// Catchup error tracking
+	LastCatchupError     string    // Last error message from catchup attempt with this peer
+	LastCatchupErrorTime time.Time // When the last catchup error occurred
 }
 
 // PeerRegistry maintains peer information
@@ -349,6 +353,17 @@ func (pr *PeerRegistry) RecordCatchupFailure(id peer.ID) {
 	pr.RecordInteractionFailure(id)
 }
 
+// UpdateCatchupError stores the last catchup error for a peer
+func (pr *PeerRegistry) UpdateCatchupError(id peer.ID, errorMsg string) {
+	pr.mu.Lock()
+	defer pr.mu.Unlock()
+
+	if info, exists := pr.peers[id]; exists {
+		info.LastCatchupError = errorMsg
+		info.LastCatchupErrorTime = time.Now()
+	}
+}
+
 // RecordMaliciousInteraction records malicious behavior detected during any interaction
 // Significantly reduces reputation score for malicious activity
 func (pr *PeerRegistry) RecordMaliciousInteraction(id peer.ID) {
@@ -638,10 +653,23 @@ func (pr *PeerRegistry) GetPeersForCatchup() []*PeerInfo {
 		}
 	}
 
-	// Sort by reputation score (highest first)
-	// Secondary sort by last success time (most recent first)
+	// Sort by storage mode preference: full > pruned > unknown
+	// Secondary sort by reputation score (highest first)
+	// Tertiary sort by last success time (most recent first)
 	for i := 0; i < len(result); i++ {
 		for j := i + 1; j < len(result); j++ {
+			if result[i].Storage != result[j].Storage {
+				// Define storage preference order
+				storagePreference := map[string]int{
+					"full":   3,
+					"pruned": 2,
+					"":       1, // Unknown/old version
+				}
+				if storagePreference[result[i].Storage] < storagePreference[result[j].Storage] {
+					result[i], result[j] = result[j], result[i]
+				}
+				continue
+			}
 			// Compare reputation scores
 			if result[i].ReputationScore < result[j].ReputationScore {
 				result[i], result[j] = result[j], result[i]

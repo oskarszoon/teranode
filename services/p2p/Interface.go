@@ -102,6 +102,10 @@ type ClientI interface {
 	// RecordCatchupMalicious records malicious behavior detected during catchup.
 	RecordCatchupMalicious(ctx context.Context, peerID string) error
 
+	// UpdateCatchupError stores the last catchup error for a peer.
+	// This helps track why catchup failed for specific peers.
+	UpdateCatchupError(ctx context.Context, peerID string, errorMsg string) error
+
 	// UpdateCatchupReputation updates the reputation score for a peer.
 	// Score should be between 0 and 100.
 	UpdateCatchupReputation(ctx context.Context, peerID string, score float64) error

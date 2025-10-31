@@ -258,6 +258,9 @@ func (u *Server) releaseCatchupLock(ctx *CatchupContext, err *error) {
 			DurationMs:        time.Since(ctx.startTime).Milliseconds(),
 			BlocksValidated:   u.blocksValidated.Load(),
 		}
+
+		// Also store the error in the peer registry
+		u.reportCatchupError(context.Background(), ctx.peerID, errorMsg)
 	}
 
 	// Clear the active catchup context

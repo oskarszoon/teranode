@@ -327,6 +327,32 @@ func (c *Client) RecordCatchupMalicious(ctx context.Context, peerID string) erro
 	return nil
 }
 
+// UpdateCatchupError stores the last catchup error for a peer.
+// Parameters:
+//   - ctx: Context for the operation
+//   - peerID: The peer ID to update error for
+//   - errorMsg: The error message to store
+//
+// Returns:
+//   - error: Any error encountered during the operation
+func (c *Client) UpdateCatchupError(ctx context.Context, peerID string, errorMsg string) error {
+	req := &p2p_api.UpdateCatchupErrorRequest{
+		PeerId:   peerID,
+		ErrorMsg: errorMsg,
+	}
+
+	resp, err := c.client.UpdateCatchupError(ctx, req)
+	if err != nil {
+		return err
+	}
+
+	if resp != nil && !resp.Ok {
+		return errors.NewServiceError("failed to update catchup error")
+	}
+
+	return nil
+}
+
 // UpdateCatchupReputation updates the reputation score for a peer.
 // Parameters:
 //   - ctx: Context for the operation

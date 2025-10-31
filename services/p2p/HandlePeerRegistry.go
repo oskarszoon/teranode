@@ -62,6 +62,8 @@ func (s *Server) GetPeerRegistry(ctx context.Context, _ *emptypb.Empty) (*p2p_ap
 			AvgResponseTimeMs:      peer.AvgResponseTime.Milliseconds(),
 			Storage:                peer.Storage,
 			ClientName:             peer.ClientName,
+			LastCatchupError:       peer.LastCatchupError,
+			LastCatchupErrorTime:   timeToUnix(peer.LastCatchupErrorTime),
 		})
 	}
 

@@ -76,6 +76,26 @@ func (u *Server) reportCatchupFailure(ctx context.Context, peerID string) {
 	}
 }
 
+// reportCatchupError stores the catchup error message in the peer registry.
+// This allows the UI to display why catchup failed for each peer.
+//
+// Parameters:
+//   - ctx: Context for the operation
+//   - peerID: Peer identifier
+//   - errorMsg: Error message to store
+func (u *Server) reportCatchupError(ctx context.Context, peerID string, errorMsg string) {
+	if peerID == "" || errorMsg == "" {
+		return
+	}
+
+	// Report to P2P service if client is available
+	if u.p2pClient != nil {
+		if err := u.p2pClient.UpdateCatchupError(ctx, peerID, errorMsg); err != nil {
+			u.logger.Warnf("[peer_metrics] Failed to update catchup error for peer %s: %v", peerID, err)
+		}
+	}
+}
+
 // reportCatchupMalicious reports malicious behavior to the P2P service.
 // Falls back to local metrics if P2P client is unavailable.
 //

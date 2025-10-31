@@ -93,6 +93,22 @@ func (s *Server) UpdateCatchupReputation(ctx context.Context, req *p2p_api.Updat
 	return &p2p_api.UpdateCatchupReputationResponse{Ok: true}, nil
 }
 
+// UpdateCatchupError updates the last catchup error for a peer
+func (s *Server) UpdateCatchupError(ctx context.Context, req *p2p_api.UpdateCatchupErrorRequest) (*p2p_api.UpdateCatchupErrorResponse, error) {
+	if s.peerRegistry == nil {
+		return &p2p_api.UpdateCatchupErrorResponse{Ok: false}, errors.WrapGRPC(errors.NewServiceError("peer registry not initialized"))
+	}
+
+	peerID, err := peer.Decode(req.PeerId)
+	if err != nil {
+		return &p2p_api.UpdateCatchupErrorResponse{Ok: false}, errors.WrapGRPC(errors.NewProcessingError("invalid peer ID: %v", err))
+	}
+
+	s.peerRegistry.UpdateCatchupError(peerID, req.ErrorMsg)
+
+	return &p2p_api.UpdateCatchupErrorResponse{Ok: true}, nil
+}
+
 // GetPeersForCatchup returns peers suitable for catchup operations
 func (s *Server) GetPeersForCatchup(ctx context.Context, req *p2p_api.GetPeersForCatchupRequest) (*p2p_api.GetPeersForCatchupResponse, error) {
 	if s.peerRegistry == nil {

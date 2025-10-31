@@ -144,6 +144,15 @@ message AddBanScoreRequest {
     bool ok = 1;
   }
 
+  message UpdateCatchupErrorRequest {
+    string peer_id = 1;
+    string error_msg = 2;
+  }
+
+  message UpdateCatchupErrorResponse {
+    bool ok = 1;
+  }
+
   message GetPeersForCatchupRequest {
     // Empty for now, can add filtering params later
   }
@@ -237,6 +246,8 @@ message AddBanScoreRequest {
     int64 avg_response_time_ms = 25;
     string storage = 26;
     string client_name = 27;  // Human-readable name of the client
+    string last_catchup_error = 28;  // Last error message from catchup attempt
+    int64 last_catchup_error_time = 29;  // Unix timestamp of last catchup error
   }
 
   message GetPeerRegistryResponse {
@@ -261,6 +272,7 @@ message AddBanScoreRequest {
     rpc RecordCatchupFailure(RecordCatchupFailureRequest) returns (RecordCatchupFailureResponse) {}
     rpc RecordCatchupMalicious(RecordCatchupMaliciousRequest) returns (RecordCatchupMaliciousResponse) {}
     rpc UpdateCatchupReputation(UpdateCatchupReputationRequest) returns (UpdateCatchupReputationResponse) {}
+    rpc UpdateCatchupError(UpdateCatchupErrorRequest) returns (UpdateCatchupErrorResponse) {}
     rpc GetPeersForCatchup(GetPeersForCatchupRequest) returns (GetPeersForCatchupResponse) {}
 
     // Subtree and block validation reporting

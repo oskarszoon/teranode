@@ -13,6 +13,7 @@
   import i18n from '$internal/i18n'
   import RenderSpan from '$lib/components/table/renderers/render-span/index.svelte'
   import RenderSpanWithTooltip from '$lib/components/table/renderers/render-span-with-tooltip/index.svelte'
+  import RenderLink from '$lib/components/table/renderers/render-link/index.svelte'
 
   $: t = $i18n.t
 
@@ -46,6 +47,8 @@
     catchup_reputation_score: number
     catchup_malicious_count: number
     catchup_avg_response_ms: number
+    last_catchup_error: string
+    last_catchup_error_time: number
   }
 
   interface PreviousAttemptData {
@@ -85,6 +88,10 @@
   let error: string | null = null
   let refreshInterval: number | null = null
   let catchupRefreshInterval: number | null = null
+
+  // Modal state
+  let showCatchupModal = false
+  let selectedPeer: PeerData | null = null
 
   // Persistent pagination state
   let currentPage = 1
@@ -157,8 +164,17 @@
   if (browser) {
     const savedSort = loadSortFromStorage()
     if (savedSort) {
-      sortColumn = savedSort.sortColumn
-      sortOrder = savedSort.sortOrder
+      // Validate that the saved sort column still exists
+      const validColumns = ['id', 'is_connected', 'height', 'catchup_reputation_score', 'bytes_received', 'data_hub_url']
+      if (validColumns.includes(savedSort.sortColumn)) {
+        sortColumn = savedSort.sortColumn
+        sortOrder = savedSort.sortOrder
+      } else {
+        // Clear invalid sort from localStorage
+        localStorage.removeItem(PEERS_SORT_KEY)
+        sortColumn = ''
+        sortOrder = ''
+      }
     }
   }
 
@@ -404,27 +420,12 @@
         },
       },
       {
-        id: 'catchup_success_rate',
-        name: 'Success Rate',
-        type: 'number',
-        props: {
-          width: '10%',
-        },
-      },
-      {
-        id: 'catchup_attempts',
-        name: 'Attempts',
-        type: 'number',
+        id: 'catchup',
+        name: 'Catchup',
+        type: 'string',
+        sortable: false,  // Disable sorting for the catchup column
         props: {
           width: '8%',
-        },
-      },
-      {
-        id: 'catchup_avg_response_ms',
-        name: 'Avg Response',
-        type: 'number',
-        props: {
-          width: '10%',
         },
       },
       {
@@ -589,80 +590,12 @@
         value: '',
       }
     },
-    catchup_success_rate: (idField, item, colId) => {
-      const successes = item.catchup_successes || 0
-      const failures = item.catchup_failures || 0
-      const totalAttempts = successes + failures
-
-      if (totalAttempts === 0) {
-        return {
-          component: RenderSpan,
-          props: {
-            value: '-',
-            className: 'num',
-          },
-          value: '',
-        }
-      }
-
-      const rate = (successes / totalAttempts) * 100
-      let className = 'num'
-
-      if (rate >= 90) {
-        className += ' success-rate-excellent'
-      } else if (rate >= 75) {
-        className += ' success-rate-good'
-      } else if (rate >= 50) {
-        className += ' success-rate-fair'
-      } else {
-        className += ' success-rate-poor'
-      }
-
+    catchup: (idField, item, colId) => {
       return {
         component: RenderSpan,
         props: {
-          value: `${rate.toFixed(1)}%`,
-          className: className,
-        },
-        value: '',
-      }
-    },
-    catchup_attempts: (idField, item, colId) => {
-      const attempts = item.catchup_attempts || 0
-      const successes = item.catchup_successes || 0
-      const failures = item.catchup_failures || 0
-
-      const tooltipText = `Successes: ${successes}\nFailures: ${failures}\nTotal: ${attempts}`
-
-      return {
-        component: RenderSpanWithTooltip,
-        props: {
-          value: attempts.toString(),
-          tooltip: tooltipText,
-          className: 'num',
-        },
-        value: '',
-      }
-    },
-    catchup_avg_response_ms: (idField, item, colId) => {
-      const ms = item[colId] || 0
-
-      if (ms === 0) {
-        return {
-          component: RenderSpan,
-          props: {
-            value: '-',
-            className: 'num',
-          },
-          value: '',
-        }
-      }
-
-      return {
-        component: RenderSpan,
-        props: {
-          value: formatDuration(ms),
-          className: 'num',
+          value: 'View',
+          className: 'catchup-view-link',
         },
         value: '',
       }
@@ -671,12 +604,44 @@
 
   // Auto-refresh every 10 seconds for peers, every 3 seconds for catchup status
   onMount(() => {
+    // Validate sort column exists in current columns
+    const validColumns = ['id', 'is_connected', 'height', 'catchup_reputation_score', 'bytes_received', 'data_hub_url']
+    if (sortColumn && !validColumns.includes(sortColumn)) {
+      // Clear invalid sort
+      sortColumn = ''
+      sortOrder = ''
+      localStorage.removeItem(PEERS_SORT_KEY)
+    }
+
     fetchPeers()
     fetchCatchupStatus()
     refreshInterval = window.setInterval(fetchPeers, 10000)
     // Check catchup status more frequently to provide real-time updates
     catchupRefreshInterval = window.setInterval(fetchCatchupStatus, 3000)
+
+    // Add event listener for catchup view buttons
+    document.addEventListener('click', handleCatchupButtonClick)
   })
+
+  // Handle clicks on catchup view buttons
+  function handleCatchupButtonClick(event: MouseEvent) {
+    const target = event.target as HTMLElement
+    if (target.classList.contains('catchup-view-link')) {
+      // Find the row element
+      let row = target.closest('tr')
+      if (row) {
+        // Get the row index
+        const tbody = row.parentElement
+        const rowIndex = Array.from(tbody?.children || []).indexOf(row)
+        // Get the peer from the displayed data
+        const peer = data[rowIndex]
+        if (peer) {
+          selectedPeer = peer
+          showCatchupModal = true
+        }
+      }
+    }
+  }
 
   onDestroy(() => {
     if (refreshInterval) {
@@ -685,6 +650,8 @@
     if (catchupRefreshInterval) {
       clearInterval(catchupRefreshInterval)
     }
+    // Remove event listener
+    document.removeEventListener('click', handleCatchupButtonClick)
   })
 </script>
 
@@ -916,6 +883,128 @@
     </div>
   </Card>
 </PageWithMenu>
+
+{#if showCatchupModal && selectedPeer}
+  <div class="modal-overlay" on:click={() => {
+    showCatchupModal = false
+    selectedPeer = null
+  }}>
+    <div class="modal-content" on:click|stopPropagation>
+      <div class="modal-header">
+        <h2 class="modal-title">Catchup Details - {selectedPeer.client_name || selectedPeer.id}</h2>
+        <button class="modal-close" on:click={() => {
+          showCatchupModal = false
+          selectedPeer = null
+        }}>×</button>
+      </div>
+      <div class="modal-body">
+        <div class="modal-section">
+          <h3 class="section-title">Performance Metrics</h3>
+        <div class="metrics-grid">
+          <div class="metric-item">
+            <span class="metric-label">Reputation Score</span>
+            <span class="metric-value reputation-score" data-score="{selectedPeer.catchup_reputation_score}">
+              {selectedPeer.catchup_reputation_score ? selectedPeer.catchup_reputation_score.toFixed(1) : '0.0'}
+            </span>
+          </div>
+          <div class="metric-item">
+            <span class="metric-label">Success Rate</span>
+            <span class="metric-value">
+              {#if selectedPeer.catchup_attempts > 0}
+                {((selectedPeer.catchup_successes / selectedPeer.catchup_attempts) * 100).toFixed(1)}%
+              {:else}
+                -
+              {/if}
+            </span>
+          </div>
+          <div class="metric-item">
+            <span class="metric-label">Total Attempts</span>
+            <span class="metric-value">{selectedPeer.catchup_attempts || 0}</span>
+          </div>
+          <div class="metric-item">
+            <span class="metric-label">Successes</span>
+            <span class="metric-value success">{selectedPeer.catchup_successes || 0}</span>
+          </div>
+          <div class="metric-item">
+            <span class="metric-label">Failures</span>
+            <span class="metric-value failure">{selectedPeer.catchup_failures || 0}</span>
+          </div>
+          <div class="metric-item">
+            <span class="metric-label">Malicious Count</span>
+            <span class="metric-value malicious">{selectedPeer.catchup_malicious_count || 0}</span>
+          </div>
+          <div class="metric-item">
+            <span class="metric-label">Avg Response Time</span>
+            <span class="metric-value">
+              {selectedPeer.catchup_avg_response_ms ? formatDuration(selectedPeer.catchup_avg_response_ms) : '-'}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-section">
+        <h3 class="section-title">Last Activity</h3>
+        <div class="metrics-grid">
+          <div class="metric-item">
+            <span class="metric-label">Last Attempt</span>
+            <span class="metric-value">
+              {selectedPeer.catchup_last_attempt ? new Date(selectedPeer.catchup_last_attempt * 1000).toLocaleString() : 'Never'}
+            </span>
+          </div>
+          <div class="metric-item">
+            <span class="metric-label">Last Success</span>
+            <span class="metric-value">
+              {selectedPeer.catchup_last_success ? new Date(selectedPeer.catchup_last_success * 1000).toLocaleString() : 'Never'}
+            </span>
+          </div>
+          <div class="metric-item">
+            <span class="metric-label">Last Failure</span>
+            <span class="metric-value">
+              {selectedPeer.catchup_last_failure ? new Date(selectedPeer.catchup_last_failure * 1000).toLocaleString() : 'Never'}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {#if selectedPeer.last_catchup_error}
+        <div class="modal-section">
+          <h3 class="section-title error-title">Last Catchup Error</h3>
+          <div class="error-details">
+            <div class="error-time">
+              {selectedPeer.last_catchup_error_time ? new Date(selectedPeer.last_catchup_error_time * 1000).toLocaleString() : 'Unknown time'}
+            </div>
+            <div class="error-message">
+              {selectedPeer.last_catchup_error}
+            </div>
+          </div>
+        </div>
+      {/if}
+
+      <div class="modal-section">
+        <h3 class="section-title">Peer Information</h3>
+        <div class="metrics-grid">
+          <div class="metric-item">
+            <span class="metric-label">Peer ID</span>
+            <span class="metric-value peer-id">{selectedPeer.id}</span>
+          </div>
+          <div class="metric-item">
+            <span class="metric-label">Client Name</span>
+            <span class="metric-value">{selectedPeer.client_name || '-'}</span>
+          </div>
+          <div class="metric-item">
+            <span class="metric-label">Height</span>
+            <span class="metric-value">#{selectedPeer.height?.toLocaleString() || '0'}</span>
+          </div>
+          <div class="metric-item">
+            <span class="metric-label">DataHub URL</span>
+            <span class="metric-value url">{selectedPeer.data_hub_url || '-'}</span>
+          </div>
+        </div>
+      </div>
+      </div>
+    </div>
+  </div>
+{/if}
 
 <style>
   .title {
@@ -1423,5 +1512,218 @@
 
   .clear-sort-btn:active {
     background: rgba(255, 255, 255, 0.15);
+  }
+
+  /* Modal styles */
+  .modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.7);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 9999;
+    animation: fadeIn 0.2s ease-out;
+  }
+
+  @keyframes fadeIn {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+
+  .modal-content {
+    background: #1a1b23;
+    border-radius: 8px;
+    padding: 0;
+    max-height: 80vh;
+    min-width: 600px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+    position: relative;
+    z-index: 1002;
+  }
+
+  .modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 20px 24px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    background: #15161d;
+  }
+
+  .modal-title {
+    margin: 0;
+    font-size: 18px;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.9);
+  }
+
+  .modal-close {
+    background: transparent;
+    border: none;
+    color: rgba(255, 255, 255, 0.5);
+    font-size: 28px;
+    cursor: pointer;
+    padding: 0;
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 4px;
+    transition: all 0.2s;
+  }
+
+  .modal-close:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: rgba(255, 255, 255, 0.8);
+  }
+
+  .modal-body {
+    padding: 24px;
+    overflow-y: auto;
+    flex: 1;
+  }
+
+  .modal-section {
+    margin-bottom: 32px;
+  }
+
+  .modal-section:last-child {
+    margin-bottom: 0;
+  }
+
+  .section-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.9);
+    margin: 0 0 16px 0;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  .section-title.error-title {
+    color: #ff6b6b;
+  }
+
+  .metrics-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 16px;
+  }
+
+  .metric-item {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .metric-label {
+    font-size: 11px;
+    color: rgba(255, 255, 255, 0.5);
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  .metric-value {
+    font-size: 14px;
+    color: rgba(255, 255, 255, 0.88);
+    font-weight: 500;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+  }
+
+  .metric-value.reputation-score[data-score] {
+    font-weight: 600;
+  }
+
+  .metric-value.reputation-score[data-score]:where([data-score^="9"], [data-score^="8"]) {
+    color: #15b241;
+  }
+
+  .metric-value.reputation-score[data-score]:where([data-score^="7"], [data-score^="6"]) {
+    color: #ff9800;
+  }
+
+  .metric-value.reputation-score[data-score]:where([data-score^="5"], [data-score^="4"]) {
+    color: #ffa500;
+  }
+
+  .metric-value.reputation-score[data-score]:where([data-score^="3"], [data-score^="2"], [data-score^="1"], [data-score^="0"]) {
+    color: #ff6b6b;
+  }
+
+  .metric-value.success {
+    color: #15b241;
+  }
+
+  .metric-value.failure {
+    color: #ff6b6b;
+  }
+
+  .metric-value.malicious {
+    color: #ce1722;
+    font-weight: 600;
+  }
+
+  .metric-value.peer-id {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    word-break: break-all;
+  }
+
+  .metric-value.url {
+    font-size: 12px;
+    word-break: break-all;
+  }
+
+  .error-details {
+    background: rgba(255, 107, 107, 0.1);
+    border-left: 3px solid #ff6b6b;
+    padding: 12px;
+    border-radius: 4px;
+  }
+
+  .error-time {
+    font-size: 11px;
+    color: rgba(255, 255, 255, 0.5);
+    margin-bottom: 8px;
+  }
+
+  .error-message {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    color: rgba(255, 255, 255, 0.8);
+    line-height: 1.5;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+    word-break: break-all;
+    white-space: pre-wrap;
+  }
+
+  :global(.catchup-view-link) {
+    color: #1878ff;
+    cursor: pointer;
+    font-weight: 500;
+    text-decoration: underline;
+    transition: color 0.2s;
+    display: inline-block;
+    padding: 2px 4px;
+  }
+
+  :global(.catchup-view-link:hover) {
+    color: #4a94ff;
+    text-decoration: underline;
   }
 </style>

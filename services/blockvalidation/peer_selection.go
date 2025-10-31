@@ -2,7 +2,6 @@ package blockvalidation
 
 import (
 	"context"
-	"sort"
 
 	"github.com/bsv-blockchain/teranode/services/p2p/p2p_api"
 )
@@ -10,6 +9,7 @@ import (
 // PeerForCatchup represents a peer suitable for catchup operations with its metadata
 type PeerForCatchup struct {
 	ID                     string
+	Storage                string
 	DataHubURL             string
 	Height                 int32
 	BlockHash              string
@@ -86,7 +86,8 @@ func (u *Server) selectBestPeersForCatchup(ctx context.Context, targetHeight int
 
 	// P2P service already returns peers sorted by reputation, but let's ensure it
 	// in case the order gets mixed up during proto conversion
-	sort.Slice(peers, func(i, j int) bool {
+	// Lets not resort, its wasteful and we trust the p2p service to do it right
+	/*sort.Slice(peers, func(i, j int) bool {
 		// Primary sort: reputation score (higher is better)
 		if peers[i].CatchupReputationScore != peers[j].CatchupReputationScore {
 			return peers[i].CatchupReputationScore > peers[j].CatchupReputationScore
@@ -104,7 +105,7 @@ func (u *Server) selectBestPeersForCatchup(ctx context.Context, targetHeight int
 		}
 
 		return successRateI > successRateJ
-	})
+	})*/
 
 	u.logger.Infof("[peer_selection] Selected %d peers for catchup (from %d total)", len(peers), len(resp.Peers))
 	for i, p := range peers {

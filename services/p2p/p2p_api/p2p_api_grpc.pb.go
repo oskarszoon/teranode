@@ -34,6 +34,7 @@ const (
 	PeerService_RecordCatchupFailure_FullMethodName    = "/p2p_api.PeerService/RecordCatchupFailure"
 	PeerService_RecordCatchupMalicious_FullMethodName  = "/p2p_api.PeerService/RecordCatchupMalicious"
 	PeerService_UpdateCatchupReputation_FullMethodName = "/p2p_api.PeerService/UpdateCatchupReputation"
+	PeerService_UpdateCatchupError_FullMethodName      = "/p2p_api.PeerService/UpdateCatchupError"
 	PeerService_GetPeersForCatchup_FullMethodName      = "/p2p_api.PeerService/GetPeersForCatchup"
 	PeerService_ReportValidSubtree_FullMethodName      = "/p2p_api.PeerService/ReportValidSubtree"
 	PeerService_ReportValidBlock_FullMethodName        = "/p2p_api.PeerService/ReportValidBlock"
@@ -63,6 +64,7 @@ type PeerServiceClient interface {
 	RecordCatchupFailure(ctx context.Context, in *RecordCatchupFailureRequest, opts ...grpc.CallOption) (*RecordCatchupFailureResponse, error)
 	RecordCatchupMalicious(ctx context.Context, in *RecordCatchupMaliciousRequest, opts ...grpc.CallOption) (*RecordCatchupMaliciousResponse, error)
 	UpdateCatchupReputation(ctx context.Context, in *UpdateCatchupReputationRequest, opts ...grpc.CallOption) (*UpdateCatchupReputationResponse, error)
+	UpdateCatchupError(ctx context.Context, in *UpdateCatchupErrorRequest, opts ...grpc.CallOption) (*UpdateCatchupErrorResponse, error)
 	GetPeersForCatchup(ctx context.Context, in *GetPeersForCatchupRequest, opts ...grpc.CallOption) (*GetPeersForCatchupResponse, error)
 	// Subtree and block validation reporting
 	ReportValidSubtree(ctx context.Context, in *ReportValidSubtreeRequest, opts ...grpc.CallOption) (*ReportValidSubtreeResponse, error)
@@ -222,6 +224,16 @@ func (c *peerServiceClient) UpdateCatchupReputation(ctx context.Context, in *Upd
 	return out, nil
 }
 
+func (c *peerServiceClient) UpdateCatchupError(ctx context.Context, in *UpdateCatchupErrorRequest, opts ...grpc.CallOption) (*UpdateCatchupErrorResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UpdateCatchupErrorResponse)
+	err := c.cc.Invoke(ctx, PeerService_UpdateCatchupError_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *peerServiceClient) GetPeersForCatchup(ctx context.Context, in *GetPeersForCatchupRequest, opts ...grpc.CallOption) (*GetPeersForCatchupResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetPeersForCatchupResponse)
@@ -303,6 +315,7 @@ type PeerServiceServer interface {
 	RecordCatchupFailure(context.Context, *RecordCatchupFailureRequest) (*RecordCatchupFailureResponse, error)
 	RecordCatchupMalicious(context.Context, *RecordCatchupMaliciousRequest) (*RecordCatchupMaliciousResponse, error)
 	UpdateCatchupReputation(context.Context, *UpdateCatchupReputationRequest) (*UpdateCatchupReputationResponse, error)
+	UpdateCatchupError(context.Context, *UpdateCatchupErrorRequest) (*UpdateCatchupErrorResponse, error)
 	GetPeersForCatchup(context.Context, *GetPeersForCatchupRequest) (*GetPeersForCatchupResponse, error)
 	// Subtree and block validation reporting
 	ReportValidSubtree(context.Context, *ReportValidSubtreeRequest) (*ReportValidSubtreeResponse, error)
@@ -363,6 +376,9 @@ func (UnimplementedPeerServiceServer) RecordCatchupMalicious(context.Context, *R
 }
 func (UnimplementedPeerServiceServer) UpdateCatchupReputation(context.Context, *UpdateCatchupReputationRequest) (*UpdateCatchupReputationResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method UpdateCatchupReputation not implemented")
+}
+func (UnimplementedPeerServiceServer) UpdateCatchupError(context.Context, *UpdateCatchupErrorRequest) (*UpdateCatchupErrorResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method UpdateCatchupError not implemented")
 }
 func (UnimplementedPeerServiceServer) GetPeersForCatchup(context.Context, *GetPeersForCatchupRequest) (*GetPeersForCatchupResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetPeersForCatchup not implemented")
@@ -655,6 +671,24 @@ func _PeerService_UpdateCatchupReputation_Handler(srv interface{}, ctx context.C
 	return interceptor(ctx, in, info, handler)
 }
 
+func _PeerService_UpdateCatchupError_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateCatchupErrorRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PeerServiceServer).UpdateCatchupError(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PeerService_UpdateCatchupError_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PeerServiceServer).UpdateCatchupError(ctx, req.(*UpdateCatchupErrorRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _PeerService_GetPeersForCatchup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GetPeersForCatchupRequest)
 	if err := dec(in); err != nil {
@@ -825,6 +859,10 @@ var PeerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "UpdateCatchupReputation",
 			Handler:    _PeerService_UpdateCatchupReputation_Handler,
+		},
+		{
+			MethodName: "UpdateCatchupError",
+			Handler:    _PeerService_UpdateCatchupError_Handler,
 		},
 		{
 			MethodName: "GetPeersForCatchup",

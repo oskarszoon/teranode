@@ -24,7 +24,6 @@ type PeerRegistryCache struct {
 
 // CachedPeerMetrics represents the cached metrics for a single peer
 type CachedPeerMetrics struct {
-	ClientName string `json:"client_name,omitempty"`
 	// Interaction metrics - works for all types of interactions (blocks, subtrees, catchup, etc.)
 	InteractionAttempts    int64     `json:"interaction_attempts"`
 	InteractionSuccesses   int64     `json:"interaction_successes"`
@@ -46,6 +45,8 @@ type CachedPeerMetrics struct {
 	Height     int32  `json:"height,omitempty"`
 	BlockHash  string `json:"block_hash,omitempty"`
 	DataHubURL string `json:"data_hub_url,omitempty"`
+	ClientName string `json:"client_name,omitempty"`
+	Storage    string `json:"storage,omitempty"`
 
 	// Legacy fields for backward compatibility (can read old cache files)
 	CatchupAttempts        int64     `json:"catchup_attempts,omitempty"`
@@ -106,6 +107,7 @@ func (pr *PeerRegistry) SavePeerRegistryCache(cacheDir string) error {
 				BlockHash:              info.BlockHash,
 				DataHubURL:             info.DataHubURL,
 				ClientName:             info.ClientName,
+				Storage:                info.Storage,
 			}
 		}
 	}
@@ -190,6 +192,7 @@ func (pr *PeerRegistry) LoadPeerRegistryCache(cacheDir string) error {
 				Height:          metrics.Height,
 				BlockHash:       metrics.BlockHash,
 				DataHubURL:      metrics.DataHubURL,
+				Storage:         metrics.Storage,
 				IsHealthy:       true, // Assume healthy initially
 				ReputationScore: 50.0, // Start with neutral reputation
 			}

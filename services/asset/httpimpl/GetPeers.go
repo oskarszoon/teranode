@@ -41,6 +41,8 @@ type PeerInfoResponse struct {
 	CatchupReputationScore float64 `json:"catchup_reputation_score"`
 	CatchupMaliciousCount  int64   `json:"catchup_malicious_count"`
 	CatchupAvgResponseTime int64   `json:"catchup_avg_response_ms"`
+	LastCatchupError       string  `json:"last_catchup_error"`
+	LastCatchupErrorTime   int64   `json:"last_catchup_error_time"`
 }
 
 // PeersResponse represents the JSON response containing all peers
@@ -111,6 +113,8 @@ func (h *HTTP) GetPeers(c echo.Context) error {
 			CatchupReputationScore: peer.ReputationScore,
 			CatchupMaliciousCount:  peer.MaliciousCount,
 			CatchupAvgResponseTime: peer.AvgResponseTimeMs,
+			LastCatchupError:       peer.LastCatchupError,
+			LastCatchupErrorTime:   peer.LastCatchupErrorTime,
 		})
 	}
 
