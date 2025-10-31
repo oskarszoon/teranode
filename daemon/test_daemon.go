@@ -1916,7 +1916,7 @@ func (td *TestDaemon) WaitForBlockAssemblyToProcessTx(t *testing.T, txHashStr st
 			return
 
 		case <-ticker.C:
-			txs, err := td.BlockAssemblyClient.GetTransactionHashes(td.Ctx)
+			txs, err := td.BlockAssemblyClient.GetTransactionHashes(ctx)
 			if err != nil {
 				// Continue retrying on error
 				continue
