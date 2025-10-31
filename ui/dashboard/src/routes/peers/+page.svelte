@@ -101,6 +101,9 @@
   let sortColumn = ''
   let sortOrder = ''
 
+  // Memoized sorted data
+  let sortedData: PeerData[] = []
+
   // Local storage keys for persistence
   const PEERS_PAGE_SIZE_KEY = 'teranode-peers-pagesize'
   const PEERS_SORT_KEY = 'teranode-peers-sort'
@@ -220,10 +223,52 @@
     goto(url.toString(), { replaceState: true })
   }
 
+  // Apply sorting to data and memoize the result
+  function applySorting(dataToSort: PeerData[]): PeerData[] {
+    if (!sortColumn || !sortOrder) {
+      return [...dataToSort]
+    }
+
+    const sorted = [...dataToSort]
+    const multiplier = sortOrder === 'asc' ? 1 : -1
+
+    sorted.sort((a, b) => {
+      const aVal = a[sortColumn]
+      const bVal = b[sortColumn]
+
+      // Handle null/undefined values
+      if (aVal === null || aVal === undefined) return 1 * multiplier
+      if (bVal === null || bVal === undefined) return -1 * multiplier
+
+      // Numeric comparison
+      if (typeof aVal === 'number' && typeof bVal === 'number') {
+        return (aVal - bVal) * multiplier
+      }
+
+      // String comparison
+      if (typeof aVal === 'string' && typeof bVal === 'string') {
+        return aVal.localeCompare(bVal) * multiplier
+      }
+
+      // Boolean comparison
+      if (typeof aVal === 'boolean' && typeof bVal === 'boolean') {
+        return (aVal === bVal ? 0 : aVal ? -1 : 1) * multiplier
+      }
+
+      return 0
+    })
+
+    return sorted
+  }
+
   function updatePaginatedData() {
+    // Apply sorting to allData and memoize
+    sortedData = applySorting(allData)
+
+    // Paginate the sorted data
     const startIndex = (currentPage - 1) * currentPageSize
     const endIndex = startIndex + currentPageSize
-    data = allData.slice(startIndex, endIndex)
+    data = sortedData.slice(startIndex, endIndex)
   }
 
   // Fetch peer data from the API
@@ -328,8 +373,8 @@
   // Handle sort changes
   function onSort(e) {
     const { colId, value } = e.detail
-    sortColumn = colId
-    sortOrder = value
+    sortColumn = colId || ''
+    sortOrder = value || ''
 
     // Save sort to localStorage, or remove if clearing
     if (colId && value) {
@@ -344,6 +389,9 @@
         }
       }
     }
+
+    // Re-apply sorting and update the displayed data
+    updatePaginatedData()
   }
 
   // Clear sort
@@ -421,7 +469,7 @@
       },
       {
         id: 'catchup',
-        name: 'Catchup',
+        name: 'Metrics',
         type: 'string',
         sortable: false,  // Disable sorting for the catchup column
         props: {
@@ -850,6 +898,7 @@
           sortOrder,
         }}
         sortEnabled={true}
+        serverSort={true}
         pagination={{
           page: 1,
           pageSize: -1,
