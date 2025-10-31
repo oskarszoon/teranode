@@ -20,6 +20,7 @@
 
   interface PeerData {
     id: string
+    client_name?: string
     height: number
     block_hash: string
     data_hub_url: string
@@ -372,10 +373,10 @@
     return [
       {
         id: 'id',
-        name: 'Peer ID',
+        name: 'Peer',
         type: 'string',
         props: {
-          width: '12%',
+          width: '14%',
         },
       },
       {
@@ -450,14 +451,28 @@
   // Custom render functions
   const renderCells = {
     id: (idField, item, colId) => {
-      const value = item[colId] || ''
-      const shortId = value.length > 16 ? `${value.slice(0, 8)}...${value.slice(-8)}` : value
+      // Prefer client_name over peer ID for display
+      const peerId = item[colId] || ''
+      const displayValue = item.client_name || peerId
+
+      // If using client name, show full name; if using peer ID, abbreviate it
+      let shortValue = displayValue
+      if (!item.client_name && displayValue.length > 16) {
+        shortValue = `${displayValue.slice(0, 8)}...${displayValue.slice(-8)}`
+      }
+
+      // Always show the peer ID in the tooltip, and client name if available
+      let tooltip = peerId
+      if (item.client_name) {
+        tooltip = `${item.client_name}\n${peerId}`
+      }
+
       return {
         component: RenderSpanWithTooltip,
         props: {
-          value: shortId,
-          tooltip: value,
-          className: 'peer-id',
+          value: shortValue,
+          tooltip: tooltip,
+          className: 'peer-name',
         },
         value: '',
       }
@@ -689,7 +704,7 @@
       <div class="catchup-details">
         <div class="catchup-detail-item">
           <span class="catchup-label">Syncing From</span>
-          <span class="catchup-value peer-id-value">{catchupStatus.peer_id || 'Unknown'}</span>
+          <span class="catchup-value peer-name-value">{catchupStatus.peer_id || 'Unknown'}</span>
         </div>
         <div class="catchup-detail-item">
           <span class="catchup-label">Peer URL</span>
@@ -750,7 +765,7 @@
           <div class="previous-attempt-grid">
             <div class="previous-attempt-item">
               <span class="attempt-label">Peer:</span>
-              <span class="attempt-value peer-id-value">{catchupStatus.previous_attempt.peer_id}</span>
+              <span class="attempt-value peer-name-value">{catchupStatus.previous_attempt.peer_id}</span>
             </div>
             <div class="previous-attempt-item">
               <span class="attempt-label">Error Type:</span>
@@ -981,10 +996,11 @@
   }
 
   /* Custom styles for table cells */
-  :global(.peer-id) {
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 12px;
+  :global(.peer-name) {
+    font-family: 'Satoshi', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+    font-size: 13px;
     color: rgba(255, 255, 255, 0.88);
+    font-weight: 500;
   }
 
   :global(.hash) {
@@ -1195,8 +1211,8 @@
     overflow-wrap: break-word;
   }
 
-  .peer-id-value {
-    font-family: 'JetBrains Mono', monospace;
+  .peer-name-value {
+    font-family: 'Satoshi', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
     font-size: 13px;
     color: #1878ff;
     font-weight: 600;
@@ -1322,7 +1338,7 @@
     word-break: break-all;
   }
 
-  .attempt-value.peer-id-value {
+  .attempt-value.peer-name-value {
     word-break: break-all;
     line-height: 1.4;
   }

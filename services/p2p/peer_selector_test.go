@@ -52,8 +52,8 @@ func TestSelector_SkipsPeerMarkedUnhealthyByHealthChecker(t *testing.T) {
 	// Add two peers
 	healthyID := peer.ID("H")
 	unhealthyID := peer.ID("U")
-	registry.AddPeer(healthyID)
-	registry.AddPeer(unhealthyID)
+	registry.AddPeer(healthyID, "")
+	registry.AddPeer(unhealthyID, "")
 	// Set heights so both are ahead
 	registry.UpdateHeight(healthyID, 120, "hashH")
 	registry.UpdateHeight(unhealthyID, 125, "hashU")

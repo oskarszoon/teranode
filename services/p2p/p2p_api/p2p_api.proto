@@ -236,6 +236,7 @@ message AddBanScoreRequest {
     int64 malicious_count = 24;
     int64 avg_response_time_ms = 25;
     string storage = 26;
+    string client_name = 27;  // Human-readable name of the client
   }
 
   message GetPeerRegistryResponse {

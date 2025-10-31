@@ -174,7 +174,7 @@ func TestPeerHealthChecker_checkPeerHealth(t *testing.T) {
 
 	// Add peer to registry
 	peerID := peer.ID("test-peer")
-	registry.AddPeer(peerID)
+	registry.AddPeer(peerID, "")
 	registry.UpdateDataHubURL(peerID, server.URL)
 
 	// Get peer info
@@ -205,7 +205,7 @@ func TestPeerHealthChecker_CheckPeerNow(t *testing.T) {
 
 	// Add peer to registry
 	peerID := peer.ID("test-peer")
-	registry.AddPeer(peerID)
+	registry.AddPeer(peerID, "")
 	registry.UpdateDataHubURL(peerID, server.URL)
 
 	// Check specific peer immediately
@@ -246,19 +246,19 @@ func TestPeerHealthChecker_checkAllPeers(t *testing.T) {
 	peerC := peer.ID("peer-c")
 	peerD := peer.ID("peer-d")
 
-	registry.AddPeer(peerA)
+	registry.AddPeer(peerA, "")
 	registry.UpdateConnectionState(peerA, true)
 	registry.UpdateDataHubURL(peerA, successServer.URL)
 
-	registry.AddPeer(peerB)
+	registry.AddPeer(peerB, "")
 	registry.UpdateConnectionState(peerB, true)
 	registry.UpdateDataHubURL(peerB, failServer.URL)
 
-	registry.AddPeer(peerC)
+	registry.AddPeer(peerC, "")
 	registry.UpdateConnectionState(peerC, true)
 	registry.UpdateDataHubURL(peerC, "http://localhost:99999") // Unreachable
 
-	registry.AddPeer(peerD) // No DataHub URL
+	registry.AddPeer(peerD, "") // No DataHub URL
 	registry.UpdateConnectionState(peerD, true)
 
 	// Check all peers
@@ -297,7 +297,7 @@ func TestPeerHealthChecker_ConcurrentHealthChecks(t *testing.T) {
 	// Add many peers
 	for i := 0; i < 20; i++ {
 		peerID := peer.ID(string(rune('A' + i)))
-		registry.AddPeer(peerID)
+		registry.AddPeer(peerID, "")
 		registry.UpdateConnectionState(peerID, true)
 		registry.UpdateDataHubURL(peerID, server.URL)
 	}
@@ -331,7 +331,7 @@ func TestPeerHealthChecker_HealthCheckLoop(t *testing.T) {
 
 	// Add peer
 	peerID := peer.ID("test-peer")
-	registry.AddPeer(peerID)
+	registry.AddPeer(peerID, "")
 	registry.UpdateConnectionState(peerID, true)
 	registry.UpdateDataHubURL(peerID, server.URL)
 
@@ -363,7 +363,7 @@ func TestPeerHealthChecker_DoesNotRemoveAfterConsecutiveFailures(t *testing.T) {
 
 	// Add a peer with unreachable URL
 	pid := peer.ID("peer-remove")
-	registry.AddPeer(pid)
+	registry.AddPeer(pid, "")
 	registry.UpdateDataHubURL(pid, "http://127.0.0.1:65535") // unreachable port
 
 	// First failure -> should not remove yet
@@ -410,7 +410,7 @@ func TestPeerHealthChecker_FailureCountResetsOnSuccess(t *testing.T) {
 	hc := NewPeerHealthChecker(logger, registry, settings)
 
 	pid := peer.ID("peer-reset")
-	registry.AddPeer(pid)
+	registry.AddPeer(pid, "")
 
 	// First failure
 	registry.UpdateDataHubURL(pid, failSrv.URL)
@@ -524,7 +524,7 @@ func TestPeerHealthChecker_ListenOnlyPeersNotChecked(t *testing.T) {
 
 	// Add a listen-only peer (no DataHub URL)
 	listenOnlyPeerID := peer.ID("listen-only-peer")
-	registry.AddPeer(listenOnlyPeerID)
+	registry.AddPeer(listenOnlyPeerID, "")
 	registry.UpdateConnectionState(listenOnlyPeerID, true)
 	// Do not set DataHubURL - it remains empty for listen-only peers
 
@@ -562,13 +562,13 @@ func TestPeerHealthChecker_CheckAllPeersSkipsListenOnly(t *testing.T) {
 
 	// Add a regular peer with DataHub URL
 	regularPeerID := peer.ID("regular-peer")
-	registry.AddPeer(regularPeerID)
+	registry.AddPeer(regularPeerID, "")
 	registry.UpdateConnectionState(regularPeerID, true)
 	registry.UpdateDataHubURL(regularPeerID, server.URL)
 
 	// Add a listen-only peer (no DataHub URL)
 	listenOnlyPeerID := peer.ID("listen-only-peer")
-	registry.AddPeer(listenOnlyPeerID)
+	registry.AddPeer(listenOnlyPeerID, "")
 	registry.UpdateConnectionState(listenOnlyPeerID, true)
 	// Do not set DataHubURL
 

@@ -24,6 +24,7 @@ type PeerRegistryCache struct {
 
 // CachedPeerMetrics represents the cached metrics for a single peer
 type CachedPeerMetrics struct {
+	ClientName string `json:"client_name,omitempty"`
 	// Interaction metrics - works for all types of interactions (blocks, subtrees, catchup, etc.)
 	InteractionAttempts    int64     `json:"interaction_attempts"`
 	InteractionSuccesses   int64     `json:"interaction_successes"`
@@ -104,6 +105,7 @@ func (pr *PeerRegistry) SavePeerRegistryCache(cacheDir string) error {
 				Height:                 info.Height,
 				BlockHash:              info.BlockHash,
 				DataHubURL:             info.DataHubURL,
+				ClientName:             info.ClientName,
 			}
 		}
 	}

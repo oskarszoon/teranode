@@ -10,6 +10,7 @@ import (
 // PeerInfo holds all information about a peer
 type PeerInfo struct {
 	ID              peer.ID
+	ClientName      string // Human-readable name of the client software
 	Height          int32
 	BlockHash       string
 	DataHubURL      string
@@ -66,7 +67,7 @@ func NewPeerRegistry() *PeerRegistry {
 }
 
 // AddPeer adds or updates a peer
-func (pr *PeerRegistry) AddPeer(id peer.ID) {
+func (pr *PeerRegistry) AddPeer(id peer.ID, clientName string) {
 	pr.mu.Lock()
 	defer pr.mu.Unlock()
 
@@ -74,11 +75,15 @@ func (pr *PeerRegistry) AddPeer(id peer.ID) {
 		now := time.Now()
 		pr.peers[id] = &PeerInfo{
 			ID:              id,
+			ClientName:      clientName,
 			ConnectedAt:     now,
 			LastMessageTime: now,  // Initialize to connection time
 			IsHealthy:       true, // Assume healthy until proven otherwise
 			ReputationScore: 50.0, // Start with neutral reputation
 		}
+	} else if clientName != "" {
+		// Update client name if provided for existing peer
+		pr.peers[id].ClientName = clientName
 	}
 }
 

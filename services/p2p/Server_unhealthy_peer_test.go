@@ -17,7 +17,7 @@ func TestShouldSkipUnhealthyPeer(t *testing.T) {
 		// Create peer registry with an unhealthy CONNECTED peer
 		peerRegistry := NewPeerRegistry()
 		unhealthyPeerID, _ := peer.Decode("12D3KooWEyX7hgdXy8zUjCs9CqvMGpB5dKVFj9MX2nUBLwajdSZH")
-		peerRegistry.AddPeer(unhealthyPeerID)
+		peerRegistry.AddPeer(unhealthyPeerID, "")
 		peerRegistry.UpdateConnectionState(unhealthyPeerID, true) // Mark as connected
 		peerRegistry.UpdateHealth(unhealthyPeerID, false)         // Mark as unhealthy
 
@@ -35,7 +35,7 @@ func TestShouldSkipUnhealthyPeer(t *testing.T) {
 		// Create peer registry with a healthy peer
 		peerRegistry := NewPeerRegistry()
 		healthyPeerID, _ := peer.Decode("12D3KooWEyX7hgdXy8zUjCs9CqvMGpB5dKVFj9MX2nUBLwajdSZH")
-		peerRegistry.AddPeer(healthyPeerID)
+		peerRegistry.AddPeer(healthyPeerID, "")
 		peerRegistry.UpdateHealth(healthyPeerID, true) // Mark as healthy
 
 		server := &Server{
@@ -96,7 +96,7 @@ func TestHandleBlockTopic_UnhealthyPeer(t *testing.T) {
 
 		// Create peer registry with unhealthy CONNECTED peer
 		peerRegistry := NewPeerRegistry()
-		peerRegistry.AddPeer(unhealthyPeerID)
+		peerRegistry.AddPeer(unhealthyPeerID, "")
 		peerRegistry.UpdateConnectionState(unhealthyPeerID, true) // Mark as connected
 		peerRegistry.UpdateHealth(unhealthyPeerID, false)         // Mark as unhealthy
 
@@ -144,7 +144,7 @@ func TestHandleBlockTopic_UnhealthyPeer(t *testing.T) {
 
 		// Create peer registry with healthy peer
 		peerRegistry := NewPeerRegistry()
-		peerRegistry.AddPeer(healthyPeerID)
+		peerRegistry.AddPeer(healthyPeerID, "")
 		peerRegistry.UpdateHealth(healthyPeerID, true) // Mark as healthy
 
 		// Create mock kafka producer (SHOULD be called)
@@ -196,7 +196,7 @@ func TestHandleSubtreeTopic_UnhealthyPeer(t *testing.T) {
 
 		// Create peer registry with unhealthy CONNECTED peer
 		peerRegistry := NewPeerRegistry()
-		peerRegistry.AddPeer(unhealthyPeerID)
+		peerRegistry.AddPeer(unhealthyPeerID, "")
 		peerRegistry.UpdateConnectionState(unhealthyPeerID, true) // Mark as connected
 		peerRegistry.UpdateHealth(unhealthyPeerID, false)         // Mark as unhealthy
 
@@ -247,7 +247,7 @@ func TestHandleSubtreeTopic_UnhealthyPeer(t *testing.T) {
 
 		// Create peer registry with healthy peer
 		peerRegistry := NewPeerRegistry()
-		peerRegistry.AddPeer(healthyPeerID)
+		peerRegistry.AddPeer(healthyPeerID, "")
 		peerRegistry.UpdateHealth(healthyPeerID, true) // Mark as healthy
 
 		// Create mock kafka producer (SHOULD be called)
@@ -297,7 +297,7 @@ func TestHandleNodeStatusTopic_UnhealthyPeer(t *testing.T) {
 
 		// Create peer registry with unhealthy CONNECTED peer
 		peerRegistry := NewPeerRegistry()
-		peerRegistry.AddPeer(unhealthyPeerID)
+		peerRegistry.AddPeer(unhealthyPeerID, "")
 		peerRegistry.UpdateConnectionState(unhealthyPeerID, true) // Mark as connected
 		peerRegistry.UpdateHealth(unhealthyPeerID, false)         // Mark as unhealthy
 
@@ -340,7 +340,7 @@ func TestHandleNodeStatusTopic_UnhealthyPeer(t *testing.T) {
 
 		// Create peer registry with healthy peer
 		peerRegistry := NewPeerRegistry()
-		peerRegistry.AddPeer(healthyPeerID)
+		peerRegistry.AddPeer(healthyPeerID, "")
 		peerRegistry.UpdateHealth(healthyPeerID, true) // Mark as healthy
 
 		// Create server with registry
@@ -381,7 +381,7 @@ func TestConnectedVsGossipedPeers(t *testing.T) {
 		connectedPeerID, _ := peer.Decode("12D3KooWEyX7hgdXy8zUjCs9CqvMGpB5dKVFj9MX2nUBLwajdSZH")
 
 		// Add as connected peer
-		peerRegistry.AddPeer(connectedPeerID)
+		peerRegistry.AddPeer(connectedPeerID, "")
 		peerRegistry.UpdateConnectionState(connectedPeerID, true)
 
 		// Verify it's marked as connected
@@ -400,7 +400,7 @@ func TestConnectedVsGossipedPeers(t *testing.T) {
 		gossipedPeerID, _ := peer.Decode("12D3KooWEyX7hgdXy8zUjCs9CqvMGpB5dKVFj9MX2nUBLwajdSZH")
 
 		// Add as gossiped peer (default IsConnected = false)
-		peerRegistry.AddPeer(gossipedPeerID)
+		peerRegistry.AddPeer(gossipedPeerID, "")
 
 		// Verify it's not marked as connected
 		peerInfo, exists := peerRegistry.GetPeer(gossipedPeerID)
@@ -419,11 +419,11 @@ func TestConnectedVsGossipedPeers(t *testing.T) {
 		connectedPeerID, _ := peer.Decode("12D3KooWL1NF6fdTJ9cucEuwvuX8V8KtpJZZnUE4umdLBuK15eUZ")
 		gossipedPeerID, _ := peer.Decode("12D3KooWEyX7hgdXy8zUjCs9CqvMGpB5dKVFj9MX2nUBLwajdSZH")
 
-		peerRegistry.AddPeer(connectedPeerID)
+		peerRegistry.AddPeer(connectedPeerID, "")
 		peerRegistry.UpdateConnectionState(connectedPeerID, true)
 		peerRegistry.UpdateDataHubURL(connectedPeerID, "http://connected.test")
 
-		peerRegistry.AddPeer(gossipedPeerID)
+		peerRegistry.AddPeer(gossipedPeerID, "")
 		// Don't mark as connected
 		peerRegistry.UpdateDataHubURL(gossipedPeerID, "http://gossiped.test")
 
@@ -450,7 +450,7 @@ func TestConnectedVsGossipedPeers(t *testing.T) {
 
 		// Create peer registry with unhealthy CONNECTED peer
 		peerRegistry := NewPeerRegistry()
-		peerRegistry.AddPeer(unhealthyConnectedPeerID)
+		peerRegistry.AddPeer(unhealthyConnectedPeerID, "")
 		peerRegistry.UpdateConnectionState(unhealthyConnectedPeerID, true) // Mark as connected
 		peerRegistry.UpdateHealth(unhealthyConnectedPeerID, false)         // Mark as unhealthy
 
@@ -489,7 +489,7 @@ func TestConnectedVsGossipedPeers(t *testing.T) {
 
 		// Create peer registry with unhealthy GOSSIPED peer (not connected)
 		peerRegistry := NewPeerRegistry()
-		peerRegistry.AddPeer(unhealthyGossipedPeerID)
+		peerRegistry.AddPeer(unhealthyGossipedPeerID, "")
 		// Don't mark as connected (IsConnected = false by default)
 		peerRegistry.UpdateHealth(unhealthyGossipedPeerID, false) // Mark as unhealthy
 
@@ -535,7 +535,7 @@ func TestHandleRejectedTxTopic_UnhealthyPeer(t *testing.T) {
 
 		// Create peer registry with unhealthy CONNECTED peer
 		peerRegistry := NewPeerRegistry()
-		peerRegistry.AddPeer(unhealthyPeerID)
+		peerRegistry.AddPeer(unhealthyPeerID, "")
 		peerRegistry.UpdateConnectionState(unhealthyPeerID, true) // Mark as connected
 		peerRegistry.UpdateHealth(unhealthyPeerID, false)         // Mark as unhealthy
 
@@ -568,7 +568,7 @@ func TestHandleRejectedTxTopic_UnhealthyPeer(t *testing.T) {
 
 		// Create peer registry with healthy peer
 		peerRegistry := NewPeerRegistry()
-		peerRegistry.AddPeer(healthyPeerID)
+		peerRegistry.AddPeer(healthyPeerID, "")
 		peerRegistry.UpdateHealth(healthyPeerID, true) // Mark as healthy
 
 		// Create server with registry

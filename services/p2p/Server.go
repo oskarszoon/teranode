@@ -845,27 +845,29 @@ func generateRandomKey() (string, error) {
 // Parameters:
 //   - from: the immediate sender's peer ID string
 //   - originatorPeerID: the original message creator's peer ID string (may be same as from)
-func (s *Server) updatePeerLastMessageTime(from string, originatorPeerID string) {
+//   - originatorClientName: the client name of the original message creator (optional)
+func (s *Server) updatePeerLastMessageTime(from string, originatorPeerID string, originatorClientName string) {
 	if s.peerRegistry == nil {
 		return
 	}
 
 	// Mark sender as connected and update last message time
 	// The sender is the peer we're directly connected to
+	// Note: We don't have the sender's client name here, only the originator's
 	senderID, err := peer.Decode(from)
 	if err != nil {
 		s.logger.Errorf("failed to decode sender peer ID %s: %v", from, err)
 		return
 	}
-	s.addConnectedPeer(senderID)
+	s.addConnectedPeer(senderID, "")
 	s.peerRegistry.UpdateLastMessageTime(senderID)
 
 	// Also update for the originator if different (gossiped message)
 	// The originator is not directly connected to us
 	if originatorPeerID != "" {
 		if peerID, err := peer.Decode(originatorPeerID); err == nil && peerID != senderID {
-			// Add as gossiped peer (not connected)
-			s.addPeer(peerID)
+			// Add as gossiped peer (not connected) with their client name
+			s.addPeer(peerID, originatorClientName)
 			s.peerRegistry.UpdateLastMessageTime(peerID)
 		}
 	}
@@ -925,8 +927,8 @@ func (s *Server) handleNodeStatusTopic(_ context.Context, m []byte, from string)
 	if !isSelf {
 		s.logger.Debugf("[handleNodeStatusTopic] Processing node_status from remote peer %s (peer_id: %s)", from, nodeStatusMessage.PeerID)
 
-		// Update last message time for the sender and originator
-		s.updatePeerLastMessageTime(from, nodeStatusMessage.PeerID)
+		// Update last message time for the sender and originator with client name
+		s.updatePeerLastMessageTime(from, nodeStatusMessage.PeerID, nodeStatusMessage.ClientName)
 
 		// Track bytes received from this message
 		s.updateBytesReceived(from, nodeStatusMessage.PeerID, uint64(len(m)))
@@ -980,8 +982,8 @@ func (s *Server) handleNodeStatusTopic(_ context.Context, m []byte, from string)
 			s.logger.Errorf("[handleNodeStatusTopic] failed to decode peer ID %s: %v", nodeStatusMessage.PeerID, err)
 			return
 		}
-		// Ensure this peer is in the registry
-		s.addPeer(peerID)
+		// Ensure this peer is in the registry with client name
+		s.addPeer(peerID, nodeStatusMessage.ClientName)
 
 		// Update sync manager with peer height from node status
 		// Update peer height in registry
@@ -1016,7 +1018,7 @@ func (s *Server) handleNodeStatusTopic(_ context.Context, m []byte, from string)
 	// Also ensure the sender is in the registry
 	if !isSelf && from != "" {
 		if senderID, err := peer.Decode(from); err == nil {
-			s.addPeer(senderID)
+			s.addPeer(senderID, "")
 		}
 	}
 }
@@ -1695,8 +1697,8 @@ func (s *Server) handleBlockTopic(_ context.Context, m []byte, from string) {
 		return
 	}
 
-	// Update last message time for the sender and originator
-	s.updatePeerLastMessageTime(from, blockMessage.PeerID)
+	// Update last message time for the sender and originator with client name
+	s.updatePeerLastMessageTime(from, blockMessage.PeerID, blockMessage.ClientName)
 
 	// Track bytes received from this message
 	s.updateBytesReceived(from, blockMessage.PeerID, uint64(len(m)))
@@ -1816,8 +1818,8 @@ func (s *Server) handleSubtreeTopic(_ context.Context, m []byte, from string) {
 		return
 	}
 
-	// Update last message time for the sender and originator
-	s.updatePeerLastMessageTime(from, subtreeMessage.PeerID)
+	// Update last message time for the sender and originator with client name
+	s.updatePeerLastMessageTime(from, subtreeMessage.PeerID, subtreeMessage.ClientName)
 
 	// Track bytes received from this message
 	s.updateBytesReceived(from, subtreeMessage.PeerID, uint64(len(m)))
@@ -1939,7 +1941,8 @@ func (s *Server) handleRejectedTxTopic(_ context.Context, m []byte, from string)
 		return
 	}
 
-	s.updatePeerLastMessageTime(from, rejectedTxMessage.PeerID)
+	// Update last message time with client name
+	s.updatePeerLastMessageTime(from, rejectedTxMessage.PeerID, rejectedTxMessage.ClientName)
 
 	// Track bytes received from this message
 	s.updateBytesReceived(from, rejectedTxMessage.PeerID, uint64(len(m)))
@@ -2554,7 +2557,7 @@ func (s *Server) updatePeerHeight(peerID peer.ID, height int32) {
 	// Update in registry and coordinator
 	if s.peerRegistry != nil {
 		// Ensure peer exists in registry
-		s.addPeer(peerID)
+		s.addPeer(peerID, "")
 
 		// Get the existing block hash from registry
 		blockHash := ""
@@ -2574,16 +2577,16 @@ func (s *Server) updatePeerHeight(peerID peer.ID, height int32) {
 	}
 }
 
-func (s *Server) addPeer(peerID peer.ID) {
+func (s *Server) addPeer(peerID peer.ID, clientName string) {
 	if s.peerRegistry != nil {
-		s.peerRegistry.AddPeer(peerID)
+		s.peerRegistry.AddPeer(peerID, clientName)
 	}
 }
 
 // addConnectedPeer adds a peer and marks it as directly connected
-func (s *Server) addConnectedPeer(peerID peer.ID) {
+func (s *Server) addConnectedPeer(peerID peer.ID, clientName string) {
 	if s.peerRegistry != nil {
-		s.peerRegistry.AddPeer(peerID)
+		s.peerRegistry.AddPeer(peerID, clientName)
 		s.peerRegistry.UpdateConnectionState(peerID, true)
 	}
 }

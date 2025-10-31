@@ -14,7 +14,7 @@ func TestPeerRegistry_AddPeer(t *testing.T) {
 	peerID := peer.ID("test-peer-1")
 
 	// Add a new peer
-	pr.AddPeer(peerID)
+	pr.AddPeer(peerID, "")
 
 	// Verify peer was added
 	info, exists := pr.GetPeer(peerID)
@@ -29,7 +29,7 @@ func TestPeerRegistry_AddPeer(t *testing.T) {
 	// Adding same peer again should not reset data
 	originalTime := info.ConnectedAt
 	time.Sleep(10 * time.Millisecond)
-	pr.AddPeer(peerID)
+	pr.AddPeer(peerID, "")
 
 	info, _ = pr.GetPeer(peerID)
 	assert.Equal(t, originalTime, info.ConnectedAt, "ConnectedAt should not change on re-add")
@@ -40,7 +40,7 @@ func TestPeerRegistry_RemovePeer(t *testing.T) {
 	peerID := peer.ID("test-peer-1")
 
 	// Add then remove
-	pr.AddPeer(peerID)
+	pr.AddPeer(peerID, "")
 	pr.RemovePeer(peerID)
 
 	// Verify peer was removed
@@ -56,7 +56,7 @@ func TestPeerRegistry_UpdateLastMessageTime(t *testing.T) {
 	peerID := peer.ID("test-peer-1")
 
 	// Add peer
-	pr.AddPeer(peerID)
+	pr.AddPeer(peerID, "")
 
 	// Get initial last message time (should be set to connection time)
 	info1, exists := pr.GetPeer(peerID)
@@ -88,7 +88,7 @@ func TestPeerRegistry_GetAllPeers(t *testing.T) {
 	// Add multiple peers
 	ids := GenerateTestPeerIDs(3)
 	for _, id := range ids {
-		pr.AddPeer(id)
+		pr.AddPeer(id, "")
 	}
 
 	// Get all peers
@@ -109,7 +109,7 @@ func TestPeerRegistry_UpdateHeight(t *testing.T) {
 	pr := NewPeerRegistry()
 	peerID := peer.ID("test-peer-1")
 
-	pr.AddPeer(peerID)
+	pr.AddPeer(peerID, "")
 	pr.UpdateHeight(peerID, 12345, "block-hash-12345")
 
 	info, exists := pr.GetPeer(peerID)
@@ -125,7 +125,7 @@ func TestPeerRegistry_UpdateDataHubURL(t *testing.T) {
 	pr := NewPeerRegistry()
 	peerID := peer.ID("test-peer-1")
 
-	pr.AddPeer(peerID)
+	pr.AddPeer(peerID, "")
 	pr.UpdateDataHubURL(peerID, "http://datahub.test")
 
 	info, exists := pr.GetPeer(peerID)
@@ -137,7 +137,7 @@ func TestPeerRegistry_UpdateHealth(t *testing.T) {
 	pr := NewPeerRegistry()
 	peerID := peer.ID("test-peer-1")
 
-	pr.AddPeer(peerID)
+	pr.AddPeer(peerID, "")
 
 	// Initially healthy
 	info, _ := pr.GetPeer(peerID)
@@ -159,7 +159,7 @@ func TestPeerRegistry_UpdateBanStatus(t *testing.T) {
 	pr := NewPeerRegistry()
 	peerID := peer.ID("test-peer-1")
 
-	pr.AddPeer(peerID)
+	pr.AddPeer(peerID, "")
 	pr.UpdateBanStatus(peerID, 50, false)
 
 	info, _ := pr.GetPeer(peerID)
@@ -177,7 +177,7 @@ func TestPeerRegistry_UpdateNetworkStats(t *testing.T) {
 	pr := NewPeerRegistry()
 	peerID := peer.ID("test-peer-1")
 
-	pr.AddPeer(peerID)
+	pr.AddPeer(peerID, "")
 	pr.UpdateNetworkStats(peerID, 1024)
 
 	info, _ := pr.GetPeer(peerID)
@@ -189,7 +189,7 @@ func TestPeerRegistry_UpdateURLResponsiveness(t *testing.T) {
 	pr := NewPeerRegistry()
 	peerID := peer.ID("test-peer-1")
 
-	pr.AddPeer(peerID)
+	pr.AddPeer(peerID, "")
 	pr.UpdateDataHubURL(peerID, "http://test.com")
 
 	// Initially not responsive
@@ -211,7 +211,7 @@ func TestPeerRegistry_PeerCount(t *testing.T) {
 	// Add peers
 	ids := GenerateTestPeerIDs(5)
 	for i, id := range ids {
-		pr.AddPeer(id)
+		pr.AddPeer(id, "")
 		assert.Equal(t, i+1, pr.PeerCount())
 	}
 
@@ -230,7 +230,7 @@ func TestPeerRegistry_ConcurrentAccess(t *testing.T) {
 	go func() {
 		for i := 0; i < 100; i++ {
 			id := peer.ID(string(rune('A' + i%10)))
-			pr.AddPeer(id)
+			pr.AddPeer(id, "")
 			pr.UpdateHeight(id, int32(i), "hash")
 		}
 		done <- true
@@ -277,7 +277,7 @@ func TestPeerRegistry_GetPeerReturnsCopy(t *testing.T) {
 	pr := NewPeerRegistry()
 	peerID := peer.ID("test-peer-1")
 
-	pr.AddPeer(peerID)
+	pr.AddPeer(peerID, "")
 	pr.UpdateHeight(peerID, 100, "hash-100")
 
 	// Get peer info
@@ -301,7 +301,7 @@ func TestPeerRegistry_RecordCatchupAttempt(t *testing.T) {
 	pr := NewPeerRegistry()
 	peerID := peer.ID("test-peer-1")
 
-	pr.AddPeer(peerID)
+	pr.AddPeer(peerID, "")
 
 	// Initial state
 	info, _ := pr.GetPeer(peerID)
@@ -331,7 +331,7 @@ func TestPeerRegistry_RecordCatchupSuccess(t *testing.T) {
 	pr := NewPeerRegistry()
 	peerID := peer.ID("test-peer-1")
 
-	pr.AddPeer(peerID)
+	pr.AddPeer(peerID, "")
 
 	// Initial state
 	info, _ := pr.GetPeer(peerID)
@@ -363,7 +363,7 @@ func TestPeerRegistry_RecordCatchupFailure(t *testing.T) {
 	pr := NewPeerRegistry()
 	peerID := peer.ID("test-peer-1")
 
-	pr.AddPeer(peerID)
+	pr.AddPeer(peerID, "")
 
 	// Initial state
 	info, _ := pr.GetPeer(peerID)
@@ -393,7 +393,7 @@ func TestPeerRegistry_RecordCatchupMalicious(t *testing.T) {
 	pr := NewPeerRegistry()
 	peerID := peer.ID("test-peer-1")
 
-	pr.AddPeer(peerID)
+	pr.AddPeer(peerID, "")
 
 	// Initial state
 	info, _ := pr.GetPeer(peerID)
@@ -416,7 +416,7 @@ func TestPeerRegistry_UpdateCatchupReputation(t *testing.T) {
 	pr := NewPeerRegistry()
 	peerID := peer.ID("test-peer-1")
 
-	pr.AddPeer(peerID)
+	pr.AddPeer(peerID, "")
 
 	// Initial state - should have default reputation of 50
 	info, _ := pr.GetPeer(peerID)
@@ -448,30 +448,30 @@ func TestPeerRegistry_GetPeersForCatchup(t *testing.T) {
 	ids := GenerateTestPeerIDs(5)
 
 	// Peer 0: Healthy with DataHub URL, good reputation
-	pr.AddPeer(ids[0])
+	pr.AddPeer(ids[0], "")
 	pr.UpdateDataHubURL(ids[0], "http://peer0.test")
 	pr.UpdateHealth(ids[0], true)
 	pr.UpdateReputation(ids[0], 90.0)
 
 	// Peer 1: Healthy with DataHub URL, medium reputation
-	pr.AddPeer(ids[1])
+	pr.AddPeer(ids[1], "")
 	pr.UpdateDataHubURL(ids[1], "http://peer1.test")
 	pr.UpdateHealth(ids[1], true)
 	pr.UpdateReputation(ids[1], 50.0)
 
 	// Peer 2: Unhealthy with DataHub URL (should be excluded)
-	pr.AddPeer(ids[2])
+	pr.AddPeer(ids[2], "")
 	pr.UpdateDataHubURL(ids[2], "http://peer2.test")
 	pr.UpdateHealth(ids[2], false)
 	pr.UpdateReputation(ids[2], 80.0)
 
 	// Peer 3: Healthy but no DataHub URL (should be excluded)
-	pr.AddPeer(ids[3])
+	pr.AddPeer(ids[3], "")
 	pr.UpdateHealth(ids[3], true)
 	pr.UpdateReputation(ids[3], 85.0)
 
 	// Peer 4: Healthy with DataHub URL but banned (should be excluded)
-	pr.AddPeer(ids[4])
+	pr.AddPeer(ids[4], "")
 	pr.UpdateDataHubURL(ids[4], "http://peer4.test")
 	pr.UpdateHealth(ids[4], true)
 	pr.UpdateBanStatus(ids[4], 100, true)
@@ -499,7 +499,7 @@ func TestPeerRegistry_GetPeersForCatchup_SameReputation(t *testing.T) {
 	baseTime := time.Now()
 
 	// Peer 0: Last success 1 hour ago
-	pr.AddPeer(ids[0])
+	pr.AddPeer(ids[0], "")
 	pr.UpdateDataHubURL(ids[0], "http://peer0.test")
 	pr.UpdateHealth(ids[0], true)
 	pr.UpdateReputation(ids[0], 75.0)
@@ -508,7 +508,7 @@ func TestPeerRegistry_GetPeersForCatchup_SameReputation(t *testing.T) {
 	pr.peers[ids[0]].LastInteractionSuccess = baseTime.Add(-1 * time.Hour)
 
 	// Peer 1: Last success 10 minutes ago (most recent)
-	pr.AddPeer(ids[1])
+	pr.AddPeer(ids[1], "")
 	pr.UpdateDataHubURL(ids[1], "http://peer1.test")
 	pr.UpdateHealth(ids[1], true)
 	pr.UpdateReputation(ids[1], 75.0)
@@ -516,7 +516,7 @@ func TestPeerRegistry_GetPeersForCatchup_SameReputation(t *testing.T) {
 	pr.peers[ids[1]].LastInteractionSuccess = baseTime.Add(-10 * time.Minute)
 
 	// Peer 2: Last success 30 minutes ago
-	pr.AddPeer(ids[2])
+	pr.AddPeer(ids[2], "")
 	pr.UpdateDataHubURL(ids[2], "http://peer2.test")
 	pr.UpdateHealth(ids[2], true)
 	pr.UpdateReputation(ids[2], 75.0)
@@ -535,7 +535,7 @@ func TestPeerRegistry_GetPeersForCatchup_SameReputation(t *testing.T) {
 func TestPeerRegistry_CatchupMetrics_ConcurrentAccess(t *testing.T) {
 	pr := NewPeerRegistry()
 	peerID, _ := peer.Decode(testPeer1)
-	pr.AddPeer(peerID)
+	pr.AddPeer(peerID, "")
 	pr.UpdateDataHubURL(peerID, "http://test.com")
 	pr.UpdateHealth(peerID, true)
 

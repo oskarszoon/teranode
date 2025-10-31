@@ -14,6 +14,7 @@ import (
 // Matches the structure from P2P service's HandlePeers.go
 type PeerInfoResponse struct {
 	ID              string `json:"id"`
+	ClientName      string `json:"client_name"`
 	Height          int32  `json:"height"`
 	BlockHash       string `json:"block_hash"`
 	DataHubURL      string `json:"data_hub_url"`
@@ -83,6 +84,7 @@ func (h *HTTP) GetPeers(c echo.Context) error {
 	for _, peer := range registryResp.Peers {
 		peerResponses = append(peerResponses, PeerInfoResponse{
 			ID:              peer.Id,
+			ClientName:      peer.ClientName,
 			Height:          peer.Height,
 			BlockHash:       peer.BlockHash,
 			DataHubURL:      peer.DataHubUrl,

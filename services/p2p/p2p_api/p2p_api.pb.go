@@ -2052,6 +2052,7 @@ type PeerRegistryInfo struct {
 	MaliciousCount         int64   `protobuf:"varint,24,opt,name=malicious_count,json=maliciousCount,proto3" json:"malicious_count,omitempty"`
 	AvgResponseTimeMs      int64   `protobuf:"varint,25,opt,name=avg_response_time_ms,json=avgResponseTimeMs,proto3" json:"avg_response_time_ms,omitempty"`
 	Storage                string  `protobuf:"bytes,26,opt,name=storage,proto3" json:"storage,omitempty"`
+	ClientName             string  `protobuf:"bytes,27,opt,name=client_name,json=clientName,proto3" json:"client_name,omitempty"` // Human-readable name of the client
 	unknownFields          protoimpl.UnknownFields
 	sizeCache              protoimpl.SizeCache
 }
@@ -2268,6 +2269,13 @@ func (x *PeerRegistryInfo) GetStorage() string {
 	return ""
 }
 
+func (x *PeerRegistryInfo) GetClientName() string {
+	if x != nil {
+		return x.ClientName
+	}
+	return ""
+}
+
 type GetPeerRegistryResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Peers         []*PeerRegistryInfo    `protobuf:"bytes,1,rep,name=peers,proto3" json:"peers,omitempty"`
@@ -2448,7 +2456,7 @@ const file_services_p2p_p2p_api_p2p_api_proto_rawDesc = "" +
 	"\x17IsPeerUnhealthyResponse\x12!\n" +
 	"\fis_unhealthy\x18\x01 \x01(\bR\visUnhealthy\x12\x16\n" +
 	"\x06reason\x18\x02 \x01(\tR\x06reason\x12)\n" +
-	"\x10reputation_score\x18\x03 \x01(\x02R\x0freputationScore\"\xa4\b\n" +
+	"\x10reputation_score\x18\x03 \x01(\x02R\x0freputationScore\"\xc5\b\n" +
 	"\x10PeerRegistryInfo\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x16\n" +
 	"\x06height\x18\x02 \x01(\x05R\x06height\x12\x1d\n" +
@@ -2479,7 +2487,9 @@ const file_services_p2p_p2p_api_p2p_api_proto_rawDesc = "" +
 	"\x10reputation_score\x18\x17 \x01(\x01R\x0freputationScore\x12'\n" +
 	"\x0fmalicious_count\x18\x18 \x01(\x03R\x0emaliciousCount\x12/\n" +
 	"\x14avg_response_time_ms\x18\x19 \x01(\x03R\x11avgResponseTimeMs\x12\x18\n" +
-	"\astorage\x18\x1a \x01(\tR\astorage\"J\n" +
+	"\astorage\x18\x1a \x01(\tR\astorage\x12\x1f\n" +
+	"\vclient_name\x18\x1b \x01(\tR\n" +
+	"clientName\"J\n" +
 	"\x17GetPeerRegistryResponse\x12/\n" +
 	"\x05peers\x18\x01 \x03(\v2\x19.p2p_api.PeerRegistryInfoR\x05peers2\xbe\r\n" +
 	"\vPeerService\x12?\n" +

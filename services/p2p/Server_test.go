@@ -490,8 +490,8 @@ func TestHandleBlockTopic(t *testing.T) {
 
 		// Create peer registry to track updates
 		peerRegistry := NewPeerRegistry()
-		peerRegistry.AddPeer(senderPeerID)
-		peerRegistry.AddPeer(originatorPeerID)
+		peerRegistry.AddPeer(senderPeerID, "")
+		peerRegistry.AddPeer(originatorPeerID, "")
 
 		// Get initial times
 		senderInfo1, _ := peerRegistry.GetPeer(senderPeerID)
@@ -1160,7 +1160,7 @@ func TestHandleBanEvent(t *testing.T) {
 
 		// Store some test data for peer1
 		// Add peer to registry and set block hash
-		server.peerRegistry.AddPeer(peerID1)
+		server.peerRegistry.AddPeer(peerID1, "")
 		server.peerRegistry.UpdateBlockHash(peerID1, "test-hash")
 
 		// Create a ban event for PeerID
@@ -3225,14 +3225,14 @@ func TestServer_AddPeer(t *testing.T) {
 	peerID := peer.ID("test-peer")
 
 	// Add peer
-	server.addPeer(peerID)
+	server.addPeer(peerID, "")
 
 	// Verify peer was added
 	_, exists := registry.GetPeer(peerID)
 	assert.True(t, exists)
 
 	// Add same peer again (should be idempotent)
-	server.addPeer(peerID)
+	server.addPeer(peerID, "")
 	_, exists = registry.GetPeer(peerID)
 	assert.True(t, exists)
 }
@@ -3248,7 +3248,7 @@ func TestServer_RemovePeer(t *testing.T) {
 	peerID := peer.ID("test-peer")
 
 	// Add peer first
-	registry.AddPeer(peerID)
+	registry.AddPeer(peerID, "")
 	_, exists := registry.GetPeer(peerID)
 	assert.True(t, exists)
 
@@ -3271,7 +3271,7 @@ func TestServer_UpdateBlockHash(t *testing.T) {
 	peerID := peer.ID("test-peer")
 
 	// Add peer first
-	registry.AddPeer(peerID)
+	registry.AddPeer(peerID, "")
 
 	// Update block hash
 	blockHash := "00000000000000000123456789abcdef"
@@ -3305,7 +3305,7 @@ func TestServer_GetPeer(t *testing.T) {
 	assert.Nil(t, peerInfo)
 
 	// Add peer
-	registry.AddPeer(peerID)
+	registry.AddPeer(peerID, "")
 	registry.UpdateHeight(peerID, 100, "hash")
 
 	// Get existing peer
@@ -3327,7 +3327,7 @@ func TestServer_UpdateDataHubURL(t *testing.T) {
 	peerID := peer.ID("test-peer")
 
 	// Add peer first
-	registry.AddPeer(peerID)
+	registry.AddPeer(peerID, "")
 
 	// Update DataHub URL
 	url := "http://example.com:8080"
@@ -3485,7 +3485,7 @@ func TestShouldSkipDuringSync(t *testing.T) {
 	require.NoError(t, err)
 
 	// Add peer to simulate having a sync peer
-	server.addPeer(syncPeerID)
+	server.addPeer(syncPeerID, "")
 
 	// Test various scenarios - the function should execute without error
 	server.shouldSkipDuringSync("peer2", "originator2", 200, "subtree")

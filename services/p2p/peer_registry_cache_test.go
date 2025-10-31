@@ -28,7 +28,7 @@ func TestPeerRegistryCache_SaveAndLoad(t *testing.T) {
 	t.Logf("PeerID1: %s", peerID1)
 
 	// Add peer 1 with catchup metrics
-	pr.AddPeer(peerID1)
+	pr.AddPeer(peerID1, "")
 	pr.UpdateDataHubURL(peerID1, "http://peer1.example.com:8090")
 	pr.UpdateHeight(peerID1, 123456, "hash-123456")
 	pr.RecordCatchupAttempt(peerID1)
@@ -38,13 +38,13 @@ func TestPeerRegistryCache_SaveAndLoad(t *testing.T) {
 	// Note: Don't set reputation directly since it's auto-calculated
 
 	// Add peer 2 with some metrics
-	pr.AddPeer(peerID2)
+	pr.AddPeer(peerID2, "")
 	pr.UpdateDataHubURL(peerID2, "http://peer2.example.com:8090")
 	pr.RecordCatchupAttempt(peerID2)
 	pr.RecordCatchupMalicious(peerID2)
 
 	// Add peer 3 with no meaningful metrics (should not be cached)
-	pr.AddPeer(peerID3)
+	pr.AddPeer(peerID3, "")
 
 	// Save the cache
 	err := pr.SavePeerRegistryCache(tempDir)
@@ -159,7 +159,7 @@ func TestPeerRegistryCache_MergeWithExisting(t *testing.T) {
 	// Create initial registry and save cache
 	pr1 := NewPeerRegistry()
 	peerID1, _ := peer.Decode(testPeer1)
-	pr1.AddPeer(peerID1)
+	pr1.AddPeer(peerID1, "")
 	pr1.UpdateDataHubURL(peerID1, "http://peer1.example.com:8090")
 	pr1.RecordCatchupAttempt(peerID1)
 	pr1.RecordCatchupSuccess(peerID1, 100*time.Millisecond)
@@ -169,11 +169,11 @@ func TestPeerRegistryCache_MergeWithExisting(t *testing.T) {
 	// Create a new registry, add a peer, then load cache
 	pr2 := NewPeerRegistry()
 	// Add the same peer with different data
-	pr2.AddPeer(peerID1)
+	pr2.AddPeer(peerID1, "")
 	pr2.UpdateDataHubURL(peerID1, "http://different.example.com:8090")
 	// Add a new peer
 	peerID2, _ := peer.Decode(testPeer2)
-	pr2.AddPeer(peerID2)
+	pr2.AddPeer(peerID2, "")
 
 	// Load cache - should restore metrics but keep existing peers
 	err = pr2.LoadPeerRegistryCache(tempDir)
@@ -220,7 +220,7 @@ func TestPeerRegistryCache_AtomicWrite(t *testing.T) {
 	// Create a registry with test data
 	pr := NewPeerRegistry()
 	peerID, _ := peer.Decode(testPeer1)
-	pr.AddPeer(peerID)
+	pr.AddPeer(peerID, "")
 	pr.UpdateDataHubURL(peerID, "http://peer1.example.com:8090")
 
 	// First save to create the file
