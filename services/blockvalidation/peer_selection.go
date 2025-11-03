@@ -2,8 +2,6 @@ package blockvalidation
 
 import (
 	"context"
-
-	"github.com/bsv-blockchain/teranode/services/p2p/p2p_api"
 )
 
 // PeerForCatchup represents a peer suitable for catchup operations with its metadata
@@ -84,37 +82,15 @@ func (u *Server) selectBestPeersForCatchup(ctx context.Context, targetHeight int
 		})
 	}
 
-	// P2P service already returns peers sorted by reputation, but let's ensure it
-	// in case the order gets mixed up during proto conversion
-	// Lets not resort, its wasteful and we trust the p2p service to do it right
-	/*sort.Slice(peers, func(i, j int) bool {
-		// Primary sort: reputation score (higher is better)
-		if peers[i].CatchupReputationScore != peers[j].CatchupReputationScore {
-			return peers[i].CatchupReputationScore > peers[j].CatchupReputationScore
-		}
-
-		// Secondary sort: success rate (higher is better)
-		successRateI := float64(0)
-		if peers[i].CatchupAttempts > 0 {
-			successRateI = float64(peers[i].CatchupSuccesses) / float64(peers[i].CatchupAttempts)
-		}
-
-		successRateJ := float64(0)
-		if peers[j].CatchupAttempts > 0 {
-			successRateJ = float64(peers[j].CatchupSuccesses) / float64(peers[j].CatchupAttempts)
-		}
-
-		return successRateI > successRateJ
-	})*/
-
 	u.logger.Infof("[peer_selection] Selected %d peers for catchup (from %d total)", len(peers), len(resp.Peers))
 	for i, p := range peers {
 		successRate := float64(0)
+
 		if p.CatchupAttempts > 0 {
 			successRate = float64(p.CatchupSuccesses) / float64(p.CatchupAttempts) * 100
 		}
-		u.logger.Debugf("[peer_selection] Peer %d: %s (score: %.2f, success: %d/%d = %.1f%%, height: %d)",
-			i+1, p.ID, p.CatchupReputationScore, p.CatchupSuccesses, p.CatchupAttempts, successRate, p.Height)
+
+		u.logger.Debugf("[peer_selection] Peer %d: %s (score: %.2f, success: %d/%d = %.1f%%, height: %d)", i+1, p.ID, p.CatchupReputationScore, p.CatchupSuccesses, p.CatchupAttempts, successRate, p.Height)
 	}
 
 	return peers, nil
@@ -142,23 +118,4 @@ func (u *Server) selectBestPeerForBlock(ctx context.Context, targetHeight int32)
 	}
 
 	return &peers[0], nil
-}
-
-// convertProtoPeersToCatchupPeers converts P2P API peer info to our internal type
-func convertProtoPeersToCatchupPeers(protoPeers []*p2p_api.PeerInfoForCatchup) []PeerForCatchup {
-	peers := make([]PeerForCatchup, 0, len(protoPeers))
-	for _, p := range protoPeers {
-		peers = append(peers, PeerForCatchup{
-			ID:                     p.Id,
-			DataHubURL:             p.DataHubUrl,
-			Height:                 p.Height,
-			BlockHash:              p.BlockHash,
-			IsHealthy:              p.IsHealthy,
-			CatchupReputationScore: p.CatchupReputationScore,
-			CatchupAttempts:        p.CatchupAttempts,
-			CatchupSuccesses:       p.CatchupSuccesses,
-			CatchupFailures:        p.CatchupFailures,
-		})
-	}
-	return peers
 }
