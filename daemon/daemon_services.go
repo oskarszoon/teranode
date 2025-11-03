@@ -423,17 +423,17 @@ func (d *Daemon) startRPCService(ctx context.Context, appSettings *settings.Sett
 		return err
 	}
 
-	blockAssemblyClient, err := blockassembly.NewClient(ctx, createLogger("ba"), appSettings)
+	blockAssemblyClient, err := GetBlockAssemblyClient(ctx, createLogger("rpc"), appSettings)
 	if err != nil {
 		return err
 	}
 
-	peerClient, err := peer.NewClient(ctx, createLogger("peer"), appSettings)
+	peerClient, err := peer.NewClient(ctx, createLogger("rpc"), appSettings)
 	if err != nil {
 		return err
 	}
 
-	p2pClient, err := p2p.NewClient(ctx, createLogger("p2p"), appSettings)
+	p2pClient, err := d.daemonStores.GetP2PClient(ctx, createLogger("rpc"), appSettings)
 	if err != nil {
 		return err
 	}
@@ -441,7 +441,7 @@ func (d *Daemon) startRPCService(ctx context.Context, appSettings *settings.Sett
 	// Create block validation client for RPC service
 	var blockValidationClient blockvalidation.Interface
 
-	blockValidationClient, err = d.daemonStores.GetBlockValidationClient(ctx, createLogger("blockvalidation"), appSettings)
+	blockValidationClient, err = d.daemonStores.GetBlockValidationClient(ctx, createLogger("rpc"), appSettings)
 	if err != nil {
 		return err
 	}
@@ -471,7 +471,7 @@ func (d *Daemon) startRPCService(ctx context.Context, appSettings *settings.Sett
 	}
 
 	// Add the RPC service to the ServiceManager
-	if err := d.ServiceManager.AddService(serviceRPCFormal, rpcServer); err != nil {
+	if err = d.ServiceManager.AddService(serviceRPCFormal, rpcServer); err != nil {
 		return err
 	}
 
@@ -480,9 +480,17 @@ func (d *Daemon) startRPCService(ctx context.Context, appSettings *settings.Sett
 
 // startAlertService initializes and adds the Alert service to the ServiceManager.
 func (d *Daemon) startAlertService(ctx context.Context, appSettings *settings.Settings,
-	createLogger func(string) ulogger.Logger) error {
+	createLogger func(string) ulogger.Logger) (err error) {
+	var (
+		blockchainClient    blockchain.ClientI
+		utxoStore           utxo.Store
+		blockAssemblyClient blockassembly.ClientI
+		peerClient          peer.ClientI
+		p2pClient           p2p.ClientI
+	)
+
 	// Create the blockchain client for the Alert service
-	blockchainClient, err := d.daemonStores.GetBlockchainClient(
+	blockchainClient, err = d.daemonStores.GetBlockchainClient(
 		ctx, createLogger(loggerBlockchainClient), appSettings, serviceAlert,
 	)
 	if err != nil {
@@ -490,33 +498,25 @@ func (d *Daemon) startAlertService(ctx context.Context, appSettings *settings.Se
 	}
 
 	// Create the UTXO store for the Alert service
-	var utxoStore utxo.Store
-
-	utxoStore, err = d.daemonStores.GetUtxoStore(ctx, createLogger(loggerUtxos), appSettings)
+	utxoStore, err = d.daemonStores.GetUtxoStore(ctx, createLogger(loggerAlert), appSettings)
 	if err != nil {
 		return err
 	}
 
 	// Create the block assembly client for the Alert service
-	var blockAssemblyClient *blockassembly.Client
-
-	blockAssemblyClient, err = blockassembly.NewClient(ctx, createLogger(loggerBlockAssembly), appSettings)
+	blockAssemblyClient, err = GetBlockAssemblyClient(ctx, createLogger(loggerAlert), appSettings)
 	if err != nil {
 		return err
 	}
 
 	// Create the peer client for the Alert service
-	var peerClient peer.ClientI
-
-	peerClient, err = peer.NewClient(ctx, createLogger(loggerPeerClient), appSettings)
+	peerClient, err = peer.NewClient(ctx, createLogger(loggerAlert), appSettings)
 	if err != nil {
 		return err
 	}
 
 	// Create the P2P client for the Alert service
-	var p2pClient p2p.ClientI
-
-	p2pClient, err = p2p.NewClient(ctx, createLogger(loggerP2P), appSettings)
+	p2pClient, err = d.daemonStores.GetP2PClient(ctx, createLogger(loggerAlert), appSettings)
 	if err != nil {
 		return err
 	}
@@ -755,7 +755,7 @@ func (d *Daemon) startValidationService(
 		// Create the P2P client for the SubtreeValidation service
 		var p2pClient p2p.ClientI
 
-		p2pClient, err = p2p.NewClient(ctx, createLogger(loggerP2P), appSettings)
+		p2pClient, err = d.daemonStores.GetP2PClient(ctx, createLogger(loggerP2P), appSettings)
 		if err != nil {
 			return err
 		}
@@ -812,7 +812,7 @@ func (d *Daemon) startValidationService(
 		// Create the P2P client for the BlockValidation service
 		var p2pClient p2p.ClientI
 
-		p2pClient, err = p2p.NewClient(ctx, createLogger(loggerP2P), appSettings)
+		p2pClient, err = d.daemonStores.GetP2PClient(ctx, createLogger(loggerP2P), appSettings)
 		if err != nil {
 			return err
 		}

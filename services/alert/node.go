@@ -56,7 +56,7 @@ type Node struct {
 
 	// blockassemblyClient handles block assembly operations, allowing the
 	// alert system to interact with block creation processes
-	blockassemblyClient *blockassembly.Client
+	blockassemblyClient blockassembly.ClientI
 
 	// peerClient handles peer operations such as banning and unbanning peers
 	// based on alert system decisions
@@ -86,7 +86,7 @@ type Node struct {
 // Returns:
 //   - config.NodeInterface: A fully initialized Node instance that satisfies the required interface
 func NewNodeConfig(logger ulogger.Logger, blockchainClient blockchain.ClientI, utxoStore utxo.Store,
-	blockassemblyClient *blockassembly.Client, peerClient peer.ClientI, p2pClient p2p.ClientI, tSettings *settings.Settings) config.NodeInterface {
+	blockassemblyClient blockassembly.ClientI, peerClient peer.ClientI, p2pClient p2p.ClientI, tSettings *settings.Settings) config.NodeInterface {
 	return &Node{
 		logger:              logger,
 		blockchainClient:    blockchainClient,
