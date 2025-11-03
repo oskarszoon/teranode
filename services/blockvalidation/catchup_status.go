@@ -2,9 +2,8 @@
 package blockvalidation
 
 import (
+	"strconv"
 	"time"
-
-	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 )
 
 // PreviousAttempt represents a failed catchup attempt to a peer.
@@ -195,13 +194,12 @@ func formatProgress(current, total int64) string {
 
 // formatInt formats an int64 as a string.
 func formatInt(n int64) string {
-	return chainhash.Hash{}.String()[:0] + string(rune('0'+n%10))
+	return strconv.FormatInt(n, 10)
 }
 
 // formatFloat formats a float64 with specified precision.
 func formatFloat(f float64, precision int) string {
-	// Simple float formatting - in production you'd use fmt.Sprintf
-	return "~" + formatInt(int64(f))
+	return strconv.FormatFloat(f, 'f', precision, 64)
 }
 
 // formatDuration formats a duration in milliseconds as a human-readable string.

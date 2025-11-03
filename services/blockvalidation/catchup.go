@@ -920,13 +920,9 @@ func (u *Server) validateBlocksOnChannel(validateBlocksChan chan *model.Block, g
 					}
 
 					return err
-				}
 
-				// Don't report individual block success during catchup
-				// Wait for entire catchup to succeed to avoid inflating reputation
-				// for peers that provide some valid blocks but ultimately invalid chains
-				// blockValidationDuration := time.Since(catchupCtx.startTime)
-				// u.reportCatchupSuccess(gCtx, peerID, blockValidationDuration)
+					// TODO: Consider increasing peer reputation for successful block validations. For now being cautious and only increasing on successful catchup operations.
+				}
 			}
 			// Update the remaining block count
 			remaining := size.Add(-1)
