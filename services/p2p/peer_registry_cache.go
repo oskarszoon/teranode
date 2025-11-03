@@ -235,7 +235,10 @@ func (pr *PeerRegistry) LoadPeerRegistryCache(cacheDir string) error {
 		info.BlocksReceived = metrics.BlocksReceived
 		info.SubtreesReceived = metrics.SubtreesReceived
 		info.TransactionsReceived = metrics.TransactionsReceived
-		info.CatchupBlocks = metrics.CatchupBlocks
+		// Only set CatchupBlocks if it hasn't been set by legacy field mapping
+		if info.CatchupBlocks == 0 && metrics.CatchupBlocks > 0 {
+			info.CatchupBlocks = metrics.CatchupBlocks
+		}
 
 		// Update DataHubURL and height if not already set
 		if info.DataHubURL == "" && metrics.DataHubURL != "" {
