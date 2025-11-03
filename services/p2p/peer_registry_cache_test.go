@@ -282,6 +282,228 @@ func TestGetPeerRegistryCacheFilePath(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// Reputation Cache Persistence Tests
+// =============================================================================
+
+func TestPeerRegistryCache_ReputationMetricsPersistence(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Create registry with peers having various reputation states
+	pr := NewPeerRegistry()
+
+	peerID1, _ := peer.Decode(testPeer1)
+	peerID2, _ := peer.Decode(testPeer2)
+	peerID3, _ := peer.Decode(testPeer3)
+
+	// Peer 1: High reputation with many successes
+	pr.AddPeer(peerID1, "Teranode v1.0")
+	pr.UpdateDataHubURL(peerID1, "http://peer1.com:8090")
+	pr.UpdateHeight(peerID1, 100000, "hash-100000")
+	for i := 0; i < 15; i++ {
+		pr.RecordInteractionAttempt(peerID1)
+		pr.RecordInteractionSuccess(peerID1, time.Duration(100+i)*time.Millisecond)
+	}
+	pr.RecordBlockReceived(peerID1, 120*time.Millisecond)
+	pr.RecordSubtreeReceived(peerID1, 110*time.Millisecond)
+
+	// Peer 2: Low reputation with many failures
+	pr.AddPeer(peerID2, "Teranode v0.9")
+	pr.UpdateDataHubURL(peerID2, "http://peer2.com:8090")
+	pr.UpdateHeight(peerID2, 99000, "hash-99000")
+	for i := 0; i < 3; i++ {
+		pr.RecordInteractionAttempt(peerID2)
+		pr.RecordInteractionSuccess(peerID2, 200*time.Millisecond)
+	}
+	for i := 0; i < 12; i++ {
+		pr.RecordInteractionAttempt(peerID2)
+		pr.RecordInteractionFailure(peerID2)
+	}
+
+	// Peer 3: Malicious with very low reputation
+	pr.AddPeer(peerID3, "Teranode v1.1")
+	pr.UpdateDataHubURL(peerID3, "http://peer3.com:8090")
+	pr.UpdateHeight(peerID3, 98000, "hash-98000")
+	// Record attempts before marking as malicious (normal flow)
+	pr.RecordInteractionAttempt(peerID3)
+	pr.RecordMaliciousInteraction(peerID3)
+	pr.RecordInteractionAttempt(peerID3)
+	pr.RecordMaliciousInteraction(peerID3)
+
+	// Save cache
+	err := pr.SavePeerRegistryCache(tempDir)
+	require.NoError(t, err)
+
+	// Create new registry and load cache
+	pr2 := NewPeerRegistry()
+	err = pr2.LoadPeerRegistryCache(tempDir)
+	require.NoError(t, err)
+
+	// Verify Peer 1 reputation metrics restored
+	info1, exists := pr2.GetPeer(peerID1)
+	require.True(t, exists, "Peer 1 should exist")
+	// 15 explicit RecordInteractionAttempt calls, but RecordBlockReceived and RecordSubtreeReceived don't increment attempts
+	assert.Equal(t, int64(15), info1.InteractionAttempts)
+	// 15 explicit + 1 from RecordBlockReceived + 1 from RecordSubtreeReceived = 17 successes
+	assert.Equal(t, int64(17), info1.InteractionSuccesses)
+	assert.Equal(t, int64(0), info1.InteractionFailures)
+	assert.Greater(t, info1.ReputationScore, 85.0, "High reputation should be restored")
+	assert.Greater(t, info1.AvgResponseTime.Milliseconds(), int64(0))
+	assert.Equal(t, int64(1), info1.BlocksReceived)
+	assert.Equal(t, int64(1), info1.SubtreesReceived)
+	assert.False(t, info1.LastInteractionSuccess.IsZero())
+
+	// Verify Peer 2 reputation metrics restored
+	info2, exists := pr2.GetPeer(peerID2)
+	require.True(t, exists, "Peer 2 should exist")
+	assert.Equal(t, int64(15), info2.InteractionAttempts)
+	assert.Equal(t, int64(3), info2.InteractionSuccesses)
+	assert.Equal(t, int64(12), info2.InteractionFailures)
+	assert.Less(t, info2.ReputationScore, 40.0, "Low reputation should be restored")
+	assert.False(t, info2.LastInteractionFailure.IsZero())
+
+	// Verify Peer 3 malicious metrics restored
+	info3, exists := pr2.GetPeer(peerID3)
+	require.True(t, exists, "Peer 3 should exist")
+	assert.Equal(t, int64(2), info3.InteractionAttempts)
+	assert.Equal(t, int64(2), info3.MaliciousCount)
+	assert.Equal(t, int64(2), info3.InteractionFailures, "Malicious interactions also count as failures")
+	assert.Equal(t, 5.0, info3.ReputationScore, "Malicious peer should have very low reputation")
+}
+
+func TestPeerRegistryCache_BackwardCompatibility_LegacyFields(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Create cache file with legacy field names
+	cacheFile := filepath.Join(tempDir, "teranode_peer_registry.json")
+	cacheData := `{
+		"version": "1.0",
+		"last_updated": "2025-10-22T10:00:00Z",
+		"peers": {
+			"12D3KooWL1NF6fdTJ9cucEuwvuX8V8KtpJZZnUE4umdLBuK15eUZ": {
+				"catchup_attempts": 10,
+				"catchup_successes": 8,
+				"catchup_failures": 2,
+				"catchup_last_attempt": "2025-10-22T09:50:00Z",
+				"catchup_last_success": "2025-10-22T09:45:00Z",
+				"catchup_last_failure": "2025-10-22T09:40:00Z",
+				"catchup_reputation_score": 72.5,
+				"catchup_malicious_count": 0,
+				"catchup_avg_response_ms": 150,
+				"data_hub_url": "http://legacy-peer.com:8090",
+				"height": 95000,
+				"block_hash": "hash-95000"
+			}
+		}
+	}`
+	err := os.WriteFile(cacheFile, []byte(cacheData), 0600)
+	require.NoError(t, err)
+
+	// Load cache
+	pr := NewPeerRegistry()
+	err = pr.LoadPeerRegistryCache(tempDir)
+	require.NoError(t, err)
+
+	// Verify legacy fields mapped to new fields
+	peerID, _ := peer.Decode(testPeer1)
+	info, exists := pr.GetPeer(peerID)
+	require.True(t, exists, "Legacy peer should be loaded")
+	assert.Equal(t, int64(10), info.InteractionAttempts, "Legacy attempts should map to InteractionAttempts")
+	assert.Equal(t, int64(8), info.InteractionSuccesses, "Legacy successes should map to InteractionSuccesses")
+	assert.Equal(t, int64(2), info.InteractionFailures, "Legacy failures should map to InteractionFailures")
+	assert.Equal(t, 72.5, info.ReputationScore, "Legacy reputation should be preserved")
+	assert.Equal(t, 150*time.Millisecond, info.AvgResponseTime, "Legacy response time should be converted")
+	assert.Equal(t, int64(8), info.CatchupBlocks, "CatchupBlocks should be set for backward compatibility")
+	assert.Equal(t, "http://legacy-peer.com:8090", info.DataHubURL)
+	assert.Equal(t, int32(95000), info.Height)
+}
+
+func TestPeerRegistryCache_InteractionTypeBreakdown(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Create registry with peers having different interaction types
+	pr := NewPeerRegistry()
+
+	peerID1, _ := peer.Decode(testPeer1)
+	peerID2, _ := peer.Decode(testPeer2)
+
+	// Peer 1: Many blocks, some subtrees, lots of transactions
+	pr.AddPeer(peerID1, "")
+	pr.UpdateDataHubURL(peerID1, "http://peer1.com")
+	for i := 0; i < 100; i++ {
+		pr.RecordBlockReceived(peerID1, 100*time.Millisecond)
+	}
+	for i := 0; i < 50; i++ {
+		pr.RecordSubtreeReceived(peerID1, 80*time.Millisecond)
+	}
+	for i := 0; i < 200; i++ {
+		pr.RecordTransactionReceived(peerID1)
+	}
+
+	// Peer 2: Only subtrees, no blocks or transactions
+	pr.AddPeer(peerID2, "")
+	pr.UpdateDataHubURL(peerID2, "http://peer2.com")
+	for i := 0; i < 100; i++ {
+		pr.RecordSubtreeReceived(peerID2, 90*time.Millisecond)
+	}
+
+	// Save and reload
+	err := pr.SavePeerRegistryCache(tempDir)
+	require.NoError(t, err)
+
+	pr2 := NewPeerRegistry()
+	err = pr2.LoadPeerRegistryCache(tempDir)
+	require.NoError(t, err)
+
+	// Verify Peer 1 interaction breakdown
+	info1, exists := pr2.GetPeer(peerID1)
+	require.True(t, exists)
+	assert.Equal(t, int64(100), info1.BlocksReceived)
+	assert.Equal(t, int64(50), info1.SubtreesReceived)
+	assert.Equal(t, int64(200), info1.TransactionsReceived)
+
+	// Verify Peer 2 interaction breakdown
+	info2, exists := pr2.GetPeer(peerID2)
+	require.True(t, exists)
+	assert.Equal(t, int64(0), info2.BlocksReceived)
+	assert.Equal(t, int64(100), info2.SubtreesReceived)
+	assert.Equal(t, int64(0), info2.TransactionsReceived)
+}
+
+func TestPeerRegistryCache_EmptyReputationDefaults(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Create cache with peer having no interaction metrics
+	cacheFile := filepath.Join(tempDir, "teranode_peer_registry.json")
+	cacheData := `{
+		"version": "1.0",
+		"last_updated": "2025-10-22T10:00:00Z",
+		"peers": {
+			"12D3KooWL1NF6fdTJ9cucEuwvuX8V8KtpJZZnUE4umdLBuK15eUZ": {
+				"data_hub_url": "http://new-peer.com:8090",
+				"height": 100,
+				"block_hash": "hash-100"
+			}
+		}
+	}`
+	err := os.WriteFile(cacheFile, []byte(cacheData), 0600)
+	require.NoError(t, err)
+
+	// Load cache
+	pr := NewPeerRegistry()
+	err = pr.LoadPeerRegistryCache(tempDir)
+	require.NoError(t, err)
+
+	// Verify peer has default neutral reputation
+	peerID, _ := peer.Decode(testPeer1)
+	info, exists := pr.GetPeer(peerID)
+	require.True(t, exists)
+	assert.Equal(t, 50.0, info.ReputationScore, "Peer with no metrics should have neutral reputation")
+	assert.Equal(t, int64(0), info.InteractionAttempts)
+	assert.Equal(t, int64(0), info.InteractionSuccesses)
+	assert.Equal(t, int64(0), info.InteractionFailures)
+}
+
 func TestPeerRegistryCache_InvalidPeerID(t *testing.T) {
 	tempDir := t.TempDir()
 

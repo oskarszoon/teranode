@@ -204,3 +204,45 @@ func (tbs *TestBlockchainSetup) Cleanup() {
 		tbs.Cancel()
 	}
 }
+
+// CreatePeerWithReputation creates a test peer with specific reputation metrics
+func CreatePeerWithReputation(id peer.ID, reputation float64, successes, failures int64) *PeerInfo {
+	return &PeerInfo{
+		ID:                     id,
+		Height:                 100,
+		BlockHash:              "test-hash",
+		DataHubURL:             "http://test.com",
+		IsHealthy:              true,
+		IsBanned:               false,
+		BanScore:               0,
+		ReputationScore:        reputation,
+		InteractionAttempts:    successes + failures,
+		InteractionSuccesses:   successes,
+		InteractionFailures:    failures,
+		ConnectedAt:            time.Now(),
+		BytesReceived:          0,
+		LastBlockTime:          time.Now(),
+		LastMessageTime:        time.Now(),
+		URLResponsive:          true,
+		LastURLCheck:           time.Now(),
+		LastHealthCheck:        time.Now(),
+		Storage:                "full",
+		LastInteractionAttempt: time.Now(),
+		LastInteractionSuccess: time.Now(),
+		AvgResponseTime:        100 * time.Millisecond,
+	}
+}
+
+// SimulateSuccessfulCatchup records multiple successful catchup interactions
+func SimulateSuccessfulCatchup(pr *PeerRegistry, peerID peer.ID, blockCount int) {
+	for i := 0; i < blockCount; i++ {
+		pr.RecordInteractionAttempt(peerID)
+		pr.RecordInteractionSuccess(peerID, time.Duration(50+i)*time.Millisecond)
+	}
+}
+
+// SimulateInvalidFork records malicious behavior from invalid fork
+func SimulateInvalidFork(pr *PeerRegistry, peerID peer.ID) {
+	pr.RecordInteractionAttempt(peerID)
+	pr.RecordMaliciousInteraction(peerID)
+}
