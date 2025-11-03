@@ -141,10 +141,6 @@ func (u *Server) catchupGetBlockHeaders(ctx context.Context, blockUpTo *model.Bl
 		// Check if peer is marked as malicious by P2P service
 		if u.isPeerMalicious(ctx, identifier) {
 			u.logger.Warnf("[catchup][%s] peer %s is marked as malicious by P2P service, should skip catchup", chainTipHash.String(), baseURL)
-			// Too many malicious attempts - skip this peer
-			// result := catchup.CreateCatchupResult(allCatchupHeaders, blockUpTo.Hash(), startHash, startHeight, startTime, baseURL,
-			// 	iteration, failedIterations, false, "peer is malicious")
-			// return result, nil, errors.NewServiceUnavailableError("peer %s is malicious, skipping catchup", baseURL)
 		}
 
 		// Create context with iteration timeout to prevent slow-loris attacks

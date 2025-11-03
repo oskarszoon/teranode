@@ -783,8 +783,6 @@ func (u *Server) recordMaliciousAttempt(peerID string, reason string) {
 
 	// Report to P2P service (uses helper that falls back to local metrics)
 	u.reportCatchupMalicious(context.Background(), peerID, reason)
-
-	u.logger.Errorf("SECURITY: Peer %s attempted %s - should be banned (banning not yet implemented)", peerID, reason)
 }
 
 // setFSMCatchingBlocks sets the FSM state to CATCHINGBLOCKS.

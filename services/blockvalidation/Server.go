@@ -606,19 +606,6 @@ func (u *Server) Init(ctx context.Context) (err error) {
 						// Check if the error is due to another catchup in progress
 						if strings.Contains(err.Error(), "another catchup is currently in progress") {
 							u.logger.Warnf("[catchup] Catchup already in progress, requeueing block %s from peer %s", c.block.Hash().String(), c.peerID)
-
-							// Requeue the catchup request with a small delay to avoid busy loop
-							go func(catchupReq processBlockCatchup) {
-								time.Sleep(5 * time.Second)
-								select {
-								case u.catchupCh <- catchupReq:
-									u.logger.Debugf("[catchup] Successfully requeued block %s", catchupReq.block.Hash().String())
-								case <-ctx.Done():
-									u.logger.Debugf("[catchup] Context cancelled, not requeueing block %s", catchupReq.block.Hash().String())
-								default:
-									u.logger.Warnf("[catchup] Failed to requeue block %s - channel full", catchupReq.block.Hash().String())
-								}
-							}(c)
 							continue
 						}
 
@@ -1368,9 +1355,6 @@ func (u *Server) processBlockFound(ctx context.Context, hash *chainhash.Hash, ba
 	if err != nil {
 		return errors.NewServiceError("failed block validation BlockFound [%s]", block.String(), err)
 	}
-
-	// Note: Success is not reported here because this is processBlockFound, not catchup
-	// Catchup success is reported at the end of the catchup() function
 
 	return nil
 }

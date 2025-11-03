@@ -103,10 +103,6 @@ func TestCatchup_EclipseAttack(t *testing.T) {
 
 		// Should detect something is wrong
 		assert.Error(t, err)
-
-		// Note: peerMetrics field has been removed from Server struct
-		// The important thing is that the malicious chain was rejected
-		// (peer metrics assertions disabled)
 	})
 
 	t.Run("FindHonestPeerAmongMalicious", func(t *testing.T) {
@@ -607,8 +603,6 @@ func TestCatchup_InvalidHeaderSequence(t *testing.T) {
 		// Check if there were any failures recorded
 		if peerState == catchup.StateClosed {
 			t.Log("Circuit breaker is still closed")
-			// Note: peerMetrics field has been removed from Server struct
-			// (peer metrics logging disabled)
 		}
 		// For now, just verify the error was detected
 		assert.Error(t, err, "Should detect broken chain")
@@ -787,10 +781,6 @@ func TestCatchup_SecretMiningDetection(t *testing.T) {
 
 		// The catchup should fail - either due to common ancestor issues or secret mining detection
 		assert.Error(t, err, "Catchup with secret miner should fail")
-
-		// Note: peerMetrics field has been removed from Server struct
-		// Check if secret mining was recorded or at least failed
-		// (peer metrics checks disabled)
 	})
 
 	t.Run("AllowLegitimateDeepReorg", func(t *testing.T) {

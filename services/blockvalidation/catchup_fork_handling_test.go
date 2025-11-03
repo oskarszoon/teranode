@@ -1156,9 +1156,6 @@ func TestCatchup_ReorgMetrics(t *testing.T) {
 		if err != nil {
 			t.Logf("Reorg result: %v", err)
 		}
-
-		// Note: peerMetrics field has been removed from Server struct
-		// (peer reorg metrics logging disabled)
 	})
 }
 
@@ -1361,9 +1358,6 @@ func TestCatchup_CoinbaseMaturityCheckFixed(t *testing.T) {
 					"Fork depth should exceed coinbase maturity limit")
 			}
 		}
-
-		// Note: peerMetrics field has been removed from Server struct
-		// (malicious attempt tracking disabled)
 	})
 
 	t.Run("AcceptForkWithinCoinbaseMaturity", func(t *testing.T) {
