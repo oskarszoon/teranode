@@ -98,7 +98,7 @@ func (suite *UtxoTestSuite) TestShouldAllowSpendAllUtxosWithAerospikeFailure() {
 	rpcEndpoint := "http://" + framework.Nodes[0].RPCURL
 
 	node1 := framework.Nodes[0]
-	txDistributor := &node1.PropagationClient
+	txDistributor := node1.PropagationClient
 
 	// Generate private keys and addresses
 	privateKey0, err := bec.NewPrivateKey()
@@ -276,7 +276,7 @@ func (suite *UtxoTestSuite) TestDeleteParentTx() {
 	rpcEndpoint := "http://" + framework.Nodes[0].RPCURL
 
 	node1 := framework.Nodes[0]
-	txDistributor := &node1.PropagationClient
+	txDistributor := node1.PropagationClient
 
 	// Generate private keys and addresses
 	privateKey, err := bec.NewPrivateKey()
@@ -363,7 +363,7 @@ func (suite *UtxoTestSuite) TestShouldAllowSaveUTXOsIfExtStoreHasTXs() {
 	framework.StopNode("teranode2")
 
 	node1 := framework.Nodes[0]
-	txDistributor := &node1.PropagationClient
+	txDistributor := node1.PropagationClient
 
 	// Generate private key and address
 	privateKey0, err := bec.NewPrivateKey()
@@ -440,7 +440,7 @@ func (suite *UtxoTestSuite) TestConnectionPoolLimiting() {
 	framework := suite.TeranodeTestEnv
 	logger := framework.Logger
 	ctx := framework.Context
-	txDistributor := &framework.Nodes[0].PropagationClient
+	txDistributor := framework.Nodes[0].PropagationClient
 	coinbaseClient := framework.Nodes[0].CoinbaseClient
 
 	// Generate keys and address
