@@ -1546,7 +1546,7 @@ func Test_validateBlockSubtrees(t *testing.T) {
 
 		subtreeValidationClient := &subtreevalidation.MockSubtreeValidation{}
 		// First call - for subtree1 - success
-		subtreeValidationClient.Mock.On("CheckBlockSubtrees", mock.Anything, mock.Anything, mock.Anything).
+		subtreeValidationClient.Mock.On("CheckBlockSubtrees", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
 			Return(nil).
 			Once().
 			Run(func(args mock.Arguments) {
