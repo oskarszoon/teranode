@@ -743,10 +743,10 @@ func TestServer_blockFoundCh_triggersCatchupCh(t *testing.T) {
 	err = baseServer.Init(ctx)
 	require.NoError(t, err)
 
-	// Fill blockFoundCh to trigger the catchup path
+	// Fill blockFoundCh to trigger the catchup path - use dummyBlock hash (matches httpmock setup)
 	for i := 0; i < 1; i++ {
 		blockFoundCh <- processBlockFound{
-			hash:    &chainhash.Hash{},
+			hash:    dummyBlock.Hash(),
 			baseURL: fmt.Sprintf("http://peer%d", i),
 			errCh:   make(chan error, 1),
 		}
