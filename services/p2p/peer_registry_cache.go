@@ -200,7 +200,8 @@ func (pr *PeerRegistry) LoadPeerRegistryCache(cacheDir string) error {
 		}
 
 		// Restore interaction metrics (prefer new fields, fall back to legacy)
-		if metrics.InteractionAttempts > 0 {
+		switch {
+		case metrics.InteractionAttempts > 0:
 			info.InteractionAttempts = metrics.InteractionAttempts
 			info.InteractionSuccesses = metrics.InteractionSuccesses
 			info.InteractionFailures = metrics.InteractionFailures
@@ -210,7 +211,7 @@ func (pr *PeerRegistry) LoadPeerRegistryCache(cacheDir string) error {
 			info.ReputationScore = metrics.ReputationScore
 			info.MaliciousCount = metrics.MaliciousCount
 			info.AvgResponseTime = time.Duration(metrics.AvgResponseMS) * time.Millisecond
-		} else if metrics.CatchupAttempts > 0 {
+		case metrics.CatchupAttempts > 0:
 			// Fall back to legacy fields for backward compatibility
 			info.InteractionAttempts = metrics.CatchupAttempts
 			info.InteractionSuccesses = metrics.CatchupSuccesses
@@ -223,7 +224,7 @@ func (pr *PeerRegistry) LoadPeerRegistryCache(cacheDir string) error {
 			info.AvgResponseTime = time.Duration(metrics.CatchupAvgResponseMS) * time.Millisecond
 			// Also count as catchup blocks for backward compatibility
 			info.CatchupBlocks = metrics.CatchupSuccesses
-		} else {
+		default:
 			// No interaction history in cache, ensure default reputation
 			if info.ReputationScore == 0 {
 				info.ReputationScore = 50.0

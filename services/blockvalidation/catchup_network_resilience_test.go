@@ -377,9 +377,8 @@ func TestCatchup_FlappingPeer(t *testing.T) {
 
 		// Note: peerMetrics field has been removed from Server struct
 		// (peer reputation checks disabled)
-		if failCount > 0 {
-			// Reputation checks would go here
-		}
+		_ = failCount // Silence unused variable warning
+
 		breaker := suite.Server.peerCircuitBreakers.GetBreaker("peer-flapping-001")
 		finalState, _, _, _ := breaker.GetStats()
 		t.Logf("Final circuit breaker state: %v", finalState)

@@ -583,7 +583,7 @@ func TestServer_catchup(t *testing.T) {
 				requestedHash := parts[2]
 
 				// Find the starting block
-				var startIdx int = -1
+				var startIdx = -1
 				for i, block := range blocks {
 					if block.Hash().String() == requestedHash {
 						startIdx = i

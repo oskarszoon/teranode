@@ -206,12 +206,14 @@ func formatFloat(f float64, precision int) string {
 
 // formatDuration formats a duration in milliseconds as a human-readable string.
 func formatDuration(ms int64) string {
-	if ms < 1000 {
+	switch {
+	case ms < 1000:
 		return formatInt(ms) + "ms"
-	} else if ms < 60000 {
+	case ms < 60000:
 		return formatInt(ms/1000) + "s"
-	} else if ms < 3600000 {
+	case ms < 3600000:
 		return formatInt(ms/60000) + "m"
+	default:
+		return formatInt(ms/3600000) + "h"
 	}
-	return formatInt(ms/3600000) + "h"
 }

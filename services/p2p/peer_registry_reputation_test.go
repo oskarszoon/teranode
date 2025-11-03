@@ -247,11 +247,11 @@ func TestPeerRegistry_ReputationDecrease_CatchupFailure(t *testing.T) {
 
 func TestPeerRegistry_ReputationCalculation_SuccessRate(t *testing.T) {
 	tests := []struct {
-		name               string
-		successes          int64
-		failures           int64
-		expectedMinRep     float64
-		expectedMaxRep     float64
+		name           string
+		successes      int64
+		failures       int64
+		expectedMinRep float64
+		expectedMaxRep float64
 	}{
 		{
 			name:           "100% success rate",

@@ -1573,7 +1573,7 @@ func Test_validateBlockSubtrees(t *testing.T) {
 		require.NoError(t, blockValidation.validateBlockSubtrees(t.Context(), block, "http://localhost:8000", ""))
 
 		// check that the subtree validation was called 3 times
-		assert.Len(t, subtreeValidationClient.Mock.Calls, 1)
+		assert.Len(t, subtreeValidationClient.Calls, 1)
 	})
 }
 

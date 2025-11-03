@@ -5319,6 +5319,10 @@ func (m *mockP2PClient) UpdateCatchupReputation(ctx context.Context, peerID stri
 	return nil
 }
 
+func (m *mockP2PClient) UpdateCatchupError(ctx context.Context, peerID string, errorMessage string) error {
+	return nil
+}
+
 func (m *mockP2PClient) ReportValidSubtree(ctx context.Context, peerID string, subtreeHash string) error {
 	return nil
 }

@@ -753,7 +753,7 @@ func (sc *SyncCoordinator) considerReputationRecovery() {
 		if cooldownMultiplier < 1 {
 			cooldownMultiplier = 1
 		}
-		baseCooldown = baseCooldown * time.Duration(cooldownMultiplier)
+		baseCooldown *= time.Duration(cooldownMultiplier)
 	}
 
 	peersRecovered := sc.registry.ReconsiderBadPeers(baseCooldown)

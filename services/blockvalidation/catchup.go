@@ -231,19 +231,20 @@ func (u *Server) releaseCatchupLock(ctx *CatchupContext, err *error) {
 		errorType := "unknown_error"
 		errorMsg := (*err).Error()
 
-		if errors.Is(*err, errors.ErrBlockInvalid) || errors.Is(*err, errors.ErrTxInvalid) {
+		switch {
+		case errors.Is(*err, errors.ErrBlockInvalid) || errors.Is(*err, errors.ErrTxInvalid):
 			errorType = "validation_failure"
 			// Mark peer as malicious for validation failure
 			u.reportCatchupMalicious(context.Background(), ctx.peerID, "validation_failure")
-		} else if errors.IsNetworkError(*err) {
+		case errors.IsNetworkError(*err):
 			errorType = "network_error"
-		} else if strings.Contains(errorMsg, "secret mining") || strings.Contains(errorMsg, "secretly mined") {
+		case strings.Contains(errorMsg, "secret mining") || strings.Contains(errorMsg, "secretly mined"):
 			errorType = "secret_mining"
-		} else if strings.Contains(errorMsg, "coinbase maturity") {
+		case strings.Contains(errorMsg, "coinbase maturity"):
 			errorType = "coinbase_maturity_violation"
-		} else if strings.Contains(errorMsg, "checkpoint") {
+		case strings.Contains(errorMsg, "checkpoint"):
 			errorType = "checkpoint_verification_failed"
-		} else if strings.Contains(errorMsg, "connection") || strings.Contains(errorMsg, "timeout") {
+		case strings.Contains(errorMsg, "connection") || strings.Contains(errorMsg, "timeout"):
 			errorType = "connection_error"
 		}
 
@@ -913,13 +914,7 @@ func (u *Server) validateBlocksOnChannel(validateBlocksChan chan *model.Block, g
 				// for peers that provide some valid blocks but ultimately invalid chains
 				// blockValidationDuration := time.Since(catchupCtx.startTime)
 				// u.reportCatchupSuccess(gCtx, peerID, blockValidationDuration)
-			} else {
-				// Quick validation succeeded, but don't report yet
-				// Wait for entire catchup to complete successfully
-				// blockValidationDuration := time.Since(catchupCtx.startTime)
-				// u.reportCatchupSuccess(gCtx, peerID, blockValidationDuration)
 			}
-
 			// Update the remaining block count
 			remaining := size.Add(-1)
 			if remaining%100 == 0 && remaining > 0 {

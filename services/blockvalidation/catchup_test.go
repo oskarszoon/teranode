@@ -160,12 +160,13 @@ func TestCatchupGetBlockHeaders(t *testing.T) {
 			`=~^http://test-peer/headers_from_common_ancestor/.*`,
 			func(req *http.Request) (*http.Response, error) {
 				var headersBytes []byte
-				if requestCount == 0 {
+				switch requestCount {
+				case 0:
 					// First request returns blocks 1-10000
 					for i := 1; i <= 10000; i++ {
 						headersBytes = append(headersBytes, blocks[i].Header.Bytes()...)
 					}
-				} else if requestCount == 1 {
+				case 1:
 					// Second request returns blocks 10001-12499
 					for i := 10001; i < 12500; i++ {
 						headersBytes = append(headersBytes, blocks[i].Header.Bytes()...)
@@ -1164,7 +1165,6 @@ func (s *testServer) processBlockFoundChannel(ctx context.Context, pbf processBl
 }
 
 func TestCatchupIntegrationScenarios(t *testing.T) {
-
 	// Configure test settings
 	tSettings := test.CreateBaseTestSettings(t)
 	tSettings.BlockValidation.SecretMiningThreshold = 100
@@ -2575,20 +2575,19 @@ func TestCatchup_NoRepeatedHeaderFetching(t *testing.T) {
 
 			// Return different headers based on request count
 			var responseHeaders []byte
-			if requestCount == 1 {
+			switch requestCount {
+			case 1:
 				// First request: return common ancestor (0) and headers 1-5
 				responseHeaders = append(responseHeaders, allHeaders[0].Bytes()...) // Common ancestor
 				for i := 1; i <= 5; i++ {
 					responseHeaders = append(responseHeaders, allHeaders[i].Bytes()...)
 				}
-
-			} else if requestCount == 2 {
+			case 2:
 				// Second request: return common ancestor (5) and headers 6-10
 				responseHeaders = append(responseHeaders, allHeaders[5].Bytes()...) // Common ancestor from previous iteration
 				for i := 6; i <= 10; i++ {
 					responseHeaders = append(responseHeaders, allHeaders[i].Bytes()...)
 				}
-
 			}
 
 			return httpmock.NewBytesResponse(200, responseHeaders), nil
