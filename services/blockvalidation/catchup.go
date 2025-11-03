@@ -230,7 +230,9 @@ func (u *Server) releaseCatchupLock(ctx *CatchupContext, err *error) {
 		// Determine error type based on error characteristics
 		errorType := "unknown_error"
 		errorMsg := (*err).Error()
+		isPeerError := true // Track if this is a peer-related error
 
+		// TODO: all of these should be using error types, and not checking the strings (!)
 		switch {
 		case errors.Is(*err, errors.ErrBlockInvalid) || errors.Is(*err, errors.ErrTxInvalid):
 			errorType = "validation_failure"
@@ -246,6 +248,14 @@ func (u *Server) releaseCatchupLock(ctx *CatchupContext, err *error) {
 			errorType = "checkpoint_verification_failed"
 		case strings.Contains(errorMsg, "connection") || strings.Contains(errorMsg, "timeout"):
 			errorType = "connection_error"
+		case strings.Contains(errorMsg, "block assembly is behind"):
+			// Block assembly being behind is a local system error, not a peer error
+			errorType = "local_system_not_ready"
+			isPeerError = false
+		case errors.Is(*err, errors.ErrServiceUnavailable):
+			// Service unavailable errors are local system issues, not peer errors
+			errorType = "local_service_unavailable"
+			isPeerError = false
 		}
 
 		u.previousCatchupAttempt = &PreviousAttempt{
@@ -260,8 +270,13 @@ func (u *Server) releaseCatchupLock(ctx *CatchupContext, err *error) {
 			BlocksValidated:   u.blocksValidated.Load(),
 		}
 
-		// Also store the error in the peer registry
-		u.reportCatchupError(context.Background(), ctx.peerID, errorMsg)
+		// Only store the error in the peer registry if it's a peer-related error
+		// Local system errors (like block assembly being behind) should not affect peer reputation
+		if isPeerError {
+			u.reportCatchupError(context.Background(), ctx.peerID, errorMsg)
+		} else {
+			u.logger.Infof("[catchup][%s] Skipping peer error report for local system error: %s", ctx.blockUpTo.Hash().String(), errorType)
+		}
 	}
 
 	// Clear the active catchup context
