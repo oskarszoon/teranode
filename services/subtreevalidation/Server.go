@@ -196,7 +196,6 @@ func New(
 		subtreeConsumerClient:             subtreeConsumerClient,
 		txmetaConsumerClient:              txmetaConsumerClient,
 		invalidSubtreeDeDuplicateMap:      expiringmap.New[string, struct{}](time.Minute * 1),
-		orphanage:                         expiringmap.New[chainhash.Hash, *bt.Tx](tSettings.SubtreeValidation.OrphanageTimeout),
 		p2pClient:                         p2pClient,
 	}
 

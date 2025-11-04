@@ -485,3 +485,107 @@ func TestPeerRegistry_ReconsiderBadPeers_ExponentialCooldown(t *testing.T) {
 	info, _ = pr.GetPeer(peerID)
 	assert.Equal(t, 2, info.ReputationResetCount, "Reset count should be 2")
 }
+
+func TestPeerRegistry_ReputationRecovery_AfterInvalidBlock(t *testing.T) {
+	pr := NewPeerRegistry()
+	peerID := peer.ID("test-peer-recovery-after-invalid")
+
+	// Add peer with good reputation
+	pr.AddPeer(peerID, "")
+	pr.UpdateReputation(peerID, 80.0)
+	pr.UpdateDataHubURL(peerID, "http://test.com")
+
+	// Verify initial state
+	initialInfo, exists := pr.GetPeer(peerID)
+	require.True(t, exists)
+	assert.Equal(t, 80.0, initialInfo.ReputationScore, "Should start with good reputation")
+
+	// ========================================================================
+	// STEP 1: Peer sends invalid block - reputation drops to 5.0
+	// ========================================================================
+	pr.RecordMaliciousInteraction(peerID)
+
+	info, exists := pr.GetPeer(peerID)
+	require.True(t, exists)
+	assert.Equal(t, 5.0, info.ReputationScore, "Reputation should drop to 5.0 for malicious behavior (invalid block)")
+	assert.Equal(t, int64(1), info.MaliciousCount, "Malicious count should be 1")
+	assert.Equal(t, int64(1), info.InteractionFailures, "Should record 1 failure")
+
+	// ========================================================================
+	// STEP 2: Verify reputation cannot increase while malicious count > 0
+	// ========================================================================
+	// Try sending valid blocks - reputation should stay at 5.0
+	for i := 0; i < 5; i++ {
+		pr.RecordBlockReceived(peerID, 100*time.Millisecond)
+	}
+
+	info, _ = pr.GetPeer(peerID)
+	assert.Equal(t, 5.0, info.ReputationScore, "Reputation should remain at 5.0 while malicious count is set")
+	assert.Equal(t, int64(5), info.BlocksReceived, "Should still track blocks received")
+	assert.Equal(t, int64(5), info.InteractionSuccesses, "Should still track successes")
+
+	// ========================================================================
+	// STEP 3: After cooldown period, peer reputation is reconsidered
+	// ========================================================================
+	// Simulate cooldown period passing (25 hours > 24 hour default)
+	pr.peers[peerID].LastInteractionFailure = time.Now().Add(-25 * time.Hour)
+
+	// Call ReconsiderBadPeers to give the peer a second chance
+	recovered := pr.ReconsiderBadPeers(24 * time.Hour)
+
+	assert.Equal(t, 1, recovered, "Should recover one peer")
+	info, _ = pr.GetPeer(peerID)
+	assert.Equal(t, 30.0, info.ReputationScore, "Reputation should be reset to 30.0 (second chance)")
+	assert.Equal(t, int64(0), info.MaliciousCount, "Malicious count should be cleared")
+	assert.False(t, info.LastReputationReset.IsZero(), "Should record reputation reset time")
+	assert.Equal(t, 1, info.ReputationResetCount, "Should track number of resets")
+
+	// ========================================================================
+	// STEP 4: Peer sends valid blocks/subtrees - reputation increases
+	// ========================================================================
+	// Record multiple successful interactions
+	pr.RecordBlockReceived(peerID, 150*time.Millisecond)
+	info, _ = pr.GetPeer(peerID)
+	reputationAfterFirstBlock := info.ReputationScore
+	assert.Greater(t, reputationAfterFirstBlock, 30.0, "Reputation should increase after valid block")
+
+	pr.RecordSubtreeReceived(peerID, 100*time.Millisecond)
+	info, _ = pr.GetPeer(peerID)
+	reputationAfterFirstSubtree := info.ReputationScore
+	assert.Greater(t, reputationAfterFirstSubtree, reputationAfterFirstBlock, "Reputation should continue to increase")
+
+	// Record several more successful interactions
+	for i := 0; i < 8; i++ {
+		pr.RecordBlockReceived(peerID, 120*time.Millisecond)
+	}
+
+	// Verify final reputation
+	info, _ = pr.GetPeer(peerID)
+	assert.Greater(t, info.ReputationScore, 60.0, "Reputation should recover significantly with consistent success")
+	assert.Equal(t, int64(14), info.BlocksReceived, "Should have 14 blocks received total (5 during malicious + 9 after)")
+	assert.Equal(t, int64(1), info.SubtreesReceived, "Should have 1 subtree received")
+	assert.Equal(t, int64(15), info.InteractionSuccesses, "Should have 15 total successes")
+	assert.Equal(t, int64(1), info.InteractionFailures, "Should still have 1 failure from initial malicious interaction")
+
+	// Calculate success rate
+	totalAttempts := info.InteractionSuccesses + info.InteractionFailures
+	successRate := float64(info.InteractionSuccesses) / float64(totalAttempts) * 100.0
+	assert.Greater(t, successRate, 90.0, "Success rate should be > 90% after recovery")
+
+	// ========================================================================
+	// STEP 5: Verify peer is now prioritized in catchup selection
+	// ========================================================================
+	peers := pr.GetPeersForCatchup()
+	require.NotEmpty(t, peers)
+	// Peer should be ranked highly (likely first if only peer in registry)
+	foundPeer := false
+	for i, p := range peers {
+		if p.ID == peerID {
+			foundPeer = true
+			// Peer should be in the top half at least
+			assert.Less(t, i, len(peers)/2+1, "Recovered peer with good reputation should be prioritized")
+			break
+		}
+	}
+	assert.True(t, foundPeer, "Recovered peer should be included in catchup selection")
+}
