@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -690,7 +691,8 @@ func TestServer_blockFoundCh_triggersCatchupCh(t *testing.T) {
 	httpmock.Activate()
 	defer httpmock.DeactivateAndReset()
 
-	httpmock.RegisterResponder("GET", `=~^http://peer[0-9]+/block/[a-f0-9]+$`, httpmock.NewBytesResponder(200, blockBytes))
+	// Register responder for block fetch - use regex to match any peer URL
+	httpmock.RegisterRegexpResponder("GET", regexp.MustCompile(`http://peer[0-9]+/block/[a-f0-9]+`), httpmock.NewBytesResponder(200, blockBytes))
 
 	mockBlockchain := &blockchain.Mock{}
 	mockBlockchain.On("GetBlock", mock.Anything, mock.Anything).Return((*model.Block)(nil), errors.NewNotFoundError("not found"))
