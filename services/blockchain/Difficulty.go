@@ -405,7 +405,7 @@ func (d *Difficulty) ValidateBlockHeaderDifficulty(ctx context.Context, newBlock
 // stale results from CalcNextWorkRequired.
 func (d *Difficulty) ResetCache() {
 	d.mu.Lock()
+	defer d.mu.Unlock()
 	d.lastBlockHash = nil
 	d.lastComputednBits = nil
-	d.mu.Unlock()
 }
