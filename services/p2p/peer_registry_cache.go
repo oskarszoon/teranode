@@ -193,7 +193,6 @@ func (pr *PeerRegistry) LoadPeerRegistryCache(cacheDir string) error {
 				BlockHash:       metrics.BlockHash,
 				DataHubURL:      metrics.DataHubURL,
 				Storage:         metrics.Storage,
-				IsHealthy:       true, // Assume healthy initially
 				ReputationScore: 50.0, // Start with neutral reputation
 			}
 			pr.peers[peerID] = info

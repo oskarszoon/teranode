@@ -20,7 +20,7 @@ func TestPeerRegistry_AddPeer(t *testing.T) {
 	info, exists := pr.GetPeer(peerID)
 	require.True(t, exists, "Peer should exist after adding")
 	assert.Equal(t, peerID, info.ID)
-	assert.True(t, info.IsHealthy, "New peer should be healthy by default")
+	assert.True(t, info.ReputationScore >= 20.0, "New peer should be healthy by default")
 	assert.False(t, info.IsBanned, "New peer should not be banned")
 	assert.NotZero(t, info.ConnectedAt, "ConnectedAt should be set")
 	assert.NotZero(t, info.LastMessageTime, "LastMessageTime should be set")
@@ -141,18 +141,17 @@ func TestPeerRegistry_UpdateHealth(t *testing.T) {
 
 	// Initially healthy
 	info, _ := pr.GetPeer(peerID)
-	assert.True(t, info.IsHealthy)
+	assert.True(t, info.ReputationScore >= 20.0)
 
-	// Mark as unhealthy
-	pr.UpdateHealth(peerID, false)
+	// Mark as unhealthy (low reputation)
+	pr.UpdateReputation(peerID, 15.0)
 	info, _ = pr.GetPeer(peerID)
-	assert.False(t, info.IsHealthy)
-	assert.NotZero(t, info.LastHealthCheck)
+	assert.False(t, info.ReputationScore >= 20.0)
 
 	// Mark as healthy again
-	pr.UpdateHealth(peerID, true)
+	pr.UpdateReputation(peerID, 80.0)
 	info, _ = pr.GetPeer(peerID)
-	assert.True(t, info.IsHealthy)
+	assert.True(t, info.ReputationScore >= 20.0)
 }
 
 func TestPeerRegistry_UpdateBanStatus(t *testing.T) {
@@ -239,7 +238,6 @@ func TestPeerRegistry_ConcurrentAccess(t *testing.T) {
 	go func() {
 		for i := 0; i < 100; i++ {
 			id := peer.ID(string(rune('A' + i%10)))
-			pr.UpdateHealth(id, i%2 == 0)
 			pr.UpdateBanStatus(id, i, i > 50)
 		}
 		done <- true
@@ -450,44 +448,42 @@ func TestPeerRegistry_GetPeersForCatchup(t *testing.T) {
 	// Peer 0: Healthy with DataHub URL, good reputation
 	pr.AddPeer(ids[0], "")
 	pr.UpdateDataHubURL(ids[0], "http://peer0.test")
-	pr.UpdateHealth(ids[0], true)
 	pr.UpdateReputation(ids[0], 90.0)
 
 	// Peer 1: Healthy with DataHub URL, medium reputation
 	pr.AddPeer(ids[1], "")
 	pr.UpdateDataHubURL(ids[1], "http://peer1.test")
-	pr.UpdateHealth(ids[1], true)
 	pr.UpdateReputation(ids[1], 50.0)
 
-	// Peer 2: Unhealthy with DataHub URL (should be excluded)
+	// Peer 2: Low reputation with DataHub URL (should be excluded)
 	pr.AddPeer(ids[2], "")
 	pr.UpdateDataHubURL(ids[2], "http://peer2.test")
-	pr.UpdateHealth(ids[2], false)
-	pr.UpdateReputation(ids[2], 80.0)
+	pr.UpdateReputation(ids[2], 15.0)
 
 	// Peer 3: Healthy but no DataHub URL (should be excluded)
 	pr.AddPeer(ids[3], "")
-	pr.UpdateHealth(ids[3], true)
 	pr.UpdateReputation(ids[3], 85.0)
 
 	// Peer 4: Healthy with DataHub URL but banned (should be excluded)
 	pr.AddPeer(ids[4], "")
 	pr.UpdateDataHubURL(ids[4], "http://peer4.test")
-	pr.UpdateHealth(ids[4], true)
 	pr.UpdateBanStatus(ids[4], 100, true)
 	pr.UpdateReputation(ids[4], 95.0)
 
 	// Get peers for catchup
 	peers := pr.GetPeersForCatchup()
 
-	// Should only return peers 0 and 1 (healthy, with DataHub URL, not banned)
-	require.Len(t, peers, 2)
+	// Should return peers 0, 1, and 2 (with DataHub URL and not banned)
+	// Peer 3 is excluded (no DataHub URL), Peer 4 is excluded (banned)
+	require.Len(t, peers, 3)
 
 	// Should be sorted by reputation (highest first)
 	assert.Equal(t, ids[0], peers[0].ID, "Peer 0 should be first (highest reputation)")
 	assert.Equal(t, 90.0, peers[0].ReputationScore)
 	assert.Equal(t, ids[1], peers[1].ID, "Peer 1 should be second")
 	assert.Equal(t, 50.0, peers[1].ReputationScore)
+	assert.Equal(t, ids[2], peers[2].ID, "Peer 2 should be third")
+	assert.Equal(t, 15.0, peers[2].ReputationScore)
 }
 
 func TestPeerRegistry_GetPeersForCatchup_SameReputation(t *testing.T) {
@@ -501,7 +497,6 @@ func TestPeerRegistry_GetPeersForCatchup_SameReputation(t *testing.T) {
 	// Peer 0: Last success 1 hour ago
 	pr.AddPeer(ids[0], "")
 	pr.UpdateDataHubURL(ids[0], "http://peer0.test")
-	pr.UpdateHealth(ids[0], true)
 	pr.UpdateReputation(ids[0], 75.0)
 	pr.RecordInteractionSuccess(ids[0], 100*time.Millisecond)
 	// Manually set last success to older time
@@ -510,7 +505,6 @@ func TestPeerRegistry_GetPeersForCatchup_SameReputation(t *testing.T) {
 	// Peer 1: Last success 10 minutes ago (most recent)
 	pr.AddPeer(ids[1], "")
 	pr.UpdateDataHubURL(ids[1], "http://peer1.test")
-	pr.UpdateHealth(ids[1], true)
 	pr.UpdateReputation(ids[1], 75.0)
 	pr.RecordInteractionSuccess(ids[1], 100*time.Millisecond)
 	pr.peers[ids[1]].LastInteractionSuccess = baseTime.Add(-10 * time.Minute)
@@ -518,7 +512,6 @@ func TestPeerRegistry_GetPeersForCatchup_SameReputation(t *testing.T) {
 	// Peer 2: Last success 30 minutes ago
 	pr.AddPeer(ids[2], "")
 	pr.UpdateDataHubURL(ids[2], "http://peer2.test")
-	pr.UpdateHealth(ids[2], true)
 	pr.UpdateReputation(ids[2], 75.0)
 	pr.RecordInteractionSuccess(ids[2], 100*time.Millisecond)
 	pr.peers[ids[2]].LastInteractionSuccess = baseTime.Add(-30 * time.Minute)
@@ -537,7 +530,7 @@ func TestPeerRegistry_CatchupMetrics_ConcurrentAccess(t *testing.T) {
 	peerID, _ := peer.Decode(testPeer1)
 	pr.AddPeer(peerID, "")
 	pr.UpdateDataHubURL(peerID, "http://test.com")
-	pr.UpdateHealth(peerID, true)
+	pr.UpdateReputation(peerID, 80.0)
 
 	done := make(chan bool)
 

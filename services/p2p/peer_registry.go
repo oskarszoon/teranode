@@ -14,9 +14,6 @@ type PeerInfo struct {
 	Height          int32
 	BlockHash       string
 	DataHubURL      string
-	IsHealthy       bool
-	HealthDuration  time.Duration
-	LastHealthCheck time.Time
 	BanScore        int
 	IsBanned        bool
 	IsConnected     bool // Whether this peer is directly connected (vs gossiped)
@@ -82,7 +79,6 @@ func (pr *PeerRegistry) AddPeer(id peer.ID, clientName string) {
 			ClientName:      clientName,
 			ConnectedAt:     now,
 			LastMessageTime: now,  // Initialize to connection time
-			IsHealthy:       true, // Assume healthy until proven otherwise
 			ReputationScore: 50.0, // Start with neutral reputation
 		}
 	} else if clientName != "" {
@@ -155,27 +151,6 @@ func (pr *PeerRegistry) UpdateDataHubURL(id peer.ID, url string) {
 
 	if info, exists := pr.peers[id]; exists {
 		info.DataHubURL = url
-	}
-}
-
-// UpdateHealth updates a peer's health status
-func (pr *PeerRegistry) UpdateHealth(id peer.ID, healthy bool) {
-	pr.mu.Lock()
-	defer pr.mu.Unlock()
-
-	if info, exists := pr.peers[id]; exists {
-		info.IsHealthy = healthy
-		info.LastHealthCheck = time.Now()
-	}
-}
-
-// UpdateHealthDuration updates a peer's health duration
-func (pr *PeerRegistry) UpdateHealthDuration(id peer.ID, duration time.Duration) {
-	pr.mu.Lock()
-	defer pr.mu.Unlock()
-
-	if info, exists := pr.peers[id]; exists {
-		info.HealthDuration = duration
 	}
 }
 
@@ -543,15 +518,15 @@ func (pr *PeerRegistry) RecordTransactionReceived(id peer.ID) {
 }
 
 // GetPeersByReputation returns peers sorted by reputation score
-// Filters for healthy peers that are not banned
+// Filters for peers that are not banned
 func (pr *PeerRegistry) GetPeersByReputation() []*PeerInfo {
 	pr.mu.RLock()
 	defer pr.mu.RUnlock()
 
 	result := make([]*PeerInfo, 0, len(pr.peers))
 	for _, info := range pr.peers {
-		// Only include peers that are healthy and not banned
-		if info.IsHealthy && !info.IsBanned {
+		// Only include peers that are not banned
+		if !info.IsBanned {
 			copy := *info
 			result = append(result, &copy)
 		}
@@ -638,7 +613,7 @@ func (pr *PeerRegistry) ReconsiderBadPeers(cooldownPeriod time.Duration) int {
 }
 
 // GetPeersForCatchup returns peers suitable for catchup operations
-// Filters for healthy peers with DataHub URLs, sorted by reputation
+// Filters for peers with DataHub URLs, sorted by reputation
 // This is a specialized version of GetPeersByReputation for catchup operations
 func (pr *PeerRegistry) GetPeersForCatchup() []*PeerInfo {
 	pr.mu.RLock()
@@ -646,8 +621,8 @@ func (pr *PeerRegistry) GetPeersForCatchup() []*PeerInfo {
 
 	result := make([]*PeerInfo, 0, len(pr.peers))
 	for _, info := range pr.peers {
-		// Only include peers with DataHub URLs that are healthy and not banned
-		if info.DataHubURL != "" && info.IsHealthy && !info.IsBanned {
+		// Only include peers with DataHub URLs that are not banned
+		if info.DataHubURL != "" && !info.IsBanned {
 			copy := *info
 			result = append(result, &copy)
 		}

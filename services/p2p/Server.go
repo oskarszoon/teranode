@@ -119,11 +119,10 @@ type Server struct {
 	blockPeerMap                      sync.Map           // Map to track which peer sent each block (hash -> peerMapEntry)
 	subtreePeerMap                    sync.Map           // Map to track which peer sent each subtree (hash -> peerMapEntry)
 	startTime                         time.Time          // Server start time for uptime calculation
-	peerRegistry                      *PeerRegistry      // Central registry for all peer information
-	peerSelector                      *PeerSelector      // Stateless peer selection logic
-	peerHealthChecker                 *PeerHealthChecker // Async health monitoring
-	syncCoordinator                   *SyncCoordinator   // Orchestrates sync operations
-	syncConnectionTimes               sync.Map           // Map to track when we first connected to each sync peer (peerID -> timestamp)
+	peerRegistry                      *PeerRegistry    // Central registry for all peer information
+	peerSelector                      *PeerSelector    // Stateless peer selection logic
+	syncCoordinator                   *SyncCoordinator // Orchestrates sync operations
+	syncConnectionTimes               sync.Map         // Map to track when we first connected to each sync peer (peerID -> timestamp)
 
 	// Cleanup configuration
 	peerMapCleanupTicker    *time.Ticker  // Ticker for periodic cleanup of peer maps
@@ -396,8 +395,6 @@ func NewServer(
 		logger.Infof("Loaded peer registry cache with %d peers", p2pServer.peerRegistry.PeerCount())
 	}
 
-	p2pServer.peerHealthChecker = NewPeerHealthChecker(logger, p2pServer.peerRegistry, tSettings)
-
 	// Initialize the ban manager with peer registry so it can sync ban statuses
 	p2pServer.banManager = NewPeerBanManager(ctx, &myBanEventHandler{server: p2pServer}, tSettings, p2pServer.peerRegistry)
 	p2pServer.syncCoordinator = NewSyncCoordinator(
@@ -405,7 +402,6 @@ func NewServer(
 		tSettings,
 		p2pServer.peerRegistry,
 		p2pServer.peerSelector,
-		p2pServer.peerHealthChecker,
 		p2pServer.banManager,
 		blockchainClient,
 		p2pServer.blocksKafkaProducerClient,
@@ -2865,10 +2861,9 @@ func (s *Server) shouldSkipUnhealthyPeer(from string, messageType string) bool {
 		return false
 	}
 
-	// Only filter unhealthy peers if they're directly connected
-	// Gossiped peers aren't health-checked, so we don't filter them
-	if peerInfo.IsConnected && !peerInfo.IsHealthy {
-		s.logger.Debugf("[%s] ignoring notification from unhealthy connected peer %s", messageType, from)
+	// Filter peers with very low reputation scores
+	if peerInfo.ReputationScore < 20.0 {
+		s.logger.Debugf("[%s] ignoring notification from low reputation peer %s (score: %.2f)", messageType, from, peerInfo.ReputationScore)
 		return true
 	}
 

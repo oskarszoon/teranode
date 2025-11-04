@@ -25,9 +25,6 @@
     height: number
     block_hash: string
     data_hub_url: string
-    is_healthy: boolean
-    health_duration_ms: number
-    last_health_check: number
     ban_score: number
     is_banned: boolean
     is_connected: boolean
@@ -440,15 +437,7 @@
         name: 'Peer',
         type: 'string',
         props: {
-          width: '14%',
-        },
-      },
-      {
-        id: 'is_connected',
-        name: 'Status',
-        type: 'string',
-        props: {
-          width: '8%',
+          width: '16%',
         },
       },
       {
@@ -464,7 +453,7 @@
         name: 'Reputation',
         type: 'number',
         props: {
-          width: '9%',
+          width: '10%',
         },
       },
       {
@@ -481,7 +470,7 @@
         name: 'Bytes Received',
         type: 'number',
         props: {
-          width: '12%',
+          width: '13%',
         },
       },
       {
@@ -489,7 +478,7 @@
         name: 'DataHub URL',
         type: 'string',
         props: {
-          width: '23%',
+          width: '27%',
         },
       },
     ]
@@ -522,45 +511,6 @@
           value: shortValue,
           tooltip: tooltip,
           className: 'peer-name',
-        },
-        value: '',
-      }
-    },
-    is_connected: (idField, item, colId) => {
-      const isConnected = item.is_connected
-      const isHealthy = item.is_healthy
-      const isBanned = item.is_banned
-      const urlResponsive = item.url_responsive
-
-      let status = ''
-      let className = ''
-
-      if (isBanned) {
-        status = 'Banned'
-        className = 'status-banned'
-      } else if (!isConnected) {
-        status = 'Disconnected'
-        className = 'status-disconnected'
-      } else if (!isHealthy) {
-        status = 'Unhealthy'
-        className = 'status-unhealthy'
-      } else if (isHealthy && isConnected) {
-        // For connected and healthy peers, show as Healthy regardless of URL status
-        status = 'Healthy'
-        className = 'status-healthy'
-      } else if (!urlResponsive) {
-        status = 'URL Down'
-        className = 'status-url-down'
-      } else {
-        status = 'Connected'
-        className = 'status-healthy'
-      }
-
-      return {
-        component: RenderSpan,
-        props: {
-          value: status,
-          className: className,
         },
         value: '',
       }
@@ -828,9 +778,9 @@
           >
         </span>
         <span class="stat-item">
-          <span class="stat-label">Healthy:</span>
+          <span class="stat-label">Good Reputation:</span>
           <span class="stat-value"
-            >{allData.filter((p) => p.is_healthy && p.is_connected && !p.is_banned).length}</span
+            >{allData.filter((p) => p.catchup_reputation_score >= 50 && p.is_connected && !p.is_banned).length}</span
           >
         </span>
       </div>

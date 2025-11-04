@@ -162,11 +162,10 @@ message AddBanScoreRequest {
     int32 height = 2;
     string block_hash = 3;
     string data_hub_url = 4;
-    bool is_healthy = 5;
-    double catchup_reputation_score = 6;
-    int64 catchup_attempts = 7;
-    int64 catchup_successes = 8;
-    int64 catchup_failures = 9;
+    double catchup_reputation_score = 5;
+    int64 catchup_attempts = 6;
+    int64 catchup_successes = 7;
+    int64 catchup_failures = 8;
   }
 
   message GetPeersForCatchupResponse {
@@ -221,33 +220,30 @@ message AddBanScoreRequest {
     int32 height = 2;
     string block_hash = 3;
     string data_hub_url = 4;
-    bool is_healthy = 5;
-    int64 health_duration_ms = 6;
-    int64 last_health_check = 7;  // Unix timestamp
-    int32 ban_score = 8;
-    bool is_banned = 9;
-    bool is_connected = 10;
-    int64 connected_at = 11;  // Unix timestamp
-    uint64 bytes_received = 12;
-    int64 last_block_time = 13;  // Unix timestamp
-    int64 last_message_time = 14;  // Unix timestamp
-    bool url_responsive = 15;
-    int64 last_url_check = 16;  // Unix timestamp
+    int32 ban_score = 5;
+    bool is_banned = 6;
+    bool is_connected = 7;
+    int64 connected_at = 8;  // Unix timestamp
+    uint64 bytes_received = 9;
+    int64 last_block_time = 10;  // Unix timestamp
+    int64 last_message_time = 11;  // Unix timestamp
+    bool url_responsive = 12;
+    int64 last_url_check = 13;  // Unix timestamp
 
     // Interaction/catchup metrics
-    int64 interaction_attempts = 17;
-    int64 interaction_successes = 18;
-    int64 interaction_failures = 19;
-    int64 last_interaction_attempt = 20;  // Unix timestamp
-    int64 last_interaction_success = 21;  // Unix timestamp
-    int64 last_interaction_failure = 22;  // Unix timestamp
-    double reputation_score = 23;
-    int64 malicious_count = 24;
-    int64 avg_response_time_ms = 25;
-    string storage = 26;
-    string client_name = 27;  // Human-readable name of the client
-    string last_catchup_error = 28;  // Last error message from catchup attempt
-    int64 last_catchup_error_time = 29;  // Unix timestamp of last catchup error
+    int64 interaction_attempts = 14;
+    int64 interaction_successes = 15;
+    int64 interaction_failures = 16;
+    int64 last_interaction_attempt = 17;  // Unix timestamp
+    int64 last_interaction_success = 18;  // Unix timestamp
+    int64 last_interaction_failure = 19;  // Unix timestamp
+    double reputation_score = 20;
+    int64 malicious_count = 21;
+    int64 avg_response_time_ms = 22;
+    string storage = 23;
+    string client_name = 24;  // Human-readable name of the client
+    string last_catchup_error = 25;  // Last error message from catchup attempt
+    int64 last_catchup_error_time = 26;  // Unix timestamp of last catchup error
   }
 
   message GetPeerRegistryResponse {

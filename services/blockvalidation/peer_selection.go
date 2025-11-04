@@ -11,7 +11,6 @@ type PeerForCatchup struct {
 	DataHubURL             string
 	Height                 int32
 	BlockHash              string
-	IsHealthy              bool
 	CatchupReputationScore float64
 	CatchupAttempts        int64
 	CatchupSuccesses       int64
@@ -57,15 +56,9 @@ func (u *Server) selectBestPeersForCatchup(ctx context.Context, targetHeight int
 			continue
 		}
 
-		// Filter out unhealthy peers
-		if !p.IsHealthy {
-			u.logger.Debugf("[peer_selection] Skipping unhealthy peer %s", p.Id)
-			continue
-		}
-
-		// Filter out peers without DataHub URLs
+		// Filter out peers without DataHub URLs (listen-only nodes)
 		if p.DataHubUrl == "" {
-			u.logger.Debugf("[peer_selection] Skipping peer %s (no DataHub URL)", p.Id)
+			u.logger.Debugf("[peer_selection] Skipping peer %s (no DataHub URL - listen-only node)", p.Id)
 			continue
 		}
 
@@ -74,7 +67,6 @@ func (u *Server) selectBestPeersForCatchup(ctx context.Context, targetHeight int
 			DataHubURL:             p.DataHubUrl,
 			Height:                 p.Height,
 			BlockHash:              p.BlockHash,
-			IsHealthy:              p.IsHealthy,
 			CatchupReputationScore: p.CatchupReputationScore,
 			CatchupAttempts:        p.CatchupAttempts,
 			CatchupSuccesses:       p.CatchupSuccesses,

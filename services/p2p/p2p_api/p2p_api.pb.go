@@ -1561,11 +1561,10 @@ type PeerInfoForCatchup struct {
 	Height                 int32                  `protobuf:"varint,2,opt,name=height,proto3" json:"height,omitempty"`
 	BlockHash              string                 `protobuf:"bytes,3,opt,name=block_hash,json=blockHash,proto3" json:"block_hash,omitempty"`
 	DataHubUrl             string                 `protobuf:"bytes,4,opt,name=data_hub_url,json=dataHubUrl,proto3" json:"data_hub_url,omitempty"`
-	IsHealthy              bool                   `protobuf:"varint,5,opt,name=is_healthy,json=isHealthy,proto3" json:"is_healthy,omitempty"`
-	CatchupReputationScore float64                `protobuf:"fixed64,6,opt,name=catchup_reputation_score,json=catchupReputationScore,proto3" json:"catchup_reputation_score,omitempty"`
-	CatchupAttempts        int64                  `protobuf:"varint,7,opt,name=catchup_attempts,json=catchupAttempts,proto3" json:"catchup_attempts,omitempty"`
-	CatchupSuccesses       int64                  `protobuf:"varint,8,opt,name=catchup_successes,json=catchupSuccesses,proto3" json:"catchup_successes,omitempty"`
-	CatchupFailures        int64                  `protobuf:"varint,9,opt,name=catchup_failures,json=catchupFailures,proto3" json:"catchup_failures,omitempty"`
+	CatchupReputationScore float64                `protobuf:"fixed64,5,opt,name=catchup_reputation_score,json=catchupReputationScore,proto3" json:"catchup_reputation_score,omitempty"`
+	CatchupAttempts        int64                  `protobuf:"varint,6,opt,name=catchup_attempts,json=catchupAttempts,proto3" json:"catchup_attempts,omitempty"`
+	CatchupSuccesses       int64                  `protobuf:"varint,7,opt,name=catchup_successes,json=catchupSuccesses,proto3" json:"catchup_successes,omitempty"`
+	CatchupFailures        int64                  `protobuf:"varint,8,opt,name=catchup_failures,json=catchupFailures,proto3" json:"catchup_failures,omitempty"`
 	unknownFields          protoimpl.UnknownFields
 	sizeCache              protoimpl.SizeCache
 }
@@ -1626,13 +1625,6 @@ func (x *PeerInfoForCatchup) GetDataHubUrl() string {
 		return x.DataHubUrl
 	}
 	return ""
-}
-
-func (x *PeerInfoForCatchup) GetIsHealthy() bool {
-	if x != nil {
-		return x.IsHealthy
-	}
-	return false
 }
 
 func (x *PeerInfoForCatchup) GetCatchupReputationScore() float64 {
@@ -2120,37 +2112,34 @@ func (x *IsPeerUnhealthyResponse) GetReputationScore() float32 {
 
 // Comprehensive peer information with all registry metadata
 type PeerRegistryInfo struct {
-	state            protoimpl.MessageState `protogen:"open.v1"`
-	Id               string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Height           int32                  `protobuf:"varint,2,opt,name=height,proto3" json:"height,omitempty"`
-	BlockHash        string                 `protobuf:"bytes,3,opt,name=block_hash,json=blockHash,proto3" json:"block_hash,omitempty"`
-	DataHubUrl       string                 `protobuf:"bytes,4,opt,name=data_hub_url,json=dataHubUrl,proto3" json:"data_hub_url,omitempty"`
-	IsHealthy        bool                   `protobuf:"varint,5,opt,name=is_healthy,json=isHealthy,proto3" json:"is_healthy,omitempty"`
-	HealthDurationMs int64                  `protobuf:"varint,6,opt,name=health_duration_ms,json=healthDurationMs,proto3" json:"health_duration_ms,omitempty"`
-	LastHealthCheck  int64                  `protobuf:"varint,7,opt,name=last_health_check,json=lastHealthCheck,proto3" json:"last_health_check,omitempty"` // Unix timestamp
-	BanScore         int32                  `protobuf:"varint,8,opt,name=ban_score,json=banScore,proto3" json:"ban_score,omitempty"`
-	IsBanned         bool                   `protobuf:"varint,9,opt,name=is_banned,json=isBanned,proto3" json:"is_banned,omitempty"`
-	IsConnected      bool                   `protobuf:"varint,10,opt,name=is_connected,json=isConnected,proto3" json:"is_connected,omitempty"`
-	ConnectedAt      int64                  `protobuf:"varint,11,opt,name=connected_at,json=connectedAt,proto3" json:"connected_at,omitempty"` // Unix timestamp
-	BytesReceived    uint64                 `protobuf:"varint,12,opt,name=bytes_received,json=bytesReceived,proto3" json:"bytes_received,omitempty"`
-	LastBlockTime    int64                  `protobuf:"varint,13,opt,name=last_block_time,json=lastBlockTime,proto3" json:"last_block_time,omitempty"`       // Unix timestamp
-	LastMessageTime  int64                  `protobuf:"varint,14,opt,name=last_message_time,json=lastMessageTime,proto3" json:"last_message_time,omitempty"` // Unix timestamp
-	UrlResponsive    bool                   `protobuf:"varint,15,opt,name=url_responsive,json=urlResponsive,proto3" json:"url_responsive,omitempty"`
-	LastUrlCheck     int64                  `protobuf:"varint,16,opt,name=last_url_check,json=lastUrlCheck,proto3" json:"last_url_check,omitempty"` // Unix timestamp
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	Id              string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Height          int32                  `protobuf:"varint,2,opt,name=height,proto3" json:"height,omitempty"`
+	BlockHash       string                 `protobuf:"bytes,3,opt,name=block_hash,json=blockHash,proto3" json:"block_hash,omitempty"`
+	DataHubUrl      string                 `protobuf:"bytes,4,opt,name=data_hub_url,json=dataHubUrl,proto3" json:"data_hub_url,omitempty"`
+	BanScore        int32                  `protobuf:"varint,5,opt,name=ban_score,json=banScore,proto3" json:"ban_score,omitempty"`
+	IsBanned        bool                   `protobuf:"varint,6,opt,name=is_banned,json=isBanned,proto3" json:"is_banned,omitempty"`
+	IsConnected     bool                   `protobuf:"varint,7,opt,name=is_connected,json=isConnected,proto3" json:"is_connected,omitempty"`
+	ConnectedAt     int64                  `protobuf:"varint,8,opt,name=connected_at,json=connectedAt,proto3" json:"connected_at,omitempty"` // Unix timestamp
+	BytesReceived   uint64                 `protobuf:"varint,9,opt,name=bytes_received,json=bytesReceived,proto3" json:"bytes_received,omitempty"`
+	LastBlockTime   int64                  `protobuf:"varint,10,opt,name=last_block_time,json=lastBlockTime,proto3" json:"last_block_time,omitempty"`       // Unix timestamp
+	LastMessageTime int64                  `protobuf:"varint,11,opt,name=last_message_time,json=lastMessageTime,proto3" json:"last_message_time,omitempty"` // Unix timestamp
+	UrlResponsive   bool                   `protobuf:"varint,12,opt,name=url_responsive,json=urlResponsive,proto3" json:"url_responsive,omitempty"`
+	LastUrlCheck    int64                  `protobuf:"varint,13,opt,name=last_url_check,json=lastUrlCheck,proto3" json:"last_url_check,omitempty"` // Unix timestamp
 	// Interaction/catchup metrics
-	InteractionAttempts    int64   `protobuf:"varint,17,opt,name=interaction_attempts,json=interactionAttempts,proto3" json:"interaction_attempts,omitempty"`
-	InteractionSuccesses   int64   `protobuf:"varint,18,opt,name=interaction_successes,json=interactionSuccesses,proto3" json:"interaction_successes,omitempty"`
-	InteractionFailures    int64   `protobuf:"varint,19,opt,name=interaction_failures,json=interactionFailures,proto3" json:"interaction_failures,omitempty"`
-	LastInteractionAttempt int64   `protobuf:"varint,20,opt,name=last_interaction_attempt,json=lastInteractionAttempt,proto3" json:"last_interaction_attempt,omitempty"` // Unix timestamp
-	LastInteractionSuccess int64   `protobuf:"varint,21,opt,name=last_interaction_success,json=lastInteractionSuccess,proto3" json:"last_interaction_success,omitempty"` // Unix timestamp
-	LastInteractionFailure int64   `protobuf:"varint,22,opt,name=last_interaction_failure,json=lastInteractionFailure,proto3" json:"last_interaction_failure,omitempty"` // Unix timestamp
-	ReputationScore        float64 `protobuf:"fixed64,23,opt,name=reputation_score,json=reputationScore,proto3" json:"reputation_score,omitempty"`
-	MaliciousCount         int64   `protobuf:"varint,24,opt,name=malicious_count,json=maliciousCount,proto3" json:"malicious_count,omitempty"`
-	AvgResponseTimeMs      int64   `protobuf:"varint,25,opt,name=avg_response_time_ms,json=avgResponseTimeMs,proto3" json:"avg_response_time_ms,omitempty"`
-	Storage                string  `protobuf:"bytes,26,opt,name=storage,proto3" json:"storage,omitempty"`
-	ClientName             string  `protobuf:"bytes,27,opt,name=client_name,json=clientName,proto3" json:"client_name,omitempty"`                                    // Human-readable name of the client
-	LastCatchupError       string  `protobuf:"bytes,28,opt,name=last_catchup_error,json=lastCatchupError,proto3" json:"last_catchup_error,omitempty"`                // Last error message from catchup attempt
-	LastCatchupErrorTime   int64   `protobuf:"varint,29,opt,name=last_catchup_error_time,json=lastCatchupErrorTime,proto3" json:"last_catchup_error_time,omitempty"` // Unix timestamp of last catchup error
+	InteractionAttempts    int64   `protobuf:"varint,14,opt,name=interaction_attempts,json=interactionAttempts,proto3" json:"interaction_attempts,omitempty"`
+	InteractionSuccesses   int64   `protobuf:"varint,15,opt,name=interaction_successes,json=interactionSuccesses,proto3" json:"interaction_successes,omitempty"`
+	InteractionFailures    int64   `protobuf:"varint,16,opt,name=interaction_failures,json=interactionFailures,proto3" json:"interaction_failures,omitempty"`
+	LastInteractionAttempt int64   `protobuf:"varint,17,opt,name=last_interaction_attempt,json=lastInteractionAttempt,proto3" json:"last_interaction_attempt,omitempty"` // Unix timestamp
+	LastInteractionSuccess int64   `protobuf:"varint,18,opt,name=last_interaction_success,json=lastInteractionSuccess,proto3" json:"last_interaction_success,omitempty"` // Unix timestamp
+	LastInteractionFailure int64   `protobuf:"varint,19,opt,name=last_interaction_failure,json=lastInteractionFailure,proto3" json:"last_interaction_failure,omitempty"` // Unix timestamp
+	ReputationScore        float64 `protobuf:"fixed64,20,opt,name=reputation_score,json=reputationScore,proto3" json:"reputation_score,omitempty"`
+	MaliciousCount         int64   `protobuf:"varint,21,opt,name=malicious_count,json=maliciousCount,proto3" json:"malicious_count,omitempty"`
+	AvgResponseTimeMs      int64   `protobuf:"varint,22,opt,name=avg_response_time_ms,json=avgResponseTimeMs,proto3" json:"avg_response_time_ms,omitempty"`
+	Storage                string  `protobuf:"bytes,23,opt,name=storage,proto3" json:"storage,omitempty"`
+	ClientName             string  `protobuf:"bytes,24,opt,name=client_name,json=clientName,proto3" json:"client_name,omitempty"`                                    // Human-readable name of the client
+	LastCatchupError       string  `protobuf:"bytes,25,opt,name=last_catchup_error,json=lastCatchupError,proto3" json:"last_catchup_error,omitempty"`                // Last error message from catchup attempt
+	LastCatchupErrorTime   int64   `protobuf:"varint,26,opt,name=last_catchup_error_time,json=lastCatchupErrorTime,proto3" json:"last_catchup_error_time,omitempty"` // Unix timestamp of last catchup error
 	unknownFields          protoimpl.UnknownFields
 	sizeCache              protoimpl.SizeCache
 }
@@ -2211,27 +2200,6 @@ func (x *PeerRegistryInfo) GetDataHubUrl() string {
 		return x.DataHubUrl
 	}
 	return ""
-}
-
-func (x *PeerRegistryInfo) GetIsHealthy() bool {
-	if x != nil {
-		return x.IsHealthy
-	}
-	return false
-}
-
-func (x *PeerRegistryInfo) GetHealthDurationMs() int64 {
-	if x != nil {
-		return x.HealthDurationMs
-	}
-	return 0
-}
-
-func (x *PeerRegistryInfo) GetLastHealthCheck() int64 {
-	if x != nil {
-		return x.LastHealthCheck
-	}
-	return 0
 }
 
 func (x *PeerRegistryInfo) GetBanScore() int32 {
@@ -2534,20 +2502,18 @@ const file_services_p2p_p2p_api_p2p_api_proto_rawDesc = "" +
 	"\terror_msg\x18\x02 \x01(\tR\berrorMsg\",\n" +
 	"\x1aUpdateCatchupErrorResponse\x12\x0e\n" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\"\x1b\n" +
-	"\x19GetPeersForCatchupRequest\"\xd9\x02\n" +
+	"\x19GetPeersForCatchupRequest\"\xba\x02\n" +
 	"\x12PeerInfoForCatchup\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x16\n" +
 	"\x06height\x18\x02 \x01(\x05R\x06height\x12\x1d\n" +
 	"\n" +
 	"block_hash\x18\x03 \x01(\tR\tblockHash\x12 \n" +
 	"\fdata_hub_url\x18\x04 \x01(\tR\n" +
-	"dataHubUrl\x12\x1d\n" +
-	"\n" +
-	"is_healthy\x18\x05 \x01(\bR\tisHealthy\x128\n" +
-	"\x18catchup_reputation_score\x18\x06 \x01(\x01R\x16catchupReputationScore\x12)\n" +
-	"\x10catchup_attempts\x18\a \x01(\x03R\x0fcatchupAttempts\x12+\n" +
-	"\x11catchup_successes\x18\b \x01(\x03R\x10catchupSuccesses\x12)\n" +
-	"\x10catchup_failures\x18\t \x01(\x03R\x0fcatchupFailures\"O\n" +
+	"dataHubUrl\x128\n" +
+	"\x18catchup_reputation_score\x18\x05 \x01(\x01R\x16catchupReputationScore\x12)\n" +
+	"\x10catchup_attempts\x18\x06 \x01(\x03R\x0fcatchupAttempts\x12+\n" +
+	"\x11catchup_successes\x18\a \x01(\x03R\x10catchupSuccesses\x12)\n" +
+	"\x10catchup_failures\x18\b \x01(\x03R\x0fcatchupFailures\"O\n" +
 	"\x1aGetPeersForCatchupResponse\x121\n" +
 	"\x05peers\x18\x01 \x03(\v2\x1b.p2p_api.PeerInfoForCatchupR\x05peers\"W\n" +
 	"\x19ReportValidSubtreeRequest\x12\x17\n" +
@@ -2573,42 +2539,38 @@ const file_services_p2p_p2p_api_p2p_api_proto_rawDesc = "" +
 	"\x17IsPeerUnhealthyResponse\x12!\n" +
 	"\fis_unhealthy\x18\x01 \x01(\bR\visUnhealthy\x12\x16\n" +
 	"\x06reason\x18\x02 \x01(\tR\x06reason\x12)\n" +
-	"\x10reputation_score\x18\x03 \x01(\x02R\x0freputationScore\"\xaa\t\n" +
+	"\x10reputation_score\x18\x03 \x01(\x02R\x0freputationScore\"\xb1\b\n" +
 	"\x10PeerRegistryInfo\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x16\n" +
 	"\x06height\x18\x02 \x01(\x05R\x06height\x12\x1d\n" +
 	"\n" +
 	"block_hash\x18\x03 \x01(\tR\tblockHash\x12 \n" +
 	"\fdata_hub_url\x18\x04 \x01(\tR\n" +
-	"dataHubUrl\x12\x1d\n" +
-	"\n" +
-	"is_healthy\x18\x05 \x01(\bR\tisHealthy\x12,\n" +
-	"\x12health_duration_ms\x18\x06 \x01(\x03R\x10healthDurationMs\x12*\n" +
-	"\x11last_health_check\x18\a \x01(\x03R\x0flastHealthCheck\x12\x1b\n" +
-	"\tban_score\x18\b \x01(\x05R\bbanScore\x12\x1b\n" +
-	"\tis_banned\x18\t \x01(\bR\bisBanned\x12!\n" +
-	"\fis_connected\x18\n" +
-	" \x01(\bR\visConnected\x12!\n" +
-	"\fconnected_at\x18\v \x01(\x03R\vconnectedAt\x12%\n" +
-	"\x0ebytes_received\x18\f \x01(\x04R\rbytesReceived\x12&\n" +
-	"\x0flast_block_time\x18\r \x01(\x03R\rlastBlockTime\x12*\n" +
-	"\x11last_message_time\x18\x0e \x01(\x03R\x0flastMessageTime\x12%\n" +
-	"\x0eurl_responsive\x18\x0f \x01(\bR\rurlResponsive\x12$\n" +
-	"\x0elast_url_check\x18\x10 \x01(\x03R\flastUrlCheck\x121\n" +
-	"\x14interaction_attempts\x18\x11 \x01(\x03R\x13interactionAttempts\x123\n" +
-	"\x15interaction_successes\x18\x12 \x01(\x03R\x14interactionSuccesses\x121\n" +
-	"\x14interaction_failures\x18\x13 \x01(\x03R\x13interactionFailures\x128\n" +
-	"\x18last_interaction_attempt\x18\x14 \x01(\x03R\x16lastInteractionAttempt\x128\n" +
-	"\x18last_interaction_success\x18\x15 \x01(\x03R\x16lastInteractionSuccess\x128\n" +
-	"\x18last_interaction_failure\x18\x16 \x01(\x03R\x16lastInteractionFailure\x12)\n" +
-	"\x10reputation_score\x18\x17 \x01(\x01R\x0freputationScore\x12'\n" +
-	"\x0fmalicious_count\x18\x18 \x01(\x03R\x0emaliciousCount\x12/\n" +
-	"\x14avg_response_time_ms\x18\x19 \x01(\x03R\x11avgResponseTimeMs\x12\x18\n" +
-	"\astorage\x18\x1a \x01(\tR\astorage\x12\x1f\n" +
-	"\vclient_name\x18\x1b \x01(\tR\n" +
+	"dataHubUrl\x12\x1b\n" +
+	"\tban_score\x18\x05 \x01(\x05R\bbanScore\x12\x1b\n" +
+	"\tis_banned\x18\x06 \x01(\bR\bisBanned\x12!\n" +
+	"\fis_connected\x18\a \x01(\bR\visConnected\x12!\n" +
+	"\fconnected_at\x18\b \x01(\x03R\vconnectedAt\x12%\n" +
+	"\x0ebytes_received\x18\t \x01(\x04R\rbytesReceived\x12&\n" +
+	"\x0flast_block_time\x18\n" +
+	" \x01(\x03R\rlastBlockTime\x12*\n" +
+	"\x11last_message_time\x18\v \x01(\x03R\x0flastMessageTime\x12%\n" +
+	"\x0eurl_responsive\x18\f \x01(\bR\rurlResponsive\x12$\n" +
+	"\x0elast_url_check\x18\r \x01(\x03R\flastUrlCheck\x121\n" +
+	"\x14interaction_attempts\x18\x0e \x01(\x03R\x13interactionAttempts\x123\n" +
+	"\x15interaction_successes\x18\x0f \x01(\x03R\x14interactionSuccesses\x121\n" +
+	"\x14interaction_failures\x18\x10 \x01(\x03R\x13interactionFailures\x128\n" +
+	"\x18last_interaction_attempt\x18\x11 \x01(\x03R\x16lastInteractionAttempt\x128\n" +
+	"\x18last_interaction_success\x18\x12 \x01(\x03R\x16lastInteractionSuccess\x128\n" +
+	"\x18last_interaction_failure\x18\x13 \x01(\x03R\x16lastInteractionFailure\x12)\n" +
+	"\x10reputation_score\x18\x14 \x01(\x01R\x0freputationScore\x12'\n" +
+	"\x0fmalicious_count\x18\x15 \x01(\x03R\x0emaliciousCount\x12/\n" +
+	"\x14avg_response_time_ms\x18\x16 \x01(\x03R\x11avgResponseTimeMs\x12\x18\n" +
+	"\astorage\x18\x17 \x01(\tR\astorage\x12\x1f\n" +
+	"\vclient_name\x18\x18 \x01(\tR\n" +
 	"clientName\x12,\n" +
-	"\x12last_catchup_error\x18\x1c \x01(\tR\x10lastCatchupError\x125\n" +
-	"\x17last_catchup_error_time\x18\x1d \x01(\x03R\x14lastCatchupErrorTime\"J\n" +
+	"\x12last_catchup_error\x18\x19 \x01(\tR\x10lastCatchupError\x125\n" +
+	"\x17last_catchup_error_time\x18\x1a \x01(\x03R\x14lastCatchupErrorTime\"J\n" +
 	"\x17GetPeerRegistryResponse\x12/\n" +
 	"\x05peers\x18\x01 \x03(\v2\x19.p2p_api.PeerRegistryInfoR\x05peers2\x9f\x0e\n" +
 	"\vPeerService\x12?\n" +

@@ -18,9 +18,6 @@ type PeerInfoResponse struct {
 	Height          int32  `json:"height"`
 	BlockHash       string `json:"block_hash"`
 	DataHubURL      string `json:"data_hub_url"`
-	IsHealthy       bool   `json:"is_healthy"`
-	HealthDuration  int64  `json:"health_duration_ms"`
-	LastHealthCheck int64  `json:"last_health_check"`
 	BanScore        int    `json:"ban_score"`
 	IsBanned        bool   `json:"is_banned"`
 	IsConnected     bool   `json:"is_connected"`
@@ -90,9 +87,6 @@ func (h *HTTP) GetPeers(c echo.Context) error {
 			Height:          peer.Height,
 			BlockHash:       peer.BlockHash,
 			DataHubURL:      peer.DataHubUrl,
-			IsHealthy:       peer.IsHealthy,
-			HealthDuration:  peer.HealthDurationMs,
-			LastHealthCheck: peer.LastHealthCheck,
 			BanScore:        int(peer.BanScore),
 			IsBanned:        peer.IsBanned,
 			IsConnected:     peer.IsConnected,

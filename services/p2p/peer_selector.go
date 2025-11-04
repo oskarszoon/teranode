@@ -146,11 +146,7 @@ func (ps *PeerSelector) selectFromCandidates(candidates []*PeerInfo, criteria Se
 			// Pruned nodes: prefer LOWER height (youngest, less UTXO pruning)
 			return candidates[i].Height < candidates[j].Height
 		}
-		// Fourth priority: Sort by peer health duration (lower is better)
-		if candidates[i].HealthDuration != candidates[j].HealthDuration {
-			return candidates[i].HealthDuration < candidates[j].HealthDuration
-		}
-		// Fifth priority: Sort by peer ID for deterministic ordering
+		// Fourth priority: Sort by peer ID for deterministic ordering
 		// This ensures consistent selection when peers have identical scores and heights
 		return candidates[i].ID < candidates[j].ID
 	})
@@ -189,15 +185,9 @@ func (ps *PeerSelector) isEligible(p *PeerInfo, criteria SelectionCriteria) bool
 		return false
 	}
 
-	// Check health
-	if !p.IsHealthy {
-		ps.logger.Debugf("[PeerSelector] Peer %s not healthy", p.ID)
-		return false
-	}
-
-	// Check DataHub requirement
+	// Check DataHub URL requirement - this protects against listen-only nodes
 	if p.DataHubURL == "" {
-		ps.logger.Debugf("[PeerSelector] Peer %s has no DataHub URL", p.ID)
+		ps.logger.Debugf("[PeerSelector] Peer %s has no DataHub URL (listen-only node)", p.ID)
 		return false
 	}
 

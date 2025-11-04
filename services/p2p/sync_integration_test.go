@@ -34,7 +34,7 @@ func TestSyncCoordination_FullFlow(t *testing.T) {
 	registry.AddPeer(healthyPeer, "")
 	registry.UpdateHeight(healthyPeer, 1000, "hash1000")
 	registry.UpdateDataHubURL(healthyPeer, "http://healthy.test")
-	registry.UpdateHealth(healthyPeer, true)
+	registry.UpdateReputation(healthyPeer, 80.0)
 	registry.UpdateURLResponsiveness(healthyPeer, true)
 	registry.UpdateStorage(healthyPeer, "full")
 
@@ -42,14 +42,14 @@ func TestSyncCoordination_FullFlow(t *testing.T) {
 	unhealthyPeer := peer.ID("unhealthy")
 	registry.AddPeer(unhealthyPeer, "")
 	registry.UpdateHeight(unhealthyPeer, 900, "hash900")
-	registry.UpdateHealth(unhealthyPeer, false)
+	registry.UpdateReputation(unhealthyPeer, 15.0)
 
 	// Add banned peer
 	bannedPeer := peer.ID("banned")
 	registry.AddPeer(bannedPeer, "")
 	registry.UpdateHeight(bannedPeer, 1100, "hash1100")
 	registry.UpdateDataHubURL(bannedPeer, "http://banned.test")
-	registry.UpdateHealth(bannedPeer, true)
+	registry.UpdateReputation(bannedPeer, 80.0)
 	banManager.AddScore(string(bannedPeer), ReasonSpam) // Ban the peer
 	registry.UpdateBanStatus(bannedPeer, 50, true)
 
@@ -57,7 +57,6 @@ func TestSyncCoordination_FullFlow(t *testing.T) {
 	selector := NewPeerSelector(logger, nil)
 
 	// Create health checker
-	healthChecker := NewPeerHealthChecker(logger, registry, settings)
 
 	// Create sync coordinator
 	coordinator := NewSyncCoordinator(
@@ -65,7 +64,6 @@ func TestSyncCoordination_FullFlow(t *testing.T) {
 		settings,
 		registry,
 		selector,
-		healthChecker,
 		banManager,
 		blockchainSetup.Client,
 		nil, // blocksKafkaProducerClient
@@ -96,7 +94,7 @@ func TestSyncCoordination_FullFlow(t *testing.T) {
 		registry.AddPeer(newHealthyPeer, "")
 		registry.UpdateHeight(newHealthyPeer, 1050, "hash1050")
 		registry.UpdateDataHubURL(newHealthyPeer, "http://newhealthy.test")
-		registry.UpdateHealth(newHealthyPeer, true)
+		registry.UpdateReputation(newHealthyPeer, 80.0)
 		registry.UpdateURLResponsiveness(newHealthyPeer, true)
 		registry.UpdateStorage(newHealthyPeer, "full")
 
@@ -122,7 +120,7 @@ func TestSyncCoordination_FullFlow(t *testing.T) {
 			registry.AddPeer(testPeer, "")
 			registry.UpdateHeight(testPeer, 10000, "hash10000") // Very high to ensure selection
 			registry.UpdateDataHubURL(testPeer, "http://ban-test.com")
-			registry.UpdateHealth(testPeer, true)
+			registry.UpdateReputation(testPeer, 80.0)
 			registry.UpdateURLResponsiveness(testPeer, true)
 			registry.UpdateStorage(testPeer, "full")
 
@@ -232,14 +230,13 @@ func TestSyncCoordination_WithHTTPServer(t *testing.T) {
 	registry := NewPeerRegistry()
 	selector := NewPeerSelector(logger, nil)
 	banManager := NewPeerBanManager(blockchainSetup.Ctx, nil, settings, registry)
-	healthChecker := NewPeerHealthChecker(logger, registry, settings)
 
 	// Add peer with test server URL
 	testPeer := peer.ID("httptest")
 	registry.AddPeer(testPeer, "")
 	registry.UpdateHeight(testPeer, 1000, "hash1000")
 	registry.UpdateDataHubURL(testPeer, server.URL)
-	registry.UpdateHealth(testPeer, true)
+	registry.UpdateReputation(testPeer, 80.0)
 
 	// Create sync coordinator
 	coordinator := NewSyncCoordinator(
@@ -247,7 +244,6 @@ func TestSyncCoordination_WithHTTPServer(t *testing.T) {
 		settings,
 		registry,
 		selector,
-		healthChecker,
 		banManager,
 		blockchainSetup.Client,
 		nil, // blocksKafkaProducerClient
@@ -282,14 +278,12 @@ func TestSyncCoordination_ConcurrentOperations(t *testing.T) {
 	registry := NewPeerRegistry()
 	selector := NewPeerSelector(logger, nil)
 	banManager := NewPeerBanManager(blockchainSetup.Ctx, nil, settings, registry)
-	healthChecker := NewPeerHealthChecker(logger, registry, settings)
 
 	coordinator := NewSyncCoordinator(
 		logger,
 		settings,
 		registry,
 		selector,
-		healthChecker,
 		banManager,
 		blockchainSetup.Client,
 		nil, // blocksKafkaProducerClient
@@ -300,7 +294,13 @@ func TestSyncCoordination_ConcurrentOperations(t *testing.T) {
 		peerID := peer.ID(string(rune('A' + i)))
 		registry.AddPeer(peerID, "")
 		registry.UpdateHeight(peerID, int32(1000+i*10), "hash")
-		registry.UpdateHealth(peerID, i%3 != 0) // Every third peer is unhealthy
+		registry.UpdateReputation(peerID, func() float64 {
+			if i%3 != 0 {
+				return 80.0
+			} else {
+				return 15.0
+			}
+		}()) // Every third peer is unhealthy
 	}
 
 	coordinator.Start(blockchainSetup.Ctx)
@@ -379,14 +379,12 @@ func TestSyncCoordination_CatchupFailures(t *testing.T) {
 	selector := NewPeerSelector(logger, nil)
 	banHandler := &testBanHandler{}
 	banManager := NewPeerBanManager(blockchainSetup.Ctx, banHandler, settings, registry)
-	healthChecker := NewPeerHealthChecker(logger, registry, settings)
 
 	coordinator := NewSyncCoordinator(
 		logger,
 		settings,
 		registry,
 		selector,
-		healthChecker,
 		banManager,
 		blockchainSetup.Client,
 		nil, // blocksKafkaProducerClient
@@ -397,7 +395,7 @@ func TestSyncCoordination_CatchupFailures(t *testing.T) {
 	registry.AddPeer(goodPeer, "")
 	registry.UpdateHeight(goodPeer, 1000, "hash1000")
 	registry.UpdateDataHubURL(goodPeer, "http://good.test")
-	registry.UpdateHealth(goodPeer, true)
+	registry.UpdateReputation(goodPeer, 80.0)
 	registry.UpdateURLResponsiveness(goodPeer, true)
 	registry.UpdateStorage(goodPeer, "full")
 
@@ -405,7 +403,7 @@ func TestSyncCoordination_CatchupFailures(t *testing.T) {
 	registry.AddPeer(badPeer, "")
 	registry.UpdateHeight(badPeer, 1100, "hash1100")
 	registry.UpdateDataHubURL(badPeer, "http://bad.test")
-	registry.UpdateHealth(badPeer, true)
+	registry.UpdateReputation(badPeer, 80.0)
 	registry.UpdateURLResponsiveness(badPeer, true)
 	registry.UpdateStorage(badPeer, "full")
 
@@ -439,14 +437,12 @@ func TestSyncCoordination_PeerEvaluation(t *testing.T) {
 	registry := NewPeerRegistry()
 	selector := NewPeerSelector(logger, nil)
 	banManager := NewPeerBanManager(blockchainSetup.Ctx, nil, settings, registry)
-	healthChecker := NewPeerHealthChecker(logger, registry, settings)
 
 	coordinator := NewSyncCoordinator(
 		logger,
 		settings,
 		registry,
 		selector,
-		healthChecker,
 		banManager,
 		blockchainSetup.Client,
 		nil, // blocksKafkaProducerClient
@@ -466,7 +462,7 @@ func TestSyncCoordination_PeerEvaluation(t *testing.T) {
 				registry.AddPeer(id, "")
 				registry.UpdateHeight(id, 1000, "hash")
 				registry.UpdateDataHubURL(id, "http://good.test")
-				registry.UpdateHealth(id, true)
+				registry.UpdateReputation(id, 80.0)
 				registry.UpdateURLResponsiveness(id, true)
 				return id
 			},
@@ -480,7 +476,7 @@ func TestSyncCoordination_PeerEvaluation(t *testing.T) {
 				registry.AddPeer(id, "")
 				registry.UpdateHeight(id, 1000, "hash")
 				registry.UpdateDataHubURL(id, "http://banned.test")
-				registry.UpdateHealth(id, true)
+				registry.UpdateReputation(id, 80.0)
 				registry.UpdateBanStatus(id, 100, true)
 				return id
 			},
@@ -494,7 +490,7 @@ func TestSyncCoordination_PeerEvaluation(t *testing.T) {
 				registry.AddPeer(id, "")
 				registry.UpdateHeight(id, 1000, "hash")
 				registry.UpdateDataHubURL(id, "http://unhealthy.test")
-				registry.UpdateHealth(id, false)
+				registry.UpdateReputation(id, 15.0)
 				return id
 			},
 			shouldSync:  false,
@@ -506,7 +502,7 @@ func TestSyncCoordination_PeerEvaluation(t *testing.T) {
 				id := peer.ID("nourl")
 				registry.AddPeer(id, "")
 				registry.UpdateHeight(id, 1000, "hash")
-				registry.UpdateHealth(id, true)
+				registry.UpdateReputation(id, 80.0)
 				return id
 			},
 			shouldSync:  false,

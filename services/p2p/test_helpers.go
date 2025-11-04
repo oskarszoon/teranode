@@ -55,22 +55,24 @@ func CreateTestSettings() *settings.Settings {
 
 // CreateTestPeerInfo creates a test peer with specified attributes
 func CreateTestPeerInfo(id peer.ID, height int32, healthy bool, banned bool, dataHubURL string) *PeerInfo {
+	reputationScore := 50.0
+	if !healthy {
+		reputationScore = 15.0 // Low reputation for unhealthy peers
+	}
 	return &PeerInfo{
 		ID:              id,
 		Height:          height,
 		BlockHash:       "test-hash",
 		DataHubURL:      dataHubURL,
-		IsHealthy:       healthy,
 		IsBanned:        banned,
 		BanScore:        0,
-		ReputationScore: 50,
+		ReputationScore: reputationScore,
 		ConnectedAt:     time.Now(),
 		BytesReceived:   0,
 		LastBlockTime:   time.Now(),
 		LastMessageTime: time.Now(),
 		URLResponsive:   dataHubURL != "",
 		LastURLCheck:    time.Now(),
-		LastHealthCheck: time.Now(),
 		Storage:         "full", // Default test peers to full nodes
 	}
 }
@@ -102,21 +104,24 @@ func CreateTestPeerInfoList(count int) []*PeerInfo {
 	ids := GenerateTestPeerIDs(count)
 
 	for i := 0; i < count; i++ {
+		reputationScore := 50.0
+		if i%2 != 0 {
+			reputationScore = 15.0 // Low reputation for every other peer
+		}
 		peers[i] = &PeerInfo{
 			ID:              ids[i],
 			Height:          int32(100 + i*10),
 			BlockHash:       "test-hash",
 			DataHubURL:      "",
-			IsHealthy:       i%2 == 0,     // Every other peer is healthy
 			IsBanned:        i >= count-2, // Last two peers are banned
 			BanScore:        i * 10,
+			ReputationScore: reputationScore,
 			ConnectedAt:     time.Now().Add(-time.Duration(i) * time.Minute),
 			BytesReceived:   uint64(i * 1000),
 			LastBlockTime:   time.Now(),
 			LastMessageTime: time.Now(),
 			URLResponsive:   false,
 			LastURLCheck:    time.Now(),
-			LastHealthCheck: time.Now(),
 			Storage:         "full", // Default test peers to full nodes
 		}
 	}
@@ -212,7 +217,6 @@ func CreatePeerWithReputation(id peer.ID, reputation float64, successes, failure
 		Height:                 100,
 		BlockHash:              "test-hash",
 		DataHubURL:             "http://test.com",
-		IsHealthy:              true,
 		IsBanned:               false,
 		BanScore:               0,
 		ReputationScore:        reputation,
@@ -225,7 +229,6 @@ func CreatePeerWithReputation(id peer.ID, reputation float64, successes, failure
 		LastMessageTime:        time.Now(),
 		URLResponsive:          true,
 		LastURLCheck:           time.Now(),
-		LastHealthCheck:        time.Now(),
 		Storage:                "full",
 		LastInteractionAttempt: time.Now(),
 		LastInteractionSuccess: time.Now(),

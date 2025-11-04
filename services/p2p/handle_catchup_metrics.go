@@ -129,7 +129,6 @@ func (s *Server) GetPeersForCatchup(ctx context.Context, req *p2p_api.GetPeersFo
 			Height:                 p.Height,
 			BlockHash:              p.BlockHash,
 			DataHubUrl:             p.DataHubURL,
-			IsHealthy:              p.IsHealthy,
 			CatchupReputationScore: p.ReputationScore,
 			CatchupAttempts:        totalAttempts,          // Use calculated total, not InteractionAttempts
 			CatchupSuccesses:       p.InteractionSuccesses, // Number of successful interactions
@@ -299,15 +298,6 @@ func (s *Server) IsPeerUnhealthy(ctx context.Context, req *p2p_api.IsPeerUnhealt
 				IsUnhealthy:     true,
 				Reason:          "unknown peer",
 				ReputationScore: 0,
-			}, nil
-		}
-
-		// Check if peer is marked as unhealthy
-		if !peerInfo.IsHealthy {
-			return &p2p_api.IsPeerUnhealthyResponse{
-				IsUnhealthy:     true,
-				Reason:          "peer marked as unhealthy",
-				ReputationScore: float32(peerInfo.ReputationScore),
 			}, nil
 		}
 

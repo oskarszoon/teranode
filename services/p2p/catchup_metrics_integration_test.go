@@ -228,19 +228,16 @@ func TestDistributedCatchupMetrics_GetPeersForCatchup(t *testing.T) {
 	p2pRegistry.AddPeer(peer1ID, "")
 	p2pRegistry.UpdateHeight(peer1ID, 1000, "hash1")
 	p2pRegistry.UpdateDataHubURL(peer1ID, "http://peer1:8090")
-	p2pRegistry.UpdateHealth(peer1ID, true)
 	p2pRegistry.UpdateReputation(peer1ID, 95.0) // Best
 
 	p2pRegistry.AddPeer(peer2ID, "")
 	p2pRegistry.UpdateHeight(peer2ID, 1001, "hash2")
 	p2pRegistry.UpdateDataHubURL(peer2ID, "http://peer2:8090")
-	p2pRegistry.UpdateHealth(peer2ID, true)
 	p2pRegistry.UpdateReputation(peer2ID, 85.0) // Second best
 
 	p2pRegistry.AddPeer(peer3ID, "")
 	p2pRegistry.UpdateHeight(peer3ID, 999, "hash3")
 	p2pRegistry.UpdateDataHubURL(peer3ID, "http://peer3:8090")
-	p2pRegistry.UpdateHealth(peer3ID, true)
 	p2pRegistry.UpdateReputation(peer3ID, 75.0) // Third
 
 	// Query for peers suitable for catchup
@@ -262,46 +259,6 @@ func TestDistributedCatchupMetrics_GetPeersForCatchup(t *testing.T) {
 		assert.Equal(t, peer3ID.String(), resp.Peers[2].Id)
 		assert.Equal(t, 75.0, resp.Peers[2].CatchupReputationScore)
 	}
-}
-
-// TestDistributedCatchupMetrics_GetPeersForCatchup_FilterUnhealthy tests that
-// unhealthy peers are excluded from catchup peer selection
-func TestDistributedCatchupMetrics_GetPeersForCatchup_FilterUnhealthy(t *testing.T) {
-	ctx := context.Background()
-
-	// Create P2P service with peer registry
-	p2pRegistry := NewPeerRegistry()
-	p2pServer := &Server{
-		peerRegistry: p2pRegistry,
-	}
-
-	// Create test peers
-	healthyPeerID, _ := peer.Decode("12D3KooWL8qb3L8nKPjDtQmJU8jge5Qspsn6YLSBei9MsbTjJDr8")
-	unhealthyPeerID, _ := peer.Decode("12D3KooWJpBNhwgvoZ15EB1JwRTRpxgM9NVaqpDtWZXfTf6CpCQd")
-
-	// Add healthy peer
-	p2pRegistry.AddPeer(healthyPeerID, "")
-	p2pRegistry.UpdateHeight(healthyPeerID, 1000, "hash1")
-	p2pRegistry.UpdateDataHubURL(healthyPeerID, "http://healthy:8090")
-	p2pRegistry.UpdateHealth(healthyPeerID, true)
-	p2pRegistry.UpdateReputation(healthyPeerID, 90.0)
-
-	// Add unhealthy peer
-	p2pRegistry.AddPeer(unhealthyPeerID, "")
-	p2pRegistry.UpdateHeight(unhealthyPeerID, 1000, "hash2")
-	p2pRegistry.UpdateDataHubURL(unhealthyPeerID, "http://unhealthy:8090")
-	p2pRegistry.UpdateHealth(unhealthyPeerID, false)
-	p2pRegistry.UpdateReputation(unhealthyPeerID, 95.0) // Higher score but unhealthy
-
-	// Query for peers suitable for catchup
-	req := &p2p_api.GetPeersForCatchupRequest{}
-	resp, err := p2pServer.GetPeersForCatchup(ctx, req)
-	require.NoError(t, err)
-
-	// Only healthy peer should be returned
-	assert.Equal(t, 1, len(resp.Peers))
-	assert.Equal(t, healthyPeerID.String(), resp.Peers[0].Id)
-	assert.True(t, resp.Peers[0].IsHealthy)
 }
 
 // TestDistributedCatchupMetrics_ReputationCalculation tests the reputation
@@ -519,7 +476,6 @@ func TestReportValidSubtree_IncreasesReputation(t *testing.T) {
 	p2pRegistry.AddPeer(testPeerID, "")
 	p2pRegistry.UpdateHeight(testPeerID, 1000, "test_hash")
 	p2pRegistry.UpdateDataHubURL(testPeerID, "http://localhost:8090")
-	p2pRegistry.UpdateHealth(testPeerID, true)
 
 	// Verify initial reputation (should be neutral at 50.0)
 	info, exists := p2pRegistry.GetPeer(testPeerID)

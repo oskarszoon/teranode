@@ -25,7 +25,6 @@ type SyncCoordinator struct {
 	settings         *settings.Settings
 	registry         *PeerRegistry
 	selector         *PeerSelector
-	healthChecker    *PeerHealthChecker
 	banManager       PeerBanManagerI
 	blockchainClient blockchain.ClientI
 
@@ -58,7 +57,6 @@ func NewSyncCoordinator(
 	settings *settings.Settings,
 	registry *PeerRegistry,
 	selector *PeerSelector,
-	healthChecker *PeerHealthChecker,
 	banManager PeerBanManagerI,
 	blockchainClient blockchain.ClientI,
 	blocksKafkaProducerClient kafka.KafkaAsyncProducerI,
@@ -68,7 +66,6 @@ func NewSyncCoordinator(
 		settings:                  settings,
 		registry:                  registry,
 		selector:                  selector,
-		healthChecker:             healthChecker,
 		banManager:                banManager,
 		blockchainClient:          blockchainClient,
 		blocksKafkaProducerClient: blocksKafkaProducerClient,
@@ -110,9 +107,6 @@ func (sc *SyncCoordinator) isCaughtUp() bool {
 func (sc *SyncCoordinator) Start(ctx context.Context) {
 	sc.logger.Infof("[SyncCoordinator] Starting sync coordinator")
 
-	// Start health checker
-	sc.healthChecker.Start(ctx)
-
 	// Start FSM monitoring
 	sc.wg.Add(1)
 	go sc.monitorFSM(ctx)
@@ -127,7 +121,6 @@ func (sc *SyncCoordinator) Start(ctx context.Context) {
 // Stop stops the coordinator
 func (sc *SyncCoordinator) Stop() {
 	close(sc.stopCh)
-	sc.healthChecker.Stop()
 	sc.wg.Wait()
 }
 
@@ -219,11 +212,10 @@ func (sc *SyncCoordinator) HandleCatchupFailure(reason string) {
 	failedPeer := sc.currentSyncPeer
 	sc.mu.RUnlock()
 
-	// Mark the failed peer as unhealthy and record failure BEFORE clearing and triggering sync
-	// This ensures the peer selector won't re-select the same peer
+	// Record failure for the failed peer BEFORE clearing and triggering sync
+	// This ensures reputation is updated so the peer selector won't re-select the same peer
 	if failedPeer != "" {
-		sc.logger.Infof("[SyncCoordinator] Marking failed peer %s as unhealthy and recording failure", failedPeer)
-		sc.registry.UpdateHealth(failedPeer, false)
+		sc.logger.Infof("[SyncCoordinator] Recording failure for failed peer %s", failedPeer)
 		sc.registry.RecordCatchupFailure(failedPeer)
 	}
 
@@ -543,9 +535,9 @@ func (sc *SyncCoordinator) evaluateSyncPeer() {
 		return
 	}
 
-	// Check if peer is still healthy
-	if !peerInfo.IsHealthy {
-		sc.logger.Warnf("[SyncCoordinator] Sync peer %s is unhealthy", currentPeer)
+	// Check if peer has low reputation
+	if peerInfo.ReputationScore < 20.0 {
+		sc.logger.Warnf("[SyncCoordinator] Sync peer %s has low reputation (%.2f)", currentPeer, peerInfo.ReputationScore)
 		sc.ClearSyncPeer()
 		_ = sc.TriggerSync()
 		return
@@ -556,8 +548,8 @@ func (sc *SyncCoordinator) evaluateSyncPeer() {
 		timeSinceLastMessage := time.Since(peerInfo.LastMessageTime)
 		if timeSinceLastMessage > 1*time.Minute {
 			sc.logger.Warnf("[SyncCoordinator] Sync peer %s inactive for %v", currentPeer, timeSinceLastMessage)
-			// Mark peer as unhealthy due to inactivity
-			sc.registry.UpdateHealth(currentPeer, false)
+			// Record failure due to inactivity
+			sc.registry.RecordCatchupFailure(currentPeer)
 			sc.ClearSyncPeer()
 			_ = sc.TriggerSync()
 			return
@@ -723,7 +715,7 @@ func (sc *SyncCoordinator) checkAllPeersAttempted() {
 
 	for _, p := range peers {
 		// Count peers that would normally be eligible
-		if p.Height > localHeight && p.IsHealthy && !p.IsBanned &&
+		if p.Height > localHeight && !p.IsBanned &&
 			p.DataHubURL != "" && p.URLResponsive && p.ReputationScore >= 20 {
 			eligibleCount++
 
