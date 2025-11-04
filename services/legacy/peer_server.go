@@ -1153,7 +1153,7 @@ func (sp *serverPeer) OnReject(p *peer.Peer, msg *wire.MsgReject) {
 		tracing.WithHistogram(peerServerMetrics["OnReject"]),
 	)
 
-	sp.server.logger.Warnf("Received reject message from peer %s, code: %s, reason: %s", p, msg.Code.String(), msg.Reason)
+	sp.server.logger.Warnf("Received reject message from peer %s, cmd: %s, code: %s, reason: %s, hash: %s", p, msg.Cmd, msg.Code.String(), msg.Reason, msg.Hash.String())
 }
 
 // OnNotFound logs all not found messages received from the remote peer.
