@@ -239,14 +239,14 @@ func (m *Mock) GetSubtree(_ context.Context, hash *chainhash.Hash) (*subtree.Sub
 	return args.Get(0).(*subtree.Subtree), args.Error(1)
 }
 
-func (m *Mock) GetSubtreeData(ctx context.Context, hash *chainhash.Hash) (*subtree.SubtreeData, error) {
+func (m *Mock) GetSubtreeData(ctx context.Context, hash *chainhash.Hash) (*subtree.Data, error) {
 	args := m.Called(ctx, hash)
 
 	if args.Error(1) != nil {
 		return nil, args.Error(1)
 	}
 
-	return args.Get(0).(*subtree.SubtreeData), args.Error(1)
+	return args.Get(0).(*subtree.Data), args.Error(1)
 }
 
 func (m *Mock) GetSubtreeTransactions(ctx context.Context, hash *chainhash.Hash) (map[chainhash.Hash]*bt.Tx, error) {

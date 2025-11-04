@@ -333,7 +333,7 @@ func (sm *SyncManager) checkSubtreeFromBlock(ctx context.Context, block *bsvutil
 }
 
 func (sm *SyncManager) writeSubtree(ctx context.Context, block *bsvutil.Block, subtree *subtreepkg.Subtree,
-	subtreeData *subtreepkg.SubtreeData, subtreeMetaData *subtreepkg.SubtreeMeta, quickValidationMode bool) error {
+	subtreeData *subtreepkg.Data, subtreeMetaData *subtreepkg.Meta, quickValidationMode bool) error {
 	ctx, _, deferFn := tracing.Tracer("netsync").Start(ctx, "writeSubtree",
 		tracing.WithLogMessage(sm.logger, "[writeSubtree][%s] writing subtree for block %s height %d", subtree.RootHash().String(), block.Hash().String(), block.Height()),
 	)
@@ -746,7 +746,7 @@ func (sm *SyncManager) extendTransactions(ctx context.Context, block *bsvutil.Bl
 }
 
 func (sm *SyncManager) createSubtree(ctx context.Context, block *bsvutil.Block, txMap *txmap.SyncedMap[chainhash.Hash, *TxMapWrapper],
-	subtree *subtreepkg.Subtree, subtreeData *subtreepkg.SubtreeData, subtreeMetaData *subtreepkg.SubtreeMeta) (err error) {
+	subtree *subtreepkg.Subtree, subtreeData *subtreepkg.Data, subtreeMetaData *subtreepkg.Meta) (err error) {
 	_, _, deferFn := tracing.Tracer("netsync").Start(ctx, "createSubtree",
 		tracing.WithLogMessage(sm.logger, "[createSubtree] called for block %s / height %d", block.Hash(), block.Height()),
 	)

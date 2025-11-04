@@ -48,7 +48,7 @@ type Interface interface {
 	GetSubtreeDataReaderFromBlockPersister(ctx context.Context, hash *chainhash.Hash) (io.ReadCloser, error)
 	GetSubtreeDataReader(ctx context.Context, subtreeHash *chainhash.Hash) (io.ReadCloser, error)
 	GetSubtree(ctx context.Context, hash *chainhash.Hash) (*subtree.Subtree, error)
-	GetSubtreeData(ctx context.Context, hash *chainhash.Hash) (*subtree.SubtreeData, error)
+	GetSubtreeData(ctx context.Context, hash *chainhash.Hash) (*subtree.Data, error)
 	GetSubtreeTransactions(ctx context.Context, hash *chainhash.Hash) (map[chainhash.Hash]*bt.Tx, error)
 	GetSubtreeExists(ctx context.Context, hash *chainhash.Hash) (bool, error)
 	GetSubtreeHead(ctx context.Context, hash *chainhash.Hash) (*subtree.Subtree, int, error)
@@ -603,7 +603,7 @@ func (repo *Repository) GetSubtree(ctx context.Context, hash *chainhash.Hash) (*
 // Returns:
 //   - *util.SubtreeData: Deserialized subtree data structure
 //   - error: Any error encountered during retrieval
-func (repo *Repository) GetSubtreeData(ctx context.Context, hash *chainhash.Hash) (*subtree.SubtreeData, error) {
+func (repo *Repository) GetSubtreeData(ctx context.Context, hash *chainhash.Hash) (*subtree.Data, error) {
 	ctx, _, _ = tracing.Tracer("repository").Start(ctx, "GetSubtreeData",
 		tracing.WithLogMessage(repo.logger, "[Repository] GetSubtreeData: %s", hash.String()),
 	)
