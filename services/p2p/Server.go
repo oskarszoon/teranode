@@ -112,13 +112,13 @@ type Server struct {
 	blockTopicName                    string
 	subtreeTopicName                  string
 	rejectedTxTopicName               string
-	invalidBlocksTopicName            string             // Kafka topic for invalid blocks
-	invalidSubtreeTopicName           string             // Kafka topic for invalid subtrees
-	nodeStatusTopicName               string             // pubsub topic for node status messages
-	topicPrefix                       string             // Chain identifier prefix for topic validation
-	blockPeerMap                      sync.Map           // Map to track which peer sent each block (hash -> peerMapEntry)
-	subtreePeerMap                    sync.Map           // Map to track which peer sent each subtree (hash -> peerMapEntry)
-	startTime                         time.Time          // Server start time for uptime calculation
+	invalidBlocksTopicName            string           // Kafka topic for invalid blocks
+	invalidSubtreeTopicName           string           // Kafka topic for invalid subtrees
+	nodeStatusTopicName               string           // pubsub topic for node status messages
+	topicPrefix                       string           // Chain identifier prefix for topic validation
+	blockPeerMap                      sync.Map         // Map to track which peer sent each block (hash -> peerMapEntry)
+	subtreePeerMap                    sync.Map         // Map to track which peer sent each subtree (hash -> peerMapEntry)
+	startTime                         time.Time        // Server start time for uptime calculation
 	peerRegistry                      *PeerRegistry    // Central registry for all peer information
 	peerSelector                      *PeerSelector    // Stateless peer selection logic
 	syncCoordinator                   *SyncCoordinator // Orchestrates sync operations
