@@ -384,6 +384,7 @@ func NewSettings(alternativeContext ...string) *Settings {
 			SharePrivateAddresses: getBool("p2p_share_private_addresses", true, alternativeContext...),
 			// Full/pruned node selection configuration
 			AllowPrunedNodeFallback: getBool("p2p_allow_pruned_node_fallback", true, alternativeContext...),
+			DisableNAT:              getBool("p2p_disable_nat", false, alternativeContext...),
 		},
 		Coinbase: CoinbaseSettings{
 			DB:                    getString("coinbaseDB", "", alternativeContext...),

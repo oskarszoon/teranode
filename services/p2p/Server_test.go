@@ -110,6 +110,7 @@ func createTestServer(t *testing.T) *Server {
 			BanThreshold: 100,
 			BanDuration:  time.Hour,
 			PeerCacheDir: t.TempDir(),
+			DisableNAT:   true, // Disable NAT in tests to prevent data races in libp2p
 		},
 	}
 
@@ -320,6 +321,7 @@ func TestServerHandlers(t *testing.T) {
 }
 
 func TestServerStart(t *testing.T) {
+
 	t.Run("Test Start method", func(t *testing.T) {
 		logger := ulogger.New("test-server", ulogger.WithLevel("ERROR"))
 		ctx := context.Background()
@@ -1660,6 +1662,7 @@ func TestSelfMessageFiltering(t *testing.T) {
 func createBaseTestSettings() *settings.Settings {
 	s := settings.NewSettings()
 	s.SubtreeValidation.BlacklistedBaseURLs = make(map[string]struct{})
+	s.P2P.DisableNAT = true // Disable NAT in tests to prevent data races in libp2p
 
 	return s
 }
@@ -1669,6 +1672,7 @@ func createBaseTestSettings() *settings.Settings {
 // Each subtest modifies one specific configuration field to trigger a different error path,
 // allowing full coverage of the early-return validation logic in the NewServer constructor.
 func TestNewServer_ConfigValidation(t *testing.T) {
+
 	ctx := context.Background()
 	logger := ulogger.New("test-server")
 
@@ -1689,6 +1693,7 @@ func TestNewServer_ConfigValidation(t *testing.T) {
 				RejectedTxTopic: "rejected",
 				ListenMode:      settings.ListenModeFull,
 				PrivateKey:      "privkey",
+				DisableNAT:      true, // Disable NAT in tests to prevent data races in libp2p
 			},
 			ChainCfgParams: &chaincfg.Params{
 				TopicPrefix: "prefix",
@@ -1768,6 +1773,7 @@ func TestNewServer_ConfigValidation(t *testing.T) {
 }
 
 func TestPrivateKeyHandling(t *testing.T) {
+
 	ctx := context.Background()
 	logger := ulogger.New("test-server")
 
@@ -1959,6 +1965,7 @@ func TestServerHealth(t *testing.T) {
 }
 
 func TestServerInitHTTPPublicAddressSet(t *testing.T) {
+
 	ctx := context.Background()
 	logger := ulogger.New("test-server")
 	mockClient := &blockchain.Mock{}
@@ -1980,6 +1987,7 @@ func TestServerInitHTTPPublicAddressSet(t *testing.T) {
 }
 
 func TestServerInitHTTPPublicAddressEmpty(t *testing.T) {
+
 	ctx := context.Background()
 	logger := ulogger.New("test-server")
 	mockClient := &blockchain.Mock{}
@@ -2001,6 +2009,7 @@ func TestServerInitHTTPPublicAddressEmpty(t *testing.T) {
 }
 
 func TestServerSetupHTTPServer(t *testing.T) {
+
 	ctx := context.Background()
 	logger := ulogger.New("test-logger")
 	mockClient := &blockchain.Mock{}
@@ -2049,6 +2058,7 @@ func getFreePort(t *testing.T) int {
 }
 
 func TestServerStartFull(t *testing.T) {
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -3568,6 +3578,7 @@ func createEnhancedTestServer(t *testing.T) (*Server, *MockServerP2PClient, *Moc
 			BanThreshold: 100,
 			BanDuration:  time.Hour,
 			PeerCacheDir: t.TempDir(),
+			DisableNAT:   true, // Disable NAT in tests to prevent data races in libp2p
 		},
 	}
 
