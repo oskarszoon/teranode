@@ -6,10 +6,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/docker-service-helper.sh"
 
 # Initialize (DATA_PATH needed to suppress warnings from base docker-services.yml)
-docker_service_init "${1:-}"
+docker_service_init
 
 # Run docker compose with service-specific info
-docker_service_run "deploy/docker/kafka" "Kafka and Kafka Console (ephemeral - no persistent data)" \
+docker_service_run "${1:-up}" "deploy/docker/kafka" "Kafka and Kafka Console (ephemeral - no persistent data)" \
     "Kafka broker: localhost:9092" \
     "Kafka Console UI: http://localhost:8080" \
     "" \

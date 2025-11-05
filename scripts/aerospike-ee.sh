@@ -6,9 +6,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/docker-service-helper.sh"
 
 # Initialize and create aerospike data directory
-docker_service_init "${1:-}" "aerospike"
+docker_service_init "aerospike"
 
 # Run docker compose with custom compose file and service-specific info
-docker_service_run "deploy/docker/aerospike" "Aerospike enterprise edition (evaluation mode)" "docker-compose-ee.yml" \
+docker_service_run "${1:-up}" "deploy/docker/aerospike" "Aerospike enterprise edition (evaluation mode)" "docker-compose-ee.yml" \
     "Persistent data: ${DATA_PATH}/aerospike" \
     "Connect with: aerospike://localhost:3000"

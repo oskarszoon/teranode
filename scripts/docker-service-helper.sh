@@ -12,40 +12,40 @@ docker_service_usage() {
 }
 
 # Function to initialize environment and setup data directories
-# Usage: docker_service_init <action> [data_subdirs...]
+# Usage: docker_service_init [data_subdirs...]
 docker_service_init() {
-    local action="${1:-up}"
-    shift
-
     # Use DATADIR environment variable if set, otherwise default to ./data
-    DATADIR="${DATADIR:-./data}"
+    local datadir="${DATADIR:-./data}"
 
     # Create base data directory
-    mkdir -p "${DATADIR}"
+    mkdir -p "${datadir}"
 
-    # Create data subdirectories
-    for subdir in "$@"; do
-        if [[ -n "$subdir" ]]; then
-            mkdir -p "${DATADIR}/${subdir}"
-        fi
-    done
-
-    DATA_PATH=$(realpath "$DATADIR")
+    DATA_PATH=$(realpath "$datadir")
     export DATA_PATH
-    export DATADIR
-    export ACTION="$action"
+
+    # Create data subdirectories if any specified
+    if [[ $# -gt 0 ]]; then
+        for subdir in "$@"; do
+            if [[ -n "$subdir" ]]; then
+                mkdir -p "${datadir}/${subdir}"
+            fi
+        done
+    fi
+
+    return 0
 }
 
 # Function to execute docker compose action with custom messages
-# Usage: docker_service_run <compose_dir> <service_name> [compose_file] [info_lines...]
+# Usage: docker_service_run <action> <compose_dir> <service_name> [compose_file] [info_lines...]
 #   If compose_file is provided, it will be used with -f flag
 docker_service_run() {
-    local compose_dir="$1"
-    local service_name="$2"
+    local action="${1:-up}"
+    local compose_dir="$2"
+    local service_name="$3"
     local compose_file=""
-    shift 2
+    shift 3
 
-    # Check if third argument looks like a compose file
+    # Check if next argument looks like a compose file
     if [[ $# -gt 0 && "$1" =~ \.ya?ml$ ]]; then
         compose_file="$1"
         shift
@@ -58,20 +58,22 @@ docker_service_run() {
         compose_cmd="docker compose -f $compose_file"
     fi
 
-    cd "$compose_dir" || exit
+    cd "$compose_dir" || exit 1
 
     # Validate and execute the requested action
-    case "$ACTION" in
+    case "$action" in
         up)
             $compose_cmd up -d
             echo "${service_name} started"
             for line in "${info_lines[@]}"; do
                 echo "$line"
             done
+            return 0
             ;;
         down)
             $compose_cmd down
             echo "${service_name} stopped"
+            return 0
             ;;
         restart)
             $compose_cmd restart
@@ -79,10 +81,11 @@ docker_service_run() {
             for line in "${info_lines[@]}"; do
                 echo "$line"
             done
+            return 0
             ;;
         *)
-            echo "Error: Invalid action '$ACTION'"
-            echo "Usage: up|down|restart"
+            echo "Error: Invalid action '$action'" >&2
+            echo "Usage: up|down|restart" >&2
             exit 1
             ;;
     esac
