@@ -190,7 +190,7 @@ func (u *Server) catchup(ctx context.Context, blockUpTo *model.Block, baseURL st
 //   - error: If another catchup is already in progress
 func (u *Server) acquireCatchupLock(ctx *CatchupContext) error {
 	if !u.isCatchingUp.CompareAndSwap(false, true) {
-		return errors.NewError("[catchup][%s] another catchup is currently in progress", ctx.blockUpTo.Hash().String())
+		return errors.NewCatchupInProgressError("[catchup][%s] another catchup is currently in progress", ctx.blockUpTo.Hash().String())
 	}
 
 	// Initialize metrics (check for nil in tests)

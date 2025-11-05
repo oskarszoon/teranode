@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -604,7 +603,7 @@ func (u *Server) Init(ctx context.Context) (err error) {
 
 					if err := u.catchup(ctx, c.block, c.baseURL, c.peerID); err != nil {
 						// Check if the error is due to another catchup in progress
-						if strings.Contains(err.Error(), "another catchup is currently in progress") {
+						if errors.Is(err, errors.ErrCatchupInProgress) {
 							u.logger.Warnf("[catchup] Catchup already in progress, requeueing block %s from peer %s", c.block.Hash().String(), c.peerID)
 							continue
 						}
