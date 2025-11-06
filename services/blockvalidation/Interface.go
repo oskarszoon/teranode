@@ -42,6 +42,9 @@ type Interface interface {
 	// This is useful for validating blocks without committing them to the database.
 	// The options parameter allows control over validation behavior, including revalidation of invalid blocks.
 	ValidateBlock(ctx context.Context, block *model.Block, options *ValidateBlockOptions) error
+
+	// GetCatchupStatus returns the current status of blockchain catchup operations.
+	GetCatchupStatus(ctx context.Context) (*CatchupStatus, error)
 }
 
 var _ Interface = &MockBlockValidation{}
@@ -62,4 +65,8 @@ func (mv *MockBlockValidation) ProcessBlock(ctx context.Context, block *model.Bl
 
 func (mv *MockBlockValidation) ValidateBlock(ctx context.Context, block *model.Block, options *ValidateBlockOptions) error {
 	return nil
+}
+
+func (mv *MockBlockValidation) GetCatchupStatus(ctx context.Context) (*CatchupStatus, error) {
+	return &CatchupStatus{IsCatchingUp: false}, nil
 }

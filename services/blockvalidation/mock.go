@@ -51,6 +51,15 @@ func (m *Mock) ValidateBlock(ctx context.Context, block *model.Block, options *V
 	return args.Error(0)
 }
 
+// GetCatchupStatus performs a mock catchup status retrieval.
+func (m *Mock) GetCatchupStatus(ctx context.Context) (*CatchupStatus, error) {
+	args := m.Called(ctx)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*CatchupStatus), args.Error(1)
+}
+
 // mockKafkaConsumer implements kafka.KafkaConsumerGroupI for testing
 type mockKafkaConsumer struct {
 	mock.Mock
