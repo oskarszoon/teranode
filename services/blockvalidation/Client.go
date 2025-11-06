@@ -203,3 +203,53 @@ func (s *Client) ValidateBlock(ctx context.Context, block *model.Block, options 
 
 	return nil
 }
+
+// GetCatchupStatus retrieves the current status of blockchain catchup operations.
+// It queries the block validation service for information about ongoing or recent
+// catchup attempts, including progress metrics and peer information.
+//
+// Parameters:
+//   - ctx: Context for the operation, allowing for cancellation and timeouts
+//
+// Returns:
+//   - *CatchupStatus: Current catchup status information
+//   - error: Any error encountered during the status retrieval
+func (s *Client) GetCatchupStatus(ctx context.Context) (*CatchupStatus, error) {
+	resp, err := s.apiClient.GetCatchupStatus(ctx, &blockvalidation_api.EmptyMessage{})
+	if err != nil {
+		return nil, errors.UnwrapGRPC(err)
+	}
+
+	status := &CatchupStatus{
+		IsCatchingUp:         resp.IsCatchingUp,
+		PeerID:               resp.PeerId,
+		PeerURL:              resp.PeerUrl,
+		TargetBlockHash:      resp.TargetBlockHash,
+		TargetBlockHeight:    resp.TargetBlockHeight,
+		CurrentHeight:        resp.CurrentHeight,
+		TotalBlocks:          int(resp.TotalBlocks),
+		BlocksFetched:        resp.BlocksFetched,
+		BlocksValidated:      resp.BlocksValidated,
+		StartTime:            resp.StartTime,
+		DurationMs:           resp.DurationMs,
+		ForkDepth:            resp.ForkDepth,
+		CommonAncestorHash:   resp.CommonAncestorHash,
+		CommonAncestorHeight: resp.CommonAncestorHeight,
+	}
+
+	if resp.PreviousAttempt != nil {
+		status.PreviousAttempt = &PreviousAttempt{
+			PeerID:            resp.PreviousAttempt.PeerId,
+			PeerURL:           resp.PreviousAttempt.PeerUrl,
+			TargetBlockHash:   resp.PreviousAttempt.TargetBlockHash,
+			TargetBlockHeight: resp.PreviousAttempt.TargetBlockHeight,
+			ErrorMessage:      resp.PreviousAttempt.ErrorMessage,
+			ErrorType:         resp.PreviousAttempt.ErrorType,
+			AttemptTime:       resp.PreviousAttempt.AttemptTime,
+			DurationMs:        resp.PreviousAttempt.DurationMs,
+			BlocksValidated:   resp.PreviousAttempt.BlocksValidated,
+		}
+	}
+
+	return status, nil
+}
