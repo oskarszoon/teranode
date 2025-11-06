@@ -279,6 +279,7 @@ type BlockValidationSettings struct {
 	SecretMiningThreshold                            uint32
 	ArePreviousBlocksProcessedMaxRetry               int
 	ArePreviousBlocksProcessedRetryBackoffMultiplier int
+	ArePreviousBlocksProcessedRetryBackoffDuration   time.Duration
 	PreviousBlockHeaderCount                         uint64
 	// Catchup configuration
 	CatchupMaxRetries            int // Maximum number of retries for catchup operations
