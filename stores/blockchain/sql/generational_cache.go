@@ -85,11 +85,6 @@ func (gc *GenerationalCache) DeleteAll() {
 	gc.generation.Add(1)
 }
 
-// Start begins automatic cleanup of expired items.
-func (gc *GenerationalCache) Start() {
-	go gc.cache.Start()
-}
-
 // Stop halts automatic cleanup.
 func (gc *GenerationalCache) Stop() {
 	gc.cache.Stop()
