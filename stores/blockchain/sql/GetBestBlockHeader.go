@@ -93,9 +93,9 @@ func (s *SQL) GetBestBlockHeader(ctx context.Context) (*model.BlockHeader, *mode
 
 	// Begin cache-safe query - captures generation to prevent stale writes
 	cacheID := chainhash.HashH([]byte("GetBestBlockHeader"))
-	cacheQuery := s.responseCache.BeginQuery(cacheID)
+	cacheOp := s.responseCache.Begin(cacheID)
 
-	cached := cacheQuery.Get()
+	cached := cacheOp.Get()
 	if cached != nil {
 		if result, ok := cached.Value().([2]interface{}); ok {
 			if header, ok := result[0].(*model.BlockHeader); ok {
@@ -210,7 +210,7 @@ func (s *SQL) GetBestBlockHeader(ctx context.Context) (*model.BlockHeader, *mode
 
 	// Cache result - CacheQuery.Set() checks if cache was invalidated during query
 	result := [2]interface{}{blockHeader, blockHeaderMeta}
-	cacheQuery.Set(result, s.cacheTTL)
+	cacheOp.Set(result, s.cacheTTL)
 
 	return blockHeader, blockHeaderMeta, nil
 }

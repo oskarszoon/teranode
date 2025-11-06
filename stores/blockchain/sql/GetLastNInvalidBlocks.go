@@ -56,10 +56,10 @@ func (s *SQL) GetLastNInvalidBlocks(ctx context.Context, n int64) ([]*model.Bloc
 
 	// Create a unique cache ID for this query
 	cacheID := chainhash.HashH([]byte(fmt.Sprintf("GetLastNInvalidBlocks-%d", n)))
-	cacheQuery := s.responseCache.BeginQuery(cacheID)
+	cacheOp := s.responseCache.Begin(cacheID)
 
 	// Check if we have a cached result
-	cached := cacheQuery.Get()
+	cached := cacheOp.Get()
 	if cached != nil && cached.Value() != nil {
 		if cacheData, ok := cached.Value().([]*model.BlockInfo); ok && cacheData != nil {
 			s.logger.Debugf("GetLastNInvalidBlocks cache hit")
@@ -103,7 +103,7 @@ func (s *SQL) GetLastNInvalidBlocks(ctx context.Context, n int64) ([]*model.Bloc
 	}
 
 	// Cache the result
-	cacheQuery.Set(blockInfos, s.cacheTTL)
+	cacheOp.Set(blockInfos, s.cacheTTL)
 
 	return blockInfos, nil
 }

@@ -65,9 +65,9 @@ func (s *SQL) GetHeader(ctx context.Context, blockHash *chainhash.Hash) (*model.
 
 	// the cache will be invalidated by the StoreBlock function when a new block is added, or after cacheTTL seconds
 	cacheID := chainhash.HashH([]byte(fmt.Sprintf("GetHeader-%s", blockHash.String())))
-	cacheQuery := s.responseCache.BeginQuery(cacheID)
+	cacheOp := s.responseCache.Begin(cacheID)
 
-	cached := cacheQuery.Get()
+	cached := cacheOp.Get()
 	if cached != nil && cached.Value() != nil {
 		if cacheData, ok := cached.Value().(*model.BlockHeader); ok && cacheData != nil {
 			s.logger.Debugf("GetHeader cache hit")
@@ -130,7 +130,7 @@ func (s *SQL) GetHeader(ctx context.Context, blockHash *chainhash.Hash) (*model.
 	blockHeader.Bits = *bits
 
 	// Cache the result in response cache
-	cacheQuery.Set(blockHeader, s.cacheTTL)
+	cacheOp.Set(blockHeader, s.cacheTTL)
 
 	return blockHeader, nil
 }

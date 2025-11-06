@@ -86,8 +86,8 @@ func (s *SQL) GetBlockByHeight(ctx context.Context, height uint32) (*model.Block
 	// the cache will be invalidated by the StoreBlock function when a new block is added, or after cacheTTL seconds
 	cacheID := chainhash.HashH([]byte(fmt.Sprintf("GetBlockByHeight-%d", height)))
 
-	cacheQuery := s.responseCache.BeginQuery(cacheID)
-	cached := cacheQuery.Get()
+	cacheOp := s.responseCache.Begin(cacheID)
+	cached := cacheOp.Get()
 	if cached != nil && cached.Value() != nil {
 		if cacheData, ok := cached.Value().(*model.Block); ok && cacheData != nil {
 			s.logger.Debugf("GetBlockByHeight cache hit")
@@ -157,7 +157,7 @@ func (s *SQL) GetBlockByHeight(ctx context.Context, height uint32) (*model.Block
 		return nil, err
 	}
 
-	cacheQuery.Set(block, s.cacheTTL)
+	cacheOp.Set(block, s.cacheTTL)
 
 	return block, nil
 }

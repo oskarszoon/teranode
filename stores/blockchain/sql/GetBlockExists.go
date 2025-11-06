@@ -68,8 +68,8 @@ func (s *SQL) GetBlockExists(ctx context.Context, blockHash *chainhash.Hash) (bo
 	// Use operation-prefixed key to avoid conflicts with other cached data
 	cacheID := chainhash.HashH([]byte(fmt.Sprintf("GetBlockExists-%s", blockHash.String())))
 
-	cacheQuery := s.responseCache.BeginQuery(cacheID)
-	cached := cacheQuery.Get()
+	cacheOp := s.responseCache.Begin(cacheID)
+	cached := cacheOp.Get()
 	if cached != nil {
 		// Check if it's a cached boolean result from previous GetBlockExists call
 		if exists, ok := cached.Value().(bool); ok {
@@ -93,7 +93,7 @@ func (s *SQL) GetBlockExists(ctx context.Context, blockHash *chainhash.Hash) (bo
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			// Cache the non-existence result
-			cacheQuery.Set(false, s.cacheTTL)
+			cacheOp.Set(false, s.cacheTTL)
 			return false, nil
 		}
 
@@ -101,6 +101,6 @@ func (s *SQL) GetBlockExists(ctx context.Context, blockHash *chainhash.Hash) (bo
 	}
 
 	// Cache the existence result
-	cacheQuery.Set(true, s.cacheTTL)
+	cacheOp.Set(true, s.cacheTTL)
 	return true, nil
 }

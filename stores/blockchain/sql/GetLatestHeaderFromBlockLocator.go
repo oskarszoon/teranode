@@ -75,9 +75,9 @@ func (s *SQL) GetLatestBlockHeaderFromBlockLocator(ctx context.Context, bestBloc
 		locatorStrs[i] = hash.String()
 	}
 	cacheID := chainhash.HashH([]byte(fmt.Sprintf("GetLatestHeaderFromBlockLocator-%s-%s", bestBlockHash.String(), strings.Join(locatorStrs, ","))))
-	cacheQuery := s.responseCache.BeginQuery(cacheID)
+	cacheOp := s.responseCache.Begin(cacheID)
 
-	cached := cacheQuery.Get()
+	cached := cacheOp.Get()
 	if cached != nil {
 		if result, ok := cached.Value().([2]interface{}); ok {
 			if header, ok := result[0].(*model.BlockHeader); ok {
@@ -212,7 +212,7 @@ func (s *SQL) GetLatestBlockHeaderFromBlockLocator(ctx context.Context, bestBloc
 	}
 
 	// Cache the result in response cache
-	cacheQuery.Set([2]interface{}{blockHeader, blockHeaderMeta}, s.cacheTTL)
+	cacheOp.Set([2]interface{}{blockHeader, blockHeaderMeta}, s.cacheTTL)
 
 	return blockHeader, blockHeaderMeta, nil
 }

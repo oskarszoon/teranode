@@ -58,8 +58,8 @@ func (s *SQL) GetBlockStats(ctx context.Context) (*model.BlockStats, error) {
 	// Use a fixed cache key for stats since they're global for the entire blockchain
 	statsCacheKey := chainhash.HashH([]byte("GetBlockStats"))
 
-	cacheQuery := s.responseCache.BeginQuery(statsCacheKey)
-	cached := cacheQuery.Get()
+	cacheOp := s.responseCache.Begin(statsCacheKey)
+	cached := cacheOp.Get()
 	if cached != nil && cached.Value() != nil {
 		if cacheData, ok := cached.Value().(*model.BlockStats); ok {
 			return cacheData, nil
@@ -128,7 +128,7 @@ func (s *SQL) GetBlockStats(ctx context.Context) (*model.BlockStats, error) {
 	blockStats.BlockCount += 1
 
 	// Cache the stats result
-	cacheQuery.Set(blockStats, s.cacheTTL)
+	cacheOp.Set(blockStats, s.cacheTTL)
 
 	return blockStats, nil
 }

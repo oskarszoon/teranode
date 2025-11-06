@@ -91,8 +91,8 @@ func (s *SQL) GetBlock(ctx context.Context, blockHash *chainhash.Hash) (*model.B
 	// the cache will be invalidated by the StoreBlock function when a new block is added, or after cacheTTL seconds
 	cacheID := chainhash.HashH([]byte(fmt.Sprintf("GetBlock-%s", blockHash.String())))
 
-	cacheQuery := s.responseCache.BeginQuery(cacheID)
-	cached := cacheQuery.Get()
+	cacheOp := s.responseCache.Begin(cacheID)
+	cached := cacheOp.Get()
 	if cached != nil && cached.Value() != nil {
 		if cacheData, ok := cached.Value().(*getBlockCache); ok && cacheData != nil {
 			s.logger.Debugf("GetBlock cache hit")
@@ -192,7 +192,7 @@ func (s *SQL) GetBlock(ctx context.Context, blockHash *chainhash.Hash) (*model.B
 	// set the block height on the block
 	block.Height = height
 
-	cacheQuery.Set(&getBlockCache{
+	cacheOp.Set(&getBlockCache{
 		block:  block,
 		height: height,
 	}, s.cacheTTL)
