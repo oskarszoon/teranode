@@ -11,13 +11,12 @@ import (
 // GenerationalCache wraps ttlcache with generation-based invalidation tracking.
 // This prevents stale query results from being cached after invalidation occurs.
 //
-// The problem this solves:
+// Race condition without generational tracking:
 // 1. Thread A: cache miss, starts DB query
-// 2. Thread B: cache miss, starts DB query
-// 3. Thread A: finishes query with result N+1
-// 4. Cache is invalidated (DeleteAll called)
-// 5. Thread B: finishes query with stale result N
-// 6. Thread B: writes stale result N to cache ❌ (overwrites fresh data)
+// 2. Cache is invalidated (DeleteAll called, for example block added to chain)
+// 3. Thread A: completes query with now-stale result
+// 4. Thread A: writes stale result to cache ❌
+// 5. Future reads return stale data instead of fresh data
 //
 // With generation tracking:
 // - BeginQuery() captures the current generation in a CacheQuery object
@@ -27,6 +26,7 @@ import (
 type GenerationalCache struct {
 	cache      *ttlcache.Cache[chainhash.Hash, any]
 	generation atomic.Uint64
+	stopped    atomic.Bool
 }
 
 // CacheQuery represents a scoped cache operation that captures generation at query start.
@@ -86,6 +86,9 @@ func (gc *GenerationalCache) DeleteAll() {
 }
 
 // Stop halts automatic cleanup.
+// It is safe to call Stop multiple times.
 func (gc *GenerationalCache) Stop() {
-	gc.cache.Stop()
+	if gc.stopped.CompareAndSwap(false, true) {
+		gc.cache.Stop()
+	}
 }
