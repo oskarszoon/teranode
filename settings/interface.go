@@ -266,6 +266,7 @@ type BlockValidationSettings struct {
 	OptimisticMining                                 bool
 	IsParentMinedRetryMaxRetry                       int
 	IsParentMinedRetryBackoffMultiplier              int
+	IsParentMinedRetryBackoffDuration                time.Duration
 	SubtreeGroupConcurrency                          int
 	BlockFoundChBufferSize                           int
 	CatchupChBufferSize                              int
@@ -277,9 +278,6 @@ type BlockValidationSettings struct {
 	CheckSubtreeFromBlockRetries                     int
 	CheckSubtreeFromBlockRetryBackoffDuration        time.Duration
 	SecretMiningThreshold                            uint32
-	ArePreviousBlocksProcessedMaxRetry               int
-	ArePreviousBlocksProcessedRetryBackoffMultiplier int
-	ArePreviousBlocksProcessedRetryBackoffDuration   time.Duration
 	PreviousBlockHeaderCount                         uint64
 	// Catchup configuration
 	CatchupMaxRetries            int // Maximum number of retries for catchup operations
