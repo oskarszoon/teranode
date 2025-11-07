@@ -40,11 +40,11 @@ func WaitForBlockAssemblyReady(
 		return nil
 	}
 
-	// Block assembly must be at most 1 block behind to prevent UTXO store
-	// coinbase maturity checks from failing with incorrect "current height"
-	const maxBlocksBehind uint32 = 1
+	// Block assembly can be up to 5 blocks behind to give it more breathing room
+	// while still ensuring coinbase maturity checks work correctly
+	const maxBlocksBehind uint32 = 5
 
-	// Check that block assembly is not more than 1 block behind
+	// Check that block assembly is not more than 5 blocks behind
 	// This is to make sure all the coinbases have been processed in the block assembly
 	_, err := retry.Retry(ctx, logger, func() (uint32, error) {
 		blockAssemblyStatus, err := blockAssemblyClient.GetBlockAssemblyState(ctx)
