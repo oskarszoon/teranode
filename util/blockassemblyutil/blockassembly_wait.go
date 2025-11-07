@@ -16,8 +16,8 @@ import (
 // a block at the given height. This ensures that all necessary data (such as coinbase
 // transactions) has been processed before allowing block validation to proceed.
 //
-// The function implements a retry mechanism with exponential backoff, checking if the
-// block assembly service is at most 1 block behind the target height. This prevents the
+// The function implements a retry mechanism with linear backoff, checking if the
+// block assembly service is not too far behind the target height. This prevents the
 // blockchain state from running too far ahead of block assembly, which would cause
 // coinbase maturity checks to fail incorrectly in the UTXO store.
 //
@@ -26,6 +26,7 @@ import (
 //   - logger: Logger for recording operations
 //   - blockAssemblyClient: Client interface to the block assembly service
 //   - blockHeight: The height of the block to be processed
+//   - maxBlocksBehind: Maximum number of blocks block assembly can be behind
 //
 // Returns:
 //   - error: nil if block assembly is ready, error if timeout or other failure
@@ -34,17 +35,14 @@ func WaitForBlockAssemblyReady(
 	logger ulogger.Logger,
 	blockAssemblyClient blockassembly.ClientI,
 	blockHeight uint32,
+	maxBlocksBehind int,
 ) error {
 	// Skip if block assembly client is not available (e.g., in tests)
 	if blockAssemblyClient == nil {
 		return nil
 	}
 
-	// Block assembly can be up to 5 blocks behind to give it more breathing room
-	// while still ensuring coinbase maturity checks work correctly
-	const maxBlocksBehind uint32 = 5
-
-	// Check that block assembly is not more than 5 blocks behind
+	// Check that block assembly is not more than maxBlocksBehind blocks behind
 	// This is to make sure all the coinbases have been processed in the block assembly
 	_, err := retry.Retry(ctx, logger, func() (uint32, error) {
 		blockAssemblyStatus, err := blockAssemblyClient.GetBlockAssemblyState(ctx)
@@ -52,7 +50,7 @@ func WaitForBlockAssemblyReady(
 			return 0, errors.NewProcessingError("failed to get block assembly state", err)
 		}
 
-		if blockAssemblyStatus.CurrentHeight+maxBlocksBehind < blockHeight {
+		if blockAssemblyStatus.CurrentHeight+uint32(maxBlocksBehind) < blockHeight {
 			return 0, errors.NewProcessingError("block assembly is behind, block height %d, block assembly height %d", blockHeight, blockAssemblyStatus.CurrentHeight)
 		}
 
