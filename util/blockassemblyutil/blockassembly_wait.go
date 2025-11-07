@@ -58,9 +58,9 @@ func WaitForBlockAssemblyReady(
 
 		return blockAssemblyStatus.CurrentHeight, nil
 	},
-		retry.WithRetryCount(100),
-		retry.WithBackoffDurationType(time.Millisecond),
-		retry.WithBackoffMultiplier(10),
+		retry.WithRetryCount(45),
+		retry.WithBackoffDurationType(20*time.Millisecond),
+		retry.WithBackoffMultiplier(4),
 		retry.WithMessage(fmt.Sprintf("[WaitForBlockAssemblyReady] block assembly block height %d is behind, waiting", blockHeight)),
 	)
 
