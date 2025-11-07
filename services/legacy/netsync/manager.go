@@ -1129,8 +1129,6 @@ func (sm *SyncManager) handleBlockMsg(bmsg *blockQueueMsg) error {
 			// TODO TEMPORARY: we should not panic here, but return the error
 			panic(err)
 		}
-	} else {
-		sm.logger.Infof("accepted block %v", bmsg.blockHash)
 	}
 
 	// Meta-data about the new block this peer is reporting. We use this
@@ -1176,6 +1174,8 @@ func (sm *SyncManager) handleBlockMsg(bmsg *blockQueueMsg) error {
 			heightUpdate = blockHeightInt32
 		}
 	}
+
+	sm.logger.Infof("accepted block %v at height %d", bmsg.blockHash, heightUpdate)
 
 	// Clear the rejected transactions.
 	sm.rejectedTxns.Clear()
