@@ -2511,6 +2511,11 @@ func TestHandleBlockNotificationSuccess(t *testing.T) {
 	mockBlockchain.On("GetBestBlockHeader", mock.Anything).Return(header, &model.BlockHeaderMeta{Height: 100}, nil).Maybe()
 	mockBlockchain.On("GetFSMCurrentState", mock.Anything).Return(&fsmState, nil).Maybe()
 
+	// Mock GetState for BlockPersisterHeight query
+	blockPersisterHeightData := make([]byte, 4)
+	binary.LittleEndian.PutUint32(blockPersisterHeightData, 0)
+	mockBlockchain.On("GetState", mock.Anything, "BlockPersisterHeight").Return(blockPersisterHeightData, nil).Maybe()
+
 	testSettings := settings.NewSettings()
 	testSettings.Coinbase.ArbitraryText = "MockMiner"
 	testSettings.P2P.ListenMode = settings.ListenModeFull // Ensure not in listen-only mode
