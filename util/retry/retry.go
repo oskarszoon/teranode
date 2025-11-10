@@ -77,10 +77,14 @@ func Retry[T any](ctx context.Context, logger ulogger.Logger, f func() (T, error
 				waitTime = time.Duration(backoff) * setOptions.BackoffDurationType
 			}
 
-			// Log the retry message with wait time (skip first 5 attempts to reduce noise)
-			if i >= 5 {
-				logger.Warnf(setOptions.Message+" (attempt %d): %v, trying again in %.1f seconds",
-					i+1, err, waitTime.Seconds())
+			// Log the retry message with wait time
+			// Use DEBUG level for first 5 attempts to reduce noise in logs during normal transient failures,
+			// then switch to WARN level for later attempts to highlight persistent issues that need attention
+			logMessage := setOptions.Message + " (attempt %d): %v, trying again in %.1f seconds"
+			if i < 5 {
+				logger.Debugf(logMessage, i+1, err, waitTime.Seconds())
+			} else {
+				logger.Warnf(logMessage, i+1, err, waitTime.Seconds())
 			}
 
 			// Wait before retrying

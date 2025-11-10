@@ -42,8 +42,15 @@ func WaitForBlockAssemblyReady(
 		return nil
 	}
 
-	// Check that block assembly is not more than maxBlocksBehind blocks behind
-	// This is to make sure all the coinbases have been processed in the block assembly
+	// Validate maxBlocksBehind parameter to prevent uint32 wraparound
+	if maxBlocksBehind < 0 {
+		return errors.NewInvalidArgumentError("maxBlocksBehind must be non-negative, got %d", maxBlocksBehind)
+	}
+
+	// Check that block assembly is not more than maxBlocksBehind blocks behind.
+	// We allow block assembly to run slightly behind as a performance optimization, but must ensure
+	// it stays within the coinbase maturity window to prevent block assembly state resets.
+	// This ensures all coinbase transactions have been properly processed before validation proceeds.
 	_, err := retry.Retry(ctx, logger, func() (uint32, error) {
 		blockAssemblyStatus, err := blockAssemblyClient.GetBlockAssemblyState(ctx)
 		if err != nil {
