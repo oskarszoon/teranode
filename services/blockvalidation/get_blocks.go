@@ -69,21 +69,14 @@ func (u *Server) fetchBlocksConcurrently(ctx context.Context, catchupCtx *Catchu
 	)
 	defer deferFn()
 
-	// Configuration for high-performance pipeline with sensible defaults
-	largeBatchSize := 100 // Large batches for maximum HTTP efficiency (peer limit)
-	numWorkers := 16      // Number of worker goroutines for parallel processing
-	bufferSize := 500     // Buffer size for channels
-
-	// Use configured values if available in settings
-	if u.settings.BlockValidation.FetchLargeBatchSize > 0 {
-		largeBatchSize = u.settings.BlockValidation.FetchLargeBatchSize
-	}
-	if u.settings.BlockValidation.FetchNumWorkers > 0 {
-		numWorkers = u.settings.BlockValidation.FetchNumWorkers
-	}
-	if u.settings.BlockValidation.FetchBufferSize > 0 {
-		bufferSize = u.settings.BlockValidation.FetchBufferSize
-	}
+	// Configuration for high-performance pipeline
+	// All values come from settings with sensible defaults:
+	// - FetchLargeBatchSize (100): Blocks per HTTP request for efficiency
+	// - FetchNumWorkers (16): Parallel workers for subtree fetching
+	// - FetchBufferSize (50): Channel buffer size - keeps workers ~100-150 blocks ahead max
+	largeBatchSize := u.settings.BlockValidation.FetchLargeBatchSize
+	numWorkers := u.settings.BlockValidation.FetchNumWorkers
+	bufferSize := u.settings.BlockValidation.FetchBufferSize
 
 	// Channels for pipeline stages
 	workQueue := make(chan workItem, bufferSize)

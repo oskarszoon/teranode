@@ -658,7 +658,12 @@ func (u *Server) fetchAndValidateBlocks(ctx context.Context, catchupCtx *Catchup
 	// Set up channels and counters
 	var size atomic.Int64
 	size.Store(int64(len(catchupCtx.blockHeaders)))
-	validateBlocksChan := make(chan *model.Block, size.Load())
+
+	// Limit validation channel buffer to prevent workers from racing too far ahead
+	// This creates backpressure so workers don't fetch blocks 2000+ ahead of validation
+	const maxValidationBuffer = 50
+	validationBufferSize := min(int(size.Load()), maxValidationBuffer)
+	validateBlocksChan := make(chan *model.Block, validationBufferSize)
 
 	bestBlockHeader, _, err := u.blockchainClient.GetBestBlockHeader(ctx)
 	if err != nil {

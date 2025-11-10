@@ -294,7 +294,7 @@ type BlockValidationSettings struct {
 	// Block fetching configuration
 	FetchLargeBatchSize     int // Large batches for maximum HTTP efficiency (default: 100, peer limit)
 	FetchNumWorkers         int // Number of worker goroutines for parallel processing (default: 16)
-	FetchBufferSize         int // Buffer size for channels (default: 500)
+	FetchBufferSize         int // Buffer size for channels (default: 50)
 	SubtreeFetchConcurrency int // Concurrent subtree fetches per block (default: 8)
 	// Transaction extension timeout
 	ExtendTransactionTimeout time.Duration // Timeout for extending transactions (default: 120s)
