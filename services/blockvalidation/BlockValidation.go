@@ -1386,12 +1386,25 @@ func (u *BlockValidation) ValidateBlockWithOptions(ctx context.Context, block *m
 				// For reconsidered blocks, we need to clear the invalid flag
 				// The block data already exists, so we just update its status
 				u.logger.Infof("[ValidateBlock][%s] clearing invalid flag for successfully revalidated block", block.Hash().String())
-				if err = u.blockchainClient.RevalidateBlock(ctx, block.Header.Hash()); err != nil {
+
+				// Use background context for critical database operation
+				// Once we've validated the block, we MUST complete the storage operation
+				// even if the parent context (e.g., catchup) is canceled
+				storeCtx, storeCancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer storeCancel()
+
+				if err = u.blockchainClient.RevalidateBlock(storeCtx, block.Header.Hash()); err != nil {
 					return errors.NewServiceError("[ValidateBlock][%s] failed to clear invalid flag after successful revalidation", block.Hash().String(), err)
 				}
 			} else {
 				// Normal case - add new block
-				if err = u.blockchainClient.AddBlock(ctx, block, baseURL); err != nil {
+				// Use background context for critical database operation
+				// This prevents cascading cancellation from parent operations (e.g., fetch timeouts)
+				// ensuring data consistency by completing the write even if catchup is canceled
+				storeCtx, storeCancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer storeCancel()
+
+				if err = u.blockchainClient.AddBlock(storeCtx, block, baseURL); err != nil {
 					return errors.NewServiceError("[ValidateBlock][%s] failed to store block", block.Hash().String(), err)
 				}
 			}

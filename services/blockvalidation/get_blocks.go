@@ -276,8 +276,8 @@ func (u *Server) orderedDelivery(gCtx context.Context, resultQueue <-chan result
 				}
 			}
 
-			// Check if we've delivered all blocks
-			if receivedCount == totalBlocks {
+			// Check if we've delivered all blocks (not just received)
+			if nextIndex == totalBlocks {
 				u.logger.Debugf("[catchup:orderedDelivery][%s] completed ordered delivery of %d blocks", blockUpTo.Hash().String(), totalBlocks)
 				return nil
 			}

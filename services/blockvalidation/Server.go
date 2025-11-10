@@ -1604,8 +1604,13 @@ func (u *Server) addBlockToPriorityQueue(ctx context.Context, blockFound process
 		return
 	}
 
+	// Create isolated context with timeout for transient fetch operation
+	// This ensures fetch failures don't affect other operations using parent context
+	fetchCtx, fetchCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer fetchCancel()
+
 	// Fetch the block to classify it
-	block, err := u.fetchSingleBlock(ctx, blockFound.hash, blockFound.peerID, blockFound.baseURL)
+	block, err := u.fetchSingleBlock(fetchCtx, blockFound.hash, blockFound.peerID, blockFound.baseURL)
 	if err != nil {
 		u.logger.Errorf("[addBlockToPriorityQueue] Failed to fetch block %s: %v", blockFound.hash.String(), err)
 		if blockFound.errCh != nil {
