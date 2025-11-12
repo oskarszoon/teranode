@@ -195,10 +195,10 @@ kubectl apply -f deploy/kubernetes/teranode/teranode-cr.yaml -n teranode-operato
 
 #### Start Syncing Process
 
-A fresh Teranode starts up in IDLE state by default. To start syncing from the legacy network, you can run:
+A fresh Teranode starts up in IDLE state by default. To start syncing from the network, you can run:
 
 ```bash
-kubectl exec -it $(kubectl get pods -n teranode-operator -l app=blockchain -o jsonpath='{.items[0].metadata.name}') -n teranode-operator -- teranode-cli setfsmstate -fsmstate legacysyncing
+kubectl exec -it $(kubectl get pods -n teranode-operator -l app=blockchain -o jsonpath='{.items[0].metadata.name}') -n teranode-operator -- teranode-cli setfsmstate -fsmstate running
 ```
 
 To know more about the syncing process, please refer to the [Teranode Sync Guide](minersHowToSyncTheNode.md)
