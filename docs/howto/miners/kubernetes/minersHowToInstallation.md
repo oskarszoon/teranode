@@ -152,8 +152,8 @@ You can find the latest available version published on GitHub Container Registry
 
 ```bash
 # Set image versions (please derive the right TERANODE_VERSION from the results of the previous command)
-export OPERATOR_VERSION=v0.1.2 # Or use 'latest'
-export TERANODE_VERSION=v0.12.0 # Or use 'latest'
+export OPERATOR_VERSION=v0.1.2
+export TERANODE_VERSION=v0.12.0
 export GHCR_REGISTRY=ghcr.io/bsv-blockchain
 ```
 
