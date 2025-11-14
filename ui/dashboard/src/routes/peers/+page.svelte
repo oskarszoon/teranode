@@ -273,10 +273,6 @@
 
   // Reset reputation for all peers
   async function resetAllReputation() {
-    if (!confirm('Are you sure you want to reset reputation for ALL peers? This will clear all interaction metrics and set reputation scores to neutral (50).')) {
-      return
-    }
-
     isResettingReputation = true
     try {
       const response = await fetch('/api/p2p/reset-reputation', {
@@ -309,10 +305,6 @@
 
   // Reset reputation for a specific peer
   async function resetPeerReputation(peerId: string) {
-    if (!confirm(`Reset reputation for this peer?`)) {
-      return
-    }
-
     try {
       const response = await fetch('/api/p2p/reset-reputation', {
         method: 'POST',
@@ -842,33 +834,37 @@
       <Typo variant="title" size="h4" value={t(`${pageKey}.title`, { defaultValue: 'Peer Registry' })} />
     </div>
     <svelte:fragment slot="header-tools">
-      <div class="stats">
-        <span class="stat-item">
-          <span class="stat-label">Total:</span>
-          <span class="stat-value">{allData.length}</span>
-        </span>
-        <span class="stat-item">
-          <span class="stat-label">Connected:</span>
-          <span class="stat-value"
-            >{allData.filter((p) => p.is_connected && !p.is_banned).length}</span
+      <div class="stats-and-actions">
+        <div class="stats">
+          <span class="stat-item">
+            <span class="stat-label">Total:</span>
+            <span class="stat-value">{allData.length}</span>
+          </span>
+          <span class="stat-item">
+            <span class="stat-label">Connected:</span>
+            <span class="stat-value"
+              >{allData.filter((p) => p.is_connected && !p.is_banned).length}</span
+            >
+          </span>
+          <span class="stat-item">
+            <span class="stat-label">Good Reputation:</span>
+            <span class="stat-value"
+              >{allData.filter((p) => p.catchup_reputation_score >= 50 && p.is_connected && !p.is_banned).length}</span
+            >
+          </span>
+        </div>
+        <div class="header-actions">
+          <Button
+            variant="tertiary"
+            size="small"
+            disabled={isResettingReputation || allData.length === 0}
+            on:click={resetAllReputation}
+            title="Reset reputation for all peers to neutral (50.0)"
           >
-        </span>
-        <span class="stat-item">
-          <span class="stat-label">Good Reputation:</span>
-          <span class="stat-value"
-            >{allData.filter((p) => p.catchup_reputation_score >= 50 && p.is_connected && !p.is_banned).length}</span
-          >
-        </span>
+            {isResettingReputation ? 'Resetting...' : 'Reset Peer Reputations'}
+          </Button>
+        </div>
       </div>
-      <Button
-        variant="secondary"
-        size="small"
-        disabled={isResettingReputation || allData.length === 0}
-        on:click={resetAllReputation}
-        title="Reset reputation for all peers"
-      >
-        {isResettingReputation ? 'Resetting...' : 'Reset All Reputation'}
-      </Button>
       <Pager
         i18n={i18nLocal}
         expandUp={true}
@@ -1026,10 +1022,10 @@
         </div>
         <div class="reset-reputation-row">
           <Button
-            variant="secondary"
+            variant="tertiary"
             size="small"
             on:click={() => resetPeerReputation(selectedPeer.id)}
-            title="Reset reputation for this peer"
+            title="Reset reputation for this peer to neutral (50.0)"
           >
             Reset Reputation
           </Button>
@@ -1176,6 +1172,19 @@
   .no-data p.sub {
     color: rgba(255, 255, 255, 0.44);
     font-size: 14px;
+  }
+
+  .stats-and-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    align-items: flex-start;
+  }
+
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
   }
 
   /* Custom styles for table cells */
