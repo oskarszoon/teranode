@@ -6,9 +6,23 @@ import { dev } from '$app/environment'
  * POST handler for /api/p2p/reset-reputation
  * Proxies requests to the Asset service's reset-reputation endpoint
  * (which in turn calls P2P's gRPC service)
+ * Requires authentication - admin only
  */
-export const POST: RequestHandler = async ({ request, url }) => {
+export const POST: RequestHandler = async ({ request, url, cookies }) => {
   try {
+    // Check authentication
+    const sessionToken = cookies.get('session')
+
+    if (!sessionToken) {
+      return json(
+        {
+          error: 'Unauthorized',
+          details: 'Authentication required',
+        },
+        { status: 401 },
+      )
+    }
+
     const body = await request.json()
     const { peer_id } = body
 

@@ -90,9 +90,6 @@
   let showCatchupModal = false
   let selectedPeer: PeerData | null = null
 
-  // Reset reputation state
-  let isResettingReputation = false
-
   // Persistent pagination state
   let currentPage = 1
   let currentPageSize = 25
@@ -269,71 +266,6 @@
     const startIndex = (currentPage - 1) * currentPageSize
     const endIndex = startIndex + currentPageSize
     data = sortedData.slice(startIndex, endIndex)
-  }
-
-  // Reset reputation for all peers
-  async function resetAllReputation() {
-    isResettingReputation = true
-    try {
-      const response = await fetch('/api/p2p/reset-reputation', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ peer_id: '' }) // Empty peer_id means reset all
-      })
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`)
-      }
-
-      const result = await response.json()
-
-      if (result.error) {
-        throw new Error(result.error)
-      }
-
-      console.log(`Reset reputation for ${result.peers_reset} peers`)
-
-      // Refresh peer list to show updated reputation
-      await fetchPeers()
-    } catch (err) {
-      console.error('Failed to reset reputation:', err)
-      alert(`Failed to reset reputation: ${err instanceof Error ? err.message : 'Unknown error'}`)
-    } finally {
-      isResettingReputation = false
-    }
-  }
-
-  // Reset reputation for a specific peer
-  async function resetPeerReputation(peerId: string) {
-    try {
-      const response = await fetch('/api/p2p/reset-reputation', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ peer_id: peerId })
-      })
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`)
-      }
-
-      const result = await response.json()
-
-      if (result.error) {
-        throw new Error(result.error)
-      }
-
-      console.log(`Reset reputation for peer ${peerId}`)
-
-      // Close modal
-      showCatchupModal = false
-      selectedPeer = null
-
-      // Refresh peer list to show updated reputation
-      await fetchPeers()
-    } catch (err) {
-      console.error('Failed to reset peer reputation:', err)
-      alert(`Failed to reset peer reputation: ${err instanceof Error ? err.message : 'Unknown error'}`)
-    }
   }
 
   // Fetch peer data from the API
@@ -834,36 +766,23 @@
       <Typo variant="title" size="h4" value={t(`${pageKey}.title`, { defaultValue: 'Peer Registry' })} />
     </div>
     <svelte:fragment slot="header-tools">
-      <div class="stats-and-actions">
-        <div class="stats">
-          <span class="stat-item">
-            <span class="stat-label">Total:</span>
-            <span class="stat-value">{allData.length}</span>
-          </span>
-          <span class="stat-item">
-            <span class="stat-label">Connected:</span>
-            <span class="stat-value"
-              >{allData.filter((p) => p.is_connected && !p.is_banned).length}</span
-            >
-          </span>
-          <span class="stat-item">
-            <span class="stat-label">Good Reputation:</span>
-            <span class="stat-value"
-              >{allData.filter((p) => p.catchup_reputation_score >= 50 && p.is_connected && !p.is_banned).length}</span
-            >
-          </span>
-        </div>
-        <div class="header-actions">
-          <Button
-            variant="tertiary"
-            size="small"
-            disabled={isResettingReputation || allData.length === 0}
-            on:click={resetAllReputation}
-            title="Reset reputation for all peers to neutral (50.0)"
+      <div class="stats">
+        <span class="stat-item">
+          <span class="stat-label">Total:</span>
+          <span class="stat-value">{allData.length}</span>
+        </span>
+        <span class="stat-item">
+          <span class="stat-label">Connected:</span>
+          <span class="stat-value"
+            >{allData.filter((p) => p.is_connected && !p.is_banned).length}</span
           >
-            {isResettingReputation ? 'Resetting...' : 'Reset Peer Reputations'}
-          </Button>
-        </div>
+        </span>
+        <span class="stat-item">
+          <span class="stat-label">Good Reputation:</span>
+          <span class="stat-value"
+            >{allData.filter((p) => p.catchup_reputation_score >= 50 && p.is_connected && !p.is_banned).length}</span
+          >
+        </span>
       </div>
       <Pager
         i18n={i18nLocal}
@@ -1020,16 +939,6 @@
             </span>
           </div>
         </div>
-        <div class="reset-reputation-row">
-          <Button
-            variant="tertiary"
-            size="small"
-            on:click={() => resetPeerReputation(selectedPeer.id)}
-            title="Reset reputation for this peer to neutral (50.0)"
-          >
-            Reset Reputation
-          </Button>
-        </div>
       </div>
 
       <div class="modal-section">
@@ -1172,19 +1081,6 @@
   .no-data p.sub {
     color: rgba(255, 255, 255, 0.44);
     font-size: 14px;
-  }
-
-  .stats-and-actions {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    align-items: flex-start;
-  }
-
-  .header-actions {
-    display: flex;
-    align-items: center;
-    gap: 12px;
   }
 
   /* Custom styles for table cells */
@@ -1795,14 +1691,6 @@
   .metric-value.malicious {
     color: #ce1722;
     font-weight: 600;
-  }
-
-  .reset-reputation-row {
-    margin-top: 16px;
-    padding-top: 16px;
-    border-top: 1px solid rgba(255, 255, 255, 0.1);
-    display: flex;
-    justify-content: flex-start;
   }
 
   .metric-value.peer-id {
