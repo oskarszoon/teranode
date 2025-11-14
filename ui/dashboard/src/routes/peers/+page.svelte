@@ -90,6 +90,9 @@
   let showCatchupModal = false
   let selectedPeer: PeerData | null = null
 
+  // Reset reputation state
+  let isResettingReputation = false
+
   // Persistent pagination state
   let currentPage = 1
   let currentPageSize = 25
@@ -266,6 +269,79 @@
     const startIndex = (currentPage - 1) * currentPageSize
     const endIndex = startIndex + currentPageSize
     data = sortedData.slice(startIndex, endIndex)
+  }
+
+  // Reset reputation for all peers
+  async function resetAllReputation() {
+    if (!confirm('Are you sure you want to reset reputation for ALL peers? This will clear all interaction metrics and set reputation scores to neutral (50).')) {
+      return
+    }
+
+    isResettingReputation = true
+    try {
+      const response = await fetch('/api/p2p/reset-reputation', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ peer_id: '' }) // Empty peer_id means reset all
+      })
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+      }
+
+      const result = await response.json()
+
+      if (result.error) {
+        throw new Error(result.error)
+      }
+
+      console.log(`Reset reputation for ${result.peers_reset} peers`)
+
+      // Refresh peer list to show updated reputation
+      await fetchPeers()
+    } catch (err) {
+      console.error('Failed to reset reputation:', err)
+      alert(`Failed to reset reputation: ${err instanceof Error ? err.message : 'Unknown error'}`)
+    } finally {
+      isResettingReputation = false
+    }
+  }
+
+  // Reset reputation for a specific peer
+  async function resetPeerReputation(peerId: string) {
+    if (!confirm(`Reset reputation for this peer?`)) {
+      return
+    }
+
+    try {
+      const response = await fetch('/api/p2p/reset-reputation', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ peer_id: peerId })
+      })
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+      }
+
+      const result = await response.json()
+
+      if (result.error) {
+        throw new Error(result.error)
+      }
+
+      console.log(`Reset reputation for peer ${peerId}`)
+
+      // Close modal
+      showCatchupModal = false
+      selectedPeer = null
+
+      // Refresh peer list to show updated reputation
+      await fetchPeers()
+    } catch (err) {
+      console.error('Failed to reset peer reputation:', err)
+      alert(`Failed to reset peer reputation: ${err instanceof Error ? err.message : 'Unknown error'}`)
+    }
   }
 
   // Fetch peer data from the API
@@ -784,6 +860,15 @@
           >
         </span>
       </div>
+      <Button
+        variant="secondary"
+        size="small"
+        disabled={isResettingReputation || allData.length === 0}
+        on:click={resetAllReputation}
+        title="Reset reputation for all peers"
+      >
+        {isResettingReputation ? 'Resetting...' : 'Reset All Reputation'}
+      </Button>
       <Pager
         i18n={i18nLocal}
         expandUp={true}
@@ -910,7 +995,7 @@
             <span class="metric-label">Success Rate</span>
             <span class="metric-value">
               {#if selectedPeer.catchup_attempts > 0}
-                {((selectedPeer.catchup_successes / selectedPeer.catchup_attempts) * 100).toFixed(1)}%
+                {((selectedPeer.catchup_successes / (selectedPeer.catchup_successes + selectedPeer.catchup_failures)) * 100).toFixed(1)}%
               {:else}
                 -
               {/if}
@@ -938,6 +1023,16 @@
               {selectedPeer.catchup_avg_response_ms ? formatDuration(selectedPeer.catchup_avg_response_ms) : '-'}
             </span>
           </div>
+        </div>
+        <div class="reset-reputation-row">
+          <Button
+            variant="secondary"
+            size="small"
+            on:click={() => resetPeerReputation(selectedPeer.id)}
+            title="Reset reputation for this peer"
+          >
+            Reset Reputation
+          </Button>
         </div>
       </div>
 
@@ -1691,6 +1786,14 @@
   .metric-value.malicious {
     color: #ce1722;
     font-weight: 600;
+  }
+
+  .reset-reputation-row {
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+    display: flex;
+    justify-content: flex-start;
   }
 
   .metric-value.peer-id {

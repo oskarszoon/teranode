@@ -342,6 +342,7 @@ func New(logger ulogger.Logger, tSettings *settings.Settings, repo *repository.R
 	// so we need to provide the same endpoints directly in the Go backend
 	apiP2PGroup := e.Group("/api/p2p")
 	apiP2PGroup.GET("/peers", h.GetPeers)
+	apiP2PGroup.POST("/reset-reputation", h.ResetReputation)
 
 	apiCatchupGroup := e.Group("/api/catchup")
 	apiCatchupGroup.GET("/status", h.GetCatchupStatus)
