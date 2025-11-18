@@ -381,8 +381,6 @@ type UtxoStoreSettings struct {
 }
 
 type P2PSettings struct {
-	BootstrapAddresses []string
-
 	GRPCAddress       string
 	GRPCListenAddress string
 

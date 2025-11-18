@@ -367,7 +367,6 @@ func NewSettings(alternativeContext ...string) *Settings {
 		P2P: P2PSettings{
 			BlockTopic:         getString("p2p_block_topic", "", alternativeContext...),
 			SubtreeTopic:       getString("p2p_subtree_topic", "", alternativeContext...),
-			BootstrapAddresses: getMultiString("p2p_bootstrapAddresses", "|", []string{}, alternativeContext...),
 			GRPCAddress:        getString("p2p_grpcAddress", "", alternativeContext...),
 			GRPCListenAddress:  getString("p2p_grpcListenAddress", ":9906", alternativeContext...),
 			HTTPAddress:        getString("p2p_httpAddress", "localhost:9906", alternativeContext...),
