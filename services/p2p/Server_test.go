@@ -109,7 +109,7 @@ func createTestServer(t *testing.T) *Server {
 			BanThreshold: 100,
 			BanDuration:  time.Hour,
 			PeerCacheDir: t.TempDir(),
-			EnableNAT:    true, // Disable NAT in tests to prevent data races in libp2p
+			EnableNAT:    false, // Disable NAT in tests to prevent data races in libp2p
 		},
 	}
 
@@ -1531,7 +1531,7 @@ func TestNewServer_ConfigValidation(t *testing.T) {
 				RejectedTxTopic: "rejected",
 				ListenMode:      settings.ListenModeFull,
 				PrivateKey:      "privkey",
-				EnableNAT:       true, // Disable NAT in tests to prevent data races in libp2p
+				EnableNAT:       false, // Disable NAT in tests to prevent data races in libp2p
 			},
 			ChainCfgParams: &chaincfg.Params{
 				TopicPrefix: "prefix",
@@ -3418,7 +3418,7 @@ func createEnhancedTestServer(t *testing.T) (*Server, *MockServerP2PClient, *Moc
 			BanThreshold: 100,
 			BanDuration:  time.Hour,
 			PeerCacheDir: t.TempDir(),
-			EnableNAT:    true, // Disable NAT in tests to prevent data races in libp2p
+			EnableNAT:    false, // Disable NAT in tests to prevent data races in libp2p
 		},
 	}
 
