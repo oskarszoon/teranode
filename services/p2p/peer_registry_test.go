@@ -184,7 +184,6 @@ func TestPeerRegistry_UpdateNetworkStats(t *testing.T) {
 	assert.NotZero(t, info.LastBlockTime)
 }
 
-
 func TestPeerRegistry_PeerCount(t *testing.T) {
 	pr := NewPeerRegistry()
 

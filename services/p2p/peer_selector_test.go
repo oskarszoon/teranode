@@ -251,7 +251,6 @@ func TestPeerSelector_SelectSyncPeer_RequireDataHub(t *testing.T) {
 	assert.Equal(t, peer.ID("B"), selected, "Should only select peer with DataHub")
 }
 
-
 func TestPeerSelector_SelectSyncPeer_ForcedPeer(t *testing.T) {
 	logger := ulogger.New("test")
 	ps := NewPeerSelector(logger, nil)
