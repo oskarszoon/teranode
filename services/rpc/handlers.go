@@ -48,7 +48,6 @@ import (
 	"github.com/bsv-blockchain/teranode/pkg/fileformat"
 	"github.com/bsv-blockchain/teranode/services/blockassembly/blockassembly_api"
 	"github.com/bsv-blockchain/teranode/services/blockchain"
-	"github.com/bsv-blockchain/teranode/services/blockvalidation"
 	"github.com/bsv-blockchain/teranode/services/legacy/bsvutil"
 	"github.com/bsv-blockchain/teranode/services/legacy/peer_api"
 	"github.com/bsv-blockchain/teranode/services/legacy/txscript"
@@ -1811,20 +1810,7 @@ func handleReconsiderBlock(ctx context.Context, s *RPCServer, cmd interface{}, _
 		return nil, rpcDecodeHexError(c.BlockHash)
 	}
 
-	// Get the block data from blockchain store to revalidate it
-	block, err := s.blockchainClient.GetBlock(ctx, ch)
-	if err != nil {
-		s.logger.Errorf("[handleReconsiderBlock] failed to get block %s: %v", ch, err)
-		return nil, &bsvjson.RPCError{
-			Code:    bsvjson.ErrRPCBlockNotFound,
-			Message: "Block not found",
-		}
-	}
-
-	// Submit the block to block validation service for full revalidation
-	// This will ensure all consensus rules are checked, including difficulty
-	s.logger.Infof("[handleReconsiderBlock] submitting block %s for revalidation", ch)
-
+	// Check if block validation client is available
 	if s.blockValidationClient == nil {
 		s.logger.Errorf("[handleReconsiderBlock] block validation client not available")
 		return nil, &bsvjson.RPCError{
@@ -1833,24 +1819,81 @@ func handleReconsiderBlock(ctx context.Context, s *RPCServer, cmd interface{}, _
 		}
 	}
 
-	// ValidateBlock will check if the block is marked as invalid and proceed with full validation
-	// If validation succeeds, it will call blockchain.RevalidateBlock to clear the invalid flag
-	// Pass IsRevalidation flag to indicate this is a reconsideration of an invalid block
-	options := &blockvalidation.ValidateBlockOptions{
-		IsRevalidation: true,
-	}
-	err = s.blockValidationClient.ValidateBlock(ctx, block, options)
+	// Revalidate the block - this will fetch it, validate it, and update its status
+	s.logger.Infof("[handleReconsiderBlock] revalidating block %s", ch)
+	err = s.blockValidationClient.RevalidateBlock(ctx, *ch)
 	if err != nil {
-		s.logger.Errorf("[handleReconsiderBlock] block validation failed for %s: %v", ch, err)
+		s.logger.Errorf("[handleReconsiderBlock] block revalidation failed for %s: %v", ch, err)
 		return nil, &bsvjson.RPCError{
 			Code:    bsvjson.ErrRPCVerify,
-			Message: "Block failed validation: " + err.Error(),
+			Message: "Block failed revalidation: " + err.Error(),
 		}
 	}
 
 	s.logger.Infof("[handleReconsiderBlock] block %s successfully reconsidered and validated", ch)
 
+	// Now recursively clear invalid status for all invalid child blocks
+	err = s.reconsiderInvalidChildren(ctx, ch)
+	if err != nil {
+		s.logger.Errorf("[handleReconsiderBlock] failed to reconsider child blocks: %v", err)
+		return nil, &bsvjson.RPCError{
+			Code:    bsvjson.ErrRPCInternal.Code,
+			Message: fmt.Sprintf("Block %s was reconsidered but failed to reconsider children: %v", ch, err),
+		}
+	}
+
 	return nil, nil
+}
+
+// reconsiderInvalidChildren recursively finds and clears the invalid status for all
+// invalid child blocks of the given parent block hash. This ensures that when a block
+// is reconsidered, any children that were marked invalid as a result of the parent
+// being invalid are also cleared. The blocks are then queued for reprocessing through
+// the normal validation pipeline.
+func (s *RPCServer) reconsiderInvalidChildren(ctx context.Context, parentHash *chainhash.Hash) error {
+	// Get all invalid blocks
+	invalidBlocks, err := s.blockchainClient.GetLastNInvalidBlocks(ctx, 10000)
+	if err != nil {
+		return errors.NewServiceError("failed to get invalid blocks", err)
+	}
+
+	// Find direct children of the parent that are invalid
+	var childrenToReconsider []*chainhash.Hash
+	for _, blockInfo := range invalidBlocks {
+		// Parse the block header from bytes
+		header, err := model.NewBlockHeaderFromBytes(blockInfo.BlockHeader)
+		if err != nil {
+			s.logger.Warnf("[reconsiderInvalidChildren] failed to parse block header: %v", err)
+			continue
+		}
+
+		if header.HashPrevBlock.IsEqual(parentHash) {
+			childHash := header.Hash()
+			childrenToReconsider = append(childrenToReconsider, childHash)
+		}
+	}
+
+	// Process each invalid child
+	for _, childHash := range childrenToReconsider {
+		s.logger.Infof("[reconsiderInvalidChildren] clearing invalid status for child block %s", childHash)
+
+		// Just clear the invalid flag - don't run full validation yet
+		err = s.blockchainClient.RevalidateBlock(ctx, childHash)
+		if err != nil {
+			s.logger.Errorf("[reconsiderInvalidChildren] failed to clear invalid status for child block %s: %v", childHash, err)
+			return errors.NewServiceError("failed to clear invalid status for child block %s", childHash.String(), err)
+		}
+
+		s.logger.Infof("[reconsiderInvalidChildren] successfully cleared invalid status for child block %s", childHash)
+
+		// Recursively clear invalid status for grandchildren
+		err = s.reconsiderInvalidChildren(ctx, childHash)
+		if err != nil {
+			return errors.NewServiceError("failed to reconsider descendants of %s", childHash.String(), err)
+		}
+	}
+
+	return nil
 }
 
 func handleHelp(ctx context.Context, s *RPCServer, cmd interface{}, _ <-chan struct{}) (interface{}, error) {
