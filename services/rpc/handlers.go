@@ -1845,51 +1845,61 @@ func handleReconsiderBlock(ctx context.Context, s *RPCServer, cmd interface{}, _
 	return nil, nil
 }
 
-// reconsiderInvalidChildren recursively finds and clears the invalid status for all
-// invalid child blocks of the given parent block hash. This ensures that when a block
-// is reconsidered, any children that were marked invalid as a result of the parent
-// being invalid are also cleared. The blocks are then queued for reprocessing through
-// the normal validation pipeline.
+// reconsiderInvalidChildren recursively finds and fully revalidates all invalid child
+// blocks of the given parent block hash. This ensures that when a block is reconsidered,
+// any children that were marked invalid are also properly revalidated through the full
+// validation pipeline, preventing consensus-violating blocks from re-entering the chain.
+// Uses an iterative queue-based approach to avoid redundant queries.
 func (s *RPCServer) reconsiderInvalidChildren(ctx context.Context, parentHash *chainhash.Hash) error {
-	// Get all invalid blocks
-	invalidBlocks, err := s.blockchainClient.GetLastNInvalidBlocks(ctx, 10000)
+	// Fetch all invalid blocks once at the start to avoid O(depth × N) queries
+	allInvalidBlocks, err := s.blockchainClient.GetLastNInvalidBlocks(ctx, 10000)
 	if err != nil {
 		return errors.NewServiceError("failed to get invalid blocks", err)
 	}
 
-	// Find direct children of the parent that are invalid
-	var childrenToReconsider []*chainhash.Hash
-	for _, blockInfo := range invalidBlocks {
-		// Parse the block header from bytes
+	// Build a map for efficient parent->children lookups
+	invalidBlocksByParent := make(map[chainhash.Hash][]*chainhash.Hash)
+	for _, blockInfo := range allInvalidBlocks {
 		header, err := model.NewBlockHeaderFromBytes(blockInfo.BlockHeader)
 		if err != nil {
 			s.logger.Warnf("[reconsiderInvalidChildren] failed to parse block header: %v", err)
 			continue
 		}
 
-		if header.HashPrevBlock.IsEqual(parentHash) {
-			childHash := header.Hash()
-			childrenToReconsider = append(childrenToReconsider, childHash)
-		}
+		childHash := header.Hash()
+		prevHash := *header.HashPrevBlock
+		invalidBlocksByParent[prevHash] = append(invalidBlocksByParent[prevHash], childHash)
 	}
 
-	// Process each invalid child
-	for _, childHash := range childrenToReconsider {
-		s.logger.Infof("[reconsiderInvalidChildren] clearing invalid status for child block %s", childHash)
+	// Use a queue for breadth-first traversal (more efficient than depth-first recursion)
+	queue := []*chainhash.Hash{parentHash}
 
-		// Just clear the invalid flag - don't run full validation yet
-		err = s.blockchainClient.RevalidateBlock(ctx, childHash)
-		if err != nil {
-			s.logger.Errorf("[reconsiderInvalidChildren] failed to clear invalid status for child block %s: %v", childHash, err)
-			return errors.NewServiceError("failed to clear invalid status for child block %s", childHash.String(), err)
+	for len(queue) > 0 {
+		currentParent := queue[0]
+		queue = queue[1:]
+
+		// Find children of current parent
+		children, exists := invalidBlocksByParent[*currentParent]
+		if !exists {
+			continue
 		}
 
-		s.logger.Infof("[reconsiderInvalidChildren] successfully cleared invalid status for child block %s", childHash)
+		// Revalidate each child
+		for _, childHash := range children {
+			s.logger.Infof("[reconsiderInvalidChildren] revalidating child block %s", childHash)
 
-		// Recursively clear invalid status for grandchildren
-		err = s.reconsiderInvalidChildren(ctx, childHash)
-		if err != nil {
-			return errors.NewServiceError("failed to reconsider descendants of %s", childHash.String(), err)
+			// Use blockValidationClient.RevalidateBlock for full validation
+			// This ensures consensus rules are properly checked before clearing the invalid flag
+			err = s.blockValidationClient.RevalidateBlock(ctx, *childHash)
+			if err != nil {
+				s.logger.Errorf("[reconsiderInvalidChildren] failed to revalidate child block %s: %v", childHash, err)
+				return errors.NewServiceError("failed to revalidate child block %s", childHash.String(), err)
+			}
+
+			s.logger.Infof("[reconsiderInvalidChildren] successfully revalidated child block %s", childHash)
+
+			// Add to queue to process its children
+			queue = append(queue, childHash)
 		}
 	}
 
