@@ -361,7 +361,7 @@ type SyncManager struct {
 	peerStates      *txmap.SyncedMap[*peerpkg.Peer, *peerSyncState]
 
 	// The following fields are used for headers-first mode.
-	headersFirstMode bool
+	headersFirstMode atomic.Bool // accessed from multiple goroutines, must be atomic
 	headerList       *list.List
 	startHeader      *list.Element
 	nextCheckpoint   *chaincfg.Checkpoint
@@ -379,7 +379,7 @@ type SyncManager struct {
 // resetHeaderState sets the headers-first mode state to values appropriate for
 // syncing from a new peer.
 func (sm *SyncManager) resetHeaderState(newestHash *chainhash.Hash, newestHeight int32) {
-	sm.headersFirstMode = false
+	sm.headersFirstMode.Store(false)
 	sm.headerList.Init()
 	sm.startHeader = nil
 
@@ -576,7 +576,7 @@ func (sm *SyncManager) startSync() {
 			return
 		}
 
-		sm.headersFirstMode = true
+		sm.headersFirstMode.Store(true)
 
 		sm.logger.Infof("[startSync] Downloading headers for blocks %d to %d from peer %s", bestBlockHeaderMeta.Height+1, sm.nextCheckpoint.Height, bestPeer.String())
 	} else {
@@ -629,7 +629,7 @@ func (sm *SyncManager) SyncHeight() uint64 {
 // This is used to avoid serving headers to other peers during checkpoint sync, which
 // can cause significant delays (18s+ per batch) due to database query contention.
 func (sm *SyncManager) IsHeadersFirstMode() bool {
-	return sm.headersFirstMode
+	return sm.headersFirstMode.Load()
 }
 
 // isSyncCandidate returns whether or not the peer is a candidate to consider
@@ -731,12 +731,12 @@ func (sm *SyncManager) handleCheckSyncPeer() {
 	validNetworkSpeed := sm.syncPeerState.validNetworkSpeed(sm.minSyncPeerNetworkSpeed)
 	lastBlockSince := time.Since(sm.syncPeerState.getLastBlockTime())
 
-	sm.logger.Debugf("[CheckSyncPeer] sync peer %s check, network violations: %v (limit %v), time since last block: %v (limit %v), headers-first mode: %v", sm.syncPeer.String(), validNetworkSpeed, maxNetworkViolations, lastBlockSince, maxLastBlockTime, sm.headersFirstMode)
+	sm.logger.Debugf("[CheckSyncPeer] sync peer %s check, network violations: %v (limit %v), time since last block: %v (limit %v), headers-first mode: %v", sm.syncPeer.String(), validNetworkSpeed, maxNetworkViolations, lastBlockSince, maxLastBlockTime, sm.headersFirstMode.Load())
 
 	// Don't check network speed during headers-first mode, as we're intentionally
 	// downloading small headers (80 bytes each) rather than full blocks. The peer
 	// may appear slow because we're not requesting much data, not because it's actually slow.
-	isNetworkSpeedViolation := !sm.headersFirstMode && (validNetworkSpeed >= maxNetworkViolations)
+	isNetworkSpeedViolation := !sm.headersFirstMode.Load() && (validNetworkSpeed >= maxNetworkViolations)
 
 	// Check network speed of the sync peer and its last block time. If we're currently
 	// flushing the cache skip this round.
@@ -820,12 +820,12 @@ func (sm *SyncManager) updateSyncPeer(_ *peerSyncState) {
 	sm.logger.Infof("Updating sync peer, last block: %v, violations: %v, headers-first mode: %v",
 		sm.syncPeerState.getLastBlockTime(),
 		sm.syncPeerState.getViolations(),
-		sm.headersFirstMode)
+		sm.headersFirstMode.Load())
 
 	// Only disconnect if we have a valid sync peer
 	if sm.syncPeer != nil {
 		// Log current sync state before disconnecting
-		if sm.headersFirstMode {
+		if sm.headersFirstMode.Load() {
 			sm.logger.Debugf("Current header sync state - headerList length: %d, startHeader exists: %v",
 				sm.headerList.Len(), sm.startHeader != nil)
 		}
@@ -851,7 +851,7 @@ func (sm *SyncManager) updateSyncPeer(_ *peerSyncState) {
 		return // add return to prevent continuing with invalid height
 	}
 
-	if sm.headersFirstMode {
+	if sm.headersFirstMode.Load() {
 		sm.logger.Infof("Resetting header sync state at height %d with hash %v",
 			bestBlockHeightInt32, bestBlockHeader.Hash())
 
@@ -1144,7 +1144,7 @@ func (sm *SyncManager) handleBlockMsg(bmsg *blockQueueMsg) error {
 	// properly.
 	isCheckpointBlock := false
 
-	if sm.headersFirstMode {
+	if sm.headersFirstMode.Load() {
 		sm.logger.Debugf("[handleBlockMsg][%s] headers-first mode, checking block", bmsg.blockHash)
 
 		firstNodeEl := sm.headerList.Front()
@@ -1170,7 +1170,7 @@ func (sm *SyncManager) handleBlockMsg(bmsg *blockQueueMsg) error {
 	// Track block size for dynamic in-flight adjustment during headers-first mode.
 	// This allows us to start aggressive (20 blocks) and automatically reduce
 	// to 1 block when encountering large (>2GB) blocks on mainnet.
-	if sm.headersFirstMode && bmsg.block != nil {
+	if sm.headersFirstMode.Load() && bmsg.block != nil {
 		blockSize := int64(bmsg.block.SerializeSize())
 		sm.blockSizeTracker.addBlockSize(blockSize)
 
@@ -1356,7 +1356,7 @@ func (sm *SyncManager) handleBlockMsg(bmsg *blockQueueMsg) error {
 	// This is headers-first mode, the block is a checkpoint, and there are
 	// no more checkpoints, so switch to normal mode by requesting blocks
 	// from the block after this one up to the end of the chain (zero hash).
-	sm.headersFirstMode = false
+	sm.headersFirstMode.Store(false)
 	sm.headerList.Init()
 	sm.logger.Infof("Reached the final checkpoint -- switching to normal mode")
 
@@ -1468,7 +1468,7 @@ func (sm *SyncManager) handleHeadersMsg(hmsg *headersMsg) {
 	msg := hmsg.headers
 	numHeaders := len(msg.Headers)
 
-	if !sm.headersFirstMode {
+	if !sm.headersFirstMode.Load() {
 		reason := fmt.Sprintf("Got %d unrequested headers from %s", numHeaders, peer.String())
 		peer.DisconnectWithWarning(reason)
 
@@ -1783,7 +1783,7 @@ func (sm *SyncManager) processInvMsg(i int, iv *wire.InvVect, processInvs bool, 
 	peer.AddKnownInventory(iv)
 
 	// Ignore inventory when we're in headers-first mode.
-	if sm.headersFirstMode {
+	if sm.headersFirstMode.Load() {
 		return
 	}
 
