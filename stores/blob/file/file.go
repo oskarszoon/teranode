@@ -363,18 +363,26 @@ func newStore(logger ulogger.Logger, storeURL *url.URL, opts ...options.StoreOpt
 	options := options.NewStoreOptions(opts...)
 
 	if hashPrefix := storeURL.Query().Get("hashPrefix"); len(hashPrefix) > 0 {
-		val, err := strconv.ParseInt(hashPrefix, 10, 64)
+		val, err := strconv.ParseInt(hashPrefix, 10, 32)
 		if err != nil {
 			return nil, errors.NewStorageError("[File] failed to parse hashPrefix", err)
+		}
+
+		if val < 0 {
+			return nil, errors.NewStorageError("[File] hashPrefix must be non-negative: %d", val)
 		}
 
 		options.HashPrefix = int(val)
 	}
 
 	if hashSuffix := storeURL.Query().Get("hashSuffix"); len(hashSuffix) > 0 {
-		val, err := strconv.ParseInt(hashSuffix, 10, 64)
+		val, err := strconv.ParseInt(hashSuffix, 10, 32)
 		if err != nil {
 			return nil, errors.NewStorageError("[File] failed to parse hashSuffix", err)
+		}
+
+		if val < 0 {
+			return nil, errors.NewStorageError("[File] hashSuffix must be non-negative: %d", val)
 		}
 
 		options.HashPrefix = -int(val)
