@@ -400,6 +400,11 @@ func newStore(logger ulogger.Logger, storeURL *url.URL, opts ...options.StoreOpt
 
 	// Check if longterm storage options are provided
 	if options.PersistSubDir != "" {
+		// Validate PersistSubDir doesn't contain path traversal sequences
+		if strings.Contains(options.PersistSubDir, "..") {
+			return nil, errors.NewInvalidArgumentError("[File] PersistSubDir contains path traversal sequence")
+		}
+
 		// Create persistent subdirectory
 		if err := os.MkdirAll(filepath.Join(path, options.PersistSubDir), 0755); err != nil {
 			return nil, errors.NewStorageError("[File] failed to create persist sub directory", err)
