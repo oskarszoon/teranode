@@ -48,17 +48,17 @@ func TestNewRawBlockMessage(t *testing.T) {
 
 func TestNewRawBlockMessage_ReadError(t *testing.T) {
 	// Create a reader that will return an error
-	reader := &errorReader{}
+	reader := &failingReader{}
 
 	msg, err := NewRawBlockMessage(reader)
 	require.Error(t, err)
 	require.Nil(t, msg)
 }
 
-// errorReader is a test helper that always returns an error
-type errorReader struct{}
+// failingReader is a test helper that always fails on Read
+type failingReader struct{}
 
-func (r *errorReader) Read(_ []byte) (int, error) {
+func (r *failingReader) Read(_ []byte) (int, error) {
 	return 0, io.ErrUnexpectedEOF
 }
 
