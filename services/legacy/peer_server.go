@@ -1387,9 +1387,12 @@ func (s *server) pushBlockMsg(sp *serverPeer, hash *chainhash.Hash, doneChan cha
 		_ = reader.Close()
 	}()
 
-	var msgBlock wire.MsgBlock
-	if err = msgBlock.Deserialize(reader); err != nil {
-		sp.server.logger.Errorf("Unable to deserialize requested block hash %v: %v", hash, err)
+	// Use RawBlockMessage to avoid deserialize/serialize overhead for large blocks.
+	// This reads raw bytes directly and writes them to the wire, bypassing the
+	// expensive process of creating Go structs for millions of transactions.
+	rawBlockMsg, err := NewRawBlockMessage(reader)
+	if err != nil {
+		sp.server.logger.Errorf("Unable to read requested block hash %v: %v", hash, err)
 
 		if doneChan != nil {
 			doneChan <- struct{}{}
@@ -1414,7 +1417,7 @@ func (s *server) pushBlockMsg(sp *serverPeer, hash *chainhash.Hash, doneChan cha
 		dc = doneChan
 	}
 
-	sp.QueueMessageWithEncoding(&msgBlock, dc, encoding)
+	sp.QueueMessageWithEncoding(rawBlockMsg, dc, encoding)
 
 	// When the peer requests the final block that was advertised in
 	// response to a getblocks message which requested more blocks than
