@@ -1005,8 +1005,7 @@ func (s *Store) acquireLock(txHash *chainhash.Hash, numRecords int) (*aerospike.
 
 	lockTTL := calculateLockTTL(numRecords)
 
-	lockPolicy := util.GetAerospikeWritePolicy(s.settings, 0) // generation 0
-	lockPolicy.Expiration = lockTTL                           // Set TTL in seconds
+	lockPolicy := util.GetAerospikeWritePolicy(s.settings, 0, util.WithExpiration(lockTTL))
 	lockPolicy.RecordExistsAction = aerospike.CREATE_ONLY
 
 	hostname, _ := os.Hostname()

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	aerospike2 "github.com/bitcoin-sv/testcontainers-aerospike-go"
+	aerospike2 "github.com/bsv-blockchain/testcontainers-aerospike-go"
 	"github.com/bsv-blockchain/teranode/stores/utxo/aerospike"
 	"github.com/bsv-blockchain/teranode/util/uaerospike"
 )

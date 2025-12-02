@@ -33,7 +33,7 @@ import (
 	"testing"
 	"time"
 
-	aeroTest "github.com/bitcoin-sv/testcontainers-aerospike-go"
+	aeroTest "github.com/bsv-blockchain/testcontainers-aerospike-go"
 	bt "github.com/bsv-blockchain/go-bt/v2"
 	"github.com/bsv-blockchain/go-bt/v2/bscript"
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
