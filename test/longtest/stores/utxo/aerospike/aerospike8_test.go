@@ -5,8 +5,8 @@ import (
 	"testing"
 
 	"github.com/aerospike/aerospike-client-go/v8"
-	aeroTest "github.com/bsv-blockchain/testcontainers-aerospike-go"
 	"github.com/bsv-blockchain/teranode/errors"
+	aeroTest "github.com/bsv-blockchain/testcontainers-aerospike-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

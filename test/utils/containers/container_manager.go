@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
-	aerospike2 "github.com/bsv-blockchain/testcontainers-aerospike-go"
 	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/stores/utxo/aerospike"
 	"github.com/bsv-blockchain/teranode/util/uaerospike"
+	aerospike2 "github.com/bsv-blockchain/testcontainers-aerospike-go"
 	"github.com/lib/pq"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
