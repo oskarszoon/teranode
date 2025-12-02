@@ -82,8 +82,11 @@ import (
 var placeholderKey *aerospike.Key
 
 // LockRecordIndex is a special index value for lock records
-// Uses max uint32 to avoid conflict with actual sub-records (0, 1, 2, ...)
-const LockRecordIndex = uint32(0xFFFFFFFF)
+// Uses high uint32 values to avoid conflict with actual sub-records (0, 1, 2, ...)
+// Version history:
+//   - v1: 0xFFFFFFFF (had TTL bug - locks never expired)
+//   - v2: 0xFFFFFFFE (TTL fix applied)
+const LockRecordIndex = uint32(0xFFFFFFFE)
 
 // LockRecordBaseTTL is the minimum time-to-live for lock records in seconds
 const LockRecordBaseTTL = uint32(30)
@@ -1002,7 +1005,8 @@ func (s *Store) acquireLock(txHash *chainhash.Hash, numRecords int) (*aerospike.
 
 	lockTTL := calculateLockTTL(numRecords)
 
-	lockPolicy := util.GetAerospikeWritePolicy(s.settings, lockTTL)
+	lockPolicy := util.GetAerospikeWritePolicy(s.settings, 0) // generation 0
+	lockPolicy.Expiration = lockTTL                           // Set TTL in seconds
 	lockPolicy.RecordExistsAction = aerospike.CREATE_ONLY
 
 	hostname, _ := os.Hostname()
