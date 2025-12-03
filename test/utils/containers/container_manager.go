@@ -71,7 +71,7 @@ func (cm *ContainerManager) Initialize(ctx context.Context) (*url.URL, error) {
 func (cm *ContainerManager) initializeAerospike(ctx context.Context) (*url.URL, error) {
 	aerospike.InitPrometheusMetrics()
 
-	container, err := aerospike2.RunContainer(ctx)
+	container, err := aerospike2.RunContainer(ctx, aerospike2.WithTTLSupport("test"))
 	if err != nil {
 		return nil, errors.NewExternalError("failed to start Aerospike container: %v", err)
 	}

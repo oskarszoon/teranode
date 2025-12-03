@@ -15,7 +15,7 @@ func InitAerospikeContainer() (string, func() error, error) {
 
 	ctx := context.Background()
 
-	container, err := aerospike2.RunContainer(ctx)
+	container, err := aerospike2.RunContainer(ctx, aerospike2.WithTTLSupport("test"))
 	if err != nil {
 		return "", nil, err
 	}
