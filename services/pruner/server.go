@@ -3,7 +3,7 @@
 //
 // Trigger mechanism (event-driven):
 // 1. Primary: BlockPersisted notifications (when block persister is running)
-// 2. Fallback: Block notifications with mined_set=true check (when persister not running)
+// 2. Fallback: BlockSubtreesSet notifications (when persister not running)
 //
 // Pruner operations only execute when safe to do so (i.e., when block assembly is in "running"
 // state and not performing reorgs or resets).
@@ -17,7 +17,6 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/model"
 	"github.com/bsv-blockchain/teranode/services/blockassembly"
@@ -35,7 +34,7 @@ import (
 
 // Server implements the Pruner service which handles periodic pruner operations
 // for the UTXO store. It uses event-driven triggers: BlockPersisted notifications (primary)
-// and Block notifications with mined_set check (fallback when persister not running).
+// and BlockSubtreesSet notifications (fallback when persister not running).
 type Server struct {
 	pruner_api.UnsafePrunerAPIServer
 
@@ -106,7 +105,7 @@ func (s *Server) Init(ctx context.Context) error {
 
 	// Subscribe to blockchain notifications for event-driven pruning:
 	// - BlockPersisted: Triggers pruning when block persister completes (primary)
-	// - Block: Checks mined_set=true and triggers if persister not running (fallback)
+	// - BlockSubtreesSet: Triggers pruning after block validation completes (fallback when persister not running)
 	// Also tracks persisted height for coordination with store-level pruner safety checks
 	subscriptionCh, err := s.blockchainClient.Subscribe(ctx, "Pruner")
 	if err != nil {
@@ -139,42 +138,28 @@ func (s *Server) Init(ctx context.Context) error {
 					}
 				}
 
-			case model.NotificationType_Block:
-				// Fallback trigger: if block persister is not running, check if block has mined_set=true
+			case model.NotificationType_BlockSubtreesSet:
+				// Fallback trigger: if block persister is not running, use BlockSubtreesSet as trigger
+				// BlockSubtreesSet is sent after block validation completes (updateSubtreesDAH), so this
+				// is the correct signal that the block is ready for pruning consideration.
+				// Note: We use BlockSubtreesSet instead of Block notification because Block is sent
+				// before mined_set is true, causing a timing issue where pruner would skip the block.
 				persistedHeight := s.lastPersistedHeight.Load()
 				if persistedHeight > 0 {
 					// Block persister is running - BlockPersisted notifications will handle pruning
 					continue
 				}
 
-				// Block persister not running - check if block has mined_set=true before triggering
+				// Block persister not running - trigger pruning from BlockSubtreesSet
 				if notification.Hash == nil {
-					s.logger.Debugf("Block notification missing hash, skipping")
+					s.logger.Debugf("BlockSubtreesSet notification missing hash, skipping")
 					continue
 				}
 
-				blockHash, err := chainhash.NewHash(notification.Hash)
-				if err != nil {
-					s.logger.Debugf("Failed to parse block hash from notification: %v", err)
-					continue
-				}
-
-				// Check if block has mined_set=true (block validation completed)
-				isMined, err := s.blockchainClient.GetBlockIsMined(ctx, blockHash)
-				if err != nil {
-					s.logger.Debugf("Failed to check mined_set status for block %s: %v", blockHash, err)
-					continue
-				}
-
-				if !isMined {
-					s.logger.Debugf("Block %s has mined_set=false, skipping pruning trigger", blockHash)
-					continue
-				}
-
-				// Block has mined_set=true, get its height and trigger pruning
+				// Get current height and trigger pruning
 				state, err := s.blockAssemblyClient.GetBlockAssemblyState(ctx)
 				if err != nil {
-					s.logger.Debugf("Failed to get block assembly state on Block notification: %v", err)
+					s.logger.Debugf("Failed to get block assembly state on BlockSubtreesSet notification: %v", err)
 					continue
 				}
 
@@ -182,7 +167,7 @@ func (s *Server) Init(ctx context.Context) error {
 					// Try to queue pruning (non-blocking - channel has buffer of 1)
 					select {
 					case s.prunerCh <- state.CurrentHeight:
-						s.logger.Debugf("Queued pruning for height %d from Block notification (mined_set=true)", state.CurrentHeight)
+						s.logger.Debugf("Queued pruning for height %d from BlockSubtreesSet notification", state.CurrentHeight)
 					default:
 					}
 				}
