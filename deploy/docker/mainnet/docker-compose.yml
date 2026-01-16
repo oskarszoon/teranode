@@ -64,7 +64,7 @@ services:
 
   pruner:
     extends:
-      file: ./base/docker-teranode.yml
+      file: ../base/docker-teranode.yml
       service: pruner
     <<: *teranode-settings
 
