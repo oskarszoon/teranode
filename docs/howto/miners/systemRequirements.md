@@ -64,20 +64,22 @@ Kubernetes deployments allow horizontal scaling of individual services. External
 
 **Teranode Services (per pod):**
 
-*Note: CPU and memory requirements should be monitored and adjusted based on network activity. These values are highly dependent on transaction volume and block sizes on the blockchain network.*
+*Service names match those used in teranode-operator managed CRs. CPU and memory requirements should be monitored and adjusted based on network activity. These values are highly dependent on transaction volume and block sizes on the blockchain network.*
 
 | Service | CPU Request | Memory Request |
 |---------|-------------|----------------|
-| alertsystem | 1 | 1Gi |
+| alertSystem | 1 | 1Gi |
 | asset | 1 | 1Gi |
-| blockassembly | 1 | 4Gi |
+| blockAssembly | 1 | 4Gi |
 | blockchain | 1 | 1Gi |
-| blockvalidation | 1 | 8Gi |
+| blockValidator | 1 | 8Gi |
 | legacy | 4 | 32Gi |
 | peer | 1 | 1Gi |
 | propagation | 1 | 1Gi |
 | rpc | 1 | 1Gi |
-| subtreevalidation | 1 | 16Gi |
+| subtreeValidator | 1 | 16Gi |
+
+*Optional services such as `validator`, `blockPersister`, `utxoPersister`, and `coinbase` can be enabled with a baseline of 1 CPU / 1Gi memory.*
 
 **External Dependencies:**
 
@@ -93,17 +95,7 @@ Kubernetes deployments allow horizontal scaling of individual services. External
 
 **Teranode Services (per pod):**
 
-| Service | CPU Request | Memory Request |
-|---------|-------------|----------------|
-| blockchain | 100m | 256Mi |
-| blockvalidation | 100m | 256Mi |
-| blockassembly | 100m | 256Mi |
-| subtreevalidation | 100m | 512Mi |
-| validator | 100m | 256Mi |
-| propagation | 100m | 256Mi |
-| asset | 100m | 256Mi |
-| legacy | 100m | 256Mi |
-| rpc | 100m | 256Mi |
+A baseline of 100m CPU / 512Mi memory should be sufficient for all services on testnet.
 
 **External Dependencies:**
 
