@@ -390,7 +390,10 @@ func (s *Store) Spend(ctx context.Context, tx *bt.Tx, blockHeight uint32, ignore
 	}
 
 	if len(spends) != len(spentSpends) { // there must have been failures
-		unspendErr := s.Unspend(ctx, spentSpends)
+		// Use a detached context for the rollback — the parent context may already be
+		// cancelled (e.g. by errgroup), but the unspend MUST complete to avoid leaving
+		// corrupted state (e.g. inflated spentExtraRecs on master records).
+		unspendErr := s.Unspend(context.Background(), spentSpends)
 		if unspendErr != nil {
 			s.logger.Errorf("error in aerospike unspend (batched mode): %v", unspendErr)
 		}
