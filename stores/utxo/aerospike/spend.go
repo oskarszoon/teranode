@@ -97,7 +97,6 @@ type batchSpend struct {
 	ignoreLocked      bool
 }
 
-
 // SetDAHForChildRecordsMulti expands childCount per tx and performs a single BatchOperate
 // to set/unset DeleteAtHeight across all child pagination records.
 func (s *Store) SetDAHForChildRecordsMulti(items []struct {
@@ -857,7 +856,6 @@ func (s *Store) SetDAHForChildRecords(txID *chainhash.Hash, childCount int, dah 
 
 	return nil
 }
-
 
 func (s *Store) sendSetDAHBatch(batch []*batchDAH) {
 	var err error

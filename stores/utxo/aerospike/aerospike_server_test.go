@@ -1163,7 +1163,6 @@ func TestCoinbase(t *testing.T) {
 //	assert.Equal(t, 2, totalExtraRecs)
 // }
 
-
 func TestStoreDecorate(t *testing.T) {
 	logger := ulogger.NewErrorTestLogger(t)
 	tSettings := test.CreateBaseTestSettings(t)
