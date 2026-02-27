@@ -933,17 +933,14 @@ function setDeleteAtHeight(rec, currentBlockHeight, blockHeightRetention)
        return "", nil
     end
 
-    -- Check if all the UTXOs are spent and set the deleteAtHeight, but only for transactions that have been in at least one block
     local blockIDs = rec[BIN_BLOCK_IDS]
     local totalExtraRecs = rec[BIN_TOTAL_EXTRA_RECS]
-    local spentExtraRecs = rec[BIN_SPENT_EXTRA_RECS] or 0  -- Default to 0 if nil
     local existingDeleteAtHeight = rec[BIN_DELETE_AT_HEIGHT]
     local newDeleteHeight = currentBlockHeight + blockHeightRetention
 
     -- Handle conflicting transactions first
     if rec[BIN_CONFLICTING] then
         if not existingDeleteAtHeight then
-            -- Set the deleteAtHeight for the record
             rec[BIN_DELETE_AT_HEIGHT] = newDeleteHeight
             if rec[BIN_EXTERNAL] then
                 return SIGNAL_DELETE_AT_HEIGHT_SET, totalExtraRecs
@@ -953,54 +950,64 @@ function setDeleteAtHeight(rec, currentBlockHeight, blockHeightRetention)
         return "", nil
     end
 
-    -- Handle pagination records
+    -- Handle pagination (child) records — no totalExtraRecs bin
     if totalExtraRecs == nil then
-        -- Default nil to NOTALLSPENT (initial state when record is created with unspent UTXOs)
         local lastState = rec[BIN_LAST_SPENT_STATE] or SIGNAL_NOT_ALL_SPENT
 
         local currentState
-        -- Determine current state
         if rec[BIN_SPENT_UTXOS] == rec[BIN_RECORD_UTXOS] then
             currentState = SIGNAL_ALL_SPENT
         else
             currentState = SIGNAL_NOT_ALL_SPENT
         end
 
-        -- Only signal if state has changed
+        -- Only signal on state transitions
         if lastState ~= currentState then
-            -- State transition detected, update and signal
             rec[BIN_LAST_SPENT_STATE] = currentState
             return currentState, nil
-        else
-            -- No state change, don't signal
-            return "", nil
         end
+
+        return "", nil
     end
 
-    if spentExtraRecs == nil then
-        spentExtraRecs = 0
-    end
+    -- Master record handling below
 
-    -- Cache blockIDs size check to avoid recalculation
+    local localAllSpent = (rec[BIN_SPENT_UTXOS] == rec[BIN_RECORD_UTXOS])
     local hasBlockIDs = blockIDs and #blockIDs > 0
     local isOnLongestChain = (rec[BIN_UNMINED_SINCE] == nil)
 
-    -- This is a master record: only set deleteAtHeight if all UTXOs are spent and transaction is in at least one block
-    local allSpent = (totalExtraRecs == spentExtraRecs) and (rec[BIN_SPENT_UTXOS] == rec[BIN_RECORD_UTXOS])
+    -- Multi-record master (has child records): DAH is managed by Go after
+    -- verifying all children are spent. Lua only checks local UTXOs and signals.
+    if totalExtraRecs > 0 then
+        if localAllSpent and hasBlockIDs and isOnLongestChain then
+            if not existingDeleteAtHeight then
+                -- Local conditions met, DAH not yet set — signal Go to verify children
+                return SIGNAL_ALL_SPENT, totalExtraRecs
+            end
+        elseif existingDeleteAtHeight then
+            -- Conditions no longer met — clear master DAH, signal Go to clear children
+            rec[BIN_DELETE_AT_HEIGHT] = nil
+            if rec[BIN_EXTERNAL] then
+                return SIGNAL_DELETE_AT_HEIGHT_UNSET, totalExtraRecs
+            end
+            return SIGNAL_NOT_ALL_SPENT, totalExtraRecs
+        end
 
-    -- Set or update deleteAtHeight if all UTXOs are spent, transaction is in at least one block, AND on longest chain
-    if allSpent and hasBlockIDs and isOnLongestChain then
+        return "", nil
+    end
+
+    -- Single-record master (totalExtraRecs == 0): handle DAH inline, no children to check
+    if localAllSpent and hasBlockIDs and isOnLongestChain then
         if not existingDeleteAtHeight or existingDeleteAtHeight < newDeleteHeight then
             rec[BIN_DELETE_AT_HEIGHT] = newDeleteHeight
             if rec[BIN_EXTERNAL] then
-                return SIGNAL_DELETE_AT_HEIGHT_SET, totalExtraRecs
+                return SIGNAL_DELETE_AT_HEIGHT_SET, nil
             end
         end
-    -- Clear deleteAtHeight if conditions are no longer met
     elseif existingDeleteAtHeight then
         rec[BIN_DELETE_AT_HEIGHT] = nil
         if rec[BIN_EXTERNAL] then
-            return SIGNAL_DELETE_AT_HEIGHT_UNSET, totalExtraRecs
+            return SIGNAL_DELETE_AT_HEIGHT_UNSET, nil
         end
     end
 

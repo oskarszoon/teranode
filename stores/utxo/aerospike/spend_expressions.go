@@ -30,8 +30,6 @@ type SpendState struct {
 	SpentUtxos int
 	// RecordUtxos is the total number of UTXOs in this record
 	RecordUtxos int
-	// SpentExtraRecs is the number of spent extra records
-	SpentExtraRecs *int
 }
 
 // parseSpendState extracts the SpendState from Aerospike bins.
@@ -73,13 +71,6 @@ func (s *Store) parseSpendState(bins aerospike.BinMap) (SpendState, error) {
 	if recordUtxos, ok := bins[fields.RecordUtxos.String()]; ok && recordUtxos != nil {
 		if v, ok := recordUtxos.(int); ok {
 			state.RecordUtxos = v
-		}
-	}
-
-	// Parse spentExtraRecs
-	if spentExtraRecs, ok := bins[fields.SpentExtraRecs.String()]; ok && spentExtraRecs != nil {
-		if v, ok := spentExtraRecs.(int); ok {
-			state.SpentExtraRecs = &v
 		}
 	}
 
@@ -212,7 +203,6 @@ func (s *Store) buildSpendOperations(
 		aerospike.GetBinOp(fields.DeleteAtHeight.String()),
 		aerospike.GetBinOp(fields.External.String()),
 		aerospike.GetBinOp(fields.TotalExtraRecs.String()),
-		aerospike.GetBinOp(fields.SpentExtraRecs.String()),
 		aerospike.GetBinOp(fields.BlockIDs.String()),
 	}
 
@@ -352,7 +342,6 @@ func (s *Store) processSpendBatchResultsExpressions(
 	errCount := 0
 
 	// Collect follow-up actions
-	extraRecords := make([]*chainhash.Hash, 0)
 	dahSetItems := make([]struct {
 		TxID           *chainhash.Hash
 		ChildCount     int
@@ -409,12 +398,11 @@ func (s *Store) processSpendBatchResultsExpressions(
 			continue
 		}
 
-		// Check if all UTXOs are now spent (pagination record check)
+		// Check if all UTXOs are now spent
 		if state.TotalExtraRecs == nil {
-			// Pagination record - check if all spent
-			if state.RecordUtxos > 0 && state.SpentUtxos == state.RecordUtxos {
-				extraRecords = append(extraRecords, bItem.spend.TxID)
-			}
+			// Pagination (child) record — DAH for multi-record txs is handled
+			// when the master record's setDeleteAtHeight signals ALLSPENT.
+			// No action needed here.
 		} else if state.TotalExtraRecs != nil {
 			// Master record - check DAH changes for external transactions
 			if state.External {
@@ -470,12 +458,6 @@ func (s *Store) processSpendBatchResultsExpressions(
 
 	// Execute follow-up actions
 	var postErr error
-
-	if len(extraRecords) > 0 {
-		if err := s.IncrementSpentRecordsMulti(extraRecords, 1); err != nil {
-			postErr = errors.Join(postErr, err)
-		}
-	}
 
 	if len(dahSetItems) > 0 {
 		if err := s.SetDAHForChildRecordsMulti(dahSetItems); err != nil {

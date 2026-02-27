@@ -161,7 +161,6 @@ func (s *Store) buildDeleteAtHeightExpression(currentBlockHeight uint32, blockHe
 	// Helper expressions for readability
 	conflictingBin := aerospike.ExpBoolBin(fields.Conflicting.String())
 	totalExtraRecsBin := aerospike.ExpIntBin(fields.TotalExtraRecs.String())
-	spentExtraRecsBin := aerospike.ExpIntBin(fields.SpentExtraRecs.String())
 	spentUtxosBin := aerospike.ExpIntBin(fields.SpentUtxos.String())
 	recordUtxosBin := aerospike.ExpIntBin(fields.RecordUtxos.String())
 	blockIDsBin := aerospike.ExpListBin(fields.BlockIDs.String())
@@ -175,19 +174,12 @@ func (s *Store) buildDeleteAtHeightExpression(currentBlockHeight uint32, blockHe
 	// Condition: existing DAH is NOT set
 	dahNotExists := aerospike.ExpNot(aerospike.ExpBinExists(fields.DeleteAtHeight.String()))
 
-	// Condition: is master record (totalExtraRecs bin exists)
-	isMasterRecord := aerospike.ExpBinExists(fields.TotalExtraRecs.String())
+	// Condition: is single-record master (totalExtraRecs == 0, no children)
+	// Multi-record txs (totalExtraRecs > 0) have DAH managed by Go after child verification
+	isSingleRecordMaster := aerospike.ExpEq(totalExtraRecsBin, aerospike.ExpIntVal(0))
 
-	// Condition: all UTXOs are spent (including extra records)
-	// spentExtraRecs might not exist, so use ExpCond to default to 0
-	spentExtraRecsOrZero := aerospike.ExpCond(
-		aerospike.ExpBinExists(fields.SpentExtraRecs.String()), spentExtraRecsBin,
-		aerospike.ExpIntVal(0),
-	)
-	allSpent := aerospike.ExpAnd(
-		aerospike.ExpEq(totalExtraRecsBin, spentExtraRecsOrZero),
-		aerospike.ExpEq(spentUtxosBin, recordUtxosBin),
-	)
+	// Condition: all local UTXOs are spent
+	allLocalSpent := aerospike.ExpEq(spentUtxosBin, recordUtxosBin)
 
 	// Condition: has blocks (blockIDs list size > 0)
 	hasBlocks := aerospike.ExpGreater(
@@ -207,10 +199,10 @@ func (s *Store) buildDeleteAtHeightExpression(currentBlockHeight uint32, blockHe
 		isOnLongestChainExp = aerospike.ExpNot(aerospike.ExpBinExists(fields.UnminedSince.String()))
 	}
 
-	// Condition: should set DAH for master record
+	// Condition: should set DAH for single-record master (no children to verify)
 	shouldSetDAHMaster := aerospike.ExpAnd(
-		isMasterRecord,
-		allSpent,
+		isSingleRecordMaster,
+		allLocalSpent,
 		hasBlocks,
 		isOnLongestChainExp,
 	)
