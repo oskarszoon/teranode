@@ -16,7 +16,7 @@ require (
 	github.com/bsv-blockchain/go-bt/v2 v2.5.3
 	github.com/bsv-blockchain/go-chaincfg v1.5.3
 	github.com/bsv-blockchain/go-sdk v1.2.17
-	github.com/bsv-blockchain/go-subtree v1.1.7-0.20251217151250-1cd1ee64efac
+	github.com/bsv-blockchain/go-subtree v1.1.12
 	github.com/bsv-blockchain/testcontainers-aerospike-go v0.3.2
 	github.com/btcsuite/go-socks v0.0.0-20170105172521-4720035b7bfd
 	github.com/btcsuite/goleveldb v1.0.0
@@ -99,6 +99,7 @@ require (
 	github.com/containerd/platforms v1.0.0-rc.2 // indirect
 	github.com/containerd/ttrpc v1.2.7 // indirect
 	github.com/dgraph-io/ristretto/v2 v2.2.0 // indirect
+	github.com/dgryski/go-metro v0.0.0-20200812162917-85c65e2d0165 // indirect
 	github.com/docker/cli-docs-tool v0.10.0 // indirect
 	github.com/dunglas/httpsfv v1.1.0 // indirect
 	github.com/ebitengine/purego v0.9.1 // indirect
@@ -195,7 +196,7 @@ require (
 	github.com/bsv-blockchain/go-bn v1.1.2
 	github.com/bsv-blockchain/go-lockfree-queue v1.0.0
 	github.com/bsv-blockchain/go-p2p-message-bus v0.1.10
-	github.com/bsv-blockchain/go-safe-conversion v1.1.0
+	github.com/bsv-blockchain/go-safe-conversion v1.1.2
 	github.com/bsv-blockchain/go-tx-map v1.3.2
 	github.com/bsv-blockchain/go-wire v1.1.4
 	github.com/charmbracelet/bubbles v0.21.0
@@ -207,6 +208,7 @@ require (
 	github.com/libsv/go-p2p v0.3.3
 	github.com/ordishs/go-bitcoin v1.0.88
 	github.com/patrickmn/go-cache v2.1.0+incompatible
+	github.com/seiflotfy/cuckoofilter v0.0.0-20240715131351-a2f2c23f1771
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.40.0
 )
 
