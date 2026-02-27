@@ -118,7 +118,7 @@ func (s *Store) unspend(ctx context.Context, spends []*utxo.Spend, flagAsLocked 
 			if spend != nil {
 				s.logger.Warnf("un-spending utxo %s of tx %s:%d, spending data: %v", spend.UTXOHash.String(), spend.TxID.String(), spend.Vout, spend.SpendingData)
 
-				if err = s.unspendLua(spend); err != nil {
+				if err = s.unspendLua(ctx, spend); err != nil {
 					// just return the raw error, should already be wrapped
 					return err
 				}
@@ -144,7 +144,11 @@ func (s *Store) unspend(ctx context.Context, spends []*utxo.Spend, flagAsLocked 
 // Metrics:
 //   - prometheusUtxoMapReset: Successful unspends
 //   - prometheusUtxoMapErrors: Failed operations
-func (s *Store) unspendLua(spend *utxo.Spend) error {
+func (s *Store) unspendLua(ctx context.Context, spend *utxo.Spend) error {
+	if err := ctx.Err(); err != nil {
+		return errors.NewStorageError("context cancelled before unspend", err)
+	}
+
 	policy := util.GetAerospikeWritePolicy(s.settings, 0)
 
 	keySource := uaerospike.CalculateKeySource(spend.TxID, spend.Vout, s.utxoBatchSize)
