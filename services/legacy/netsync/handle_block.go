@@ -610,10 +610,11 @@ func (sm *SyncManager) PreValidateTransactions(ctx context.Context, txMap *txmap
 	}()
 
 	spendBatcherSize := sm.settings.Legacy.SpendBatcherSize
+	spendBatcherConcurrency := sm.settings.Legacy.SpendBatcherConcurrency
 
 	// validate all the transactions in parallel
-	g, gCtx := errgroup.WithContext(context.Background()) // we don't want the tracing to be linked to these calls
-	util.SafeSetLimit(g, spendBatcherSize*2)              // keep enough goroutines in flight to feed the batcher without overwhelming Aerospike
+	g, gCtx := errgroup.WithContext(context.Background())          // we don't want the tracing to be linked to these calls
+	util.SafeSetLimit(g, spendBatcherSize*spendBatcherConcurrency) // we limit the number of concurrent requests, to not overload Aerospike
 
 	// validate all the transactions in parallel
 	for _, txHash := range txMap.Keys() {
@@ -665,6 +666,7 @@ func (sm *SyncManager) validateTransactions(ctx context.Context, maxLevel uint32
 	}()
 
 	spendBatcherSize := sm.settings.Legacy.SpendBatcherSize
+	spendBatcherConcurrency := sm.settings.Legacy.SpendBatcherConcurrency
 
 	var timeStart time.Time
 
@@ -691,8 +693,8 @@ func (sm *SyncManager) validateTransactions(ctx context.Context, maxLevel uint32
 			sm.validationClient.TriggerBatcher()
 		} else {
 			// process all the transactions on a certain level in parallel
-			g, gCtx := errgroup.WithContext(context.Background()) // we don't want the tracing to be linked to these calls
-			util.SafeSetLimit(g, spendBatcherSize*2)              // keep enough goroutines in flight to feed the batcher without overwhelming Aerospike
+			g, gCtx := errgroup.WithContext(context.Background())          // we don't want the tracing to be linked to these calls
+			util.SafeSetLimit(g, spendBatcherSize*spendBatcherConcurrency) // we limit the number of concurrent requests, to not overload Aerospike
 
 			for txIdx := range blockTxsPerLevel[i] {
 				txIdx := txIdx
