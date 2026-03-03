@@ -992,7 +992,7 @@ type incrementSpentRecordsRes struct {
 // IncrementSpentRecords updates the record count for paginated transactions.
 // Used for cleanup management of large transactions.
 func (s *Store) IncrementSpentRecords(txid *chainhash.Hash, increment int) (interface{}, error) {
-	res := make(chan incrementSpentRecordsRes)
+	res := make(chan incrementSpentRecordsRes, 1)
 
 	go func() {
 		s.incrementBatcher.Put(&batchIncrement{

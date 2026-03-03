@@ -2,6 +2,7 @@ package aerospike_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/aerospike/aerospike-client-go/v8"
 	"github.com/bsv-blockchain/go-bt/v2"
@@ -322,6 +323,30 @@ func TestStore_IncrementSpentRecords(t *testing.T) {
 		assert.Equal(t, 2, rec.Bins[fields.TotalExtraRecs.String()])
 		assert.Equal(t, 2, rec.Bins[fields.SpentExtraRecs.String()])
 	})
+}
+
+func TestStore_IncrementSpentRecords_Timeout(t *testing.T) {
+	logger := ulogger.NewErrorTestLogger(t)
+
+	tSettings := test.CreateBaseTestSettings(t)
+
+	client, store, ctx, deferFn := initAerospike(t, tSettings, logger)
+
+	t.Cleanup(func() {
+		deferFn()
+	})
+
+	cleanDB(t, client)
+
+	_, err := store.Create(ctx, tx, 101)
+	require.NoError(t, err)
+
+	// Set an extremely short timeout so the batcher can't respond in time
+	tSettings.UtxoStore.SpendWaitTimeout = time.Nanosecond
+
+	_, err = store.IncrementSpentRecords(tx.TxIDChainHash(), 1)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, errors.ErrServiceUnavailable), "expected service unavailable error, got: %v", err)
 }
 
 // TestDriftedCounterDoesNotSetDAH verifies that when spentExtraRecs drifts
