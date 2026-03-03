@@ -704,7 +704,9 @@ func (sm *SyncManager) validateTransactions(ctx context.Context, maxLevel uint32
 		} else {
 			// Use a detached context that inherits cancellation from parent but not tracing values
 			bgCtx, bgCancel := context.WithCancel(context.Background())
+			defer bgCancel()
 			stopFn := context.AfterFunc(ctx, bgCancel)
+			defer stopFn()
 
 			// process all the transactions on a certain level in parallel
 			g, gCtx := errgroup.WithContext(bgCtx)
@@ -733,8 +735,6 @@ func (sm *SyncManager) validateTransactions(ctx context.Context, maxLevel uint32
 
 			// we don't care about errors here, we are just pre-warming caches for a quicker subtree validation
 			_ = g.Wait()
-			bgCancel()
-			stopFn()
 
 			deferLevelFn()
 		}

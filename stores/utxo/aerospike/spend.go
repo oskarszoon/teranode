@@ -963,8 +963,14 @@ func (s *Store) verifyAllChildrenSpent(txID *chainhash.Hash, childCount int) (bo
 			return false, nil
 		}
 
-		spentUtxos, _ := rec.Record.Bins[fields.SpentUtxos.String()].(int)
-		recordUtxos, _ := rec.Record.Bins[fields.RecordUtxos.String()].(int)
+		spentUtxos, ok := rec.Record.Bins[fields.SpentUtxos.String()].(int)
+		if !ok {
+			return false, errors.NewStorageError("[verifyAllChildrenSpent][%s] invalid type for spentUtxos in child %d", txID.String(), i+1)
+		}
+		recordUtxos, ok := rec.Record.Bins[fields.RecordUtxos.String()].(int)
+		if !ok {
+			return false, errors.NewStorageError("[verifyAllChildrenSpent][%s] invalid type for recordUtxos in child %d", txID.String(), i+1)
+		}
 
 		if spentUtxos != recordUtxos {
 			return false, nil
