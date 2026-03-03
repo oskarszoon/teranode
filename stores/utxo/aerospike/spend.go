@@ -876,7 +876,7 @@ func (s *Store) handleExtraRecords(ctx context.Context, txID *chainhash.Hash, in
 					// setting DAH. The spentExtraRecs counter can drift due to
 					// interrupted rollbacks, so we don't trust it blindly.
 					if ret.ChildCount > 0 {
-						allSpent, verifyErr := s.verifyAllChildrenSpent(txID, ret.ChildCount)
+						allSpent, verifyErr := s.verifyAllChildrenSpent(ctx, txID, ret.ChildCount)
 						if verifyErr != nil {
 							s.logger.Errorf("[handleExtraRecords][%s] failed to verify children: %v", txID.String(), verifyErr)
 							return verifyErr
@@ -926,9 +926,13 @@ func (s *Store) handleExtraRecords(ctx context.Context, txID *chainhash.Hash, in
 // child has spentUtxos == recordUtxos. Used as a sanity check before setting
 // DAH — the spentExtraRecs counter can drift during interrupted rollbacks,
 // so we verify the actual child state before trusting it.
-func (s *Store) verifyAllChildrenSpent(txID *chainhash.Hash, childCount int) (bool, error) {
+func (s *Store) verifyAllChildrenSpent(ctx context.Context, txID *chainhash.Hash, childCount int) (bool, error) {
 	if childCount == 0 {
 		return true, nil
+	}
+
+	if err := ctx.Err(); err != nil {
+		return false, err
 	}
 
 	batchPolicy := util.GetAerospikeBatchPolicy(s.settings)

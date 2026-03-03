@@ -344,7 +344,7 @@ func (s *Store) GetMeta(ctx context.Context, hash *chainhash.Hash, data *meta.Da
 // The method creates a batchGetItem with the request parameters and sends it to the
 // getBatcher for processing. It then waits on a done channel for the result.
 func (s *Store) get(ctx context.Context, hash *chainhash.Hash, bins []fields.FieldName) (*meta.Data, error) {
-	done := make(chan batchGetItemData)
+	done := make(chan batchGetItemData, 1)
 	item := &batchGetItem{hash: *hash, fields: bins, done: done}
 
 	if s.getBatcher != nil {
