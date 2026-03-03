@@ -126,6 +126,7 @@ type Store struct {
 	spendBatcher        batcherIfc[batchSpend]
 	spendCircuitBreaker *circuitBreaker
 	outpointBatcher     batcherIfc[batchOutpoint]
+	incrementBatcher    batcherIfc[batchIncrement]
 	setDAHBatcher       batcherIfc[batchDAH]
 	lockedBatcher       batcherIfc[batchLocked]
 	externalStore       blob.Store
@@ -307,6 +308,11 @@ func New(ctx context.Context, logger ulogger.Logger, tSettings *settings.Setting
 	outpointBatchDurationStr := s.settings.UtxoStore.OutpointBatcherDurationMillis
 	outpointBatchDuration := time.Duration(outpointBatchDurationStr) * time.Millisecond
 	s.outpointBatcher = batcher.New(outpointBatchSize, outpointBatchDuration, s.sendOutpointBatch, true)
+
+	incrementBatchSize := tSettings.UtxoStore.IncrementBatcherSize
+	incrementBatchDurationStr := tSettings.UtxoStore.IncrementBatcherDurationMillis
+	incrementBatchDuration := time.Duration(incrementBatchDurationStr) * time.Millisecond
+	s.incrementBatcher = batcher.New(incrementBatchSize, incrementBatchDuration, s.sendIncrementBatch, true)
 
 	setDAHBatchSize := tSettings.UtxoStore.SetDAHBatcherSize
 	setDAHBatchDurationStr := tSettings.UtxoStore.SetDAHBatcherDurationMillis

@@ -97,6 +97,69 @@ type batchSpend struct {
 	ignoreLocked      bool
 }
 
+// IncrementSpentRecordsMulti performs a single BatchOperate to increment spent-extra-records for many txids.
+// This avoids enqueueing each increment through the batcher and waiting per-item.
+func (s *Store) IncrementSpentRecordsMulti(txids []*chainhash.Hash, increment int) error {
+	if len(txids) == 0 {
+		return nil
+	}
+
+	batchPolicy := util.GetAerospikeBatchPolicy(s.settings)
+	batchUDFPolicy := aerospike.NewBatchUDFPolicy()
+
+	currentBlockHeight := s.blockHeight.Load()
+
+	batchRecordsPtr := getBatchRecordsSlice(len(txids))
+	batchRecords := (*batchRecordsPtr)[:0]
+
+	for _, txid := range txids {
+		key, err := aerospike.NewKey(s.namespace, s.setName, txid[:])
+		if err != nil {
+			*batchRecordsPtr = batchRecords
+			putBatchRecordsSlice(batchRecordsPtr)
+			return errors.NewProcessingError("failed to init new aerospike key for txMeta", err)
+		}
+
+		batchRecords = append(batchRecords, aerospike.NewBatchUDF(batchUDFPolicy, key, LuaPackage, "incrementSpentExtraRecs",
+			aerospike.NewIntegerValue(increment),
+			aerospike.NewIntegerValue(int(currentBlockHeight)),
+			aerospike.NewValue(s.settings.GetUtxoStoreBlockHeightRetention()),
+		))
+	}
+
+	if err := s.client.BatchOperate(batchPolicy, batchRecords); err != nil {
+		*batchRecordsPtr = batchRecords
+		putBatchRecordsSlice(batchRecordsPtr)
+		return errors.NewStorageError("[IncrementSpentRecordsMulti] error in aerospike batch", err)
+	}
+
+	// Inspect per-record errors
+	var aggErr error
+	for i := range batchRecords {
+		if recErr := batchRecords[i].BatchRec().Err; recErr != nil {
+			if aggErr == nil {
+				aggErr = recErr
+			} else {
+				aggErr = errors.Join(aggErr, recErr)
+			}
+		}
+
+		response := batchRecords[i].BatchRec().Record
+		if response != nil && response.Bins != nil {
+			successMap := response.Bins[LuaSuccess.String()].(map[interface{}]interface{})
+			status, ok := successMap["status"].(string)
+			if !ok || status != "OK" {
+				aggErr = errors.Join(aggErr, errors.NewProcessingError(successMap["message"].(string)))
+			}
+		}
+	}
+
+	*batchRecordsPtr = batchRecords
+	putBatchRecordsSlice(batchRecordsPtr)
+
+	return aggErr
+}
+
 // SetDAHForChildRecordsMulti expands childCount per tx and performs a single BatchOperate
 // to set/unset DeleteAtHeight across all child pagination records.
 func (s *Store) SetDAHForChildRecordsMulti(items []struct {
@@ -155,7 +218,13 @@ func (s *Store) SetDAHForChildRecordsMulti(items []struct {
 	return aggErr
 }
 
-// batchDAH handles DeleteAtHeight updates for child records
+// batchIncrement handles record count updates for paginated transactions
+type batchIncrement struct {
+	txID      *chainhash.Hash               // Transaction hash
+	increment int                           // Count adjustment
+	res       chan incrementSpentRecordsRes // Result channel
+}
+
 type batchDAH struct {
 	txID           *chainhash.Hash // Transaction hash
 	childIdx       uint32          // Child record index
@@ -322,8 +391,8 @@ func (s *Store) Spend(ctx context.Context, tx *bt.Tx, blockHeight uint32, ignore
 
 	if len(spends) != len(spentSpends) { // there must have been failures
 		// Use a detached context for the rollback — the parent context may already be
-		// cancelled (e.g. by errgroup), but the unspend MUST complete to avoid leaving
-		// corrupted state (e.g. inflated spentExtraRecs on master records).
+		// cancelled (e.g. by errgroup), but the unspend MUST complete to properly
+		// decrement spentExtraRecs on master records via NOTALLSPENT signals.
 		unspendErr := s.Unspend(context.Background(), spentSpends)
 		if unspendErr != nil {
 			s.logger.Errorf("error in aerospike unspend (batched mode): %v", unspendErr)
@@ -606,113 +675,28 @@ func (s *Store) handleParseError(batchByKey []aerospike.MapValue, batch []*batch
 func (s *Store) handleSpendSignal(ctx context.Context, signal LuaSignal, txID *chainhash.Hash, childCount int, thisBlockHeight uint32) {
 	switch signal {
 	case LuaSignalAllSpent:
-		// For multi-record txs: Lua confirmed master's local UTXOs are all spent
-		// and conditions are met (blockIDs, onLongestChain). Verify all children
-		// are also spent before setting DAH.
-		if childCount > 0 {
-			allSpent, err := s.verifyAllChildrenSpent(txID, childCount)
-			if err != nil {
-				s.logger.Errorf("Failed to verify children spent for %s: %v", txID.String(), err)
-				return
-			}
-			if !allSpent {
-				return
-			}
-
-			retention := s.settings.GetUtxoStoreBlockHeightRetention()
-			if retention > 0 {
-				dahHeight := thisBlockHeight + retention
-
-				// Set DAH on master record (childIdx=0)
-				s.setDAHBatcher.Put(&batchDAH{
-					txID:           txID,
-					childIdx:       0,
-					deleteAtHeight: dahHeight,
-					errCh:          make(chan error, 1),
-				})
-
-				// Set DAH on all child records
-				if err := s.SetDAHForChildRecords(txID, childCount, dahHeight); err != nil {
-					s.logger.Errorf("Failed to set DAH for child records: %v", err)
-				}
-			}
-		}
-		// For single-record txs (childCount==0): Lua already set DAH inline, nothing to do
-
-	case LuaSignalNotAllSpent:
-		// Multi-record tx: conditions no longer met (Lua already cleared master DAH).
-		// Clear DAH on child records.
-		if childCount > 0 {
-			if err := s.SetDAHForChildRecords(txID, childCount, 0); err != nil {
-				s.logger.Errorf("Failed to clear DAH for child records: %v", err)
-			}
+		if err := s.handleExtraRecords(ctx, txID, 1); err != nil {
+			s.logger.Errorf("Failed to handle extra records: %v", err)
 		}
 
 	case LuaSignalDAHSet:
-		// Only for single-record txs or external store signals
+		// Only set DAH if BlockHeightRetention is configured (> 0)
+		// When retention is 0, it means "don't use automatic retention"
 		if retention := s.settings.GetUtxoStoreBlockHeightRetention(); retention > 0 {
 			dahHeight := thisBlockHeight + retention
+
 			if err := s.SetDAHForChildRecords(txID, childCount, dahHeight); err != nil {
 				s.logger.Errorf("Failed to set DAH for child records: %v", err)
 			}
+			// External store DAH is disabled - lifecycle managed by pruner service
 		}
 
 	case LuaSignalDAHUnset:
 		if err := s.SetDAHForChildRecords(txID, childCount, aerospike.TTLDontExpire); err != nil {
 			s.logger.Errorf("Failed to unset DAH for child records: %v", err)
 		}
+		// External store DAH is disabled - lifecycle managed by pruner service
 	}
-}
-
-// verifyAllChildrenSpent batch-reads all child records and checks if every
-// child has spentUtxos == recordUtxos. This replaces the spentExtraRecs counter
-// with a direct verification that's immune to interrupted rollbacks.
-func (s *Store) verifyAllChildrenSpent(txID *chainhash.Hash, childCount int) (bool, error) {
-	if childCount == 0 {
-		return true, nil
-	}
-
-	batchPolicy := util.GetAerospikeBatchPolicy(s.settings)
-	readPolicy := aerospike.NewBatchReadPolicy()
-
-	batchRecords := make([]aerospike.BatchRecordIfc, 0, childCount)
-
-	for i := uint32(1); i <= uint32(childCount); i++ { // nolint: gosec
-		keySource := uaerospike.CalculateKeySourceInternal(txID, i)
-		key, err := aerospike.NewKey(s.namespace, s.setName, keySource)
-		if err != nil {
-			return false, errors.NewProcessingError("[verifyAllChildrenSpent][%s] failed to create key for child %d", txID.String(), i, err)
-		}
-
-		batchRecords = append(batchRecords, aerospike.NewBatchRead(
-			readPolicy,
-			key,
-			[]string{fields.SpentUtxos.String(), fields.RecordUtxos.String()},
-		))
-	}
-
-	if err := s.client.BatchOperate(batchPolicy, batchRecords); err != nil {
-		return false, errors.NewStorageError("[verifyAllChildrenSpent][%s] batch read failed", txID.String(), err)
-	}
-
-	for i, br := range batchRecords {
-		rec := br.BatchRec()
-		if rec.Err != nil {
-			return false, errors.NewStorageError("[verifyAllChildrenSpent][%s] child %d read failed", txID.String(), i+1, rec.Err)
-		}
-		if rec.Record == nil || rec.Record.Bins == nil {
-			return false, nil // Missing record means not all spent
-		}
-
-		spentUtxos, _ := rec.Record.Bins[fields.SpentUtxos.String()].(int)
-		recordUtxos, _ := rec.Record.Bins[fields.RecordUtxos.String()].(int)
-
-		if spentUtxos != recordUtxos {
-			return false, nil // This child has unspent UTXOs
-		}
-	}
-
-	return true, nil
 }
 
 // handleSuccessfulSpends handles successful spend operations
@@ -855,6 +839,235 @@ func (s *Store) SetDAHForChildRecords(txID *chainhash.Hash, childCount int, dah 
 	}
 
 	return nil
+}
+
+// handleExtraRecords manages the record count for paginated transactions when UTXOs are spent.
+// This function is called when spending operations affect transactions with multiple records
+// to maintain accurate pagination counts for cleanup operations.
+//
+// Parameters:
+//   - ctx: Context for cancellation
+//   - txID: Transaction ID whose record count needs updating
+//   - increment: Amount to increment (can be negative for decrement)
+//
+// Returns:
+//   - error: Any error encountered during the record count update
+func (s *Store) handleExtraRecords(ctx context.Context, txID *chainhash.Hash, increment int) error {
+	res, err := s.IncrementSpentRecords(txID, increment) // This is a batch operation
+	if err != nil {
+		return err
+	}
+
+	// Parse the map response
+	ret, err := s.ParseLuaMapResponse(res)
+	if err != nil {
+		s.logger.Errorf("[SPEND_BATCH_LUA][%s] failed to parse LUA return value: %v", txID.String(), err)
+		return err
+	}
+
+	if ret.Status == LuaStatusOK {
+		if ret.Signal != "" {
+			switch ret.Signal {
+			case LuaSignalDAHSet:
+				// Only set DAH if BlockHeightRetention is configured (> 0)
+				// When retention is 0, it means "don't use automatic retention"
+				if retention := s.settings.GetUtxoStoreBlockHeightRetention(); retention > 0 {
+					// Sanity check: verify all children are actually spent before
+					// setting DAH. The spentExtraRecs counter can drift due to
+					// interrupted rollbacks, so we don't trust it blindly.
+					if ret.ChildCount > 0 {
+						allSpent, verifyErr := s.verifyAllChildrenSpent(txID, ret.ChildCount)
+						if verifyErr != nil {
+							s.logger.Errorf("[handleExtraRecords][%s] failed to verify children: %v", txID.String(), verifyErr)
+							return verifyErr
+						}
+						if !allSpent {
+							s.logger.Warnf("[handleExtraRecords][%s] spentExtraRecs triggered DAH but not all children are spent — counter drift detected, clearing master DAH", txID.String())
+							// Lua already set DAH on the master record inline.
+							// Clear it since children aren't actually all-spent.
+							errCh := make(chan error, 1)
+							s.setDAHBatcher.Put(&batchDAH{
+								txID:           txID,
+								childIdx:       0, // master record
+								deleteAtHeight: 0, // clear DAH
+								errCh:          errCh,
+							})
+							if dahErr := <-errCh; dahErr != nil {
+								s.logger.Errorf("[handleExtraRecords][%s] failed to clear drifted master DAH: %v", txID.String(), dahErr)
+							}
+							return nil
+						}
+					}
+
+					thisBlockHeight := s.blockHeight.Load()
+					dah := thisBlockHeight + retention
+
+					if err := s.SetDAHForChildRecords(txID, ret.ChildCount, dah); err != nil {
+						return err
+					}
+					// External store DAH is disabled - lifecycle managed by pruner service
+				}
+
+			case LuaSignalDAHUnset:
+				if err := s.SetDAHForChildRecords(txID, ret.ChildCount, 0); err != nil {
+					return err
+				}
+				// External store DAH is disabled - lifecycle managed by pruner service
+			}
+		}
+	} else if ret.Status == LuaStatusError {
+		return errors.NewStorageError("[SPEND_BATCH_LUA][%s] failed to handleExtraRecords: %v", txID.String(), ret.Message)
+	}
+
+	return nil
+}
+
+// verifyAllChildrenSpent batch-reads all child records and checks if every
+// child has spentUtxos == recordUtxos. Used as a sanity check before setting
+// DAH — the spentExtraRecs counter can drift during interrupted rollbacks,
+// so we verify the actual child state before trusting it.
+func (s *Store) verifyAllChildrenSpent(txID *chainhash.Hash, childCount int) (bool, error) {
+	if childCount == 0 {
+		return true, nil
+	}
+
+	batchPolicy := util.GetAerospikeBatchPolicy(s.settings)
+	readPolicy := aerospike.NewBatchReadPolicy()
+
+	batchRecords := make([]aerospike.BatchRecordIfc, 0, childCount)
+
+	for i := uint32(1); i <= uint32(childCount); i++ { // nolint: gosec
+		keySource := uaerospike.CalculateKeySourceInternal(txID, i)
+		key, err := aerospike.NewKey(s.namespace, s.setName, keySource)
+		if err != nil {
+			return false, errors.NewProcessingError("[verifyAllChildrenSpent][%s] failed to create key for child %d", txID.String(), i, err)
+		}
+
+		batchRecords = append(batchRecords, aerospike.NewBatchRead(
+			readPolicy,
+			key,
+			[]string{fields.SpentUtxos.String(), fields.RecordUtxos.String()},
+		))
+	}
+
+	if err := s.client.BatchOperate(batchPolicy, batchRecords); err != nil {
+		return false, errors.NewStorageError("[verifyAllChildrenSpent][%s] batch read failed", txID.String(), err)
+	}
+
+	for i, br := range batchRecords {
+		rec := br.BatchRec()
+		if rec.Err != nil {
+			return false, errors.NewStorageError("[verifyAllChildrenSpent][%s] child %d read failed", txID.String(), i+1, rec.Err)
+		}
+		if rec.Record == nil || rec.Record.Bins == nil {
+			return false, nil
+		}
+
+		spentUtxos, _ := rec.Record.Bins[fields.SpentUtxos.String()].(int)
+		recordUtxos, _ := rec.Record.Bins[fields.RecordUtxos.String()].(int)
+
+		if spentUtxos != recordUtxos {
+			return false, nil
+		}
+	}
+
+	return true, nil
+}
+
+type incrementSpentRecordsRes struct {
+	res interface{}
+	err error
+}
+
+// IncrementSpentRecords updates the record count for paginated transactions.
+// Used for cleanup management of large transactions.
+func (s *Store) IncrementSpentRecords(txid *chainhash.Hash, increment int) (interface{}, error) {
+	res := make(chan incrementSpentRecordsRes)
+
+	go func() {
+		s.incrementBatcher.Put(&batchIncrement{
+			txID:      txid,
+			increment: increment,
+			res:       res,
+		})
+	}()
+
+	response := <-res
+
+	return response.res, response.err
+}
+
+func (s *Store) sendIncrementBatch(batch []*batchIncrement) {
+	var err error
+
+	batchPolicy := util.GetAerospikeBatchPolicy(s.settings)
+	batchUDFPolicy := aerospike.NewBatchUDFPolicy()
+
+	// Create a batch of records to read, with a max size of the batch
+	batchRecords := make([]aerospike.BatchRecordIfc, 0, len(batch))
+
+	currentBlockHeight := s.blockHeight.Load()
+
+	// Create a batch of records to read from the txHashes
+	for _, item := range batch {
+		aeroKey, err := aerospike.NewKey(s.namespace, s.setName, item.txID[:])
+		if err != nil {
+			item.res <- incrementSpentRecordsRes{
+				res: nil,
+				err: errors.NewProcessingError("failed to init new aerospike key for txMeta", err),
+			}
+
+			continue
+		}
+
+		batchRecords = append(batchRecords, aerospike.NewBatchUDF(batchUDFPolicy, aeroKey, LuaPackage, "incrementSpentExtraRecs",
+			aerospike.NewIntegerValue(item.increment),
+			aerospike.NewIntegerValue(int(currentBlockHeight)),
+			aerospike.NewValue(s.settings.GetUtxoStoreBlockHeightRetention()),
+		))
+	}
+
+	// send the batch to aerospike
+	err = s.client.BatchOperate(batchPolicy, batchRecords)
+	if err != nil {
+		for _, item := range batch {
+			item.res <- incrementSpentRecordsRes{
+				res: nil,
+				err: errors.NewStorageError("error in aerospike send outpoint batch records", err),
+			}
+		}
+
+		return
+	}
+
+	// Process the batch records
+	for idx, batchRecordIfc := range batchRecords {
+		batchRecord := batchRecordIfc.BatchRec()
+		if batchRecord.Err != nil {
+			batch[idx].res <- incrementSpentRecordsRes{
+				res: nil,
+				err: errors.NewStorageError("error in aerospike send outpoint batch records", err),
+			}
+
+			continue
+		}
+
+		// Get the raw response from Lua
+		rawResponse := batchRecord.Record.Bins[LuaSuccess.String()]
+		if rawResponse == nil {
+			batch[idx].res <- incrementSpentRecordsRes{
+				res: nil,
+				err: errors.NewProcessingError("no response from Lua"),
+			}
+			continue
+		}
+
+		// Pass through the raw response - let the caller handle parsing
+		batch[idx].res <- incrementSpentRecordsRes{
+			res: rawResponse,
+			err: nil,
+		}
+	}
 }
 
 func (s *Store) sendSetDAHBatch(batch []*batchDAH) {

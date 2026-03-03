@@ -241,11 +241,7 @@ func (s *Store) processBatchResultsForSetMined(ctx context.Context, batchRecords
 	blockIDs := make(map[chainhash.Hash][]uint32, len(hashes))
 
 	// Collect follow-up actions to execute in batches after the loop
-	type verifyItem struct {
-		TxID       *chainhash.Hash
-		ChildCount int
-	}
-	verifyRecords := make([]verifyItem, 0, len(hashes))
+	extraRecords := make([]*chainhash.Hash, 0, len(hashes))
 	dahSetItems := make([]struct {
 		TxID           *chainhash.Hash
 		ChildCount     int
@@ -305,7 +301,7 @@ func (s *Store) processBatchResultsForSetMined(ctx context.Context, batchRecords
 		if res != nil && res.Signal != "" {
 			switch res.Signal {
 			case LuaSignalAllSpent:
-				verifyRecords = append(verifyRecords, verifyItem{TxID: hashes[idx], ChildCount: res.ChildCount})
+				extraRecords = append(extraRecords, hashes[idx])
 			case LuaSignalDAHSet:
 				// Only set DAH if retention is configured
 				if retention > 0 {
@@ -337,32 +333,10 @@ func (s *Store) processBatchResultsForSetMined(ctx context.Context, batchRecords
 	// Execute aggregated follow-ups in batches
 	var postErr error
 
-	// For ALLSPENT signals: verify all children are spent before setting DAH
-	for _, item := range verifyRecords {
-		if item.ChildCount > 0 {
-			allSpent, err := s.verifyAllChildrenSpent(item.TxID, item.ChildCount)
-			if err != nil {
-				postErr = errors.Join(postErr, err)
-				continue
-			}
-			if allSpent && retention > 0 {
-				// Set DAH on master + children
-				dahSetItems = append(dahSetItems, struct {
-					TxID           *chainhash.Hash
-					ChildCount     int
-					DeleteAtHeight uint32
-				}{TxID: item.TxID, ChildCount: item.ChildCount, DeleteAtHeight: dahHeight})
-
-				// Also set DAH on master (childIdx=0) via individual write
-				s.setDAHBatcher.Put(&batchDAH{
-					txID:           item.TxID,
-					childIdx:       0,
-					deleteAtHeight: dahHeight,
-					errCh:          make(chan error, 1),
-				})
-			}
+	if len(extraRecords) > 0 {
+		if err := s.IncrementSpentRecordsMulti(extraRecords, 1); err != nil {
+			postErr = errors.Join(postErr, err)
 		}
-		// Single-record txs (ChildCount==0): Lua already set DAH inline
 	}
 
 	if len(dahSetItems) > 0 {
@@ -437,29 +411,8 @@ func (s *Store) handleSetMinedSignal(ctx context.Context, signal LuaSignal, hash
 
 	switch signal {
 	case LuaSignalAllSpent:
-		// Multi-record tx: verify children before setting DAH
-		if childCount > 0 {
-			allSpent, err := s.verifyAllChildrenSpent(hash, childCount)
-			if err != nil {
-				errs = errors.Join(errs, err)
-			} else if allSpent {
-				if retention := s.settings.GetUtxoStoreBlockHeightRetention(); retention > 0 {
-					dahHeight := thisBlockHeight + retention
-					s.setDAHBatcher.Put(&batchDAH{txID: hash, childIdx: 0, deleteAtHeight: dahHeight, errCh: make(chan error, 1)})
-					if err := s.SetDAHForChildRecords(hash, childCount, dahHeight); err != nil {
-						errs = errors.Join(errs, err)
-					}
-				}
-			}
-		}
-		// Single-record txs: Lua already set DAH inline
-
-	case LuaSignalNotAllSpent:
-		// Multi-record tx: conditions no longer met (Lua cleared master DAH). Clear children.
-		if childCount > 0 {
-			if err := s.SetDAHForChildRecords(hash, childCount, 0); err != nil {
-				errs = errors.Join(errs, err)
-			}
+		if err := s.handleExtraRecords(ctx, hash, 1); err != nil {
+			errs = errors.Join(errs, err)
 		}
 
 	case LuaSignalDAHSet:

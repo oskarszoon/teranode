@@ -145,10 +145,6 @@ func (s *Store) unspend(ctx context.Context, spends []*utxo.Spend, flagAsLocked 
 //   - prometheusUtxoMapReset: Successful unspends
 //   - prometheusUtxoMapErrors: Failed operations
 func (s *Store) unspendLua(ctx context.Context, spend *utxo.Spend) error {
-	if err := ctx.Err(); err != nil {
-		return errors.NewStorageError("context cancelled before unspend", err)
-	}
-
 	policy := util.GetAerospikeWritePolicy(s.settings, 0)
 
 	keySource := uaerospike.CalculateKeySource(spend.TxID, spend.Vout, s.utxoBatchSize)
@@ -189,19 +185,11 @@ func (s *Store) unspendLua(ctx context.Context, spend *utxo.Spend) error {
 	if res.Status == LuaStatusOK {
 		// Handle signal if present
 		if res.Signal == LuaSignalNotAllSpent {
-			// Child record transitioned ALLSPENT → NOTALLSPENT. Clear DAH on
-			// the master record so the pruner won't delete the tx while it has
-			// unspent UTXOs. Clearing master DAH is sufficient — the pruner
-			// iterates from master records, so stale child DAH is harmless.
-			errCh := make(chan error, 1)
-			s.setDAHBatcher.Put(&batchDAH{
-				txID:           spend.TxID,
-				childIdx:       0, // master record
-				deleteAtHeight: 0, // clear DAH
-				errCh:          errCh,
-			})
-			if dahErr := <-errCh; dahErr != nil {
-				s.logger.Errorf("Failed to clear DAH on master for %s: %v", spend.TxID.String(), dahErr)
+			// Decrement spentExtraRecs on the master record since this child
+			// record transitioned from ALLSPENT back to NOTALLSPENT.
+			// This mirrors the +1 increment done in handleSpendSignal for ALLSPENT.
+			if err := s.handleExtraRecords(ctx, spend.TxID, -1); err != nil {
+				return err
 			}
 		}
 	} else if res.Status == LuaStatusError {

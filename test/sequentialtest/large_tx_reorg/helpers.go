@@ -87,27 +87,30 @@ func setupLargeTransactionTest(t *testing.T, utxoStoreType string) (*daemon.Test
 //
 // For non-Aerospike stores (postgres):
 // - Skips verification (counters don't apply)
-func verifySpentExtraRecs(t *testing.T, td *daemon.TestDaemon, tx *bt.Tx, _ int, expectedTotalRecs int) {
+func verifySpentExtraRecs(t *testing.T, td *daemon.TestDaemon, tx *bt.Tx, expectedSpentRecs int, expectedTotalRecs int) {
 	t.Helper()
-	// The spentExtraRecs counter was removed in favor of Go-side batch-read
-	// verification of child records. We only verify totalExtraRecs (set at creation).
+	// Only Aerospike uses the spentExtraRecs/totalExtraRecs counters
+	// Check if UTXO store URL scheme is aerospike
 	if td.Settings.UtxoStore.UtxoStore == nil || td.Settings.UtxoStore.UtxoStore.Scheme != "aerospike" {
 		storeType := "unknown"
 		if td.Settings.UtxoStore.UtxoStore != nil {
 			storeType = td.Settings.UtxoStore.UtxoStore.Scheme
 		}
-		t.Logf("Skipping verification for non-Aerospike store: %s", storeType)
+		t.Logf("Skipping spentExtraRecs verification for non-Aerospike store: %s", storeType)
 		return
 	}
 
 	txID := tx.TxIDChainHash()
 
+	// Cast UTXO store to Aerospike store to access client and settings
 	aeroStore, ok := td.UtxoStore.(*aerospikestore.Store)
 	require.True(t, ok, "UTXO store must be Aerospike store")
 
+	// Get the underlying Aerospike client
 	client := aeroStore.GetClient()
 	require.NotNil(t, client, "Aerospike client should be available")
 
+	// Create key for the main transaction record
 	key, err := aerospike.NewKey(
 		aeroStore.GetNamespace(),
 		aeroStore.GetSet(),
@@ -115,20 +118,37 @@ func verifySpentExtraRecs(t *testing.T, td *daemon.TestDaemon, tx *bt.Tx, _ int,
 	)
 	require.NoError(t, err, "Failed to create Aerospike key for tx %s", txID)
 
+	// Fetch only the counter bins we care about
 	policy := util.GetAerospikeReadPolicy(td.Settings)
-	rec, err := client.Get(policy, key, "totalExtraRecs")
+	rec, err := client.Get(policy, key, "totalExtraRecs", "spentExtraRecs")
 	require.NoError(t, err, "Failed to read Aerospike record for tx %s", txID)
 	require.NotNil(t, rec, "Aerospike record should exist for tx %s", txID)
 
+	// Extract counter values
 	totalRecs := 0
+	spentRecs := 0
+
 	if val, ok := rec.Bins["totalExtraRecs"].(int); ok {
 		totalRecs = val
 	}
+	if val, ok := rec.Bins["spentExtraRecs"].(int); ok {
+		spentRecs = val
+	}
 
+	// Verify expected values
 	require.Equal(t, expectedTotalRecs, totalRecs,
 		"totalExtraRecs mismatch for tx %s", txID)
+	require.Equal(t, expectedSpentRecs, spentRecs,
+		"spentExtraRecs mismatch for tx %s", txID)
 
-	t.Logf("✓ totalExtraRecs verified for tx %s: totalExtraRecs=%d", txID, totalRecs)
+	// CRITICAL BUG CHECK: spentExtraRecs must never exceed totalExtraRecs
+	// This is the exact condition that caused the production panic
+	require.LessOrEqual(t, spentRecs, totalRecs,
+		"PRODUCTION BUG DETECTED: spentExtraRecs (%d) > totalExtraRecs (%d) for tx %s",
+		spentRecs, totalRecs, txID)
+
+	t.Logf("✓ Counter verification passed for tx %s: spentExtraRecs=%d, totalExtraRecs=%d",
+		txID, spentRecs, totalRecs)
 }
 
 // calculateExpectedTotalExtraRecs calculates the expected totalExtraRecs value

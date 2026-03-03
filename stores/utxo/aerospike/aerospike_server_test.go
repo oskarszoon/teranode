@@ -930,6 +930,57 @@ func TestAerospike(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, []interface{}{int(blockID1), int(blockID2)}, value2.Bins[fields.BlockIDs.String()].([]interface{}))
 	})
+
+	// New test to validate IncrementSpentRecordsMulti coalesces increments and updates the counter
+	t.Run("aerospike_increment_spent_records_multi", func(t *testing.T) {
+		cleanDB(t, client)
+
+		bigTx := createTransactionWithOutputs(tSettings.UtxoStore.UtxoBatchSize + 1) // This will make the tx split into 2 records
+
+		_, err = store.Create(ctx, bigTx, 0)
+		require.NoError(t, err)
+
+		bigTxKey, err := aerospike.NewKey(store.GetNamespace(), store.GetName(), uaerospike.CalculateKeySourceInternal(bigTx.TxIDChainHash(), 0))
+		require.NoError(t, err)
+
+		// Get the master record
+		rec, err := client.Get(util.GetAerospikeReadPolicy(tSettings), bigTxKey)
+		require.NoError(t, err)
+
+		// Check the creating bin is removed
+		assert.Nil(t, rec.Bins["creating"])
+
+		// The spentExtraRecords will be nil if not set
+		initial := 0
+		if v, ok := rec.Bins["spentExtraRecs"].(int); ok {
+			initial = v
+		}
+
+		totalExtraRecs := rec.Bins[fields.TotalExtraRecs.String()].(int)
+		assert.Equal(t, 1, totalExtraRecs)
+
+		childKey, err := aerospike.NewKey(store.GetNamespace(), store.GetName(), uaerospike.CalculateKeySourceInternal(bigTx.TxIDChainHash(), 1))
+		require.NoError(t, err)
+
+		// Get the master record
+		rec, err = client.Get(util.GetAerospikeReadPolicy(tSettings), childKey)
+		require.NoError(t, err)
+
+		// Check the creating bin is removed
+		assert.Nil(t, rec.Bins["creating"])
+
+		// Increment via multi API
+		require.NoError(t, store.IncrementSpentRecordsMulti([]*chainhash.Hash{bigTx.TxIDChainHash()}, 1))
+
+		rec2, err := client.Get(util.GetAerospikeReadPolicy(tSettings), bigTxKey)
+		require.NoError(t, err)
+
+		v2, ok := rec2.Bins["spentExtraRecs"].(int)
+		require.True(t, ok)
+
+		assert.Equal(t, initial+1, v2)
+	})
+
 	// New test: SetMinedMulti with one valid and one invalid hash should partially succeed and return an error
 	t.Run("aerospike_setmined_multi_partial_failure", func(t *testing.T) {
 		cleanDB(t, client)
@@ -954,6 +1005,47 @@ func TestAerospike(t *testing.T) {
 		_, hasInvalid := blockIDsMap[invalid]
 		require.False(t, hasInvalid)
 	})
+
+	// New test: IncrementSpentRecordsMulti with one invalid key should aggregate errors and still update the valid one
+	t.Run("aerospike_increment_spent_records_multi_with_errors", func(t *testing.T) {
+		cleanDB(t, client)
+
+		bigTx := createTransactionWithOutputs(tSettings.UtxoStore.UtxoBatchSize + 1) // This will make the tx split into 2 records
+
+		_, err = store.Create(ctx, bigTx, 0)
+		require.NoError(t, err)
+
+		bigTxKey, err := aerospike.NewKey(store.GetNamespace(), store.GetName(), bigTx.TxIDChainHash().CloneBytes())
+		require.NoError(t, err)
+
+		rec, err := client.Get(util.GetAerospikeReadPolicy(tSettings), bigTxKey, "spentExtraRecs")
+		require.NoError(t, err)
+		base := 0
+		if v, ok := rec.Bins["spentExtraRecs"].(int); ok {
+			base = v
+		}
+
+		valid := tx.TxIDChainHash()
+		var invalid chainhash.Hash // zero hash, not present
+		ids := []*chainhash.Hash{valid, &invalid}
+
+		aggErr := store.IncrementSpentRecordsMulti(ids, 1)
+		require.Error(t, aggErr)
+		t.Logf("Error: %v", aggErr)
+
+		rec2, err := client.Get(util.GetAerospikeReadPolicy(tSettings), bigTxKey)
+		require.NoError(t, err)
+
+		spentExtraRecordsBin := rec2.Bins["spentExtraRecs"]
+		if spentExtraRecordsBin == nil {
+			t.Logf("spentExtraRecs bin is nil")
+		} else {
+			v2, ok := spentExtraRecordsBin.(int)
+			require.True(t, ok)
+			assert.Equal(t, base+1, v2)
+		}
+	})
+
 	t.Run("set mined with locked", func(t *testing.T) {
 		cleanDB(t, client)
 
@@ -1162,6 +1254,44 @@ func TestCoinbase(t *testing.T) {
 //	require.True(t, ok)
 //	assert.Equal(t, 2, totalExtraRecs)
 // }
+
+func TestIncrementSpentRecords(t *testing.T) {
+	logger := ulogger.NewErrorTestLogger(t)
+	tSettings := test.CreateBaseTestSettings(t)
+
+	client, store, ctx, deferFn := initAerospike(t, tSettings, logger)
+
+	t.Cleanup(func() {
+		deferFn()
+	})
+
+	key, aErr := aerospike.NewKey(store.GetNamespace(), store.GetName(), tx.TxIDChainHash().CloneBytes())
+	require.NoError(t, aErr)
+	assert.NotNil(t, key)
+
+	_, aErr = client.Delete(nil, key)
+	require.NoError(t, aErr)
+
+	txMeta, err := store.Create(ctx, tx, 0)
+	require.NoError(t, err)
+	assert.NotNil(t, txMeta)
+
+	resp, err := client.Get(nil, key, "totalExtraRecs")
+	require.NoError(t, err)
+
+	totalExtraRecs, ok := resp.Bins["totalExtraRecs"].(int)
+	require.True(t, ok)
+	assert.Equal(t, 0, totalExtraRecs)
+
+	res, err := store.IncrementSpentRecords(tx.TxIDChainHash(), 1)
+	require.NoError(t, err) // IncrementSpentRecords doesn't return error directly
+
+	// Parse the response to check for error
+	parsedRes, err := store.ParseLuaMapResponse(res)
+	require.NoError(t, err)
+	assert.Equal(t, teranode_aerospike.LuaStatusError, parsedRes.Status)
+	assert.Contains(t, parsedRes.Message, "spentExtraRecs cannot be greater than totalExtraRecs")
+}
 
 func TestStoreDecorate(t *testing.T) {
 	logger := ulogger.NewErrorTestLogger(t)
@@ -1573,6 +1703,52 @@ func TestAerospikeWithBatchSize(t *testing.T) {
 		require.True(t, ok)
 		assert.Equal(t, 2, totalExtraRecs)
 
+		spentExtraRecs, ok := value.Bins[fields.SpentExtraRecs.String()].(int)
+		require.True(t, ok)
+		assert.Equal(t, 2, spentExtraRecs)
+	})
+
+	t.Run("aerospike_increment_spent_records", func(t *testing.T) {
+		cleanDB(t, client)
+
+		txMeta, err := store.Create(ctx, tx, 0)
+		require.NoError(t, err)
+		assert.NotNil(t, txMeta)
+
+		resp, err := client.Get(nil, txKey, fields.TotalExtraRecs.String())
+		require.NoError(t, err)
+
+		totalExtraRecs, ok := resp.Bins[fields.TotalExtraRecs.String()].(int)
+		require.True(t, ok)
+		assert.Equal(t, 2, totalExtraRecs)
+
+		_, err = store.IncrementSpentRecords(tx.TxIDChainHash(), 1)
+		require.NoError(t, err)
+
+		resp, err = client.Get(nil, txKey)
+		require.NoError(t, err)
+
+		totalExtraRecs, ok = resp.Bins[fields.TotalExtraRecs.String()].(int)
+		require.True(t, ok)
+		assert.Equal(t, 2, totalExtraRecs)
+
+		spentExtraRecs, ok := resp.Bins[fields.SpentExtraRecs.String()].(int)
+		require.True(t, ok)
+		assert.Equal(t, 1, spentExtraRecs)
+
+		_, err = store.IncrementSpentRecords(tx.TxIDChainHash(), -1)
+		require.NoError(t, err)
+
+		resp, err = client.Get(nil, txKey)
+		require.NoError(t, err)
+
+		totalExtraRecs, ok = resp.Bins[fields.TotalExtraRecs.String()].(int)
+		require.True(t, ok)
+		assert.Equal(t, 2, totalExtraRecs)
+
+		spentExtraRecs, ok = resp.Bins[fields.SpentExtraRecs.String()].(int)
+		require.True(t, ok)
+		assert.Equal(t, 0, spentExtraRecs)
 	})
 
 	t.Run("aerospike_setTTLBatch", func(t *testing.T) {
