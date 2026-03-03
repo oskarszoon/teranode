@@ -552,7 +552,13 @@ func (sm *SyncManager) createUtxos(ctx context.Context, txMap *txmap.SyncedMap[c
 	storeBatcherSize := sm.settings.Legacy.StoreBatcherSize
 	storeBatcherConcurrency := sm.settings.Legacy.StoreBatcherConcurrency
 
-	g, gCtx := errgroup.WithContext(context.Background())          // we don't want the tracing to be linked to these calls
+	// Use a detached context that inherits cancellation from parent but not tracing values
+	bgCtx, bgCancel := context.WithCancel(context.Background())
+	defer bgCancel()
+	stop := context.AfterFunc(ctx, bgCancel)
+	defer stop()
+
+	g, gCtx := errgroup.WithContext(bgCtx)
 	util.SafeSetLimit(g, storeBatcherSize*storeBatcherConcurrency) // we limit the number of concurrent requests, to not overload Aerospike
 
 	blockHeightUint32, err := safeconversion.Int32ToUint32(block.Height())
@@ -610,8 +616,14 @@ func (sm *SyncManager) PreValidateTransactions(ctx context.Context, txMap *txmap
 	spendBatcherSize := sm.settings.Legacy.SpendBatcherSize
 	spendBatcherConcurrency := sm.settings.Legacy.SpendBatcherConcurrency
 
+	// Use a detached context that inherits cancellation from parent but not tracing values
+	bgCtx, bgCancel := context.WithCancel(context.Background())
+	defer bgCancel()
+	stop := context.AfterFunc(ctx, bgCancel)
+	defer stop()
+
 	// validate all the transactions in parallel
-	g, gCtx := errgroup.WithContext(context.Background())          // we don't want the tracing to be linked to these calls
+	g, gCtx := errgroup.WithContext(bgCtx)
 	util.SafeSetLimit(g, spendBatcherSize*spendBatcherConcurrency) // we limit the number of concurrent requests, to not overload Aerospike
 
 	// validate all the transactions in parallel
@@ -690,8 +702,12 @@ func (sm *SyncManager) validateTransactions(ctx context.Context, maxLevel uint32
 
 			sm.validationClient.TriggerBatcher()
 		} else {
+			// Use a detached context that inherits cancellation from parent but not tracing values
+			bgCtx, bgCancel := context.WithCancel(context.Background())
+			stopFn := context.AfterFunc(ctx, bgCancel)
+
 			// process all the transactions on a certain level in parallel
-			g, gCtx := errgroup.WithContext(context.Background())          // we don't want the tracing to be linked to these calls
+			g, gCtx := errgroup.WithContext(bgCtx)
 			util.SafeSetLimit(g, spendBatcherSize*spendBatcherConcurrency) // we limit the number of concurrent requests, to not overload Aerospike
 
 			for txIdx := range blockTxsPerLevel[i] {
@@ -717,6 +733,8 @@ func (sm *SyncManager) validateTransactions(ctx context.Context, maxLevel uint32
 
 			// we don't care about errors here, we are just pre-warming caches for a quicker subtree validation
 			_ = g.Wait()
+			bgCancel()
+			stopFn()
 
 			deferLevelFn()
 		}

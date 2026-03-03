@@ -992,9 +992,23 @@ func (s *Store) IncrementSpentRecords(txid *chainhash.Hash, increment int) (inte
 		})
 	}()
 
-	response := <-res
+	spendTimeout := s.settings.UtxoStore.SpendWaitTimeout
+	if spendTimeout <= 0 {
+		spendTimeout = 30 * time.Second
+	}
 
-	return response.res, response.err
+	timer := time.NewTimer(spendTimeout)
+	defer timer.Stop()
+
+	select {
+	case response := <-res:
+		return response.res, response.err
+	case <-timer.C:
+		if prometheusUtxoMapErrors != nil {
+			prometheusUtxoMapErrors.WithLabelValues("IncrementSpentRecords", "BatchTimeout").Inc()
+		}
+		return nil, errors.NewServiceUnavailableError("[IncrementSpentRecords][%s] batch operation timed out after %s", txid.String(), spendTimeout)
+	}
 }
 
 func (s *Store) sendIncrementBatch(batch []*batchIncrement) {
