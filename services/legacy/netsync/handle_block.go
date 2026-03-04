@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -622,11 +623,21 @@ func (sm *SyncManager) PreValidateTransactions(ctx context.Context, txMap *txmap
 	stop := context.AfterFunc(ctx, bgCancel)
 	defer stop()
 
-	// validate all the transactions in parallel
-	g, gCtx := errgroup.WithContext(bgCtx)
-	util.SafeSetLimit(g, spendBatcherSize*spendBatcherConcurrency) // we limit the number of concurrent requests, to not overload Aerospike
+	// These transactions arrive as part of a block, so they should be treated as valid
+	// transactions that all need to be processed. If one fails (e.g. transient Aerospike
+	// DEVICE_OVERLOAD), rolling back or cancelling all other independent transactions
+	// in the block makes no sense. We use the errgroup only for concurrency limiting,
+	// never returning errors from goroutines, to prevent a cancel cascade where one
+	// failure triggers thousands of concurrent rollbacks across unrelated transactions.
+	g, _ := errgroup.WithContext(bgCtx)
+	util.SafeSetLimit(g, spendBatcherSize*spendBatcherConcurrency)
 
-	// validate all the transactions in parallel
+	var (
+		mu            sync.Mutex
+		failedTxCount int
+		lastFailedErr error
+	)
+
 	for _, txHash := range txMap.Keys() {
 		txHash := txHash
 
@@ -638,24 +649,40 @@ func (sm *SyncManager) PreValidateTransactions(ctx context.Context, txMap *txmap
 
 			txWrapper, ok := txMap.Get(txHash)
 			if !ok {
-				return errors.NewProcessingError("transaction %s not found in txMap", txHash.String())
+				mu.Lock()
+				failedTxCount++
+				lastFailedErr = errors.NewProcessingError("transaction %s not found in txMap", txHash.String())
+				mu.Unlock()
+				return nil
 			}
 
-			// call the validator to validate the transaction, but skip the utxo creation
-			_, err = sm.validationClient.Validate(gCtx,
+			// Use bgCtx (not gCtx) so one tx failure doesn't cancel others
+			if _, validateErr := sm.validationClient.Validate(bgCtx,
 				txWrapper.Tx,
 				blockHeight,
 				validator.WithSkipUtxoCreation(true),
 				validator.WithAddTXToBlockAssembly(false),
 				validator.WithSkipPolicyChecks(true),
-			)
+			); validateErr != nil {
+				mu.Lock()
+				failedTxCount++
+				lastFailedErr = validateErr
+				mu.Unlock()
+			}
 
-			return err
+			return nil
 		})
 	}
 
-	// wait for all the transactions to be validated
-	return g.Wait()
+	// Wait for all goroutines to complete — no early cancellation
+	_ = g.Wait()
+
+	if failedTxCount > 0 {
+		return errors.NewProcessingError("[PreValidateTransactions] %d of %d transactions failed, last error: %v",
+			failedTxCount, txMap.Length(), lastFailedErr)
+	}
+
+	return nil
 }
 
 // validateTransactions validates all the transactions in the block in parallel

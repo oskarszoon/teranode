@@ -3,7 +3,10 @@ package netsync
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -13,6 +16,7 @@ import (
 	subtreepkg "github.com/bsv-blockchain/go-subtree"
 	txmap "github.com/bsv-blockchain/go-tx-map"
 	"github.com/bsv-blockchain/go-wire"
+	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/model"
 	"github.com/bsv-blockchain/teranode/services/blockassembly"
 	"github.com/bsv-blockchain/teranode/services/blockassembly/blockassembly_api"
@@ -23,6 +27,7 @@ import (
 	"github.com/bsv-blockchain/teranode/services/legacy/testdata"
 	"github.com/bsv-blockchain/teranode/services/validator"
 	"github.com/bsv-blockchain/teranode/stores/blob/memory"
+	"github.com/bsv-blockchain/teranode/stores/utxo/meta"
 	"github.com/bsv-blockchain/teranode/stores/utxo/nullstore"
 	"github.com/bsv-blockchain/teranode/ulogger"
 	"github.com/bsv-blockchain/teranode/util/expiringmap"
@@ -502,4 +507,165 @@ func TestSyncManager_ExtendTransaction(t *testing.T) {
 	// Test ExtendTransaction
 	err := sm.ExtendTransaction(context.Background(), tx, txMap)
 	assert.NoError(t, err)
+}
+
+// countingValidator tracks how many times Validate is called and optionally fails
+// the first N calls. It checks context cancellation to detect cascade behavior.
+type countingValidator struct {
+	validator.MockValidator
+	callCount      atomic.Int64
+	failFirst      int
+	failErr        error
+	mu             sync.Mutex
+	ctxCancelCount atomic.Int64 // tracks how many calls saw a cancelled context
+}
+
+func (v *countingValidator) Validate(ctx context.Context, tx *bt.Tx, blockHeight uint32, opts ...validator.Option) (*meta.Data, error) {
+	if ctx.Err() != nil {
+		v.ctxCancelCount.Add(1)
+		return nil, ctx.Err()
+	}
+
+	callNum := int(v.callCount.Add(1))
+
+	v.mu.Lock()
+	shouldFail := callNum <= v.failFirst
+	v.mu.Unlock()
+
+	if shouldFail {
+		return nil, v.failErr
+	}
+
+	return &meta.Data{}, nil
+}
+
+func (v *countingValidator) ValidateWithOptions(ctx context.Context, tx *bt.Tx, blockHeight uint32, validationOptions *validator.Options) (*meta.Data, error) {
+	return v.Validate(ctx, tx, blockHeight)
+}
+
+func (v *countingValidator) TriggerBatcher() {}
+
+func makeTxMap(t *testing.T, count int) *txmap.SyncedMap[chainhash.Hash, *TxMapWrapper] {
+	t.Helper()
+	txMap := txmap.NewSyncedMap[chainhash.Hash, *TxMapWrapper](count)
+
+	for i := 0; i < count; i++ {
+		tx := bt.NewTx()
+		tx.Version = 1
+		_ = tx.PayToAddress("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", uint64(1000+i))
+		txHash := chainhash.HashH([]byte(fmt.Sprintf("test-tx-%d", i)))
+		txMap.Set(txHash, &TxMapWrapper{Tx: tx})
+	}
+
+	return txMap
+}
+
+func TestPreValidateTransactions_AllSucceed(t *testing.T) {
+	initPrometheusMetrics()
+
+	cv := &countingValidator{}
+
+	tSettings := test.CreateBaseTestSettings(t)
+	tSettings.Legacy.SpendBatcherSize = 2
+	tSettings.Legacy.SpendBatcherConcurrency = 2
+
+	sm := &SyncManager{
+		settings:         tSettings,
+		logger:           ulogger.TestLogger{},
+		validationClient: cv,
+	}
+
+	txMap := makeTxMap(t, 10)
+
+	err := sm.PreValidateTransactions(context.Background(), txMap, chainhash.Hash{}, 100)
+	require.NoError(t, err)
+	assert.Equal(t, int64(10), cv.callCount.Load(), "all 10 transactions should be validated")
+}
+
+func TestPreValidateTransactions_PartialFailure_NoCascade(t *testing.T) {
+	initPrometheusMetrics()
+
+	// Fail the first 3 calls, succeed the rest. With the old errgroup cancel-on-first-error,
+	// the first failure would cancel gCtx and cascade to other goroutines. Now, only the
+	// 3 explicitly failed calls should fail.
+	cv := &countingValidator{
+		failFirst: 3,
+		failErr:   errors.NewStorageError("DEVICE_OVERLOAD"),
+	}
+
+	tSettings := test.CreateBaseTestSettings(t)
+	// Use concurrency=1 to serialize goroutines — makes the test deterministic.
+	// With old errgroup code, first error would cancel gCtx, and goroutines 2-10
+	// would see a cancelled context (cascade). With the fix, all 10 run independently.
+	tSettings.Legacy.SpendBatcherSize = 1
+	tSettings.Legacy.SpendBatcherConcurrency = 1
+
+	sm := &SyncManager{
+		settings:         tSettings,
+		logger:           ulogger.TestLogger{},
+		validationClient: cv,
+	}
+
+	txMap := makeTxMap(t, 10)
+
+	err := sm.PreValidateTransactions(context.Background(), txMap, chainhash.Hash{}, 100)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "3 of 10 transactions failed")
+
+	// All 10 should have been called — no cascade cancellation
+	assert.Equal(t, int64(10), cv.callCount.Load(), "all 10 transactions should be attempted")
+	assert.Equal(t, int64(0), cv.ctxCancelCount.Load(), "no calls should have seen a cancelled context")
+}
+
+func TestPreValidateTransactions_AllFail(t *testing.T) {
+	initPrometheusMetrics()
+
+	cv := &countingValidator{
+		failFirst: 100, // more than we have txs
+		failErr:   errors.NewStorageError("DEVICE_OVERLOAD"),
+	}
+
+	tSettings := test.CreateBaseTestSettings(t)
+	tSettings.Legacy.SpendBatcherSize = 2
+	tSettings.Legacy.SpendBatcherConcurrency = 2
+
+	sm := &SyncManager{
+		settings:         tSettings,
+		logger:           ulogger.TestLogger{},
+		validationClient: cv,
+	}
+
+	txMap := makeTxMap(t, 5)
+
+	err := sm.PreValidateTransactions(context.Background(), txMap, chainhash.Hash{}, 100)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "5 of 5 transactions failed")
+	assert.Equal(t, int64(5), cv.callCount.Load())
+}
+
+func TestPreValidateTransactions_ParentContextCancelled(t *testing.T) {
+	initPrometheusMetrics()
+
+	// Use a slow validator that blocks until context is cancelled
+	slowValidator := &countingValidator{}
+
+	tSettings := test.CreateBaseTestSettings(t)
+	tSettings.Legacy.SpendBatcherSize = 1
+	tSettings.Legacy.SpendBatcherConcurrency = 1
+
+	sm := &SyncManager{
+		settings:         tSettings,
+		logger:           ulogger.TestLogger{},
+		validationClient: slowValidator,
+	}
+
+	txMap := makeTxMap(t, 3)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	err := sm.PreValidateTransactions(ctx, txMap, chainhash.Hash{}, 100)
+	// All 3 goroutines should see the cancelled context
+	require.Error(t, err)
+	assert.True(t, slowValidator.ctxCancelCount.Load() > 0, "at least some calls should detect cancelled context")
 }

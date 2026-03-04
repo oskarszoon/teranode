@@ -390,12 +390,16 @@ func (s *Store) Spend(ctx context.Context, tx *bt.Tx, blockHeight uint32, ignore
 	}
 
 	if len(spends) != len(spentSpends) { // there must have been failures
-		// Use a detached context for the rollback — the parent context may already be
-		// cancelled (e.g. by errgroup), but the unspend MUST complete to properly
-		// decrement spentExtraRecs on master records via NOTALLSPENT signals.
-		unspendErr := s.Unspend(context.Background(), spentSpends)
-		if unspendErr != nil {
-			s.logger.Errorf("error in aerospike unspend (batched mode): %v", unspendErr)
+		// Only rollback successful spends when the transaction is genuinely invalid
+		// (double-spend, frozen, conflicting, hash mismatch). For transient infrastructure
+		// errors (DEVICE_OVERLOAD, timeout, etc.), skip the rollback — the Lua spend
+		// script is idempotent for the same spender, so successful spends can safely
+		// remain and will be silently skipped on retry.
+		if needsSpendRollback(spends) {
+			unspendErr := s.Unspend(context.Background(), spentSpends)
+			if unspendErr != nil {
+				s.logger.Errorf("error in aerospike unspend (batched mode): %v", unspendErr)
+			}
 		}
 
 		var spendErrors error
@@ -417,6 +421,26 @@ func (s *Store) Spend(ctx context.Context, tx *bt.Tx, blockHeight uint32, ignore
 	prometheusUtxoMapSpend.Add(float64(len(spends)))
 
 	return spends, nil
+}
+
+// needsSpendRollback returns true if any spend failed due to a validation error
+// that indicates the transaction is genuinely invalid. Only explicit Lua-level
+// validation failures trigger rollback — infrastructure errors (DEVICE_OVERLOAD,
+// timeout, etc.) do not, because the Lua spend script is idempotent for the
+// same spender and successful spends will be silently skipped on retry.
+func needsSpendRollback(spends []*utxo.Spend) bool {
+	for _, spend := range spends {
+		if spend.Err == nil {
+			continue
+		}
+		if errors.Is(spend.Err, errors.ErrSpent) ||
+			errors.Is(spend.Err, errors.ErrTxConflicting) ||
+			errors.Is(spend.Err, errors.ErrFrozen) ||
+			errors.Is(spend.Err, errors.ErrUtxoHashMismatch) {
+			return true
+		}
+	}
+	return false
 }
 
 type keyIgnoreLocked struct {
