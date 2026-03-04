@@ -616,6 +616,7 @@ func (sm *SyncManager) PreValidateTransactions(ctx context.Context, txMap *txmap
 
 	spendBatcherSize := sm.settings.Legacy.SpendBatcherSize
 	spendBatcherConcurrency := sm.settings.Legacy.SpendBatcherConcurrency
+	concurrencyLimit := spendBatcherSize * spendBatcherConcurrency
 
 	// Use a detached context that inherits cancellation from parent but not tracing values
 	bgCtx, bgCancel := context.WithCancel(context.Background())
@@ -626,63 +627,89 @@ func (sm *SyncManager) PreValidateTransactions(ctx context.Context, txMap *txmap
 	// These transactions arrive as part of a block, so they should be treated as valid
 	// transactions that all need to be processed. If one fails (e.g. transient Aerospike
 	// DEVICE_OVERLOAD), rolling back or cancelling all other independent transactions
-	// in the block makes no sense. We use the errgroup only for concurrency limiting,
-	// never returning errors from goroutines, to prevent a cancel cascade where one
-	// failure triggers thousands of concurrent rollbacks across unrelated transactions.
-	g, _ := errgroup.WithContext(bgCtx)
-	util.SafeSetLimit(g, spendBatcherSize*spendBatcherConcurrency)
+	// in the block makes no sense. We retry failed transactions with backoff to adapt
+	// to whatever throughput the storage backend can handle.
+	const maxRetries = 10
+	const retryBackoff = 2 * time.Second
 
-	var (
-		mu            sync.Mutex
-		failedTxCount int
-		lastFailedErr error
-	)
+	pendingTxHashes := txMap.Keys()
+	totalTxCount := txMap.Length()
 
-	for _, txHash := range txMap.Keys() {
-		txHash := txHash
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if bgCtx.Err() != nil {
+			return errors.NewProcessingError("[PreValidateTransactions] context cancelled")
+		}
 
-		g.Go(func() (err error) {
-			timeStart := time.Now()
-			defer func() {
-				prometheusLegacyNetsyncBlockTxValidate.Observe(float64(time.Since(timeStart).Microseconds()) / 1_000_000)
-			}()
+		if attempt > 0 {
+			sm.logger.Infof("[PreValidateTransactions] retry %d/%d: %d of %d transactions remaining",
+				attempt, maxRetries, len(pendingTxHashes), totalTxCount)
+			time.Sleep(retryBackoff)
+		}
 
-			txWrapper, ok := txMap.Get(txHash)
-			if !ok {
-				mu.Lock()
-				failedTxCount++
-				lastFailedErr = errors.NewProcessingError("transaction %s not found in txMap", txHash.String())
-				mu.Unlock()
+		g, _ := errgroup.WithContext(bgCtx)
+		util.SafeSetLimit(g, concurrencyLimit)
+
+		var (
+			mu        sync.Mutex
+			failedTxs []chainhash.Hash
+			lastErr   error
+		)
+
+		for _, txHash := range pendingTxHashes {
+			txHash := txHash
+
+			g.Go(func() (err error) {
+				timeStart := time.Now()
+				defer func() {
+					prometheusLegacyNetsyncBlockTxValidate.Observe(float64(time.Since(timeStart).Microseconds()) / 1_000_000)
+				}()
+
+				txWrapper, ok := txMap.Get(txHash)
+				if !ok {
+					mu.Lock()
+					failedTxs = append(failedTxs, txHash)
+					lastErr = errors.NewProcessingError("transaction %s not found in txMap", txHash.String())
+					mu.Unlock()
+					return nil
+				}
+
+				if _, validateErr := sm.validationClient.Validate(bgCtx,
+					txWrapper.Tx,
+					blockHeight,
+					validator.WithSkipUtxoCreation(true),
+					validator.WithAddTXToBlockAssembly(false),
+					validator.WithSkipPolicyChecks(true),
+				); validateErr != nil {
+					mu.Lock()
+					failedTxs = append(failedTxs, txHash)
+					lastErr = validateErr
+					mu.Unlock()
+				}
+
 				return nil
-			}
+			})
+		}
 
-			// Use bgCtx (not gCtx) so one tx failure doesn't cancel others
-			if _, validateErr := sm.validationClient.Validate(bgCtx,
-				txWrapper.Tx,
-				blockHeight,
-				validator.WithSkipUtxoCreation(true),
-				validator.WithAddTXToBlockAssembly(false),
-				validator.WithSkipPolicyChecks(true),
-			); validateErr != nil {
-				mu.Lock()
-				failedTxCount++
-				lastFailedErr = validateErr
-				mu.Unlock()
-			}
+		_ = g.Wait()
 
+		if len(failedTxs) == 0 {
+			if attempt > 0 {
+				sm.logger.Infof("[PreValidateTransactions] all transactions succeeded after %d retries", attempt)
+			}
 			return nil
-		})
+		}
+
+		// No progress since last attempt — stop retrying
+		if attempt > 0 && len(failedTxs) >= len(pendingTxHashes) {
+			return errors.NewProcessingError("[PreValidateTransactions] %d of %d transactions failed with no progress, giving up",
+				len(failedTxs), totalTxCount, lastErr)
+		}
+
+		pendingTxHashes = failedTxs
 	}
 
-	// Wait for all goroutines to complete — no early cancellation
-	_ = g.Wait()
-
-	if failedTxCount > 0 {
-		return errors.NewProcessingError("[PreValidateTransactions] %d of %d transactions failed, last error: %v",
-			failedTxCount, txMap.Length(), lastFailedErr)
-	}
-
-	return nil
+	return errors.NewProcessingError("[PreValidateTransactions] %d of %d transactions still failing after %d retries",
+		len(pendingTxHashes), totalTxCount, maxRetries)
 }
 
 // validateTransactions validates all the transactions in the block in parallel

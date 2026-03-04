@@ -582,21 +582,17 @@ func TestPreValidateTransactions_AllSucceed(t *testing.T) {
 	assert.Equal(t, int64(10), cv.callCount.Load(), "all 10 transactions should be validated")
 }
 
-func TestPreValidateTransactions_PartialFailure_NoCascade(t *testing.T) {
+func TestPreValidateTransactions_PartialFailure_RetriesSucceed(t *testing.T) {
 	initPrometheusMetrics()
 
-	// Fail the first 3 calls, succeed the rest. With the old errgroup cancel-on-first-error,
-	// the first failure would cancel gCtx and cascade to other goroutines. Now, only the
-	// 3 explicitly failed calls should fail.
+	// Fail the first 3 calls, succeed the rest. On retry, those 3 txs will be
+	// retried and succeed (callCount > failFirst), so the block should pass.
 	cv := &countingValidator{
 		failFirst: 3,
 		failErr:   errors.NewStorageError("DEVICE_OVERLOAD"),
 	}
 
 	tSettings := test.CreateBaseTestSettings(t)
-	// Use concurrency=1 to serialize goroutines — makes the test deterministic.
-	// With old errgroup code, first error would cancel gCtx, and goroutines 2-10
-	// would see a cancelled context (cascade). With the fix, all 10 run independently.
 	tSettings.Legacy.SpendBatcherSize = 1
 	tSettings.Legacy.SpendBatcherConcurrency = 1
 
@@ -609,19 +605,18 @@ func TestPreValidateTransactions_PartialFailure_NoCascade(t *testing.T) {
 	txMap := makeTxMap(t, 10)
 
 	err := sm.PreValidateTransactions(context.Background(), txMap, chainhash.Hash{}, 100)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "3 of 10 transactions failed")
+	require.NoError(t, err, "should succeed after retrying the 3 failed transactions")
 
-	// All 10 should have been called — no cascade cancellation
-	assert.Equal(t, int64(10), cv.callCount.Load(), "all 10 transactions should be attempted")
+	// 10 in first pass + 3 retried = 13 total calls
+	assert.Equal(t, int64(13), cv.callCount.Load())
 	assert.Equal(t, int64(0), cv.ctxCancelCount.Load(), "no calls should have seen a cancelled context")
 }
 
-func TestPreValidateTransactions_AllFail(t *testing.T) {
+func TestPreValidateTransactions_AllFail_NoProgress_GivesUp(t *testing.T) {
 	initPrometheusMetrics()
 
 	cv := &countingValidator{
-		failFirst: 100, // more than we have txs
+		failFirst: 100000, // always fail
 		failErr:   errors.NewStorageError("DEVICE_OVERLOAD"),
 	}
 
@@ -639,14 +634,15 @@ func TestPreValidateTransactions_AllFail(t *testing.T) {
 
 	err := sm.PreValidateTransactions(context.Background(), txMap, chainhash.Hash{}, 100)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "5 of 5 transactions failed")
-	assert.Equal(t, int64(5), cv.callCount.Load())
+	assert.Contains(t, err.Error(), "no progress")
+
+	// First pass (5) + one retry attempt (5) = 10, then gives up on no progress
+	assert.Equal(t, int64(10), cv.callCount.Load())
 }
 
 func TestPreValidateTransactions_ParentContextCancelled(t *testing.T) {
 	initPrometheusMetrics()
 
-	// Use a slow validator that blocks until context is cancelled
 	slowValidator := &countingValidator{}
 
 	tSettings := test.CreateBaseTestSettings(t)
@@ -665,7 +661,6 @@ func TestPreValidateTransactions_ParentContextCancelled(t *testing.T) {
 	cancel() // cancel immediately
 
 	err := sm.PreValidateTransactions(ctx, txMap, chainhash.Hash{}, 100)
-	// All 3 goroutines should see the cancelled context
 	require.Error(t, err)
-	assert.True(t, slowValidator.ctxCancelCount.Load() > 0, "at least some calls should detect cancelled context")
+	assert.Contains(t, err.Error(), "context cancelled")
 }
