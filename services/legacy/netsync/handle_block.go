@@ -681,7 +681,7 @@ func (sm *SyncManager) PreValidateTransactions(ctx context.Context, txMap *txmap
 					validator.WithAddTXToBlockAssembly(false),
 					validator.WithSkipPolicyChecks(true),
 				); validateErr != nil {
-					if isRetryableSpendError(validateErr) {
+					if errors.IsRetryableError(validateErr) {
 						mu.Lock()
 						retryableTxs = append(retryableTxs, txHash)
 						lastErr = validateErr
@@ -721,15 +721,6 @@ func (sm *SyncManager) PreValidateTransactions(ctx context.Context, txMap *txmap
 
 	return errors.NewProcessingError("[PreValidateTransactions] %d of %d transactions still failing after %d retries",
 		len(pendingTxHashes), totalTxCount, maxRetries)
-}
-
-// isRetryableSpendError returns true if the validation error is caused by a transient
-// infrastructure issue (Aerospike overload, timeout, unavailability) rather than a
-// genuine validation failure (double-spend, frozen UTXO, etc.).
-func isRetryableSpendError(err error) bool {
-	return errors.Is(err, errors.ErrStorageError) ||
-		errors.Is(err, errors.ErrServiceUnavailable) ||
-		errors.Is(err, errors.ErrStorageUnavailable)
 }
 
 // validateTransactions validates all the transactions in the block in parallel
