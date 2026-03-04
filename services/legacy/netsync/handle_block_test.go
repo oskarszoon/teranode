@@ -640,6 +640,35 @@ func TestPreValidateTransactions_AllFail_NoProgress_GivesUp(t *testing.T) {
 	assert.Equal(t, int64(10), cv.callCount.Load())
 }
 
+func TestPreValidateTransactions_NonRetryableError_FailsImmediately(t *testing.T) {
+	initPrometheusMetrics()
+
+	// A non-retryable error (e.g. double-spend) should not be retried
+	cv := &countingValidator{
+		failFirst: 1,
+		failErr:   errors.NewUtxoFrozenError("utxo is frozen"),
+	}
+
+	tSettings := test.CreateBaseTestSettings(t)
+	tSettings.Legacy.SpendBatcherSize = 1
+	tSettings.Legacy.SpendBatcherConcurrency = 1
+
+	sm := &SyncManager{
+		settings:         tSettings,
+		logger:           ulogger.TestLogger{},
+		validationClient: cv,
+	}
+
+	txMap := makeTxMap(t, 5)
+
+	err := sm.PreValidateTransactions(context.Background(), txMap, chainhash.Hash{}, 100)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "non-retryable")
+
+	// All 5 should run (no cascade), but no retry should happen
+	assert.Equal(t, int64(5), cv.callCount.Load())
+}
+
 func TestPreValidateTransactions_ParentContextCancelled(t *testing.T) {
 	initPrometheusMetrics()
 

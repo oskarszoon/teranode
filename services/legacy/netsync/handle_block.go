@@ -636,7 +636,7 @@ func (sm *SyncManager) PreValidateTransactions(ctx context.Context, txMap *txmap
 	totalTxCount := txMap.Length()
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		if bgCtx.Err() != nil {
+		if ctx.Err() != nil || bgCtx.Err() != nil {
 			return errors.NewProcessingError("[PreValidateTransactions] context cancelled")
 		}
 
@@ -650,9 +650,10 @@ func (sm *SyncManager) PreValidateTransactions(ctx context.Context, txMap *txmap
 		util.SafeSetLimit(g, concurrencyLimit)
 
 		var (
-			mu        sync.Mutex
-			failedTxs []chainhash.Hash
-			lastErr   error
+			mu           sync.Mutex
+			retryableTxs []chainhash.Hash
+			lastErr      error
+			hardFail     error
 		)
 
 		for _, txHash := range pendingTxHashes {
@@ -666,9 +667,9 @@ func (sm *SyncManager) PreValidateTransactions(ctx context.Context, txMap *txmap
 
 				txWrapper, ok := txMap.Get(txHash)
 				if !ok {
+					// Not found in txMap — non-recoverable, fail immediately
 					mu.Lock()
-					failedTxs = append(failedTxs, txHash)
-					lastErr = errors.NewProcessingError("transaction %s not found in txMap", txHash.String())
+					hardFail = errors.NewProcessingError("transaction %s not found in txMap", txHash.String())
 					mu.Unlock()
 					return nil
 				}
@@ -680,10 +681,16 @@ func (sm *SyncManager) PreValidateTransactions(ctx context.Context, txMap *txmap
 					validator.WithAddTXToBlockAssembly(false),
 					validator.WithSkipPolicyChecks(true),
 				); validateErr != nil {
-					mu.Lock()
-					failedTxs = append(failedTxs, txHash)
-					lastErr = validateErr
-					mu.Unlock()
+					if isRetryableSpendError(validateErr) {
+						mu.Lock()
+						retryableTxs = append(retryableTxs, txHash)
+						lastErr = validateErr
+						mu.Unlock()
+					} else {
+						mu.Lock()
+						hardFail = validateErr
+						mu.Unlock()
+					}
 				}
 
 				return nil
@@ -692,7 +699,11 @@ func (sm *SyncManager) PreValidateTransactions(ctx context.Context, txMap *txmap
 
 		_ = g.Wait()
 
-		if len(failedTxs) == 0 {
+		if hardFail != nil {
+			return errors.NewProcessingError("[PreValidateTransactions] non-retryable error", hardFail)
+		}
+
+		if len(retryableTxs) == 0 {
 			if attempt > 0 {
 				sm.logger.Infof("[PreValidateTransactions] all transactions succeeded after %d retries", attempt)
 			}
@@ -700,16 +711,25 @@ func (sm *SyncManager) PreValidateTransactions(ctx context.Context, txMap *txmap
 		}
 
 		// No progress since last attempt — stop retrying
-		if attempt > 0 && len(failedTxs) >= len(pendingTxHashes) {
+		if attempt > 0 && len(retryableTxs) >= len(pendingTxHashes) {
 			return errors.NewProcessingError("[PreValidateTransactions] %d of %d transactions failed with no progress, giving up",
-				len(failedTxs), totalTxCount, lastErr)
+				len(retryableTxs), totalTxCount, lastErr)
 		}
 
-		pendingTxHashes = failedTxs
+		pendingTxHashes = retryableTxs
 	}
 
 	return errors.NewProcessingError("[PreValidateTransactions] %d of %d transactions still failing after %d retries",
 		len(pendingTxHashes), totalTxCount, maxRetries)
+}
+
+// isRetryableSpendError returns true if the validation error is caused by a transient
+// infrastructure issue (Aerospike overload, timeout, unavailability) rather than a
+// genuine validation failure (double-spend, frozen UTXO, etc.).
+func isRetryableSpendError(err error) bool {
+	return errors.Is(err, errors.ErrStorageError) ||
+		errors.Is(err, errors.ErrServiceUnavailable) ||
+		errors.Is(err, errors.ErrStorageUnavailable)
 }
 
 // validateTransactions validates all the transactions in the block in parallel
