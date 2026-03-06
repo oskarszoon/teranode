@@ -1195,11 +1195,10 @@ func (u *BlockValidation) ValidateBlockWithOptions(ctx context.Context, block *m
 		}
 
 		if block.CoinbaseTx == nil || block.CoinbaseTx.Inputs == nil || len(block.CoinbaseTx.Inputs) == 0 {
-			if !opts.IsRevalidation {
-				u.storeInvalidBlock(ctx, block, opts.PeerID, "coinbase tx is nil or empty")
-			}
-
-			return errors.NewBlockInvalidError("[ValidateBlock][%s] coinbase tx is nil or empty", block.Header.Hash().String())
+			// Use BlockIncomplete rather than BlockInvalid — a missing coinbase likely means the peer
+			// doesn't have full block data (e.g. seeded peer). Don't store as invalid so we can
+			// accept the valid version from another peer later.
+			return errors.NewBlockIncompleteError("[ValidateBlock][%s] coinbase tx is nil or empty", block.Header.Hash().String())
 		}
 
 		// check the coinbase length
