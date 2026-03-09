@@ -1039,11 +1039,12 @@ func (u *Server) validateBlocksOnChannel(validateBlocksChan chan *model.Block, g
 				if err := u.blockValidation.ValidateBlockWithOptions(gCtx, block, baseURL, opts); err != nil {
 					u.logger.Errorf("[catchup:validateBlocksOnChannel][%s] failed to validate block %s at position %d: %v", blockUpTo.Hash().String(), block.Hash().String(), i, err)
 
-					// Incomplete block (e.g. no coinbase from seeded peer) — penalize and abort catchup
+					// Incomplete block (e.g. no coinbase from seeded peer) — abort catchup on this peer
 					// Block was NOT stored as invalid, so another peer can provide the full version
+					// This is a non-malicious interaction failure — seeded peers may not have full block data
 					if errors.Is(err, errors.ErrBlockIncomplete) {
 						u.logger.Warnf("[catchup:validateBlocksOnChannel][%s] block %s from peer %s is incomplete, aborting catchup", blockUpTo.Hash().String(), block.Hash().String(), peerID)
-						u.reportCatchupMalicious(gCtx, peerID, "incomplete_block_no_coinbase")
+						u.reportCatchupFailure(gCtx, peerID)
 					} else if errors.Is(err, errors.ErrBlockInvalid) || errors.Is(err, errors.ErrTxInvalid) {
 						// ValidateBlockWithOptions already stored the block as invalid if it's a consensus violation
 						u.logger.Warnf("[catchup:validateBlocksOnChannel][%s] block %s violates consensus rules (already stored as invalid by ValidateBlockWithOptions)", blockUpTo.Hash().String(), block.Hash().String())
@@ -1110,12 +1111,13 @@ func (u *Server) tryQuickValidation(ctx context.Context, block *model.Block, cat
 			prometheusCatchupErrors.WithLabelValues(baseURL, "validation_failure").Inc()
 		}
 
-		// Block is incomplete (e.g. seeded peer without full block data) — penalize peer and abort catchup
+		// Block is incomplete (e.g. seeded peer without full block data) — abort catchup for this peer
 		// Keep subtree files — they contain valid data that the next peer's validation can reuse
+		// This is a non-malicious interaction failure — seeded peers may not have full block data
 		if errors.Is(err, errors.ErrBlockIncomplete) {
 			u.logger.Warnf("[catchup:tryQuickValidation][%s] block %s from peer %s is incomplete (no coinbase), aborting catchup",
 				catchupCtx.blockUpTo.Hash().String(), block.Hash().String(), peerID)
-			u.reportCatchupMalicious(ctx, peerID, "incomplete_block_no_coinbase")
+			u.reportCatchupFailure(ctx, peerID)
 
 			return false, err
 		}
