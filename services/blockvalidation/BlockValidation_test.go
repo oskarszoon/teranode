@@ -1535,6 +1535,91 @@ func TestBlockValidationExcessiveBlockSize(t *testing.T) {
 	}
 }
 
+func TestBlockValidation_IncompleteBlockNilCoinbase(t *testing.T) {
+	initPrometheusMetrics()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	tests := []struct {
+		name        string
+		coinbaseTx  *bt.Tx
+		expectError string
+	}{
+		{
+			name:        "Nil coinbase tx returns ErrBlockIncomplete",
+			coinbaseTx:  nil,
+			expectError: "coinbase tx is nil or empty",
+		},
+		{
+			name:        "Coinbase with nil inputs returns ErrBlockIncomplete",
+			coinbaseTx:  &bt.Tx{Inputs: nil},
+			expectError: "coinbase tx is nil or empty",
+		},
+		{
+			name:        "Coinbase with empty inputs returns ErrBlockIncomplete",
+			coinbaseTx:  &bt.Tx{Inputs: []*bt.Input{}},
+			expectError: "coinbase tx is nil or empty",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			utxoStore, subtreeValidationClient, _, txStore, subtreeStore, cleanup := setup(t)
+			defer cleanup()
+
+			tSettings := test.CreateBaseTestSettings(t)
+
+			blockchainStoreURL, err := url.Parse("sqlitememory://")
+			require.NoError(t, err)
+			blockchainStore, err := blockchain_store.NewStore(ulogger.TestLogger{}, blockchainStoreURL, tSettings)
+			require.NoError(t, err)
+
+			blockchainClient, err := blockchain.NewLocalClient(ulogger.TestLogger{}, tSettings, blockchainStore, nil, nil)
+			require.NoError(t, err)
+
+			blockValidator := NewBlockValidation(
+				ctx,
+				ulogger.TestLogger{},
+				tSettings,
+				blockchainClient,
+				subtreeStore,
+				txStore,
+				utxoStore,
+				nil,
+				subtreeValidationClient,
+			)
+
+			nBits, _ := model.NewNBitFromString("2000ffff")
+			hashPrevBlock := chaincfg.RegressionNetParams.GenesisHash
+			merkleRoot := chainhash.Hash{}
+
+			blockHeader := &model.BlockHeader{
+				Version:        1,
+				HashPrevBlock:  hashPrevBlock,
+				HashMerkleRoot: &merkleRoot,
+				Timestamp:      uint32(time.Now().Unix()), //nolint:gosec
+				Bits:           *nBits,
+				Nonce:          0,
+			}
+
+			block := &model.Block{
+				Header:           blockHeader,
+				SizeInBytes:      1000,
+				TransactionCount: 1,
+				CoinbaseTx:       tt.coinbaseTx,
+				Subtrees:         []*chainhash.Hash{},
+			}
+
+			err = blockValidator.ValidateBlock(ctx, block, "test")
+			require.Error(t, err)
+			require.True(t, errors.Is(err, errors.ErrBlockIncomplete), "expected ErrBlockIncomplete, got: %v", err)
+			require.False(t, errors.Is(err, errors.ErrBlockInvalid), "should NOT be ErrBlockInvalid")
+			require.Contains(t, err.Error(), tt.expectError)
+		})
+	}
+}
+
 func Test_validateBlockSubtrees(t *testing.T) {
 	initPrometheusMetrics()
 

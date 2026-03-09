@@ -1107,7 +1107,7 @@ func (u *Server) tryQuickValidation(ctx context.Context, block *model.Block, cat
 	// Quick validation: create UTXOs for the block and validate transactions in parallel
 	if err := u.blockValidation.quickValidateBlockAsync(ctx, block, peerID, baseURL, writeJobsChan); err != nil {
 		if prometheusCatchupErrors != nil {
-			prometheusCatchupErrors.WithLabelValues(baseURL, "validation_failure").Inc()
+			prometheusCatchupErrors.WithLabelValues(peerID, "validation_failure").Inc()
 		}
 
 		// Block is incomplete (e.g. seeded peer without full block data) — abort catchup for this peer
