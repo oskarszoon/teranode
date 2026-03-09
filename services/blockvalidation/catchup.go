@@ -339,6 +339,10 @@ func (u *Server) releaseCatchupLock(ctx *CatchupContext, err *error) {
 			// Service unavailable errors are local system issues, not peer errors
 			errorType = "local_service_unavailable"
 			isPeerError = false
+		case errors.Is(*err, errors.ErrBlockIncomplete):
+			// Incomplete blocks (e.g. seeded peers without full block data) are not peer errors
+			errorType = "block_incomplete"
+			isPeerError = false
 		}
 
 		u.previousCatchupAttempt = &PreviousAttempt{
