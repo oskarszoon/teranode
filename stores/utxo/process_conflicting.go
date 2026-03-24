@@ -16,6 +16,7 @@ import (
 	txmap "github.com/bsv-blockchain/go-tx-map"
 	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/stores/utxo/fields"
+	"github.com/bsv-blockchain/teranode/stores/utxo/meta"
 	"github.com/bsv-blockchain/teranode/util/tracing"
 	"golang.org/x/sync/errgroup"
 )
@@ -193,6 +194,11 @@ func markConflictingRecursively(ctx context.Context, s Store, hashes []chainhash
 	var allAffectedSpends []*Spend
 	toProcess := hashes
 
+	visited := make(map[chainhash.Hash]struct{}, len(hashes))
+	for _, h := range hashes {
+		visited[h] = struct{}{}
+	}
+
 	for len(toProcess) > 0 {
 		affectedParentSpends, spendingChildTxs, err := s.SetConflicting(ctx, toProcess, true)
 		if err != nil {
@@ -200,7 +206,16 @@ func markConflictingRecursively(ctx context.Context, s Store, hashes []chainhash
 		}
 
 		allAffectedSpends = append(allAffectedSpends, affectedParentSpends...)
-		toProcess = spendingChildTxs
+
+		// filter out already-visited hashes to prevent infinite loops
+		nextBatch := spendingChildTxs[:0]
+		for _, child := range spendingChildTxs {
+			if _, ok := visited[child]; !ok {
+				visited[child] = struct{}{}
+				nextBatch = append(nextBatch, child)
+			}
+		}
+		toProcess = nextBatch
 	}
 
 	return allAffectedSpends, nil
@@ -218,45 +233,57 @@ func GetAndLockChildren(ctx context.Context, s Store, hash chainhash.Hash) ([]ch
 
 	visited := make(map[chainhash.Hash]struct{})
 	visited[hash] = struct{}{}
-	queue := []chainhash.Hash{hash}
+	currentLevel := []chainhash.Hash{hash}
 
-	for len(queue) > 0 {
-		current := queue[0]
-		queue = queue[1:]
+	for len(currentLevel) > 0 {
+		results := make([]*meta.Data, len(currentLevel))
+		g, gCtx := errgroup.WithContext(ctx)
 
-		// lock the transaction so it can't be modified while we are processing it
-		if err := s.SetLocked(ctx, []chainhash.Hash{current}, true); err != nil {
+		for i, current := range currentLevel {
+			i := i
+			current := current
+			g.Go(func() error {
+				if err := s.SetLocked(gCtx, []chainhash.Hash{current}, true); err != nil {
+					return err
+				}
+				txMeta, err := s.Get(gCtx, &current, fields.Utxos)
+				if err != nil {
+					return err
+				}
+				results[i] = txMeta
+				return nil
+			})
+		}
+
+		if err := g.Wait(); err != nil {
 			return nil, err
 		}
 
-		// get the transaction utxos, which will include the spends
-		txMeta, err := s.Get(ctx, &current, fields.Utxos)
-		if err != nil {
-			return nil, err
-		}
+		var nextLevel []chainhash.Hash
+		for _, txMeta := range results {
+			if txMeta == nil {
+				continue
+			}
 
-		if txMeta == nil {
-			continue
-		}
+			if txMeta.SpendingDatas != nil {
+				for _, spendingData := range txMeta.SpendingDatas {
+					if spendingData != nil {
+						child := *spendingData.TxID
+						if _, ok := visited[child]; ok {
+							continue
+						}
 
-		// find spending children from utxos
-		if txMeta.SpendingDatas != nil {
-			for _, spendingData := range txMeta.SpendingDatas {
-				if spendingData != nil {
-					child := *spendingData.TxID
-					if _, ok := visited[child]; ok {
-						continue
+						if child.Equal(subtree.CoinbasePlaceholderHashValue) {
+							return nil, errors.NewProcessingError("[GetAndLockChildren][%s] tx is frozen", child.String())
+						}
+
+						visited[child] = struct{}{}
+						nextLevel = append(nextLevel, child)
 					}
-
-					if child.Equal(subtree.CoinbasePlaceholderHashValue) {
-						return nil, errors.NewProcessingError("[GetAndLockChildren][%s] tx is frozen", child.String())
-					}
-
-					visited[child] = struct{}{}
-					queue = append(queue, child)
 				}
 			}
 		}
+		currentLevel = nextLevel
 	}
 
 	// exclude the root hash from the result
@@ -282,43 +309,57 @@ func GetConflictingChildren(ctx context.Context, s Store, hash chainhash.Hash) (
 
 	visited := make(map[chainhash.Hash]struct{})
 	visited[hash] = struct{}{}
-	queue := []chainhash.Hash{hash}
+	currentLevel := []chainhash.Hash{hash}
 
-	for len(queue) > 0 {
-		current := queue[0]
-		queue = queue[1:]
+	for len(currentLevel) > 0 {
+		results := make([]*meta.Data, len(currentLevel))
+		g, gCtx := errgroup.WithContext(ctx)
 
-		txMeta, err := s.Get(ctx, &current, fields.Utxos, fields.ConflictingChildren)
-		if err != nil {
+		for i, current := range currentLevel {
+			i := i
+			current := current
+			g.Go(func() error {
+				txMeta, err := s.Get(gCtx, &current, fields.Utxos, fields.ConflictingChildren)
+				if err != nil {
+					return err
+				}
+				results[i] = txMeta
+				return nil
+			})
+		}
+
+		if err := g.Wait(); err != nil {
 			return nil, err
 		}
 
-		if txMeta == nil {
-			continue
-		}
-
-		// collect children from the conflictingChildren bin
-		if txMeta.ConflictingChildren != nil {
-			for _, child := range txMeta.ConflictingChildren {
-				if _, ok := visited[child]; !ok {
-					visited[child] = struct{}{}
-					queue = append(queue, child)
-				}
+		var nextLevel []chainhash.Hash
+		for _, txMeta := range results {
+			if txMeta == nil {
+				continue
 			}
-		}
 
-		// collect children from the utxos bin spends
-		if txMeta.SpendingDatas != nil {
-			for _, spendingData := range txMeta.SpendingDatas {
-				if spendingData != nil {
-					child := *spendingData.TxID
+			if txMeta.ConflictingChildren != nil {
+				for _, child := range txMeta.ConflictingChildren {
 					if _, ok := visited[child]; !ok {
 						visited[child] = struct{}{}
-						queue = append(queue, child)
+						nextLevel = append(nextLevel, child)
+					}
+				}
+			}
+
+			if txMeta.SpendingDatas != nil {
+				for _, spendingData := range txMeta.SpendingDatas {
+					if spendingData != nil {
+						child := *spendingData.TxID
+						if _, ok := visited[child]; !ok {
+							visited[child] = struct{}{}
+							nextLevel = append(nextLevel, child)
+						}
 					}
 				}
 			}
 		}
+		currentLevel = nextLevel
 	}
 
 	// exclude the root hash from the result
