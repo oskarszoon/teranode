@@ -174,8 +174,8 @@ func ProcessConflicting(ctx context.Context, s Store, blockHeight uint32, confli
 	return losingTxHashesMap, nil
 }
 
-// markConflictingRecursively marks the given transactions as conflicting, and recursively marks all their spending
-// children as conflicting too.
+// markConflictingRecursively marks the given transactions as conflicting, and iteratively marks all their spending
+// children as conflicting too using breadth-first traversal.
 //
 // Parameters:
 //   - ctx: The context for managing request-scoped values, cancellation signals, and deadlines.
@@ -190,22 +190,20 @@ func markConflictingRecursively(ctx context.Context, s Store, hashes []chainhash
 
 	defer deferFn()
 
-	// mark tx as conflicting
-	affectedParentSpends, spendingChildTxs, err := s.SetConflicting(ctx, hashes, true)
-	if err != nil {
-		return nil, err
-	}
+	var allAffectedSpends []*Spend
+	toProcess := hashes
 
-	if len(spendingChildTxs) > 0 {
-		childSpends, err := markConflictingRecursively(ctx, s, spendingChildTxs)
+	for len(toProcess) > 0 {
+		affectedParentSpends, spendingChildTxs, err := s.SetConflicting(ctx, toProcess, true)
 		if err != nil {
 			return nil, err
 		}
 
-		affectedParentSpends = append(affectedParentSpends, childSpends...)
+		allAffectedSpends = append(allAffectedSpends, affectedParentSpends...)
+		toProcess = spendingChildTxs
 	}
 
-	return affectedParentSpends, nil
+	return allAffectedSpends, nil
 }
 
 func GetAndLockChildren(ctx context.Context, s Store, hash chainhash.Hash) ([]chainhash.Hash, error) {
@@ -218,43 +216,50 @@ func GetAndLockChildren(ctx context.Context, s Store, hash chainhash.Hash) ([]ch
 		return nil, errors.NewProcessingError("[GetAndLockChildren][%s] tx is frozen", hash.String())
 	}
 
-	// lock the transaction so it can't be modified while we are processing it
-	if err := s.SetLocked(ctx, []chainhash.Hash{hash}, true); err != nil {
-		return nil, err
-	}
+	visited := make(map[chainhash.Hash]struct{})
+	visited[hash] = struct{}{}
+	queue := []chainhash.Hash{hash}
 
-	// get the transaction utxos, which will include the spends
-	txMeta, err := s.Get(ctx, &hash, fields.Utxos)
-	if err != nil {
-		return nil, err
-	}
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
 
-	childrenMap := make(map[chainhash.Hash]struct{})
-
-	// set the conflicting children from the utxos bin spends
-	if txMeta.SpendingDatas != nil {
-		for _, spendingData := range txMeta.SpendingDatas {
-			if spendingData != nil {
-				childrenMap[*spendingData.TxID] = struct{}{}
-			}
+		// lock the transaction so it can't be modified while we are processing it
+		if err := s.SetLocked(ctx, []chainhash.Hash{current}, true); err != nil {
+			return nil, err
 		}
-	}
 
-	// get and lock the children of the spends
-	for child := range childrenMap {
-		children, err := GetAndLockChildren(ctx, s, child)
+		// get the transaction utxos, which will include the spends
+		txMeta, err := s.Get(ctx, &current, fields.Utxos)
 		if err != nil {
 			return nil, err
 		}
 
-		for _, c := range children {
-			childrenMap[c] = struct{}{}
+		// find spending children from utxos
+		if txMeta.SpendingDatas != nil {
+			for _, spendingData := range txMeta.SpendingDatas {
+				if spendingData != nil {
+					child := *spendingData.TxID
+					if _, ok := visited[child]; ok {
+						continue
+					}
+
+					if child.Equal(subtree.CoinbasePlaceholderHashValue) {
+						return nil, errors.NewProcessingError("[GetAndLockChildren][%s] tx is frozen", child.String())
+					}
+
+					visited[child] = struct{}{}
+					queue = append(queue, child)
+				}
+			}
 		}
 	}
 
-	children := make([]chainhash.Hash, 0, len(childrenMap))
+	// exclude the root hash from the result
+	delete(visited, hash)
 
-	for child := range childrenMap {
+	children := make([]chainhash.Hash, 0, len(visited))
+	for child := range visited {
 		children = append(children, child)
 	}
 
@@ -271,44 +276,48 @@ func GetConflictingChildren(ctx context.Context, s Store, hash chainhash.Hash) (
 		return nil, nil
 	}
 
-	txMeta, err := s.Get(ctx, &hash, fields.Utxos, fields.ConflictingChildren)
-	if err != nil {
-		return nil, err
-	}
+	visited := make(map[chainhash.Hash]struct{})
+	visited[hash] = struct{}{}
+	queue := []chainhash.Hash{hash}
 
-	conflictingChildrenMap := make(map[chainhash.Hash]struct{})
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
 
-	// set the conflicting children from the conflictingChildren bin
-	if txMeta.ConflictingChildren != nil {
-		for _, child := range txMeta.ConflictingChildren {
-			conflictingChildrenMap[child] = struct{}{}
-		}
-	}
-
-	// set the conflicting children from the utxos bin spends
-	if txMeta.SpendingDatas != nil {
-		for _, spendingData := range txMeta.SpendingDatas {
-			if spendingData != nil {
-				conflictingChildrenMap[*spendingData.TxID] = struct{}{}
-			}
-		}
-	}
-
-	// get the conflicting children of the conflicting children
-	for conflictingChild := range conflictingChildrenMap {
-		conflictingChildren, err := s.GetConflictingChildren(ctx, conflictingChild)
+		txMeta, err := s.Get(ctx, &current, fields.Utxos, fields.ConflictingChildren)
 		if err != nil {
 			return nil, err
 		}
 
-		for _, child := range conflictingChildren {
-			conflictingChildrenMap[child] = struct{}{}
+		// collect children from the conflictingChildren bin
+		if txMeta.ConflictingChildren != nil {
+			for _, child := range txMeta.ConflictingChildren {
+				if _, ok := visited[child]; !ok {
+					visited[child] = struct{}{}
+					queue = append(queue, child)
+				}
+			}
+		}
+
+		// collect children from the utxos bin spends
+		if txMeta.SpendingDatas != nil {
+			for _, spendingData := range txMeta.SpendingDatas {
+				if spendingData != nil {
+					child := *spendingData.TxID
+					if _, ok := visited[child]; !ok {
+						visited[child] = struct{}{}
+						queue = append(queue, child)
+					}
+				}
+			}
 		}
 	}
 
-	conflictingChildren := make([]chainhash.Hash, 0, len(conflictingChildrenMap))
+	// exclude the root hash from the result
+	delete(visited, hash)
 
-	for child := range conflictingChildrenMap {
+	conflictingChildren := make([]chainhash.Hash, 0, len(visited))
+	for child := range visited {
 		conflictingChildren = append(conflictingChildren, child)
 	}
 

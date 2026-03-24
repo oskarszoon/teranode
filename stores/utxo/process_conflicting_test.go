@@ -440,9 +440,11 @@ func TestGetConflictingChildren_Success(t *testing.T) {
 			ConflictingChildren: []chainhash.Hash{grandChildHash},
 		}, nil)
 
-	// Mock GetConflictingChildren recursive call
-	mockStore.On("GetConflictingChildren", mock.Anything, childHash).Return([]chainhash.Hash{}, nil)
-	mockStore.On("GetConflictingChildren", mock.Anything, grandChildHash).Return([]chainhash.Hash{}, nil)
+	// Mock Get calls for child and grandchild (iterative BFS fetches each directly)
+	mockStore.On("Get", mock.Anything, &childHash, mock.Anything, mock.Anything).
+		Return(&meta.Data{}, nil)
+	mockStore.On("Get", mock.Anything, &grandChildHash, mock.Anything, mock.Anything).
+		Return(&meta.Data{}, nil)
 
 	// Execute test
 	result, err := GetConflictingChildren(ctx, mockStore, parentHash)
@@ -490,7 +492,7 @@ func TestGetConflictingChildren_GetError(t *testing.T) {
 	mockStore.AssertExpectations(t)
 }
 
-func TestGetConflictingChildren_RecursiveError(t *testing.T) {
+func TestGetConflictingChildren_ChildGetError(t *testing.T) {
 	ctx := context.Background()
 	mockStore := &MockUtxostore{}
 
@@ -504,9 +506,9 @@ func TestGetConflictingChildren_RecursiveError(t *testing.T) {
 			SpendingDatas: []*spend.SpendingData{spendingData},
 		}, nil)
 
-	// Mock GetConflictingChildren recursive call returning error
-	mockStore.On("GetConflictingChildren", mock.Anything, childHash).
-		Return([]chainhash.Hash{}, errors.NewProcessingError("recursive error"))
+	// Mock Get call for child returning error
+	mockStore.On("Get", mock.Anything, &childHash, mock.Anything, mock.Anything).
+		Return(nil, errors.NewProcessingError("child get error"))
 
 	// Execute test
 	result, err := GetConflictingChildren(ctx, mockStore, parentHash)
@@ -514,7 +516,37 @@ func TestGetConflictingChildren_RecursiveError(t *testing.T) {
 	// Assertions
 	assert.Nil(t, result)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "recursive error")
+	assert.Contains(t, err.Error(), "child get error")
+	mockStore.AssertExpectations(t)
+}
+
+func TestGetConflictingChildren_CycleDetection(t *testing.T) {
+	ctx := context.Background()
+	mockStore := &MockUtxostore{}
+
+	parentHash := createTestHash("parent-tx")
+	childHash := createTestHash("child-tx")
+
+	// Parent points to child
+	spendingData := &spend.SpendingData{TxID: &childHash}
+	mockStore.On("Get", mock.Anything, &parentHash, mock.Anything, mock.Anything).
+		Return(&meta.Data{
+			SpendingDatas: []*spend.SpendingData{spendingData},
+		}, nil)
+
+	// Child points back to parent (cycle)
+	mockStore.On("Get", mock.Anything, &childHash, mock.Anything, mock.Anything).
+		Return(&meta.Data{
+			ConflictingChildren: []chainhash.Hash{parentHash},
+		}, nil)
+
+	// Execute test - should complete without infinite loop
+	result, err := GetConflictingChildren(ctx, mockStore, parentHash)
+
+	// Assertions
+	require.NoError(t, err)
+	assert.Len(t, result, 1)
+	assert.Contains(t, result, childHash)
 	mockStore.AssertExpectations(t)
 }
 
