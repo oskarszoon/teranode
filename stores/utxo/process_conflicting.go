@@ -235,6 +235,10 @@ func GetAndLockChildren(ctx context.Context, s Store, hash chainhash.Hash) ([]ch
 			return nil, err
 		}
 
+		if txMeta == nil {
+			continue
+		}
+
 		// find spending children from utxos
 		if txMeta.SpendingDatas != nil {
 			for _, spendingData := range txMeta.SpendingDatas {
@@ -287,6 +291,10 @@ func GetConflictingChildren(ctx context.Context, s Store, hash chainhash.Hash) (
 		txMeta, err := s.Get(ctx, &current, fields.Utxos, fields.ConflictingChildren)
 		if err != nil {
 			return nil, err
+		}
+
+		if txMeta == nil {
+			continue
 		}
 
 		// collect children from the conflictingChildren bin
