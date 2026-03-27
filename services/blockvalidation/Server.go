@@ -237,6 +237,11 @@ type Server struct {
 	// wireTransport is the wire-protocol CatchupTransport used for legacy peers.
 	// May be nil if no legacy service client is available.
 	wireTransport CatchupTransport
+
+	// catchupPeerCooldowns tracks per-peer cooldown expiry after failed catchup attempts.
+	catchupPeerCooldowns map[string]time.Time
+	// catchupPeerFailCounts tracks consecutive failure counts per peer for exponential backoff.
+	catchupPeerFailCounts map[string]int
 }
 
 // New creates a new block validation server with the provided dependencies.
@@ -313,8 +318,10 @@ func New(
 		kafkaConsumerClient: kafkaConsumerClient,
 		peerCircuitBreakers: catchup.NewPeerCircuitBreakers(*cbConfig),
 		headerChainCache:    catchup.NewHeaderChainCache(logger),
-		p2pClient:           p2pClient,
-		httpTransport:       NewHTTPTransport(),
+		p2pClient:             p2pClient,
+		httpTransport:         NewHTTPTransport(),
+		catchupPeerCooldowns:  make(map[string]time.Time),
+		catchupPeerFailCounts: make(map[string]int),
 	}
 
 	return bVal

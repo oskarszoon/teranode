@@ -151,29 +151,72 @@ func (u *Server) pollCentralRegistry(ctx context.Context) bool {
 		return true // treat as triggered — catchup is active
 	}
 
-	best := peers[0]
+	// Find the best peer that isn't on cooldown from a recent failure.
+	now := time.Now()
+	var best *PeerForCatchup
+	for i := range peers {
+		cooldownUntil, onCooldown := u.catchupPeerCooldowns[peers[i].ID]
+		if onCooldown && now.Before(cooldownUntil) {
+			continue
+		}
+		best = &peers[i]
+		break
+	}
+
+	if best == nil {
+		u.logger.Debugf("[central_registry] All %d peers with height > %d are on cooldown", len(peers), ourHeight)
+		return false
+	}
+
 	u.logger.Infof("[central_registry] Found peer %s at height %d (our height: %d) — triggering catchup", best.ID, best.Height, ourHeight)
 
 	// Build a synthetic block representing the target we want to catch up to.
-	// The block hash comes from the peer's advertised BlockHash in the registry.
 	if best.BlockHash == nil {
 		u.logger.Warnf("[central_registry] Peer %s has no block hash in registry, skipping", best.ID)
 		return false
 	}
 
-	// Construct a minimal block descriptor for catchup.
 	targetBlock := model.NewSyntheticBlock(best.Height, best.BlockHash)
 
-	startTime := time.Now()
+	startTime := now
 	if err = u.catchup(ctx, targetBlock, best.ID, best.DataHubURL); err != nil {
 		responseMs := time.Since(startTime).Milliseconds()
 		u.logger.Warnf("[central_registry] Catchup from peer %s failed: %v", best.ID, err)
 		u.reportCatchupMetricsToCentralRegistry(ctx, best.ID, false, false, responseMs)
-		return true // catchup was attempted even though it failed
+
+		// Put the peer on cooldown (exponential: 30s, 60s, 120s, max 5min).
+		cooldown := u.nextCooldownForPeer(best.ID)
+		u.catchupPeerCooldowns[best.ID] = time.Now().Add(cooldown)
+		u.logger.Infof("[central_registry] Peer %s on cooldown for %s after failure", best.ID, cooldown)
+
+		return true
 	}
 
 	responseMs := time.Since(startTime).Milliseconds()
 	u.logger.Infof("[central_registry] Catchup from peer %s succeeded in %dms", best.ID, responseMs)
 	u.reportCatchupMetricsToCentralRegistry(ctx, best.ID, true, false, responseMs)
+
+	// Clear cooldowns on success — all peers get a fresh start.
+	u.catchupPeerCooldowns = make(map[string]time.Time)
+	u.catchupPeerFailCounts = make(map[string]int)
+
 	return true
+}
+
+// nextCooldownForPeer returns an exponentially increasing cooldown duration for a peer.
+func (u *Server) nextCooldownForPeer(peerID string) time.Duration {
+	if u.catchupPeerFailCounts == nil {
+		u.catchupPeerFailCounts = make(map[string]int)
+	}
+	u.catchupPeerFailCounts[peerID]++
+	count := u.catchupPeerFailCounts[peerID]
+
+	cooldown := 30 * time.Second
+	for i := 1; i < count && cooldown < 5*time.Minute; i++ {
+		cooldown *= 2
+	}
+	if cooldown > 5*time.Minute {
+		cooldown = 5 * time.Minute
+	}
+	return cooldown
 }
