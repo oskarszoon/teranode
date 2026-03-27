@@ -68,13 +68,12 @@ func (m *mockPeerRegistryClient) ListBannedPeers(_ context.Context) ([]string, e
 func (m *mockPeerRegistryClient) ClearBannedPeers(_ context.Context) error { return nil }
 func (m *mockPeerRegistryClient) Close() error                             { return nil }
 
-// newMinimalServer creates a bare-minimum Server for testing peer registry dual-write.
+// newMinimalServer creates a bare-minimum Server for testing central registry operations.
 func newMinimalServer(t *testing.T) *Server {
 	t.Helper()
 	return &Server{
-		peerRegistry: NewPeerRegistry(),
-		gCtx:         context.Background(),
-		logger:       mocklogger.NewTestLogger(),
+		gCtx:   context.Background(),
+		logger: mocklogger.NewTestLogger(),
 	}
 }
 
@@ -103,10 +102,6 @@ func TestDualWrite_RemovePeer_RemovesFromCentralRegistry(t *testing.T) {
 
 	peerID, err := peer.Decode("12D3KooWNvSZnPi3RrhrTwEY4LuHBeB6K6idsA5DZtEt3yBHk5CQ")
 	require.NoError(t, err)
-
-	// Register first so the local registry has the peer.
-	s.peerRegistry.Put(peerID, "test-client", 100, nil, "http://peer.example.com")
-	s.peerRegistry.UpdateConnectionState(peerID, true)
 
 	reg := &mockPeerRegistryClient{}
 	reg.On("RemovePeer", peerID.String()).Return(nil)

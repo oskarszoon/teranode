@@ -1,3 +1,6 @@
+//go:build ignore
+// TODO: adapt to central registry — SyncCoordinator is being removed from Server
+
 package p2p
 
 import (

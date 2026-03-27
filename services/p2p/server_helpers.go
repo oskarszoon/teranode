@@ -249,10 +249,14 @@ func (s *Server) handleSubtreeTopic(_ context.Context, m []byte, fromID string) 
 	}
 }
 
-// addProtocolViolation records a protocol violation against a peer if the ban manager is available.
+// addProtocolViolation records a protocol violation against a peer via the central registry.
 func (s *Server) addProtocolViolation(peerID string) {
-	if s.banManager != nil {
-		s.banManager.AddScore(peerID, ReasonProtocolViolation)
+	if s.centralRegistry != nil {
+		go func() {
+			if _, _, err := s.centralRegistry.AddBanScore(s.gCtx, peerID, ReasonProtocolViolation.String(), 20); err != nil {
+				s.logger.Warnf("[P2P] failed to add protocol violation score for peer %s: %v", peerID, err)
+			}
+		}()
 	}
 }
 
@@ -419,14 +423,18 @@ func (s *Server) handleRejectedTxTopic(_ context.Context, m []byte, fromID strin
 
 // getPeerIDFromDataHubURL finds the peer ID that has the given DataHub URL
 func (s *Server) getPeerIDFromDataHubURL(dataHubURL string) string {
-	if s.peerRegistry == nil {
+	if s.centralRegistry == nil {
 		return ""
 	}
 
-	peers := s.peerRegistry.GetAll()
+	peers, err := s.centralRegistry.ListPeers(s.gCtx, nil, 0, 0, false)
+	if err != nil {
+		s.logger.Warnf("[getPeerIDFromDataHubURL] failed to list peers: %v", err)
+		return ""
+	}
 	for _, peerInfo := range peers {
 		if peerInfo.DataHubURL == dataHubURL {
-			return peerInfo.ID.String()
+			return peerInfo.ID
 		}
 	}
 	return ""
@@ -576,9 +584,6 @@ func (s *Server) SetCentralPeerRegistry(r blockchain.PeerRegistryClientI) {
 }
 
 func (s *Server) addPeer(peerID peer.ID, clientName string, height uint32, blockHash *chainhash.Hash, dataHubURL string) {
-	if s.peerRegistry != nil {
-		s.peerRegistry.Put(peerID, clientName, height, blockHash, dataHubURL)
-	}
 	if s.centralRegistry != nil {
 		info := p2pPeerToRegistryInfo(peerID, clientName, height, blockHash, dataHubURL, false)
 		go s.registerInCentralRegistry(info)
@@ -587,10 +592,6 @@ func (s *Server) addPeer(peerID peer.ID, clientName string, height uint32, block
 
 // addConnectedPeer adds a peer and marks it as directly connected
 func (s *Server) addConnectedPeer(peerID peer.ID, clientName string, height uint32, blockHash *chainhash.Hash, dataHubURL string) {
-	if s.peerRegistry != nil {
-		s.peerRegistry.Put(peerID, clientName, height, blockHash, dataHubURL)
-		s.peerRegistry.UpdateConnectionState(peerID, true)
-	}
 	if s.centralRegistry != nil {
 		info := p2pPeerToRegistryInfo(peerID, clientName, height, blockHash, dataHubURL, false)
 		go s.registerInCentralRegistry(info)
@@ -599,27 +600,19 @@ func (s *Server) addConnectedPeer(peerID peer.ID, clientName string, height uint
 
 // InjectPeerForTesting directly injects a peer into the registry for testing purposes.
 // This method allows deterministic peer setup without requiring actual P2P network connections.
-// After injecting, it triggers the sync coordinator to consider syncing from the new peer.
 func (s *Server) InjectPeerForTesting(peerID peer.ID, clientName, dataHubURL string, height uint32, blockHash *chainhash.Hash) {
-	if s.peerRegistry == nil {
+	if s.centralRegistry == nil {
 		return
 	}
 
-	s.peerRegistry.Put(peerID, clientName, height, blockHash, dataHubURL)
-	s.peerRegistry.UpdateStorage(peerID, "full")
-
-	// Trigger sync coordinator to consider the new peer
-	if s.syncCoordinator != nil {
-		_ = s.syncCoordinator.TriggerSync()
+	info := p2pPeerToRegistryInfo(peerID, clientName, height, blockHash, dataHubURL, false)
+	info.Storage = "full"
+	if err := s.centralRegistry.RegisterPeer(s.gCtx, info); err != nil {
+		s.logger.Warnf("[InjectPeerForTesting] failed to register peer %s in central registry: %v", peerID, err)
 	}
 }
 
 func (s *Server) removePeer(peerID peer.ID) {
-	if s.peerRegistry != nil {
-		// Mark as disconnected before removing
-		s.peerRegistry.UpdateConnectionState(peerID, false)
-		s.peerRegistry.Remove(peerID)
-	}
 	if s.centralRegistry != nil {
 		peerIDStr := peerID.String()
 		go func() {
@@ -628,31 +621,29 @@ func (s *Server) removePeer(peerID peer.ID) {
 			}
 		}()
 	}
-	if s.syncCoordinator != nil {
-		s.syncCoordinator.HandlePeerDisconnected(peerID)
-	}
 }
 
-// getPeer gets peer information from the registry
+// getPeer gets peer information from the central registry and returns it as a local PeerInfo.
 func (s *Server) getPeer(peerID peer.ID) (*PeerInfo, bool) {
-	if s.peerRegistry != nil {
-		return s.peerRegistry.Get(peerID)
+	if s.centralRegistry == nil {
+		return nil, false
 	}
-	return nil, false
+	info, found, err := s.centralRegistry.GetPeer(s.gCtx, peerID.String())
+	if err != nil || !found {
+		return nil, false
+	}
+	// Convert blockchain.PeerInfo to local PeerInfo for compatibility
+	return centralPeerToLocalPeerInfo(info), true
 }
 
 func (s *Server) getSyncPeer() peer.ID {
-	if s.syncCoordinator != nil {
-		return s.syncCoordinator.GetCurrentSyncPeer()
-	}
+	// SyncCoordinator removed -- catchup orchestration handled by BlockValidation polling the central registry.
+	// Return empty to indicate no local sync peer tracking.
 	return ""
 }
 
-// updateStorage updates peer storage mode in both local and central registries.
+// updateStorage updates peer storage mode in the central registry.
 func (s *Server) updateStorage(peerID peer.ID, mode string) {
-	if s.peerRegistry != nil && mode != "" {
-		s.peerRegistry.UpdateStorage(peerID, mode)
-	}
 	if s.centralRegistry != nil && mode != "" {
 		info := &blockchain.PeerInfo{
 			ID:      peerID.String(),
@@ -861,9 +852,12 @@ func (s *Server) isOwnMessage(from string, peerID string) bool {
 
 // shouldSkipBannedPeer checks if we should skip a message from a banned peer
 func (s *Server) shouldSkipBannedPeer(from string, messageType string) bool {
-	if s.banManager.IsBanned(from) {
-		s.logger.Debugf("[%s] ignoring notification from banned peer %s", messageType, from)
-		return true
+	if s.centralRegistry != nil {
+		banned, err := s.centralRegistry.IsPeerBanned(s.gCtx, from)
+		if err == nil && banned {
+			s.logger.Debugf("[%s] ignoring notification from banned peer %s", messageType, from)
+			return true
+		}
 	}
 	return false
 }
@@ -871,22 +865,13 @@ func (s *Server) shouldSkipBannedPeer(from string, messageType string) bool {
 // shouldSkipUnhealthyPeer checks if we should skip a message from an unhealthy peer
 // Only checks health for directly connected peers (not gossiped peers)
 func (s *Server) shouldSkipUnhealthyPeer(from string, messageType string) bool {
-	// If no peer registry, allow all messages
-	if s.peerRegistry == nil {
+	if s.centralRegistry == nil {
 		return false
 	}
 
-	peerID, err := peer.Decode(from)
-	if err != nil {
-		// If we can't decode the peer ID (e.g., from is a hostname/identifier in gossiped messages),
-		// we can't check health status, so allow the message through.
-		// This is normal for gossiped messages where 'from' is the relay peer's identifier, not a valid peer ID.
-		return false
-	}
-
-	peerInfo, exists := s.peerRegistry.Get(peerID)
-	if !exists {
-		// Peer not in registry - allow message (peer might be new)
+	peerInfo, found, err := s.centralRegistry.GetPeer(s.gCtx, from)
+	if err != nil || !found {
+		// Peer not in registry or error - allow message (peer might be new)
 		return false
 	}
 
@@ -935,38 +920,10 @@ func (s *Server) parseHash(hashStr string, context string) (*chainhash.Hash, err
 	return hash, nil
 }
 
-// shouldSkipDuringSync checks if we should skip processing during sync
-func (s *Server) shouldSkipDuringSync(from string, originatorPeerID string, messageHeight uint32, messageType string) bool {
-	syncPeer := s.getSyncPeer()
-	if syncPeer == "" {
-		return false
-	}
-
-	syncing, err := s.isBlockchainSyncingOrCatchingUp(s.gCtx)
-	if err != nil || !syncing {
-		return false
-	}
-
-	// Get sync peer's height from registry
-	syncPeerHeight := int32(0)
-	if peerInfo, exists := s.getPeer(syncPeer); exists {
-		syncPeerHeight = int32(peerInfo.Height)
-	}
-
-	// Discard announcements from peers that are behind our sync peer
-	if messageHeight < uint32(syncPeerHeight) {
-		s.logger.Debugf("[%s] Discarding announcement at height %d from %s (below sync peer height %d)",
-			messageType, messageHeight, from, syncPeerHeight)
-		return true
-	}
-
-	// Skip if it's not from our sync peer
-	peerID, err := peer.Decode(originatorPeerID)
-	if err != nil || peerID != syncPeer {
-		s.logger.Debugf("[%s] Skipping announcement during sync (not from sync peer)", messageType)
-		return true
-	}
-
+// shouldSkipDuringSync checks if we should skip processing during sync.
+// With the SyncCoordinator removed, sync peer selection is handled by BlockValidation,
+// so this function no longer filters by sync peer.
+func (s *Server) shouldSkipDuringSync(_ string, _ string, _ uint32, _ string) bool {
 	return false
 }
 
@@ -994,42 +951,7 @@ func (s *Server) startPeerMapCleanup(ctx context.Context) {
 	s.logger.Infof("[startPeerMapCleanup] started peer map cleanup with interval %v", cleanupInterval)
 }
 
-// startPeerRegistryCacheSave starts periodic saving of peer registry cache
-func (s *Server) startPeerRegistryCacheSave(ctx context.Context) {
-	// Save every 5 minutes
-	saveInterval := 5 * time.Minute
 
-	s.registryCacheSaveTicker = time.NewTicker(saveInterval)
-
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				// Save one final time before shutdown
-				if s.peerRegistry != nil {
-					if err := s.peerRegistry.SavePeerRegistryCache(s.settings.P2P.PeerCacheDir); err != nil {
-						s.logger.Errorf("[startPeerRegistryCacheSave] failed to save peer registry cache on shutdown: %v", err)
-					} else {
-						s.logger.Infof("[startPeerRegistryCacheSave] saved peer registry cache on shutdown")
-					}
-				}
-				s.logger.Infof("[startPeerRegistryCacheSave] stopping peer registry cache save")
-				return
-			case <-s.registryCacheSaveTicker.C:
-				if s.peerRegistry != nil {
-					if err := s.peerRegistry.SavePeerRegistryCache(s.settings.P2P.PeerCacheDir); err != nil {
-						s.logger.Errorf("[startPeerRegistryCacheSave] failed to save peer registry cache: %v", err)
-					} else {
-						peerCount := s.peerRegistry.PeerCount()
-						s.logger.Debugf("[startPeerRegistryCacheSave] saved peer registry cache with %d peers", peerCount)
-					}
-				}
-			}
-		}
-	}()
-
-	s.logger.Infof("[startPeerRegistryCacheSave] started peer registry cache save with interval %v", saveInterval)
-}
 
 func (s *Server) listenForBanEvents(ctx context.Context) {
 	for {
@@ -1084,6 +1006,33 @@ func p2pPeerToRegistryInfo(peerID peer.ID, clientName string, height uint32, blo
 		BlockHash:     blockHash,
 		DataHubURL:    dataHubURL,
 		IsBanned:      isBanned,
+	}
+}
+
+// centralPeerToLocalPeerInfo converts a blockchain.PeerInfo to a local PeerInfo for compatibility.
+func centralPeerToLocalPeerInfo(info *blockchain.PeerInfo) *PeerInfo {
+	peerID, _ := peer.Decode(info.ID)
+	return &PeerInfo{
+		ID:                     peerID,
+		ClientName:             info.ClientName,
+		Height:                 info.Height,
+		BlockHash:              info.BlockHash,
+		DataHubURL:             info.DataHubURL,
+		BanScore:               int(info.BanScore),
+		IsBanned:               info.IsBanned,
+		ConnectedAt:            info.ConnectedAt,
+		BytesReceived:          info.BytesReceived,
+		LastMessageTime:        info.LastMessageTime,
+		Storage:                info.Storage,
+		InteractionAttempts:    info.InteractionAttempts,
+		InteractionSuccesses:   info.InteractionSuccesses,
+		InteractionFailures:    info.InteractionFailures,
+		LastInteractionAttempt: info.LastInteractionAttempt,
+		LastInteractionSuccess: info.LastInteractionSuccess,
+		LastInteractionFailure: info.LastInteractionFailure,
+		ReputationScore:        info.ReputationScore,
+		MaliciousCount:         info.MaliciousCount,
+		AvgResponseTime:        time.Duration(info.AvgResponseTimeMs) * time.Millisecond,
 	}
 }
 

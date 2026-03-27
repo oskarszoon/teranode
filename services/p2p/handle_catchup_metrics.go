@@ -3,124 +3,95 @@ package p2p
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/services/p2p/p2p_api"
-	"github.com/libp2p/go-libp2p/core/peer"
 )
 
 // RecordCatchupAttempt records that a catchup attempt was made to a peer
-func (s *Server) RecordCatchupAttempt(_ context.Context, req *p2p_api.RecordCatchupAttemptRequest) (*p2p_api.RecordCatchupAttemptResponse, error) {
-	if s.peerRegistry == nil {
-		return &p2p_api.RecordCatchupAttemptResponse{Ok: false}, errors.WrapGRPC(errors.NewServiceError("peer registry not initialized"))
+func (s *Server) RecordCatchupAttempt(ctx context.Context, req *p2p_api.RecordCatchupAttemptRequest) (*p2p_api.RecordCatchupAttemptResponse, error) {
+	if s.centralRegistry == nil {
+		return &p2p_api.RecordCatchupAttemptResponse{Ok: false}, errors.WrapGRPC(errors.NewServiceError("central registry not initialized"))
 	}
 
-	peerID, err := peer.Decode(req.PeerId)
-	if err != nil {
-		return &p2p_api.RecordCatchupAttemptResponse{Ok: false}, errors.WrapGRPC(errors.NewProcessingError("invalid peer ID: %v", err))
+	// Record attempt as a metrics update (no success/failure yet)
+	if err := s.centralRegistry.UpdatePeerMetrics(ctx, req.PeerId, 0, 0, 0, false, false, false, 0); err != nil {
+		s.logger.Warnf("[RecordCatchupAttempt] failed to record attempt for peer %s: %v", req.PeerId, err)
 	}
-
-	s.peerRegistry.RecordCatchupAttempt(peerID)
 
 	return &p2p_api.RecordCatchupAttemptResponse{Ok: true}, nil
 }
 
 // RecordCatchupSuccess records a successful catchup from a peer
-func (s *Server) RecordCatchupSuccess(_ context.Context, req *p2p_api.RecordCatchupSuccessRequest) (*p2p_api.RecordCatchupSuccessResponse, error) {
-	if s.peerRegistry == nil {
-		return &p2p_api.RecordCatchupSuccessResponse{Ok: false}, errors.WrapGRPC(errors.NewServiceError("peer registry not initialized"))
+func (s *Server) RecordCatchupSuccess(ctx context.Context, req *p2p_api.RecordCatchupSuccessRequest) (*p2p_api.RecordCatchupSuccessResponse, error) {
+	if s.centralRegistry == nil {
+		return &p2p_api.RecordCatchupSuccessResponse{Ok: false}, errors.WrapGRPC(errors.NewServiceError("central registry not initialized"))
 	}
 
-	peerID, err := peer.Decode(req.PeerId)
-	if err != nil {
-		return &p2p_api.RecordCatchupSuccessResponse{Ok: false}, errors.WrapGRPC(errors.NewProcessingError("invalid peer ID: %v", err))
+	if err := s.centralRegistry.UpdatePeerMetrics(ctx, req.PeerId, 0, 0, 0, true, false, false, req.DurationMs); err != nil {
+		s.logger.Warnf("[RecordCatchupSuccess] failed to record success for peer %s: %v", req.PeerId, err)
 	}
-
-	duration := time.Duration(req.DurationMs) * time.Millisecond
-	s.peerRegistry.RecordCatchupSuccess(peerID, duration)
 
 	return &p2p_api.RecordCatchupSuccessResponse{Ok: true}, nil
 }
 
 // RecordCatchupFailure records a failed catchup attempt from a peer
-func (s *Server) RecordCatchupFailure(_ context.Context, req *p2p_api.RecordCatchupFailureRequest) (*p2p_api.RecordCatchupFailureResponse, error) {
-	if s.peerRegistry == nil {
-		return &p2p_api.RecordCatchupFailureResponse{Ok: false}, errors.WrapGRPC(errors.NewServiceError("peer registry not initialized"))
+func (s *Server) RecordCatchupFailure(ctx context.Context, req *p2p_api.RecordCatchupFailureRequest) (*p2p_api.RecordCatchupFailureResponse, error) {
+	if s.centralRegistry == nil {
+		return &p2p_api.RecordCatchupFailureResponse{Ok: false}, errors.WrapGRPC(errors.NewServiceError("central registry not initialized"))
 	}
 
-	peerID, err := peer.Decode(req.PeerId)
-	if err != nil {
-		return &p2p_api.RecordCatchupFailureResponse{Ok: false}, errors.WrapGRPC(errors.NewProcessingError("invalid peer ID: %v", err))
+	if err := s.centralRegistry.UpdatePeerMetrics(ctx, req.PeerId, 0, 0, 0, false, true, false, 0); err != nil {
+		s.logger.Warnf("[RecordCatchupFailure] failed to record failure for peer %s: %v", req.PeerId, err)
 	}
-
-	s.peerRegistry.RecordCatchupFailure(peerID)
 
 	return &p2p_api.RecordCatchupFailureResponse{Ok: true}, nil
 }
 
 // RecordCatchupMalicious records malicious behavior detected during catchup
-func (s *Server) RecordCatchupMalicious(_ context.Context, req *p2p_api.RecordCatchupMaliciousRequest) (*p2p_api.RecordCatchupMaliciousResponse, error) {
-	if s.peerRegistry == nil {
-		return &p2p_api.RecordCatchupMaliciousResponse{Ok: false}, errors.WrapGRPC(errors.NewServiceError("peer registry not initialized"))
+func (s *Server) RecordCatchupMalicious(ctx context.Context, req *p2p_api.RecordCatchupMaliciousRequest) (*p2p_api.RecordCatchupMaliciousResponse, error) {
+	if s.centralRegistry == nil {
+		return &p2p_api.RecordCatchupMaliciousResponse{Ok: false}, errors.WrapGRPC(errors.NewServiceError("central registry not initialized"))
 	}
 
-	peerID, err := peer.Decode(req.PeerId)
-	if err != nil {
-		return &p2p_api.RecordCatchupMaliciousResponse{Ok: false}, errors.WrapGRPC(errors.NewProcessingError("invalid peer ID: %v", err))
+	if err := s.centralRegistry.UpdatePeerMetrics(ctx, req.PeerId, 0, 0, 0, false, false, true, 0); err != nil {
+		s.logger.Warnf("[RecordCatchupMalicious] failed to record malicious behavior for peer %s: %v", req.PeerId, err)
 	}
-
-	s.peerRegistry.RecordCatchupMalicious(peerID)
 
 	return &p2p_api.RecordCatchupMaliciousResponse{Ok: true}, nil
 }
 
 // UpdateCatchupReputation updates the reputation score for a peer
 func (s *Server) UpdateCatchupReputation(_ context.Context, req *p2p_api.UpdateCatchupReputationRequest) (*p2p_api.UpdateCatchupReputationResponse, error) {
-	if s.peerRegistry == nil {
-		return &p2p_api.UpdateCatchupReputationResponse{Ok: false}, errors.WrapGRPC(errors.NewServiceError("peer registry not initialized"))
-	}
-
-	peerID, err := peer.Decode(req.PeerId)
-	if err != nil {
-		return &p2p_api.UpdateCatchupReputationResponse{Ok: false}, errors.WrapGRPC(errors.NewProcessingError("invalid peer ID: %v", err))
-	}
-
-	s.peerRegistry.UpdateCatchupReputation(peerID, req.Score)
-
+	// NOTE: Reputation is computed automatically by the central registry based on interactions.
+	// This explicit setter is a no-op but returns success for backward compatibility.
+	s.logger.Debugf("[UpdateCatchupReputation] Reputation update requested for peer %s (score=%.2f) -- computed by central registry", req.PeerId, req.Score)
 	return &p2p_api.UpdateCatchupReputationResponse{Ok: true}, nil
 }
 
 // UpdateCatchupError updates the last catchup error for a peer
 func (s *Server) UpdateCatchupError(_ context.Context, req *p2p_api.UpdateCatchupErrorRequest) (*p2p_api.UpdateCatchupErrorResponse, error) {
-	if s.peerRegistry == nil {
-		return &p2p_api.UpdateCatchupErrorResponse{Ok: false}, errors.WrapGRPC(errors.NewServiceError("peer registry not initialized"))
-	}
-
-	peerID, err := peer.Decode(req.PeerId)
-	if err != nil {
-		return &p2p_api.UpdateCatchupErrorResponse{Ok: false}, errors.WrapGRPC(errors.NewProcessingError("invalid peer ID: %v", err))
-	}
-
-	s.peerRegistry.UpdateCatchupError(peerID, req.ErrorMsg)
-
+	// NOTE: Catchup error tracking not yet implemented in central registry.
+	// Log and return success for backward compatibility.
+	s.logger.Debugf("[UpdateCatchupError] Error recorded for peer %s: %s", req.PeerId, req.ErrorMsg)
 	return &p2p_api.UpdateCatchupErrorResponse{Ok: true}, nil
 }
 
 // GetPeersForCatchup returns peers suitable for catchup operations
-func (s *Server) GetPeersForCatchup(_ context.Context, _ *p2p_api.GetPeersForCatchupRequest) (*p2p_api.GetPeersForCatchupResponse, error) {
-	if s.peerRegistry == nil {
-		return &p2p_api.GetPeersForCatchupResponse{Peers: []*p2p_api.PeerInfoForCatchup{}}, errors.WrapGRPC(errors.NewServiceError("peer registry not initialized"))
+func (s *Server) GetPeersForCatchup(ctx context.Context, _ *p2p_api.GetPeersForCatchupRequest) (*p2p_api.GetPeersForCatchupResponse, error) {
+	if s.centralRegistry == nil {
+		return &p2p_api.GetPeersForCatchupResponse{Peers: []*p2p_api.PeerInfoForCatchup{}}, errors.WrapGRPC(errors.NewServiceError("central registry not initialized"))
 	}
 
-	peers := s.peerRegistry.GetPeersForCatchup()
+	// List peers with minimum reputation, excluding banned
+	peers, err := s.centralRegistry.ListPeers(ctx, nil, 10.0, 0, true)
+	if err != nil {
+		s.logger.Errorf("[GetPeersForCatchup] failed to list peers from central registry: %v", err)
+		return &p2p_api.GetPeersForCatchupResponse{Peers: []*p2p_api.PeerInfoForCatchup{}}, nil
+	}
 
-	// Convert to proto format
 	protoPeers := make([]*p2p_api.PeerInfoForCatchup, 0, len(peers))
-
 	for _, p := range peers {
-		// Calculate total attempts as sum of successes and failures
-		// InteractionAttempts is a separate counter that may not match
 		totalAttempts := p.InteractionSuccesses + p.InteractionFailures
 
 		blockHashStr := ""
@@ -129,14 +100,14 @@ func (s *Server) GetPeersForCatchup(_ context.Context, _ *p2p_api.GetPeersForCat
 		}
 
 		protoPeers = append(protoPeers, &p2p_api.PeerInfoForCatchup{
-			Id:                     p.ID.String(),
+			Id:                     p.ID,
 			Height:                 p.Height,
 			BlockHash:              blockHashStr,
 			DataHubUrl:             p.DataHubURL,
 			CatchupReputationScore: p.ReputationScore,
-			CatchupAttempts:        totalAttempts,          // Use calculated total, not InteractionAttempts
-			CatchupSuccesses:       p.InteractionSuccesses, // Number of successful interactions
-			CatchupFailures:        p.InteractionFailures,  // Number of failed interactions
+			CatchupAttempts:        totalAttempts,
+			CatchupSuccesses:       p.InteractionSuccesses,
+			CatchupFailures:        p.InteractionFailures,
 		})
 	}
 
@@ -144,12 +115,12 @@ func (s *Server) GetPeersForCatchup(_ context.Context, _ *p2p_api.GetPeersForCat
 }
 
 // ReportValidSubtree is a gRPC handler for reporting valid subtree reception
-func (s *Server) ReportValidSubtree(_ context.Context, req *p2p_api.ReportValidSubtreeRequest) (*p2p_api.ReportValidSubtreeResponse, error) {
-	if s.peerRegistry == nil {
+func (s *Server) ReportValidSubtree(ctx context.Context, req *p2p_api.ReportValidSubtreeRequest) (*p2p_api.ReportValidSubtreeResponse, error) {
+	if s.centralRegistry == nil {
 		return &p2p_api.ReportValidSubtreeResponse{
 			Success: false,
-			Message: "peer registry not initialized",
-		}, errors.WrapGRPC(errors.NewServiceError("peer registry not initialized"))
+			Message: "central registry not initialized",
+		}, errors.WrapGRPC(errors.NewServiceError("central registry not initialized"))
 	}
 
 	if req.PeerId == "" {
@@ -166,18 +137,12 @@ func (s *Server) ReportValidSubtree(_ context.Context, req *p2p_api.ReportValidS
 		}, errors.WrapGRPC(errors.NewInvalidArgumentError("subtree hash is required"))
 	}
 
-	// Decode peer ID
-	peerID, err := peer.Decode(req.PeerId)
-	if err != nil {
-		return &p2p_api.ReportValidSubtreeResponse{
-			Success: false,
-			Message: "invalid peer ID",
-		}, errors.WrapGRPC(errors.NewProcessingError("invalid peer ID: %v", err))
+	// Record successful subtree reception in central registry
+	if s.centralRegistry != nil {
+		if err := s.centralRegistry.UpdatePeerMetrics(ctx, req.PeerId, 0, 0, 0, true, false, false, 0); err != nil {
+			s.logger.Warnf("[ReportValidSubtree] failed to record success for peer %s: %v", req.PeerId, err)
+		}
 	}
-
-	// Record successful subtree reception directly with peer ID
-	// Use a nominal duration since we don't have timing info at this level
-	s.peerRegistry.RecordSubtreeReceived(peerID, 0)
 	s.logger.Debugf("[ReportValidSubtree] Recorded successful subtree %s from peer %s", req.SubtreeHash, req.PeerId)
 
 	return &p2p_api.ReportValidSubtreeResponse{
@@ -187,12 +152,12 @@ func (s *Server) ReportValidSubtree(_ context.Context, req *p2p_api.ReportValidS
 }
 
 // ReportValidBlock is a gRPC handler for reporting valid block reception
-func (s *Server) ReportValidBlock(_ context.Context, req *p2p_api.ReportValidBlockRequest) (*p2p_api.ReportValidBlockResponse, error) {
-	if s.peerRegistry == nil {
+func (s *Server) ReportValidBlock(ctx context.Context, req *p2p_api.ReportValidBlockRequest) (*p2p_api.ReportValidBlockResponse, error) {
+	if s.centralRegistry == nil {
 		return &p2p_api.ReportValidBlockResponse{
 			Success: false,
-			Message: "peer registry not initialized",
-		}, errors.WrapGRPC(errors.NewServiceError("peer registry not initialized"))
+			Message: "central registry not initialized",
+		}, errors.WrapGRPC(errors.NewServiceError("central registry not initialized"))
 	}
 
 	if req.PeerId == "" {
@@ -209,18 +174,12 @@ func (s *Server) ReportValidBlock(_ context.Context, req *p2p_api.ReportValidBlo
 		}, errors.WrapGRPC(errors.NewInvalidArgumentError("block hash is required"))
 	}
 
-	// Decode peer ID
-	peerID, err := peer.Decode(req.PeerId)
-	if err != nil {
-		return &p2p_api.ReportValidBlockResponse{
-			Success: false,
-			Message: "invalid peer ID",
-		}, errors.WrapGRPC(errors.NewProcessingError("invalid peer ID: %v", err))
+	// Record successful block reception in central registry
+	if s.centralRegistry != nil {
+		if err := s.centralRegistry.UpdatePeerMetrics(ctx, req.PeerId, 0, 0, 0, true, false, false, 0); err != nil {
+			s.logger.Warnf("[ReportValidBlock] failed to record success for peer %s: %v", req.PeerId, err)
+		}
 	}
-
-	// Record successful block reception directly with peer ID
-	// Use a nominal duration since we don't have timing info at this level
-	s.peerRegistry.RecordBlockReceived(peerID, 0)
 	s.logger.Debugf("[ReportValidBlock] Recorded successful block %s from peer %s", req.BlockHash, req.PeerId)
 
 	return &p2p_api.ReportValidBlockResponse{
@@ -238,12 +197,15 @@ func (s *Server) IsPeerMalicious(_ context.Context, req *p2p_api.IsPeerMalicious
 		}, nil
 	}
 
-	// Check if peer is in the ban list
-	if s.banManager != nil && s.banManager.IsBanned(req.PeerId) {
-		return &p2p_api.IsPeerMaliciousResponse{
-			IsMalicious: true,
-			Reason:      "peer is banned",
-		}, nil
+	// Check if peer is banned via central registry
+	if s.centralRegistry != nil {
+		banned, err := s.centralRegistry.IsPeerBanned(context.Background(), req.PeerId)
+		if err == nil && banned {
+			return &p2p_api.IsPeerMaliciousResponse{
+				IsMalicious: true,
+				Reason:      "peer is banned",
+			}, nil
+		}
 	}
 
 	// A peer is ONLY considered malicious if they are explicitly banned.
@@ -268,19 +230,10 @@ func (s *Server) IsPeerUnhealthy(_ context.Context, req *p2p_api.IsPeerUnhealthy
 		}, nil
 	}
 
-	// Check peer registry for health status
-	if s.peerRegistry != nil {
-		peerId, err := peer.Decode(req.PeerId)
-		if err != nil {
-			return &p2p_api.IsPeerUnhealthyResponse{
-				IsUnhealthy:     true,
-				Reason:          "invalid peer ID",
-				ReputationScore: 0,
-			}, nil
-		}
-		peerInfo, exists := s.peerRegistry.Get(peerId)
-		if !exists {
-			// Unknown peer - consider unhealthy since we have no information about them
+	// Check peer health via central registry
+	if s.centralRegistry != nil {
+		peerInfo, found, err := s.centralRegistry.GetPeer(context.Background(), req.PeerId)
+		if err != nil || !found {
 			return &p2p_api.IsPeerUnhealthyResponse{
 				IsUnhealthy:     true,
 				Reason:          "unknown peer",
@@ -288,9 +241,6 @@ func (s *Server) IsPeerUnhealthy(_ context.Context, req *p2p_api.IsPeerUnhealthy
 			}, nil
 		}
 
-		// A peer is considered unhealthy if:
-		// 1. They have a low reputation score (below 40)
-		// 2. They have a high failure rate
 		if peerInfo.ReputationScore < 40 {
 			return &p2p_api.IsPeerUnhealthyResponse{
 				IsUnhealthy:     true,
@@ -299,7 +249,6 @@ func (s *Server) IsPeerUnhealthy(_ context.Context, req *p2p_api.IsPeerUnhealthy
 			}, nil
 		}
 
-		// Check success rate based on total interactions (successes + failures)
 		totalInteractions := peerInfo.InteractionSuccesses + peerInfo.InteractionFailures
 		if totalInteractions > 10 && peerInfo.InteractionSuccesses < totalInteractions/2 {
 			successRate := float64(peerInfo.InteractionSuccesses) / float64(totalInteractions)
@@ -310,7 +259,6 @@ func (s *Server) IsPeerUnhealthy(_ context.Context, req *p2p_api.IsPeerUnhealthy
 			}, nil
 		}
 
-		// Peer is healthy
 		return &p2p_api.IsPeerUnhealthyResponse{
 			IsUnhealthy:     false,
 			Reason:          "",
@@ -318,7 +266,6 @@ func (s *Server) IsPeerUnhealthy(_ context.Context, req *p2p_api.IsPeerUnhealthy
 		}, nil
 	}
 
-	// If we can't determine health, consider unhealthy
 	return &p2p_api.IsPeerUnhealthyResponse{
 		IsUnhealthy:     true,
 		Reason:          "unable to determine peer health",
