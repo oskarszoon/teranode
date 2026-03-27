@@ -648,10 +648,17 @@ func (s *Server) getSyncPeer() peer.ID {
 	return ""
 }
 
-// updateStorage updates peer storage mode in the registry
+// updateStorage updates peer storage mode in both local and central registries.
 func (s *Server) updateStorage(peerID peer.ID, mode string) {
 	if s.peerRegistry != nil && mode != "" {
 		s.peerRegistry.UpdateStorage(peerID, mode)
+	}
+	if s.centralRegistry != nil && mode != "" {
+		info := &blockchain.PeerInfo{
+			ID:      peerID.String(),
+			Storage: mode,
+		}
+		go s.registerInCentralRegistry(info)
 	}
 }
 

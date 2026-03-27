@@ -368,12 +368,17 @@ func (sc *SyncCoordinator) handleFSMTransition(currentState *blockchain_api.FSMS
 
 // handleRunningState handles the FSM RUNNING state logic
 func (sc *SyncCoordinator) handleRunningState(_ context.Context) {
-	localHeight := sc.getLocalHeightSafe()
-
 	sc.mu.RLock()
 	currentSyncPeer := sc.currentSyncPeer
 	sc.mu.RUnlock()
 
+	// If we already have a sync peer, don't rotate — the central registry poller
+	// in BlockValidation handles catchup orchestration.
+	if currentSyncPeer != "" {
+		return
+	}
+
+	localHeight := sc.getLocalHeightSafe()
 	sc.selectAndActivateNewPeer(localHeight, currentSyncPeer)
 }
 

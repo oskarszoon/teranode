@@ -30,7 +30,7 @@ import (
 //   - *CatchupResult: Result containing headers and metrics
 //   - *model.BlockHeader: Best block header from our chain
 //   - error: If fetching or parsing headers fails
-func (u *Server) catchupGetBlockHeaders(ctx context.Context, blockUpTo *model.Block, peerID, baseURL string, transport CatchupTransport) (*catchup.Result, *model.BlockHeader, error) {
+func (u *Server) catchupGetBlockHeaders(ctx context.Context, blockUpTo *model.Block, peerID, baseURL string, transport CatchupTransport, maxHeadersOverride int) (*catchup.Result, *model.BlockHeader, error) {
 	ctx, _, deferFn := tracing.Tracer("subtreevalidation").Start(ctx, "catchupGetBlockHeaders",
 		tracing.WithParentStat(u.stats),
 		tracing.WithLogMessage(u.logger, "[catchup][%s] fetching headers up to %s from peer %s", blockUpTo.Hash().String(), baseURL, peerID),
@@ -180,6 +180,9 @@ func (u *Server) catchupGetBlockHeaders(ctx context.Context, blockUpTo *model.Bl
 	// iteration variables
 	iteration := 0
 	maxAccumulatedHeaders := u.settings.BlockValidation.CatchupMaxAccumulatedHeaders
+	if maxHeadersOverride > 0 {
+		maxAccumulatedHeaders = maxHeadersOverride
+	}
 	totalHeadersFetched := 0
 	reachedTarget := false
 	stopReason := ""

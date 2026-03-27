@@ -97,7 +97,7 @@ func TestCatchup_MultiIterationNoDuplicates(t *testing.T) {
 		)
 
 		// Execute catchup
-		result, _, err := server.catchupGetBlockHeaders(ctx, targetBlock, "peer-test-001", "http://test-peer", nil)
+		result, _, err := server.catchupGetBlockHeaders(ctx, targetBlock, "peer-test-001", "http://test-peer", nil, 0)
 
 		// Verify results
 		require.NoError(t, err)
@@ -226,7 +226,7 @@ func TestCatchup_MultiIterationNoDuplicates(t *testing.T) {
 		)
 
 		// Execute catchup
-		result, _, err := server.catchupGetBlockHeaders(ctx, targetBlock, "peer-test-001", "http://test-peer", nil)
+		result, _, err := server.catchupGetBlockHeaders(ctx, targetBlock, "peer-test-001", "http://test-peer", nil, 0)
 
 		// Verify results
 		require.NoError(t, err)
@@ -343,7 +343,7 @@ func TestCatchup_MultiIterationNoDuplicates(t *testing.T) {
 		)
 
 		// Execute catchup
-		result, _, err := server.catchupGetBlockHeaders(ctx, targetBlock, "peer-test-001", "http://test-peer", nil)
+		result, _, err := server.catchupGetBlockHeaders(ctx, targetBlock, "peer-test-001", "http://test-peer", nil, 0)
 
 		// Verify results
 		require.NoError(t, err)
@@ -434,7 +434,7 @@ func TestCatchup_HeaderChainCacheWithMultiIteration(t *testing.T) {
 	)
 
 	// Execute catchup
-	result, _, err := server.catchupGetBlockHeaders(ctx, targetBlock, "peer-test-001", "http://test-peer", nil)
+	result, _, err := server.catchupGetBlockHeaders(ctx, targetBlock, "peer-test-001", "http://test-peer", nil, 0)
 
 	require.NoError(t, err)
 	require.NotNil(t, result)

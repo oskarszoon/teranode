@@ -22,11 +22,11 @@ import (
 )
 
 const (
-	// maxBlockHeadersPerRequest is the maximum number of headers to request in a single batch
+	// maxBlockHeadersPerRequest is the maximum number of headers the peer returns per request.
+	// This is a protocol-level limit from the DataHub HTTP endpoint.
 	maxBlockHeadersPerRequest = 10_000
 
-	// maxCatchupIterations was the old iteration limit, kept for reference but no longer used
-	// since we now make a single request for headers
+	// maxCatchupIterations limits header fetch iterations per catchup round.
 	maxCatchupIterations = 1000
 )
 
@@ -180,6 +180,17 @@ func (u *Server) catchup(ctx context.Context, blockUpTo *model.Block, peerID, ba
 		return err
 	}
 	defer u.releaseCatchupLock(catchupCtx, &err)
+
+	// Step 1.5: Transition FSM to CATCHINGBLOCKS immediately so other services
+	// (subtree validation, etc.) stop processing network messages while we catch up.
+	if fsmErr := u.blockchainClient.CatchUpBlocks(ctx); fsmErr != nil {
+		u.logger.Warnf("[catchup][%s] Could not transition FSM to CATCHINGBLOCKS early: %v (will retry at block fetch stage)",
+			catchupCtx.blockUpTo.Hash().String(), fsmErr)
+	} else {
+		// Ensure FSM is restored if we exit before reaching fetchAndValidateBlocks
+		// (which has its own deferred restore).
+		defer u.restoreFSMState(ctx, catchupCtx)
+	}
 
 	// Step 2: Fetch block headers from peer
 	if err = u.fetchHeaders(ctx, catchupCtx); err != nil {
@@ -426,7 +437,28 @@ func (u *Server) releaseCatchupLock(ctx *CatchupContext, err *error) {
 func (u *Server) fetchHeaders(ctx context.Context, catchupCtx *CatchupContext) error {
 	u.logger.Debugf("[catchup][%s] Step 1: Fetching headers from peer %s", catchupCtx.blockUpTo.Hash().String(), catchupCtx.baseURL)
 
-	result, _, err := u.catchupGetBlockHeaders(ctx, catchupCtx.blockUpTo, catchupCtx.peerID, catchupCtx.baseURL, catchupCtx.transport)
+	// Calculate the header cap for this catchup round. If the next checkpoint
+	// requires more headers than the configured default, raise the cap so we
+	// accumulate enough headers for checkpoint verification and quick validation.
+	maxAccumulated := u.settings.BlockValidation.CatchupMaxAccumulatedHeaders
+	if len(catchupCtx.checkpoints) > 0 {
+		localHeight := uint32(0)
+		if u.utxoStore != nil {
+			localHeight = u.utxoStore.GetBlockHeight()
+		}
+		for _, cp := range catchupCtx.checkpoints {
+			if uint32(cp.Height) > localHeight {
+				needed := int(uint32(cp.Height)-localHeight) + maxBlockHeadersPerRequest
+				if needed > maxAccumulated {
+					u.logger.Infof("[catchup][%s] Raising max accumulated headers from %d to %d to reach checkpoint at height %d",
+						catchupCtx.blockUpTo.Hash().String(), maxAccumulated, needed, cp.Height)
+					maxAccumulated = needed
+				}
+				break
+			}
+		}
+	}
+	result, _, err := u.catchupGetBlockHeaders(ctx, catchupCtx.blockUpTo, catchupCtx.peerID, catchupCtx.baseURL, catchupCtx.transport, maxAccumulated)
 	if err != nil {
 		return errors.NewProcessingError("[catchup][%s] failed to get block headers: %w", catchupCtx.blockUpTo.Hash().String(), err)
 	}
@@ -963,6 +995,12 @@ func (u *Server) recordMaliciousAttempt(peerID string, reason string) {
 //   - error: If FSM state change fails
 func (u *Server) setFSMCatchingBlocks(ctx context.Context, catchupCtx *CatchupContext, size *atomic.Int64) error {
 	u.logger.Infof("[catchup][%s] Setting node to CATCHINGBLOCKS state for %d blocks", catchupCtx.blockUpTo.Hash().String(), size.Load())
+
+	// Check if already in CATCHINGBLOCKS (early transition in Step 1.5 may have set this).
+	state, stateErr := u.blockchainClient.GetFSMCurrentState(ctx)
+	if stateErr == nil && state != nil && *state == blockchain.FSMStateCATCHINGBLOCKS {
+		return nil
+	}
 
 	if err := u.blockchainClient.CatchUpBlocks(ctx); err != nil {
 		if errors.Is(err, errors.ErrStateError) {

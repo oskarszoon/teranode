@@ -4,6 +4,7 @@ package blockvalidation
 
 import (
 	"context"
+	"sort"
 	"time"
 
 	"github.com/bsv-blockchain/teranode/model"
@@ -65,7 +66,16 @@ func (u *Server) selectBestPeersFromCentralRegistry(ctx context.Context, targetH
 		})
 	}
 
-	// ListPeers already returns results sorted by reputation descending.
+	// Sort: full nodes first, then by reputation descending.
+	sort.Slice(result, func(i, j int) bool {
+		isFull_i := result[i].Storage == "full"
+		isFull_j := result[j].Storage == "full"
+		if isFull_i != isFull_j {
+			return isFull_i
+		}
+		return result[i].CatchupReputationScore > result[j].CatchupReputationScore
+	})
+
 	return result, nil
 }
 
@@ -134,6 +144,11 @@ func (u *Server) pollCentralRegistry(ctx context.Context) bool {
 	if len(peers) == 0 {
 		u.logger.Debugf("[central_registry] No peers with height > %d in centralized registry", ourHeight)
 		return false
+	}
+
+	// Don't attempt if catchup is already running.
+	if u.isCatchingUp.Load() {
+		return true // treat as triggered — catchup is active
 	}
 
 	best := peers[0]
