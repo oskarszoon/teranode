@@ -424,6 +424,9 @@ func (b *Blockchain) Start(ctx context.Context, readyCh chan<- struct{}) error {
 		}
 	}
 
+	// Start ban score decay goroutine for the centralized peer registry.
+	b.peerRegistry.StartBanDecay(ctx)
+
 	go b.startSubscriptions()
 
 	// Start heartbeat sender for subscription health monitoring
