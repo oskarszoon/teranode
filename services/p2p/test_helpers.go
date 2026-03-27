@@ -229,17 +229,3 @@ func CreatePeerWithReputation(id peer.ID, reputation float64, successes, failure
 		AvgResponseTime:        100 * time.Millisecond,
 	}
 }
-
-// SimulateSuccessfulCatchup records multiple successful catchup interactions
-func SimulateSuccessfulCatchup(pr *PeerRegistry, peerID peer.ID, blockCount int) {
-	for i := 0; i < blockCount; i++ {
-		pr.RecordInteractionAttempt(peerID)
-		pr.RecordInteractionSuccess(peerID, time.Duration(50+i)*time.Millisecond)
-	}
-}
-
-// SimulateInvalidFork records malicious behavior from invalid fork
-func SimulateInvalidFork(pr *PeerRegistry, peerID peer.ID) {
-	pr.RecordInteractionAttempt(peerID)
-	pr.RecordMaliciousInteraction(peerID)
-}

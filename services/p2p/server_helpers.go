@@ -253,7 +253,7 @@ func (s *Server) handleSubtreeTopic(_ context.Context, m []byte, fromID string) 
 func (s *Server) addProtocolViolation(peerID string) {
 	if s.centralRegistry != nil {
 		go func() {
-			if _, _, err := s.centralRegistry.AddBanScore(s.gCtx, peerID, ReasonProtocolViolation.String(), 20); err != nil {
+			if _, _, err := s.centralRegistry.AddBanScore(s.gCtx, peerID, "protocol_violation", 20); err != nil {
 				s.logger.Warnf("[P2P] failed to add protocol violation score for peer %s: %v", peerID, err)
 			}
 		}()

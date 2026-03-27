@@ -1725,48 +1725,20 @@ func (s *Server) ClearBanned(ctx context.Context, _ *emptypb.Empty) (*p2p_api.Cl
 }
 
 func (s *Server) AddBanScore(ctx context.Context, req *p2p_api.AddBanScoreRequest) (*p2p_api.AddBanScoreResponse, error) {
-	// Map the reason string to a BanReason enum
-	reason := ReasonUnknown
-
-	switch req.Reason {
-	case "invalid_subtree":
-		reason = ReasonInvalidSubtree
-	case "protocol_violation":
-		reason = ReasonProtocolViolation
-	case "spam":
-		reason = ReasonSpam
-	case "invalid_block":
-		reason = ReasonInvalidBlock
-	default:
-		s.logger.Warnf("[AddBanScore] Unknown ban reason: %s", req.Reason)
+	if s.centralRegistry == nil {
+		return &p2p_api.AddBanScoreResponse{Ok: false}, errors.NewServiceUnavailableError("central registry not available")
 	}
 
-	if s.centralRegistry != nil {
-		// Map reason to points
-		points := int32(10) // default
-		switch reason {
-		case ReasonProtocolViolation:
-			points = 20
-		case ReasonSpam:
-			points = 50
-		case ReasonInvalidBlock:
-			points = 10
-		case ReasonInvalidSubtree:
-			points = 10
-		case ReasonCatchupFailure:
-			points = 30
-		}
-		score, banned, err := s.centralRegistry.AddBanScore(ctx, req.PeerId, reason.String(), points)
-		if err != nil {
-			s.logger.Errorf("[AddBanScore] failed to add ban score via central registry: %v", err)
-			return &p2p_api.AddBanScoreResponse{Ok: false}, errors.WrapGRPC(err)
-		}
-		s.logger.Infof("[AddBanScore] Added score to peer %s for reason %s. New score: %d, Banned: %t", req.PeerId, req.Reason, score, banned)
+	// Central registry handles reason→points mapping via its BanConfig.
+	score, banned, err := s.centralRegistry.AddBanScore(ctx, req.PeerId, req.Reason, 0)
+	if err != nil {
+		s.logger.Errorf("[AddBanScore] failed to add ban score via central registry: %v", err)
+		return &p2p_api.AddBanScoreResponse{Ok: false}, errors.WrapGRPC(err)
+	}
+	s.logger.Infof("[AddBanScore] Added score to peer %s for reason %s. New score: %d, Banned: %t", req.PeerId, req.Reason, score, banned)
 
-		if banned {
-			// Trigger ban event handling (disconnect peer, etc.)
-			s.banChan <- BanEvent{Action: banActionAdd, PeerID: req.PeerId, Reason: req.Reason}
-		}
+	if banned {
+		s.banChan <- BanEvent{Action: banActionAdd, PeerID: req.PeerId, Reason: req.Reason}
 	}
 
 	return &p2p_api.AddBanScoreResponse{Ok: true}, nil
