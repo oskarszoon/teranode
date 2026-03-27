@@ -5,197 +5,98 @@ import (
 	"time"
 )
 
-// reportCatchupAttempt reports a catchup attempt to the P2P service.
-// Falls back to local metrics if P2P client is unavailable.
-//
-// Parameters:
-//   - ctx: Context for the gRPC call
-//   - peerID: Peer identifier
+// reportCatchupAttempt reports a catchup attempt to the central registry.
 func (u *Server) reportCatchupAttempt(ctx context.Context, peerID string) {
-	if peerID == "" {
+	if peerID == "" || u.centralPeerRegistry == nil {
 		return
 	}
-
-	// Report to P2P service if client is available
-	if u.p2pClient != nil {
-		if err := u.p2pClient.RecordCatchupAttempt(ctx, peerID); err != nil {
-			u.logger.Warnf("[peer_metrics] Failed to report catchup attempt to P2P service for peer %s: %v", peerID, err)
-			// Fall through to local metrics as backup
-		} else {
-			return // Successfully reported to P2P service
-		}
+	// Attempts are tracked via UpdatePeerMetrics with no success/failure flags.
+	if err := u.centralPeerRegistry.UpdatePeerMetrics(ctx, peerID, 0, 0, 0, false, false, false, 0); err != nil {
+		u.logger.Warnf("[peer_metrics] Failed to report catchup attempt for peer %s: %v", peerID, err)
 	}
-
-	// Fallback to local metrics (for backward compatibility or when P2P client unavailable)
-	// Note: Local metrics don't track attempts separately, only successes/failures
 }
 
-// reportCatchupSuccess reports a successful catchup to the P2P service.
-// Falls back to local metrics if P2P client is unavailable.
-//
-// Parameters:
-//   - ctx: Context for the gRPC call
-//   - peerID: Peer identifier
-//   - duration: Duration of the catchup operation
+// reportCatchupSuccess reports a successful catchup to the central registry.
 func (u *Server) reportCatchupSuccess(ctx context.Context, peerID string, duration time.Duration) {
-	if peerID == "" {
+	if peerID == "" || u.centralPeerRegistry == nil {
 		return
 	}
-
 	durationMs := duration.Milliseconds()
-
-	// Report to P2P service if client is available
-	if u.p2pClient != nil {
-		if err := u.p2pClient.RecordCatchupSuccess(ctx, peerID, durationMs); err != nil {
-			u.logger.Warnf("[peer_metrics] Failed to report catchup success to P2P service for peer %s: %v", peerID, err)
-			// Fall through to local metrics as backup
-		} else {
-			return // Successfully reported to P2P service
-		}
+	if err := u.centralPeerRegistry.UpdatePeerMetrics(ctx, peerID, 0, 0, 0, true, false, false, durationMs); err != nil {
+		u.logger.Warnf("[peer_metrics] Failed to report catchup success for peer %s: %v", peerID, err)
 	}
-
-	// Fallback: No local metrics needed since we're using P2P service for all peer tracking
 }
 
-// reportCatchupFailure reports a failed catchup to the P2P service.
-// Falls back to local metrics if P2P client is unavailable.
-//
-// Parameters:
-//   - ctx: Context for the gRPC call
-//   - peerID: Peer identifier
+// reportCatchupFailure reports a failed catchup to the central registry.
 func (u *Server) reportCatchupFailure(ctx context.Context, peerID string) {
-	if peerID == "" {
+	if peerID == "" || u.centralPeerRegistry == nil {
 		return
 	}
-
-	// Report to P2P service if client is available
-	if u.p2pClient != nil {
-		if err := u.p2pClient.RecordCatchupFailure(ctx, peerID); err != nil {
-			u.logger.Warnf("[peer_metrics] Failed to report catchup failure to P2P service for peer %s: %v", peerID, err)
-		}
+	if err := u.centralPeerRegistry.UpdatePeerMetrics(ctx, peerID, 0, 0, 0, false, true, false, 0); err != nil {
+		u.logger.Warnf("[peer_metrics] Failed to report catchup failure for peer %s: %v", peerID, err)
 	}
 }
 
-// reportCatchupError stores the catchup error message in the peer registry.
-// This allows the UI to display why catchup failed for each peer.
-//
-// Parameters:
-//   - ctx: Context for the operation
-//   - peerID: Peer identifier
-//   - errorMsg: Error message to store
-func (u *Server) reportCatchupError(ctx context.Context, peerID string, errorMsg string) {
+// reportCatchupError stores the catchup error message (best-effort logging only).
+func (u *Server) reportCatchupError(_ context.Context, peerID string, errorMsg string) {
 	if peerID == "" || errorMsg == "" {
 		return
 	}
-
-	// Report to P2P service if client is available
-	if u.p2pClient != nil {
-		if err := u.p2pClient.UpdateCatchupError(ctx, peerID, errorMsg); err != nil {
-			u.logger.Warnf("[peer_metrics] Failed to update catchup error for peer %s: %v", peerID, err)
-		}
-	}
+	u.logger.Debugf("[peer_metrics] Catchup error for peer %s: %s", peerID, errorMsg)
 }
 
-// reportCatchupMalicious reports malicious behavior to the P2P service.
-// Falls back to local metrics if P2P client is unavailable.
-//
-// Parameters:
-//   - ctx: Context for the gRPC call
-//   - peerID: Peer identifier
-//   - reason: Description of the malicious behavior (for logging)
+// reportCatchupMalicious reports malicious behavior to the central registry.
 func (u *Server) reportCatchupMalicious(ctx context.Context, peerID string, reason string) {
 	if peerID == "" {
 		return
 	}
-
 	u.logger.Warnf("[peer_metrics] Recording malicious attempt from peer %s: %s", peerID, reason)
 
-	// Report to P2P service if client is available
-	if u.p2pClient != nil {
-		if err := u.p2pClient.RecordCatchupMalicious(ctx, peerID); err != nil {
-			u.logger.Warnf("[peer_metrics] Failed to report malicious behavior to P2P service for peer %s: %v", peerID, err)
-			// Fall through to local metrics as backup
-		} else {
-			return // Successfully reported to P2P service
+	if u.centralPeerRegistry != nil {
+		if err := u.centralPeerRegistry.UpdatePeerMetrics(ctx, peerID, 0, 0, 0, false, false, true, 0); err != nil {
+			u.logger.Warnf("[peer_metrics] Failed to report malicious behavior for peer %s: %v", peerID, err)
+		}
+		// Also add ban score for malicious behavior
+		if _, _, err := u.centralPeerRegistry.AddBanScore(ctx, peerID, "catchup_malicious", 50); err != nil {
+			u.logger.Warnf("[peer_metrics] Failed to add ban score for malicious peer %s: %v", peerID, err)
 		}
 	}
-
-	// Fallback: No local metrics needed since we're using P2P service for all peer tracking
 }
 
-// isPeerMalicious checks if a peer is marked as malicious.
-// Queries the P2P service for the peer's status.
-//
-// Parameters:
-//   - ctx: Context for the gRPC call
-//   - peerID: Peer identifier
-//
-// Returns:
-//   - bool: True if peer is malicious
+// isPeerMalicious checks if a peer is banned in the central registry.
 func (u *Server) isPeerMalicious(ctx context.Context, peerID string) bool {
-	if peerID == "" {
+	if peerID == "" || u.centralPeerRegistry == nil {
 		return false
 	}
-
-	// Query P2P service for peer status
-	if u.p2pClient != nil {
-		isMalicious, reason, err := u.p2pClient.IsPeerMalicious(ctx, peerID)
-		if err != nil {
-			u.logger.Warnf("[isPeerMalicious] Failed to check if peer %s is malicious: %v", peerID, err)
-			// On error, assume peer is not malicious to avoid false positives
-			return false
-		}
-		if isMalicious {
-			u.logger.Debugf("[isPeerMalicious] Peer %s is malicious: %s", peerID, reason)
-		}
-		return isMalicious
+	banned, err := u.centralPeerRegistry.IsPeerBanned(ctx, peerID)
+	if err != nil {
+		u.logger.Warnf("[isPeerMalicious] Failed to check ban status for peer %s: %v", peerID, err)
+		return false
 	}
-
-	return false
+	return banned
 }
 
-// isPeerBad checks if a peer has a bad reputation.
-// Queries the P2P service for the peer's health status.
-//
-// Parameters:
-//   - peerID: Peer identifier
-//
-// Returns:
-//   - bool: True if peer has bad reputation
+// isPeerBad checks if a peer has bad reputation in the central registry.
 func (u *Server) isPeerBad(peerID string) bool {
-	if peerID == "" {
+	if peerID == "" || u.centralPeerRegistry == nil {
 		return false
 	}
-
-	// Query P2P service for peer health status
-	if u.p2pClient != nil {
-		// Use context.Background() since the old method didn't require context
-		isUnhealthy, reason, reputationScore, err := u.p2pClient.IsPeerUnhealthy(context.Background(), peerID)
-		if err != nil {
-			u.logger.Warnf("[isPeerBad] Failed to check if peer %s is unhealthy: %v", peerID, err)
-			// On error, assume peer is not bad to avoid false positives
-			return false
-		}
-		if isUnhealthy {
-			u.logger.Debugf("[isPeerBad] Peer %s is unhealthy (reputation: %.2f): %s", peerID, reputationScore, reason)
-		}
-		return isUnhealthy
+	info, found, err := u.centralPeerRegistry.GetPeer(context.Background(), peerID)
+	if err != nil || !found {
+		return false
 	}
-
-	return false
+	return info.ReputationScore < 20
 }
 
-// reportValidBlockForPeers reports a successfully validated block to the P2P service
-// for the primary peer and all contributing secondary peers.
-// This credits reputation to all peers that provided data for this block.
+// reportValidBlockForPeers credits reputation to all peers that contributed to a valid block.
 func (u *Server) reportValidBlockForPeers(ctx context.Context, primaryPeerID string, blockHash string, contributingPeers map[string]struct{}) {
-	if u.p2pClient == nil {
+	if u.centralPeerRegistry == nil {
 		return
 	}
 
 	// Credit the primary peer
 	if primaryPeerID != "" {
-		if err := u.p2pClient.ReportValidBlock(ctx, primaryPeerID, blockHash); err != nil {
+		if err := u.centralPeerRegistry.UpdatePeerMetrics(ctx, primaryPeerID, 0, 0, 0, true, false, false, 0); err != nil {
 			u.logger.Warnf("[peer_metrics] Failed to report valid block %s for primary peer %s: %v", blockHash, primaryPeerID, err)
 		}
 	}
@@ -204,9 +105,9 @@ func (u *Server) reportValidBlockForPeers(ctx context.Context, primaryPeerID str
 	secondaryCount := 0
 	for contributingPeerID := range contributingPeers {
 		if contributingPeerID == primaryPeerID {
-			continue // already credited
+			continue
 		}
-		if err := u.p2pClient.ReportValidBlock(ctx, contributingPeerID, blockHash); err != nil {
+		if err := u.centralPeerRegistry.UpdatePeerMetrics(ctx, contributingPeerID, 0, 0, 0, true, false, false, 0); err != nil {
 			u.logger.Warnf("[peer_metrics] Failed to report valid block %s for contributing peer %s: %v", blockHash, contributingPeerID, err)
 		} else {
 			secondaryCount++
