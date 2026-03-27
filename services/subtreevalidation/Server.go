@@ -767,7 +767,7 @@ func (u *Server) checkSubtreeFromBlock(ctx context.Context, request *subtreevali
 		}
 
 		// During legacy syncing or catching up, disable adding transactions to block assembly
-		if *currentState == blockchain.FSMStateLEGACYSYNCING || *currentState == blockchain.FSMStateCATCHINGBLOCKS {
+		if *currentState == blockchain.FSMStateCATCHINGBLOCKS {
 			validatorOptions = append(validatorOptions, validator.WithAddTXToBlockAssembly(false))
 		}
 
@@ -922,7 +922,7 @@ func (u *Server) publishInvalidSubtree(ctx context.Context, subtreeHash, peerURL
 			return
 		}
 
-		if *state == blockchain_api.FSMStateType_CATCHINGBLOCKS || *state == blockchain_api.FSMStateType_LEGACYSYNCING {
+		if *state == blockchain_api.FSMStateType_CATCHINGBLOCKS {
 			// ignore notifications while syncing or catching up
 			return
 		}

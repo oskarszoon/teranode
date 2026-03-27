@@ -134,6 +134,46 @@ func Test_GetSetFSMStateFromStore(t *testing.T) {
 	})
 }
 
+// Test_FSMTransitions_CatchingBlocksOnly confirms the simplified FSM has no LEGACYSYNCING
+// state or LEGACYSYNC event — CATCHINGBLOCKS is the single catchup state for all scenarios.
+func Test_FSMTransitions_CatchingBlocksOnly(t *testing.T) {
+	ctx := context.Background()
+	logger := mocklogger.NewTestLogger()
+	blockchainClient, err := New(ctx, logger, getTestSettings(), nil, nil)
+	require.NoError(t, err)
+
+	fsm := blockchainClient.NewFiniteStateMachine()
+	require.NotNil(t, fsm)
+
+	t.Run("LEGACYSYNC event does not exist", func(t *testing.T) {
+		require.Equal(t, "IDLE", fsm.Current())
+		require.False(t, fsm.Can("LEGACYSYNC"), "LEGACYSYNC event must not be available from IDLE")
+	})
+
+	t.Run("LEGACYSYNCING state is not reachable", func(t *testing.T) {
+		_, legacySyncingExists := blockchain_api.FSMStateType_value["LEGACYSYNCING"]
+		require.False(t, legacySyncingExists, "LEGACYSYNCING must not exist in FSMStateType")
+	})
+
+	t.Run("Full catchup cycle: IDLE -> RUNNING -> CATCHINGBLOCKS -> RUNNING", func(t *testing.T) {
+		require.Equal(t, "IDLE", fsm.Current())
+
+		err := fsm.Event(ctx, blockchain_api.FSMEventType_RUN.String())
+		require.NoError(t, err)
+		require.Equal(t, "RUNNING", fsm.Current())
+
+		err = fsm.Event(ctx, blockchain_api.FSMEventType_CATCHUPBLOCKS.String())
+		require.NoError(t, err)
+		require.Equal(t, "CATCHINGBLOCKS", fsm.Current())
+		require.False(t, fsm.Can("LEGACYSYNC"), "LEGACYSYNC must not be available from CATCHINGBLOCKS")
+
+		// After catchup completes, transition back to RUNNING
+		err = fsm.Event(ctx, blockchain_api.FSMEventType_RUN.String())
+		require.NoError(t, err)
+		require.Equal(t, "RUNNING", fsm.Current())
+	})
+}
+
 func getTestSettings() *settings.Settings {
 	return &settings.Settings{
 		ChainCfgParams: &chaincfg.RegressionNetParams,

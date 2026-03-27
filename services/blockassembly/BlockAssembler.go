@@ -377,11 +377,11 @@ func (b *BlockAssembler) reset(ctx context.Context, fullScan bool) error {
 		return errors.NewProcessingError("[Reset] error getting reorg blocks", err)
 	}
 
-	isLegacySync, err := b.blockchainClient.IsFSMCurrentState(ctx, blockchain.FSMStateLEGACYSYNCING)
+	isLegacySync, err := b.blockchainClient.IsFSMCurrentState(ctx, blockchain.FSMStateCATCHINGBLOCKS)
 	if err != nil {
 		b.logger.Errorf("[BlockAssembler][Reset] error getting FSM state: %v", err)
 
-		// if we can't get the FSM state, we assume we are not in legacy sync, which is the default, but less optimized
+		// if we can't get the FSM state, fall back to the standard (non-optimized) path
 		isLegacySync = false
 	}
 

@@ -3,6 +3,7 @@ package peer
 import (
 	"context"
 
+	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/services/legacy/peer_api"
 	"github.com/bsv-blockchain/teranode/settings"
@@ -86,4 +87,45 @@ func (c *Client) ListBanned(ctx context.Context, _ *emptypb.Empty) (*peer_api.Li
 // ClearBanned removes all entries from the ban list.
 func (c *Client) ClearBanned(ctx context.Context, _ *emptypb.Empty) (*peer_api.ClearBannedResponse, error) {
 	return c.client.ClearBanned(ctx, &emptypb.Empty{})
+}
+
+// FetchHeadersFromPeer sends a getheaders wire-protocol message to the specified peer
+// and returns the raw concatenated 80-byte block header bytes from the response.
+func (c *Client) FetchHeadersFromPeer(ctx context.Context, peerAddr string, locatorHashes []*chainhash.Hash, stopHash *chainhash.Hash) ([]byte, error) {
+	req := &peer_api.FetchHeadersFromPeerRequest{
+		PeerAddr: peerAddr,
+	}
+	for _, h := range locatorHashes {
+		if h == nil {
+			continue
+		}
+		req.LocatorHashes = append(req.LocatorHashes, h[:])
+	}
+	if stopHash != nil {
+		req.StopHash = stopHash[:]
+	}
+
+	resp, err := c.client.FetchHeadersFromPeer(ctx, req)
+	if err != nil {
+		return nil, errors.NewNetworkError("[LegacyClient.FetchHeadersFromPeer] gRPC call failed", err)
+	}
+	return resp.HeaderBytes, nil
+}
+
+// FetchBlockFromPeer sends a getdata wire-protocol message to the specified peer
+// and returns the raw serialized block bytes from the response.
+func (c *Client) FetchBlockFromPeer(ctx context.Context, peerAddr string, blockHash *chainhash.Hash) ([]byte, error) {
+	if blockHash == nil {
+		return nil, errors.NewInvalidArgumentError("blockHash cannot be nil")
+	}
+	req := &peer_api.FetchBlockFromPeerRequest{
+		PeerAddr:  peerAddr,
+		BlockHash: blockHash[:],
+	}
+
+	resp, err := c.client.FetchBlockFromPeer(ctx, req)
+	if err != nil {
+		return nil, errors.NewNetworkError("[LegacyClient.FetchBlockFromPeer] gRPC call failed", err)
+	}
+	return resp.BlockBytes, nil
 }

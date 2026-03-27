@@ -1,0 +1,4 @@
+# Skill/command prompt files are not documentation — skip markdown linting
+.claude/
+.github/prompts/
+.github/skills/

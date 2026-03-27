@@ -132,7 +132,7 @@ func (u *Server) processMissingSubtreesStreaming(ctx context.Context, request *s
 		return nil, errors.NewProcessingError("[processMissingSubtreesStreaming] Failed to get FSM current state", err)
 	}
 
-	if *currentState == blockchain.FSMStateLEGACYSYNCING || *currentState == blockchain.FSMStateCATCHINGBLOCKS {
+	if *currentState == blockchain.FSMStateCATCHINGBLOCKS {
 		validatorOptions = append(validatorOptions, validator.WithAddTXToBlockAssembly(false))
 	}
 

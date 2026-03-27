@@ -125,6 +125,9 @@ type Server struct {
 	peerMapMaxSize          int           // Maximum number of entries in peer maps
 	peerMapTTL              time.Duration // Time-to-live for peer map entries
 	registryCacheSaveTicker *time.Ticker  // Ticker for periodic saving of peer registry cache
+
+	// Centralized peer registry (optional, dual-write phase — nil when blockchain registry unavailable)
+	centralRegistry blockchain.PeerRegistryClientI
 }
 
 // NewServer creates a new P2P server instance with the provided configuration and dependencies.
@@ -414,7 +417,6 @@ func NewServer(
 		p2pServer.peerSelector,
 		p2pServer.banManager,
 		blockchainClient,
-		p2pServer.blocksKafkaProducerClient,
 	)
 
 	// Set local height callback for sync coordinator
@@ -896,6 +898,14 @@ func (s *Server) updateBytesReceived(from string, originatorPeerID string, messa
 		newTotal := info.BytesReceived + messageSize
 		s.peerRegistry.UpdateNetworkStats(senderID, newTotal)
 	}
+	if s.centralRegistry != nil {
+		senderIDStr := senderID.String()
+		go func() {
+			if err := s.centralRegistry.UpdatePeerMetrics(s.gCtx, senderIDStr, 0, 0, messageSize, false, false, false, 0); err != nil {
+				s.logger.Warnf("[P2P] failed to update bytes for peer %s in central registry: %v", senderIDStr, err)
+			}
+		}()
+	}
 
 	// Also update for the originator if different (gossiped message)
 	if originatorPeerID != "" {
@@ -903,6 +913,14 @@ func (s *Server) updateBytesReceived(from string, originatorPeerID string, messa
 			if info, exists := s.peerRegistry.Get(peerID); exists {
 				newTotal := info.BytesReceived + messageSize
 				s.peerRegistry.UpdateNetworkStats(peerID, newTotal)
+			}
+			if s.centralRegistry != nil {
+				peerIDStr := peerID.String()
+				go func() {
+					if err := s.centralRegistry.UpdatePeerMetrics(s.gCtx, peerIDStr, 0, 0, messageSize, false, false, false, 0); err != nil {
+						s.logger.Warnf("[P2P] failed to update bytes for originator %s in central registry: %v", peerIDStr, err)
+					}
+				}()
 			}
 		}
 	}

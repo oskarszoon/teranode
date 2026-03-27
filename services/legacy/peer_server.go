@@ -32,6 +32,7 @@ import (
 	"github.com/bsv-blockchain/go-wire"
 	"github.com/bsv-blockchain/teranode/services/blockassembly"
 	"github.com/bsv-blockchain/teranode/services/blockchain"
+	"github.com/bsv-blockchain/teranode/services/blockchain/blockchain_api"
 	"github.com/bsv-blockchain/teranode/services/blockvalidation"
 	"github.com/bsv-blockchain/teranode/services/legacy/addrmgr"
 	blockchain2 "github.com/bsv-blockchain/teranode/services/legacy/blockchain"
@@ -306,8 +307,10 @@ type server struct {
 	cfCheckptCachesMtx sync.RWMutex
 
 	// teranode additions
-	logger            ulogger.Logger
-	blockchainClient  blockchain.ClientI
+	logger           ulogger.Logger
+	blockchainClient blockchain.ClientI
+	// centralRegistry is the optional centralized peer registry client for dual-write.
+	centralRegistry   blockchain.PeerRegistryClientI
 	utxoStore         utxostore.Store
 	subtreeStore      blob.Store
 	tempStore         blob.Store
@@ -321,6 +324,18 @@ type server struct {
 
 	// multistream association tracking
 	associationMgr *peer.AssociationManager
+
+	// pendingHeaderRequests tracks one-shot getheaders requests initiated by FetchHeadersFromPeer gRPC.
+	// Key: peer network address (host:port), value: chan *wire.MsgHeaders.
+	// At most one request per peer is allowed; concurrent requests are rejected.
+	// Entries are always cleaned up via deferred Delete in the RPC handler.
+	pendingHeaderRequests sync.Map
+
+	// pendingBlockRequests tracks one-shot getdata requests initiated by FetchBlockFromPeer gRPC.
+	// Key: block hash hex string, value: chan *wire.MsgBlock.
+	// At most one request per block hash is allowed; concurrent requests are rejected.
+	// Entries are always cleaned up via deferred Delete in the RPC handler.
+	pendingBlockRequests sync.Map
 }
 
 // serverPeer extends the peer to maintain state shared by the server and
@@ -885,6 +900,13 @@ func (sp *serverPeer) OnBlock(_ *peer.Peer, msg *wire.MsgBlock, buf []byte) {
 		tracing.WithHistogram(peerServerMetrics["OnBlock"]),
 	)
 
+	// Route to a one-shot FetchBlockFromPeer gRPC caller if present.
+	blockHashStr := msg.BlockHash().String()
+	if ch, ok := sp.server.pendingBlockRequests.LoadAndDelete(blockHashStr); ok {
+		ch.(chan *wire.MsgBlock) <- msg
+		return
+	}
+
 	// Check if this peer is banned
 	host, _, err := net.SplitHostPort(sp.Addr())
 	if err == nil {
@@ -995,6 +1017,12 @@ func (sp *serverPeer) OnHeaders(_ *peer.Peer, msg *wire.MsgHeaders) {
 	_, _, _ = tracing.Tracer("legacy").Start(sp.ctx, "serverPeer.OnHeaders",
 		tracing.WithHistogram(peerServerMetrics["OnHeaders"]),
 	)
+
+	// Route to a one-shot FetchHeadersFromPeer gRPC caller if present.
+	if ch, ok := sp.server.pendingHeaderRequests.LoadAndDelete(sp.Addr()); ok {
+		ch.(chan *wire.MsgHeaders) <- msg
+		return
+	}
 
 	sp.server.syncManager.QueueHeaders(msg, sp.Peer)
 }
@@ -1428,6 +1456,16 @@ func (sp *serverPeer) OnRead(_ *peer.Peer, bytesRead int, msg wire.Message, err 
 	)
 
 	sp.server.AddBytesReceived(uint64(bytesRead))
+
+	if sp.server.centralRegistry != nil && bytesRead > 0 {
+		addr := sp.Addr()
+		n := uint64(bytesRead)
+		go func() {
+			if e := sp.server.centralRegistry.UpdatePeerMetrics(sp.server.ctx, addr, 0, 0, n, false, false, false, 0); e != nil {
+				sp.server.logger.Warnf("[Legacy] centralRegistry.UpdatePeerMetrics recv %s: %v", addr, e)
+			}
+		}()
+	}
 }
 
 // OnWrite is invoked when a peer sends a message and it is used to update
@@ -1438,6 +1476,16 @@ func (sp *serverPeer) OnWrite(_ *peer.Peer, bytesWritten int, msg wire.Message, 
 	)
 
 	sp.server.AddBytesSent(uint64(bytesWritten))
+
+	if sp.server.centralRegistry != nil && bytesWritten > 0 {
+		addr := sp.Addr()
+		n := uint64(bytesWritten)
+		go func() {
+			if e := sp.server.centralRegistry.UpdatePeerMetrics(sp.server.ctx, addr, 0, n, 0, false, false, false, 0); e != nil {
+				sp.server.logger.Warnf("[Legacy] centralRegistry.UpdatePeerMetrics send %s: %v", addr, e)
+			}
+		}()
+	}
 }
 
 // randomUint16Number returns a random uint16 in a specified input range.  Note
@@ -1758,6 +1806,17 @@ func (s *server) handleUpdatePeerHeights(state *peerState, umsg updatePeerHeight
 		if *latestBlkHash == *umsg.newHash {
 			sp.UpdateLastBlockHeight(umsg.newHeight)
 			sp.UpdateLastAnnouncedBlock(nil)
+
+			// Report height update to central registry (best-effort).
+			if s.centralRegistry != nil {
+				addr := sp.Addr()
+				h := umsg.newHeight
+				go func() {
+					if e := s.centralRegistry.UpdatePeerMetrics(s.ctx, addr, uint32(h), 0, 0, false, false, false, 0); e != nil {
+						s.logger.Warnf("[Legacy] centralRegistry.UpdatePeerMetrics height %s: %v", addr, e)
+					}
+				}()
+			}
 		}
 	})
 }
@@ -1875,6 +1934,16 @@ func (s *server) handleAddPeerMsg(state *peerState, sp *serverPeer) bool {
 	// Signal the sync manager this peer is a new sync candidate.
 	s.syncManager.NewPeer(sp.Peer, nil)
 
+	// Register with central peer registry (best-effort, fire-and-forget).
+	if s.centralRegistry != nil {
+		info := legacyPeerToRegistryInfo(sp)
+		go func() {
+			if err := s.centralRegistry.RegisterPeer(s.ctx, info); err != nil {
+				s.logger.Warnf("[Legacy] centralRegistry.RegisterPeer %s: %v", sp.Addr(), err)
+			}
+		}()
+	}
+
 	return true
 }
 
@@ -1942,6 +2011,16 @@ func (s *server) handleDonePeerMsg(state *peerState, sp *serverPeer) {
 	// our version and has sent us its version as well.
 	if sp.VerAckReceived() && sp.VersionKnown() && sp.NA() != nil {
 		s.addrManager.Connected(sp.NA())
+	}
+
+	// Remove from central peer registry (best-effort, fire-and-forget).
+	if s.centralRegistry != nil && sp.VersionKnown() {
+		addr := sp.Addr()
+		go func() {
+			if err := s.centralRegistry.RemovePeer(s.ctx, addr); err != nil {
+				s.logger.Warnf("[Legacy] centralRegistry.RemovePeer %s: %v", addr, err)
+			}
+		}()
 	}
 	// If we get here it means that either we didn't know about the peer
 	// or we purposefully deleted it.
@@ -2649,6 +2728,38 @@ func (s *server) AddBytesReceived(bytesReceived uint64) {
 func (s *server) NetTotals() (uint64, uint64) {
 	return atomic.LoadUint64(&s.bytesReceived),
 		atomic.LoadUint64(&s.bytesSent)
+}
+
+// SetCentralPeerRegistry sets the optional central peer registry client for dual-write.
+func (s *server) SetCentralPeerRegistry(r blockchain.PeerRegistryClientI) {
+	s.centralRegistry = r
+}
+
+// getPeerByAddr finds the first connected peer with the given network address (host:port).
+// Returns nil if no matching connected peer is found.
+func (s *server) getPeerByAddr(addr string) *serverPeer {
+	for _, sp := range s.getPeers() {
+		if sp.Addr() == addr {
+			return sp
+		}
+	}
+	return nil
+}
+
+// legacyPeerToRegistryInfo converts a serverPeer to the PeerInfo format used by the central registry.
+// Wire protocol peers use the network address as their ID.
+func legacyPeerToRegistryInfo(sp *serverPeer) *blockchain.PeerInfo {
+	height := uint32(0)
+	if h := sp.LastBlock(); h > 0 {
+		height = uint32(h)
+	}
+	return &blockchain.PeerInfo{
+		ID:             sp.Addr(),
+		TransportType:  blockchain_api.TransportType_TRANSPORT_WIRE_PROTOCOL,
+		ClientName:     sp.UserAgent(),
+		Height:         height,
+		NetworkAddress: sp.Addr(),
+	}
 }
 
 // UpdatePeerHeights updates the heights of all peers who have have announced

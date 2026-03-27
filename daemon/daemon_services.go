@@ -341,6 +341,14 @@ func (d *Daemon) startP2PService(ctx context.Context, appSettings *settings.Sett
 		return err
 	}
 
+	// Inject centralized peer registry client (dual-write phase — best-effort, P2P still works without it)
+	peerRegistryClient, prErr := blockchain.NewPeerRegistryClient(ctx, appSettings.BlockChain.GRPCAddress, appSettings)
+	if prErr != nil {
+		p2pLogger.Warnf("[P2P] failed to connect to centralized peer registry, running without it: %v", prErr)
+	} else {
+		p2pService.SetCentralPeerRegistry(peerRegistryClient)
+	}
+
 	return d.ServiceManager.AddService(serviceNameP2PFormal, p2pService)
 }
 
@@ -865,6 +873,24 @@ func (d *Daemon) startValidationService(
 			p2pClient,
 		)
 
+		// Wire the centralized peer registry so BlockValidation can drive catchup orchestration.
+		bvPeerRegistryClient, prErr := blockchain.NewPeerRegistryClient(ctx, appSettings.BlockChain.GRPCAddress, appSettings)
+		if prErr != nil {
+			createLogger(loggerBlockValidation).Warnf("[BlockValidation] failed to create central peer registry client: %v; centralized catchup orchestration will be disabled", prErr)
+		} else {
+			d.blockValidationSrv.SetCentralPeerRegistry(bvPeerRegistryClient)
+		}
+
+		// Wire the wire-protocol transport if the legacy service gRPC address is configured.
+		if appSettings.Legacy.GRPCAddress != "" {
+			legacyPeerClient, legacyErr := peer.NewClient(ctx, createLogger(loggerBlockValidation), appSettings)
+			if legacyErr != nil {
+				createLogger(loggerBlockValidation).Warnf("[BlockValidation] failed to create legacy peer client: %v; wire-protocol catchup will be unavailable", legacyErr)
+			} else {
+				d.blockValidationSrv.SetWireTransport(blockvalidation.NewWireTransport(legacyPeerClient))
+			}
+		}
+
 		// Add the BlockValidation service to the ServiceManager
 		return d.ServiceManager.AddService(serviceBlockValidationFormal, d.blockValidationSrv)
 
@@ -1097,8 +1123,8 @@ func (d *Daemon) startLegacyService(
 		return err
 	}
 
-	// Add the Legacy service to the ServiceManager
-	return d.ServiceManager.AddService(serviceLegacyFormal, legacy.New(
+	// Create the Legacy service.
+	legacyService := legacy.New(
 		createLogger(serviceLegacy),
 		appSettings,
 		blockchainClient,
@@ -1109,7 +1135,17 @@ func (d *Daemon) startLegacyService(
 		subtreeValidationClient,
 		blockValidationClient,
 		blockassemblyClient,
-	))
+	)
+
+	// Wire the centralized peer registry (best-effort — Legacy service is optional).
+	peerRegistryClient, prErr := blockchain.NewPeerRegistryClient(ctx, appSettings.BlockChain.GRPCAddress, appSettings)
+	if prErr != nil {
+		createLogger(serviceLegacy).Warnf("[Legacy] failed to create central peer registry client: %v; peers will not be reported", prErr)
+	} else {
+		legacyService.SetCentralPeerRegistry(peerRegistryClient)
+	}
+
+	return d.ServiceManager.AddService(serviceLegacyFormal, legacyService)
 }
 
 // startPrunerService initializes and adds the Pruner service to the ServiceManager.

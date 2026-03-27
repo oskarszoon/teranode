@@ -370,8 +370,8 @@ func (v *Validator) ValidateWithOptions(ctx context.Context, tx *bt.Tx, blockHei
 						return
 					}
 
-					if *state == blockchain_api.FSMStateType_CATCHINGBLOCKS || *state == blockchain_api.FSMStateType_LEGACYSYNCING {
-						// ignore notifications while syncing or catching up
+					if *state == blockchain_api.FSMStateType_CATCHINGBLOCKS {
+						// ignore notifications while catching blocks
 						return
 					}
 				}

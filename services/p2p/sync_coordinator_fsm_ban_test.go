@@ -27,7 +27,6 @@ func TestSyncCoordinator_BannedPeerNotReselected(t *testing.T) {
 		selector,
 		banManager,
 		blockchainSetup.Client,
-		nil, // blocksKafkaProducerClient
 	)
 
 	// Add a peer with highest height but it's banned

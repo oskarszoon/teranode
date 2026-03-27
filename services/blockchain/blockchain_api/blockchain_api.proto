@@ -174,9 +174,6 @@ service BlockchainAPI {
   // CatchUpBlocks initiates block catch-up process.
   rpc CatchUpBlocks(google.protobuf.Empty) returns (google.protobuf.Empty) {}
 
-  // LegacySync initiates legacy synchronization process.
-  rpc LegacySync(google.protobuf.Empty) returns (google.protobuf.Empty) {}
-
   // Idle marks the service as idle.
   rpc Idle(google.protobuf.Empty) returns (google.protobuf.Empty) {}
 
@@ -636,7 +633,115 @@ enum FSMEventType {
   STOP = 0;
   RUN = 1;
   CATCHUPBLOCKS = 2;
-  LEGACYSYNC = 3;
+  reserved 3;
+  reserved "LEGACYSYNC";
+}
+
+// TransportType distinguishes how to communicate with a peer during catchup.
+enum TransportType {
+  TRANSPORT_HTTP = 0;          // Peer reachable via HTTP DataHub URL (P2P service)
+  TRANSPORT_WIRE_PROTOCOL = 1; // Peer reachable via Bitcoin wire protocol (Legacy service)
+}
+
+// PeerRegistryService manages a centralized registry of all known peers,
+// accessible to both P2P and Legacy services. The blockchain service hosts
+// this registry as it is always running and owns the chain state.
+service PeerRegistryService {
+  // RegisterPeer adds or updates a peer in the centralized registry.
+  rpc RegisterPeer(RegisterPeerRequest) returns (google.protobuf.Empty) {}
+
+  // UpdatePeerMetrics updates runtime metrics for a registered peer.
+  rpc UpdatePeerMetrics(UpdatePeerMetricsRequest) returns (google.protobuf.Empty) {}
+
+  // RemovePeer removes a peer from the registry (e.g. on disconnect).
+  rpc RemovePeer(RemovePeerRequest) returns (google.protobuf.Empty) {}
+
+  // ListPeers returns all peers matching the given filters, sorted by reputation descending.
+  rpc ListPeers(ListPeersRequest) returns (ListPeersResponse) {}
+
+  // GetPeer retrieves a single peer by ID.
+  rpc GetPeer(GetPeerRequest) returns (GetPeerResponse) {}
+}
+
+// PeerRegistryInfo holds all information about a peer in the centralized registry.
+message PeerRegistryInfo {
+  string peer_id = 1;                         // Unique peer identifier (libp2p ID or address string)
+  TransportType transport_type = 2;           // How to communicate with this peer
+  string client_name = 3;                     // Human-readable client software name
+  uint32 height = 4;                          // Last known block height
+  string data_hub_url = 5;                    // DataHub URL (HTTP transport only)
+  string network_address = 6;                 // Network address (wire protocol transport only)
+  bool is_banned = 7;                         // Whether this peer is banned
+  int32 ban_score = 8;                        // Ban score accumulator
+  string storage = 9;                         // Storage mode: "full", "pruned", or empty
+
+  // Bytes tracking
+  uint64 bytes_sent = 10;                     // Total bytes sent to this peer
+  uint64 bytes_received = 11;                 // Total bytes received from this peer
+
+  // Interaction metrics
+  int64 interaction_attempts = 12;            // Total interaction attempts
+  int64 interaction_successes = 13;           // Successful interactions
+  int64 interaction_failures = 14;            // Failed interactions
+  int64 malicious_count = 15;                 // Malicious behavior detections
+  double reputation_score = 16;              // Reputation score (0-100)
+  int64 avg_response_time_ms = 17;            // Average response time in milliseconds
+
+  // Timestamps
+  google.protobuf.Timestamp connected_at = 18;
+  google.protobuf.Timestamp last_message_time = 19;
+  google.protobuf.Timestamp last_interaction_attempt = 20;
+  google.protobuf.Timestamp last_interaction_success = 21;
+  google.protobuf.Timestamp last_interaction_failure = 22;
+  google.protobuf.Timestamp last_seen = 23;   // Used for TTL-based cleanup on load
+  bytes block_hash = 24;                      // Best block hash last advertised by this peer (optional)
+}
+
+// RegisterPeerRequest registers or updates a peer in the centralized registry.
+message RegisterPeerRequest {
+  PeerRegistryInfo peer = 1;
+}
+
+// UpdatePeerMetricsRequest updates runtime metrics for an existing peer.
+message UpdatePeerMetricsRequest {
+  string peer_id = 1;
+  uint32 height = 2;                          // Updated block height (0 = no update)
+  uint64 bytes_sent_delta = 3;                // Bytes sent since last update (added to total)
+  uint64 bytes_received_delta = 4;            // Bytes received since last update (added to total)
+  bool record_success = 5;                    // Record a successful interaction
+  bool record_failure = 6;                    // Record a failed interaction
+  bool record_malicious = 7;                  // Record malicious behavior
+  int64 response_time_ms = 8;                 // Response time for this interaction (0 = not applicable)
+}
+
+// RemovePeerRequest removes a peer from the registry.
+message RemovePeerRequest {
+  string peer_id = 1;
+}
+
+// ListPeersRequest filters peers returned by ListPeers.
+message ListPeersRequest {
+  TransportType transport_filter = 1;         // Filter by transport type (0 = no filter — use filter_transport to distinguish)
+  bool filter_transport = 2;                  // Whether to apply transport_filter
+  double min_reputation = 3;                  // Minimum reputation score (0 = no minimum)
+  uint32 min_height = 4;                      // Minimum block height (0 = no minimum)
+  bool exclude_banned = 5;                    // Exclude banned peers
+}
+
+// ListPeersResponse contains the filtered and sorted list of peers.
+message ListPeersResponse {
+  repeated PeerRegistryInfo peers = 1;
+}
+
+// GetPeerRequest retrieves a single peer by ID.
+message GetPeerRequest {
+  string peer_id = 1;
+}
+
+// GetPeerResponse contains the peer info (or not_found=true).
+message GetPeerResponse {
+  PeerRegistryInfo peer = 1;
+  bool not_found = 2;
 }
 
 // FSMStateType defines possible states of the blockchain FSM.
@@ -644,7 +749,8 @@ enum FSMStateType {
   IDLE = 0;           // Service is idle
   RUNNING = 1;        // Service is running normally
   CATCHINGBLOCKS = 2; // Service is catching up blocks
-  LEGACYSYNCING = 3;  // Service is in legacy sync mode
+  reserved 3;
+  reserved "LEGACYSYNCING";
 }
 
 // GetBlockLocatorRequest requests a block locator.

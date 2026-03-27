@@ -54,6 +54,11 @@ type CatchupContext struct {
 
 	// Checkpoints to use for this catchup (isolated copy, not shared with settings)
 	checkpoints []chaincfg.Checkpoint
+
+	// transport is the CatchupTransport to use for fetching headers and blocks.
+	// When nil, the legacy HTTP code path is used (backward-compatible default).
+	// When non-nil (centralized orchestration enabled), all fetches go through this transport.
+	transport CatchupTransport
 }
 
 // catchup orchestrates the complete blockchain synchronization process.
@@ -114,9 +119,12 @@ func (u *Server) catchup(ctx context.Context, blockUpTo *model.Block, peerID, ba
 		return errors.NewInvalidArgumentError("baseURL is required for catchup")
 	}
 
-	// Validate that baseURL is a proper HTTP/HTTPS URL and not a peer ID
-	// Special case: "legacy" is allowed for blocks from the legacy service
-	if baseURL != "legacy" {
+	// Validate that baseURL is a proper HTTP/HTTPS URL and not a peer ID.
+	// Special cases:
+	//   - "legacy" is allowed for blocks from the legacy service
+	//   - wire-protocol peers (from centralized registry) supply a network address
+	//     (host:port) rather than an HTTP URL, so skip validation when registry is set.
+	if baseURL != "legacy" && u.centralPeerRegistry == nil {
 		parsedURL, err := url.Parse(baseURL)
 		if err != nil || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
 			u.logger.Errorf("[catchup][%s] Invalid baseURL '%s' - must be valid http/https URL, not peer ID. PeerID: %s",
@@ -148,6 +156,18 @@ func (u *Server) catchup(ctx context.Context, blockUpTo *model.Block, peerID, ba
 		enableParallelFetch:  u.settings.BlockValidation.CatchupParallelFetchEnabled,
 		parallelFetchWorkers: u.settings.BlockValidation.CatchupParallelFetchWorkers,
 		checkpoints:          checkpoints,
+	}
+
+	// When a centralized peer registry is configured, select the appropriate transport
+	// based on the peer's registered transport type.
+	if u.centralPeerRegistry != nil {
+		p, found, getErr := u.centralPeerRegistry.GetPeer(ctx, peerID)
+		if getErr != nil {
+			u.logger.Debugf("[catchup][%s] failed to look up peer %s in registry: %v, using default transport", catchupCtx.blockUpTo.Hash().String(), peerID, getErr)
+		} else if found {
+			catchupCtx.transport = u.selectTransport(p)
+		}
+		// If peer not found in registry, transport stays nil → existing HTTP path.
 	}
 
 	// Default parallel fetch workers if not configured
@@ -406,7 +426,7 @@ func (u *Server) releaseCatchupLock(ctx *CatchupContext, err *error) {
 func (u *Server) fetchHeaders(ctx context.Context, catchupCtx *CatchupContext) error {
 	u.logger.Debugf("[catchup][%s] Step 1: Fetching headers from peer %s", catchupCtx.blockUpTo.Hash().String(), catchupCtx.baseURL)
 
-	result, _, err := u.catchupGetBlockHeaders(ctx, catchupCtx.blockUpTo, catchupCtx.peerID, catchupCtx.baseURL)
+	result, _, err := u.catchupGetBlockHeaders(ctx, catchupCtx.blockUpTo, catchupCtx.peerID, catchupCtx.baseURL, catchupCtx.transport)
 	if err != nil {
 		return errors.NewProcessingError("[catchup][%s] failed to get block headers: %w", catchupCtx.blockUpTo.Hash().String(), err)
 	}

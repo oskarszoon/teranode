@@ -5325,6 +5325,14 @@ func (m *mockLegacyPeerClient) ClearBanned(ctx context.Context, req *emptypb.Emp
 	return &peer_api.ClearBannedResponse{}, nil
 }
 
+func (m *mockLegacyPeerClient) FetchHeadersFromPeer(_ context.Context, _ string, _ []*chainhash.Hash, _ *chainhash.Hash) ([]byte, error) {
+	return nil, nil
+}
+
+func (m *mockLegacyPeerClient) FetchBlockFromPeer(_ context.Context, _ string, _ *chainhash.Hash) ([]byte, error) {
+	return nil, nil
+}
+
 type mockP2PClient struct {
 	getPeersFunc           func(ctx context.Context) ([]*p2p.PeerInfo, error)
 	getPeerFunc            func(ctx context.Context, peerID string) (*p2p.PeerInfo, error)

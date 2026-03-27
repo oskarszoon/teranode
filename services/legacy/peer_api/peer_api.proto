@@ -95,7 +95,7 @@ message Peer {
       string addr = 1;
       int64 until = 2;
   }
-  
+
   message BanPeerResponse {
       bool ok = 1;
   }
@@ -123,7 +123,40 @@ message Peer {
   message ClearBannedResponse {
       bool ok = 1;
   }
-  
+
+  // FetchHeadersFromPeerRequest requests block headers from a specific peer
+  // using the Bitcoin wire protocol getheaders message.
+  message FetchHeadersFromPeerRequest {
+      // peer_addr is the "host:port" address of the connected legacy peer.
+      string peer_addr = 1;
+      // locator_hashes is the block locator (each entry is a 32-byte LE hash).
+      repeated bytes locator_hashes = 2;
+      // stop_hash is the hash where the peer should stop (32-byte LE).
+      // All-zeros means return up to the chain tip.
+      bytes stop_hash = 3;
+  }
+
+  // FetchHeadersFromPeerResponse returns the raw concatenated 80-byte block headers
+  // received from the peer.
+  message FetchHeadersFromPeerResponse {
+      // header_bytes is a sequence of concatenated 80-byte block headers.
+      bytes header_bytes = 1;
+  }
+
+  // FetchBlockFromPeerRequest requests a specific block from a peer via getdata.
+  message FetchBlockFromPeerRequest {
+      // peer_addr is the "host:port" address of the connected legacy peer.
+      string peer_addr = 1;
+      // block_hash is the 32-byte LE hash of the block to fetch.
+      bytes block_hash = 2;
+  }
+
+  // FetchBlockFromPeerResponse returns the raw serialized block bytes.
+  message FetchBlockFromPeerResponse {
+      // block_bytes is the full serialized Bitcoin block.
+      bytes block_bytes = 1;
+  }
+
   // Add new service for peer operations
   service PeerService {
     rpc GetPeers(google.protobuf.Empty) returns (GetPeersResponse) {}
@@ -133,5 +166,6 @@ message Peer {
     rpc ListBanned(google.protobuf.Empty) returns (ListBannedResponse) {}
     rpc ClearBanned(google.protobuf.Empty) returns (ClearBannedResponse) {}
     rpc GetPeerCount(google.protobuf.Empty) returns (GetPeerCountResponse) {}
+    rpc FetchHeadersFromPeer(FetchHeadersFromPeerRequest) returns (FetchHeadersFromPeerResponse) {}
+    rpc FetchBlockFromPeer(FetchBlockFromPeerRequest) returns (FetchBlockFromPeerResponse) {}
   }
-  

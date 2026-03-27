@@ -2,14 +2,12 @@ package p2p
 
 import (
 	"context"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	"github.com/bsv-blockchain/teranode/services/blockchain/blockchain_api"
 	"github.com/bsv-blockchain/teranode/ulogger"
-	"github.com/bsv-blockchain/teranode/util/kafka"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -31,7 +29,6 @@ func TestSyncCoordinator_NewSyncCoordinator(t *testing.T) {
 		selector,
 		banManager,
 		blockchainSetup.Client,
-		nil, // blocksKafkaProducerClient
 	)
 
 	assert.NotNil(t, sc)
@@ -60,7 +57,6 @@ func TestSyncCoordinator_SetGetLocalHeightCallback(t *testing.T) {
 		selector,
 		banManager,
 		blockchainSetup.Client,
-		nil, // blocksKafkaProducerClient
 	)
 
 	// Set callback
@@ -94,7 +90,6 @@ func TestSyncCoordinator_StartAndStop(t *testing.T) {
 		selector,
 		banManager,
 		blockchainSetup.Client,
-		nil, // blocksKafkaProducerClient
 	)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -129,7 +124,6 @@ func TestSyncCoordinator_GetCurrentSyncPeer(t *testing.T) {
 		selector,
 		banManager,
 		blockchainSetup.Client,
-		nil, // blocksKafkaProducerClient
 	)
 
 	// Initially no sync peer
@@ -163,7 +157,6 @@ func TestSyncCoordinator_ClearSyncPeer(t *testing.T) {
 		selector,
 		banManager,
 		blockchainSetup.Client,
-		nil, // blocksKafkaProducerClient
 	)
 
 	// Set a sync peer
@@ -196,7 +189,6 @@ func TestSyncCoordinator_TriggerSync(t *testing.T) {
 		selector,
 		banManager,
 		blockchainSetup.Client,
-		nil, // blocksKafkaProducerClient
 	)
 
 	// Set callback
@@ -234,7 +226,6 @@ func TestSyncCoordinator_TriggerSync_NoPeersAvailable(t *testing.T) {
 		selector,
 		banManager,
 		blockchainSetup.Client,
-		nil, // blocksKafkaProducerClient
 	)
 
 	sc.SetGetLocalHeightCallback(func() uint32 {
@@ -266,7 +257,6 @@ func TestSyncCoordinator_HandlePeerDisconnected(t *testing.T) {
 		selector,
 		banManager,
 		blockchainSetup.Client,
-		nil, // blocksKafkaProducerClient
 	)
 
 	// Add a peer and set as sync peer
@@ -308,7 +298,6 @@ func TestSyncCoordinator_HandlePeerDisconnected_NotSyncPeer(t *testing.T) {
 		selector,
 		banManager,
 		blockchainSetup.Client,
-		nil, // blocksKafkaProducerClient
 	)
 
 	// Add two peers
@@ -350,7 +339,6 @@ func TestSyncCoordinator_HandleCatchupFailure(t *testing.T) {
 		selector,
 		banManager,
 		blockchainSetup.Client,
-		nil, // blocksKafkaProducerClient
 	)
 
 	// Set initial sync peer
@@ -392,7 +380,6 @@ func TestSyncCoordinator_selectNewSyncPeer(t *testing.T) {
 		selector,
 		banManager,
 		blockchainSetup.Client,
-		nil, // blocksKafkaProducerClient
 	)
 
 	sc.SetGetLocalHeightCallback(func() uint32 {
@@ -436,7 +423,6 @@ func TestSyncCoordinator_selectNewSyncPeer_ForcedPeer(t *testing.T) {
 		selector,
 		banManager,
 		blockchainSetup.Client,
-		nil, // blocksKafkaProducerClient
 	)
 
 	sc.SetGetLocalHeightCallback(func() uint32 {
@@ -475,7 +461,6 @@ func TestSyncCoordinator_UpdateBanStatus(t *testing.T) {
 		selector,
 		banManager,
 		blockchainSetup.Client,
-		nil, // blocksKafkaProducerClient
 	)
 
 	// Add peer and ban it
@@ -512,7 +497,6 @@ func TestSyncCoordinator_checkFSMState(t *testing.T) {
 		selector,
 		banManager,
 		blockchainSetup.Client,
-		nil, // blocksKafkaProducerClient
 	)
 
 	// Set callback
@@ -557,7 +541,6 @@ func TestSyncCoordinator_evaluateSyncPeer(t *testing.T) {
 		selector,
 		banManager,
 		blockchainSetup.Client,
-		nil, // blocksKafkaProducerClient
 	)
 
 	// Set up callbacks - local height is caught up to sync peer
@@ -609,7 +592,6 @@ func TestSyncCoordinator_evaluateSyncPeer_StuckAtHeight(t *testing.T) {
 		selector,
 		banManager,
 		blockchainSetup.Client,
-		nil, // blocksKafkaProducerClient
 	)
 
 	// Set callback
@@ -666,7 +648,6 @@ func TestSyncCoordinator_LogPeerList(t *testing.T) {
 		selector,
 		banManager,
 		blockchainSetup.Client,
-		nil, // blocksKafkaProducerClient
 	)
 
 	// Test with empty list
@@ -710,7 +691,6 @@ func TestSyncCoordinator_LogCandidateList(t *testing.T) {
 		selector,
 		banManager,
 		blockchainSetup.Client,
-		nil, // blocksKafkaProducerClient
 	)
 
 	// Test with empty list
@@ -754,7 +734,6 @@ func TestSyncCoordinator_IsCaughtUp(t *testing.T) {
 		selector,
 		banManager,
 		blockchainSetup.Client,
-		nil,
 	)
 
 	// Set local height
@@ -800,7 +779,6 @@ func TestSyncCoordinator_IsCaughtUp_IgnoresNonViablePeers(t *testing.T) {
 		selector,
 		banManager,
 		blockchainSetup.Client,
-		nil,
 	)
 
 	sc.SetGetLocalHeightCallback(func() uint32 { return 100 })
@@ -846,7 +824,6 @@ func TestSyncCoordinator_BackoffClearsSyncAttemptsAndExpires(t *testing.T) {
 		selector,
 		banManager,
 		blockchainSetup.Client,
-		nil,
 	)
 
 	// Add a peer and record a sync attempt so LastSyncAttempt is non-zero
@@ -881,114 +858,6 @@ func TestSyncCoordinator_BackoffClearsSyncAttemptsAndExpires(t *testing.T) {
 	assert.Equal(t, 2, sc.backoffMultiplier, "Backoff multiplier should increase after expiration")
 }
 
-func TestSyncCoordinator_SendSyncTriggerToKafka(t *testing.T) {
-	logger := ulogger.New("test")
-	settings := CreateTestSettings()
-	registry := NewPeerRegistry()
-	selector := NewPeerSelector(logger, nil)
-	banManager := NewPeerBanManager(context.Background(), nil, settings, registry)
-	blockchainSetup := SetupTestBlockchain(t)
-	defer blockchainSetup.Cleanup()
-
-	// Create mock Kafka producer
-	mockProducer := kafka.NewKafkaAsyncProducerMock()
-
-	sc := NewSyncCoordinator(
-		logger,
-		settings,
-		registry,
-		selector,
-		banManager,
-		blockchainSetup.Client,
-		mockProducer,
-	)
-
-	// Add peer with DataHub URL
-	peerID := peer.ID("test-peer")
-	registry.Put(peerID, "", 0, nil, "http://datahub.example.com")
-
-	// Start monitoring the publish channel
-	publishCount := int32(0)
-	go func() {
-		for range mockProducer.PublishChannel() {
-			atomic.AddInt32(&publishCount, 1)
-		}
-	}()
-
-	// Test successful send
-	sc.sendSyncTriggerToKafka(peerID, "blockhash123")
-	time.Sleep(10 * time.Millisecond) // Give goroutine time to process
-	assert.Equal(t, int32(1), atomic.LoadInt32(&publishCount), "Should publish one message")
-
-	// Test with nil producer
-	sc.blocksKafkaProducerClient = nil
-	sc.sendSyncTriggerToKafka(peerID, "blockhash456")
-	// Should not panic, just return
-
-	// Test with empty block hash
-	sc.blocksKafkaProducerClient = mockProducer
-	sc.sendSyncTriggerToKafka(peerID, "")
-	time.Sleep(10 * time.Millisecond)
-	assert.Equal(t, int32(1), atomic.LoadInt32(&publishCount), "Should not publish with empty hash")
-}
-
-func TestSyncCoordinator_SendSyncMessage(t *testing.T) {
-	logger := ulogger.New("test")
-	settings := CreateTestSettings()
-	registry := NewPeerRegistry()
-	selector := NewPeerSelector(logger, nil)
-	banManager := NewPeerBanManager(context.Background(), nil, settings, registry)
-	blockchainSetup := SetupTestBlockchain(t)
-	defer blockchainSetup.Cleanup()
-
-	mockProducer := kafka.NewKafkaAsyncProducerMock()
-
-	sc := NewSyncCoordinator(
-		logger,
-		settings,
-		registry,
-		selector,
-		banManager,
-		blockchainSetup.Client,
-		mockProducer,
-	)
-
-	// Test with peer not in registry
-	unknownPeer := peer.ID("unknown-peer")
-	err := sc.sendSyncMessage(unknownPeer)
-	assert.Error(t, err, "Should error when peer not found")
-	assert.Contains(t, err.Error(), "not found in registry")
-
-	// Add peer without block hash
-	peerNoHash := peer.ID("peer-no-hash")
-	registry.Put(peerNoHash, "", 0, nil, "")
-	err = sc.sendSyncMessage(peerNoHash)
-	assert.Error(t, err, "Should error when peer has no block hash")
-	assert.Contains(t, err.Error(), "no block hash available")
-
-	// Add peer with block hash
-	peerWithHash := peer.ID("peer-with-hash")
-	peerHash, _ := chainhash.NewHashFromStr("000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f")
-	registry.Put(peerWithHash, "", 100, peerHash, "http://datahub.example.com")
-
-	// Start monitoring the publish channel
-	done := make(chan bool)
-	go func() {
-		<-mockProducer.PublishChannel()
-		done <- true
-	}()
-
-	err = sc.sendSyncMessage(peerWithHash)
-	assert.NoError(t, err, "Should successfully send sync message")
-
-	select {
-	case <-done:
-		// Message was published
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("Message was not published")
-	}
-}
-
 func TestSyncCoordinator_MonitorFSM(t *testing.T) {
 	logger := ulogger.New("test")
 	settings := CreateTestSettings()
@@ -1005,7 +874,6 @@ func TestSyncCoordinator_MonitorFSM(t *testing.T) {
 		selector,
 		banManager,
 		blockchainSetup.Client,
-		nil,
 	)
 
 	sc.SetGetLocalHeightCallback(func() uint32 {
@@ -1045,7 +913,6 @@ func TestSyncCoordinator_MonitorFSM(t *testing.T) {
 		selector,
 		banManager,
 		blockchainSetup.Client,
-		nil,
 	)
 
 	sc2.SetGetLocalHeightCallback(func() uint32 {
@@ -1093,7 +960,6 @@ func TestSyncCoordinator_MonitorFSM_AdaptiveIntervals(t *testing.T) {
 		selector,
 		banManager,
 		blockchainSetup.Client,
-		nil,
 	)
 
 	// Test when caught up - should use slow interval
@@ -1158,7 +1024,6 @@ func TestSyncCoordinator_HandleFSMTransition_Simplified(t *testing.T) {
 		selector,
 		banManager,
 		blockchainSetup.Client,
-		nil,
 	)
 
 	sc.SetGetLocalHeightCallback(func() uint32 {
@@ -1251,7 +1116,6 @@ func TestSyncCoordinator_FilterEligiblePeers(t *testing.T) {
 		selector,
 		banManager,
 		blockchainSetup.Client,
-		nil,
 	)
 
 	oldPeer := peer.ID("old-peer")
@@ -1288,7 +1152,6 @@ func TestSyncCoordinator_FilterEligiblePeers_OldPeerLogging(t *testing.T) {
 		selector,
 		banManager,
 		blockchainSetup.Client,
-		nil,
 	)
 
 	oldPeer := peer.ID("old-peer-to-skip")
@@ -1348,8 +1211,6 @@ func TestSyncCoordinator_SelectAndActivateNewPeer(t *testing.T) {
 	blockchainSetup := SetupTestBlockchain(t)
 	defer blockchainSetup.Cleanup()
 
-	mockProducer := kafka.NewKafkaAsyncProducerMock()
-
 	sc := NewSyncCoordinator(
 		logger,
 		settings,
@@ -1357,7 +1218,6 @@ func TestSyncCoordinator_SelectAndActivateNewPeer(t *testing.T) {
 		selector,
 		banManager,
 		blockchainSetup.Client,
-		mockProducer,
 	)
 
 	localHeight := uint32(100)
@@ -1372,26 +1232,9 @@ func TestSyncCoordinator_SelectAndActivateNewPeer(t *testing.T) {
 	peerHash, _ := chainhash.NewHashFromStr("000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f")
 	registry.Put(newPeer, "", 110, peerHash, "http://datahub.example.com")
 
-	// Start monitoring the publish channel
-	done := make(chan bool)
-	go func() {
-		select {
-		case <-mockProducer.PublishChannel():
-			done <- true
-		case <-time.After(100 * time.Millisecond):
-			done <- false
-		}
-	}()
-
-	// Test with eligible peer
+	// Test with eligible peer — centralized orchestration handles catchup, no Kafka publishing
 	sc.selectAndActivateNewPeer(localHeight, oldPeer)
 	assert.Equal(t, newPeer, sc.GetCurrentSyncPeer(), "Should select new eligible peer")
-
-	if <-done {
-		// Message was published - success
-	} else {
-		t.Fatal("Sync message was not published")
-	}
 }
 
 func TestSyncCoordinator_UpdateBanStatus_SyncPeerBanned(t *testing.T) {
@@ -1403,8 +1246,6 @@ func TestSyncCoordinator_UpdateBanStatus_SyncPeerBanned(t *testing.T) {
 	blockchainSetup := SetupTestBlockchain(t)
 	defer blockchainSetup.Cleanup()
 
-	mockProducer := kafka.NewKafkaAsyncProducerMock()
-
 	sc := NewSyncCoordinator(
 		logger,
 		settings,
@@ -1412,7 +1253,6 @@ func TestSyncCoordinator_UpdateBanStatus_SyncPeerBanned(t *testing.T) {
 		selector,
 		banManager,
 		blockchainSetup.Client,
-		mockProducer,
 	)
 
 	sc.SetGetLocalHeightCallback(func() uint32 {
@@ -1433,64 +1273,15 @@ func TestSyncCoordinator_UpdateBanStatus_SyncPeerBanned(t *testing.T) {
 	altHash, _ := chainhash.NewHashFromStr("000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f")
 	registry.Put(altPeer, "", 115, altHash, "http://alt.example.com")
 
-	// Start monitoring the publish channel
-	done := make(chan bool)
-	go func() {
-		select {
-		case <-mockProducer.PublishChannel():
-			done <- true
-		case <-time.After(100 * time.Millisecond):
-			done <- false
-		}
-	}()
-
 	// Ban the sync peer
 	banManager.AddScore(string(syncPeer), ReasonSpam)
 	banManager.AddScore(string(syncPeer), ReasonSpam) // Should trigger ban
 
-	// Update ban status
+	// Update ban status — centralized orchestration handles catchup, no Kafka publishing
 	sc.UpdateBanStatus(syncPeer)
 
 	// Verify sync peer was cleared and new one selected
 	assert.Equal(t, altPeer, sc.GetCurrentSyncPeer(), "Should switch to alternative peer when sync peer is banned")
-
-	if <-done {
-		// Message was published - success
-	} else {
-		t.Fatal("Sync message was not published")
-	}
-}
-
-func TestSyncCoordinator_TriggerSync_SendMessageError(t *testing.T) {
-	logger := ulogger.New("test")
-	settings := CreateTestSettings()
-	registry := NewPeerRegistry()
-	selector := NewPeerSelector(logger, nil)
-	banManager := NewPeerBanManager(context.Background(), nil, settings, registry)
-	blockchainSetup := SetupTestBlockchain(t)
-	defer blockchainSetup.Cleanup()
-
-	sc := NewSyncCoordinator(
-		logger,
-		settings,
-		registry,
-		selector,
-		banManager,
-		blockchainSetup.Client,
-		nil, // No Kafka producer
-	)
-
-	sc.SetGetLocalHeightCallback(func() uint32 {
-		return 100
-	})
-
-	// Add peer without block hash (will cause sendSyncMessage to fail)
-	peerID := peer.ID("test-peer")
-	registry.Put(peerID, "", 110, nil, "http://test.com")
-
-	// Trigger sync - should fail to send message but not panic
-	err := sc.TriggerSync()
-	assert.Error(t, err, "Should return error when sendSyncMessage fails")
 }
 
 func TestSyncCoordinator_HandleCatchupFailure_NoNewPeer(t *testing.T) {
@@ -1509,7 +1300,6 @@ func TestSyncCoordinator_HandleCatchupFailure_NoNewPeer(t *testing.T) {
 		selector,
 		banManager,
 		blockchainSetup.Client,
-		nil,
 	)
 
 	sc.SetGetLocalHeightCallback(func() uint32 {
@@ -1545,7 +1335,6 @@ func TestSyncCoordinator_PeriodicEvaluation(t *testing.T) {
 		selector,
 		banManager,
 		blockchainSetup.Client,
-		nil,
 	)
 
 	// Test context cancellation
@@ -1581,7 +1370,6 @@ func TestSyncCoordinator_PeriodicEvaluation(t *testing.T) {
 		selector,
 		banManager,
 		blockchainSetup.Client,
-		nil,
 	)
 
 	ctx2 := context.Background()

@@ -569,9 +569,19 @@ func (s *Server) getLocalHeight() uint32 {
 	return bhMeta.Height
 }
 
+// SetCentralPeerRegistry injects the centralized peer registry client.
+// Called after NewServer when the blockchain service address is known.
+func (s *Server) SetCentralPeerRegistry(r blockchain.PeerRegistryClientI) {
+	s.centralRegistry = r
+}
+
 func (s *Server) addPeer(peerID peer.ID, clientName string, height uint32, blockHash *chainhash.Hash, dataHubURL string) {
 	if s.peerRegistry != nil {
 		s.peerRegistry.Put(peerID, clientName, height, blockHash, dataHubURL)
+	}
+	if s.centralRegistry != nil {
+		info := p2pPeerToRegistryInfo(peerID, clientName, height, blockHash, dataHubURL, false)
+		go s.registerInCentralRegistry(info)
 	}
 }
 
@@ -580,6 +590,10 @@ func (s *Server) addConnectedPeer(peerID peer.ID, clientName string, height uint
 	if s.peerRegistry != nil {
 		s.peerRegistry.Put(peerID, clientName, height, blockHash, dataHubURL)
 		s.peerRegistry.UpdateConnectionState(peerID, true)
+	}
+	if s.centralRegistry != nil {
+		info := p2pPeerToRegistryInfo(peerID, clientName, height, blockHash, dataHubURL, false)
+		go s.registerInCentralRegistry(info)
 	}
 }
 
@@ -605,6 +619,14 @@ func (s *Server) removePeer(peerID peer.ID) {
 		// Mark as disconnected before removing
 		s.peerRegistry.UpdateConnectionState(peerID, false)
 		s.peerRegistry.Remove(peerID)
+	}
+	if s.centralRegistry != nil {
+		peerIDStr := peerID.String()
+		go func() {
+			if err := s.centralRegistry.RemovePeer(s.gCtx, peerIDStr); err != nil {
+				s.logger.Warnf("[P2P] failed to remove peer %s from central registry: %v", peerIDStr, err)
+			}
+		}()
 	}
 	if s.syncCoordinator != nil {
 		s.syncCoordinator.HandlePeerDisconnected(peerID)
@@ -715,7 +737,7 @@ func (s *Server) isBlockchainSyncingOrCatchingUp(ctx context.Context) (bool, err
 		}
 	}
 
-	if *state == blockchain_api.FSMStateType_CATCHINGBLOCKS || *state == blockchain_api.FSMStateType_LEGACYSYNCING {
+	if *state == blockchain_api.FSMStateType_CATCHINGBLOCKS {
 		// ignore notifications while syncing or catching up
 		return true, nil
 	}
@@ -1035,6 +1057,27 @@ func (s *Server) handleBanEvent(ctx context.Context, event BanEvent) {
 
 	// Disconnect by PeerID
 	s.disconnectBannedPeerByID(ctx, peerID, event.Reason)
+}
+
+// registerInCentralRegistry sends a RegisterPeer call to the centralized registry.
+// Always called in a goroutine so it never blocks the hot path.
+func (s *Server) registerInCentralRegistry(info *blockchain.PeerInfo) {
+	if err := s.centralRegistry.RegisterPeer(s.gCtx, info); err != nil {
+		s.logger.Warnf("[P2P] failed to register peer %s in central registry: %v", info.ID, err)
+	}
+}
+
+// p2pPeerToRegistryInfo converts P2P peer fields to the transport-agnostic PeerInfo used by the centralized registry.
+func p2pPeerToRegistryInfo(peerID peer.ID, clientName string, height uint32, blockHash *chainhash.Hash, dataHubURL string, isBanned bool) *blockchain.PeerInfo {
+	return &blockchain.PeerInfo{
+		ID:            peerID.String(),
+		TransportType: blockchain_api.TransportType_TRANSPORT_HTTP,
+		ClientName:    clientName,
+		Height:        height,
+		BlockHash:     blockHash,
+		DataHubURL:    dataHubURL,
+		IsBanned:      isBanned,
+	}
 }
 
 // disconnectBannedPeerByID disconnects a specific peer by their PeerID

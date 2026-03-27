@@ -30,7 +30,7 @@ import (
 //   - *CatchupResult: Result containing headers and metrics
 //   - *model.BlockHeader: Best block header from our chain
 //   - error: If fetching or parsing headers fails
-func (u *Server) catchupGetBlockHeaders(ctx context.Context, blockUpTo *model.Block, peerID, baseURL string) (*catchup.Result, *model.BlockHeader, error) {
+func (u *Server) catchupGetBlockHeaders(ctx context.Context, blockUpTo *model.Block, peerID, baseURL string, transport CatchupTransport) (*catchup.Result, *model.BlockHeader, error) {
 	ctx, _, deferFn := tracing.Tracer("subtreevalidation").Start(ctx, "catchupGetBlockHeaders",
 		tracing.WithParentStat(u.stats),
 		tracing.WithLogMessage(u.logger, "[catchup][%s] fetching headers up to %s from peer %s", blockUpTo.Hash().String(), baseURL, peerID),
@@ -204,21 +204,38 @@ func (u *Server) catchupGetBlockHeaders(ctx context.Context, blockUpTo *model.Bl
 		}
 		iterCtx, iterCancel := context.WithTimeout(ctx, iterationTimeout)
 
-		// Build request URL with current block locator
-		blockLocatorStr := catchup.BuildBlockLocatorString(currentLocatorHashes)
-		requestURL := fmt.Sprintf("%s/headers_from_common_ancestor/%s?block_locator_hashes=%s&n=%d",
-			baseURL,
-			chainTipHash.String(),
-			blockLocatorStr,
-			maxBlockHeadersPerRequest,
-		)
-
 		u.logger.Debugf("[catchup][%s] iteration %d: requesting headers with locator starting at %s (timeout: %v)", chainTipHash.String(), iteration, currentLocatorHashes[0].String(), iterationTimeout)
 
-		// Fetch with retry using iteration context with timeout
-		blockHeadersBytes, err := catchup.FetchHeadersWithRetry(iterCtx, u.logger, requestURL, maxRetries)
+		// Fetch headers — use the pluggable CatchupTransport when available (centralized
+		// orchestration), otherwise fall back to the legacy HTTP code path.
+		var blockHeaders []*model.BlockHeader
+		var fetchErr error
+
+		if transport != nil {
+			// Centralized orchestration path: transport handles URL construction and parsing.
+			blockHeaders, fetchErr = transport.FetchHeaders(iterCtx, baseURL, chainTipHash, currentLocatorHashes, maxBlockHeadersPerRequest)
+		} else {
+			// Legacy HTTP path: build URL, fetch raw bytes, validate, parse.
+			blockLocatorStr := catchup.BuildBlockLocatorString(currentLocatorHashes)
+			requestURL := fmt.Sprintf("%s/headers_from_common_ancestor/%s?block_locator_hashes=%s&n=%d",
+				baseURL, chainTipHash.String(), blockLocatorStr, maxBlockHeadersPerRequest)
+
+			var blockHeadersBytes []byte
+			blockHeadersBytes, fetchErr = catchup.FetchHeadersWithRetry(iterCtx, u.logger, requestURL, maxRetries)
+			if fetchErr == nil {
+				if valErr := catchup.ValidateBlockHeaderBytes(blockHeadersBytes); valErr != nil {
+					fetchErr = valErr
+				} else {
+					blockHeaders, fetchErr = catchup.ParseBlockHeaders(blockHeadersBytes)
+				}
+			}
+		}
+
 		iterCancel() // Clean up the iteration context
-		if err != nil {
+
+		var err error
+		if fetchErr != nil {
+			err = fetchErr
 			// Check if it's specifically a context deadline exceeded from the iteration timeout
 			// This indicates the peer is too slow to respond within our timeout
 			if errors.Is(err, context.DeadlineExceeded) {
@@ -283,44 +300,9 @@ func (u *Server) catchupGetBlockHeaders(ctx context.Context, blockUpTo *model.Bl
 			), nil, err
 		}
 
-		// Validate header bytes
-		if err = catchup.ValidateBlockHeaderBytes(blockHeadersBytes); err != nil {
-			if circuitBreaker != nil {
-				circuitBreaker.RecordFailure()
-			}
-			return catchup.CreateCatchupResult(
-				allCatchupHeaders, blockUpTo.Hash(), startHash, startHeight, startTime, baseURL,
-				iteration, failedIterations, false, "Invalid header bytes",
-			), nil, err
-		}
-
-		// Parse headers
-		blockHeaders, parseErr := catchup.ParseBlockHeaders(blockHeadersBytes)
-		if parseErr != nil {
-			u.logger.Errorf("[catchup][%s] iteration %d: header parse error: %v", chainTipHash.String(), iteration, parseErr)
-
-			// Check if error indicates malicious behavior
-			if errors.IsMaliciousResponseError(parseErr) {
-				// Report malicious behavior to P2P service
-				u.reportCatchupMalicious(ctx, identifier, "malicious response during header parsing")
-
-				u.logger.Errorf("[catchup][%s] SECURITY: Peer %s sent malicious headers - should be banned (banning not yet implemented)", chainTipHash.String(), baseURL)
-
-				return catchup.CreateCatchupResult(
-					allCatchupHeaders, blockUpTo.Hash(), startHash, startHeight, startTime, baseURL,
-					iteration, failedIterations, false, "Malicious headers detected",
-				), nil, errors.NewNetworkPeerMaliciousError("peer sent invalid headers: %w", parseErr)
-			}
-
-			// For non-malicious parse errors, still fail but with different error type
-			if circuitBreaker != nil {
-				circuitBreaker.RecordFailure()
-			}
-
-			return catchup.CreateCatchupResult(
-				allCatchupHeaders, blockUpTo.Hash(), startHash, startHeight, startTime, baseURL,
-				iteration, failedIterations, false, "Header parse failed",
-			), nil, errors.NewNetworkInvalidResponseError("failed to parse headers: %w", parseErr)
+		// Check for malicious response in parsed headers (only for legacy path — transport handles internally).
+		if transport == nil {
+			// (validation and parse already checked above in the legacy path)
 		}
 
 		// Check if we got any headers

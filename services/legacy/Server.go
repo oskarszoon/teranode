@@ -24,6 +24,7 @@
 package legacy
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -714,4 +715,140 @@ func (s *Server) Start(ctx context.Context, readyCh chan<- struct{}) error {
 // Returns an error if the shutdown process encounters problems, or nil on successful shutdown
 func (s *Server) Stop(_ context.Context) error {
 	return s.server.Stop()
+}
+
+// SetCentralPeerRegistry sets the optional central peer registry client.
+// When set, Legacy peers are registered/removed from the centralized registry
+// in addition to local tracking (dual-write phase).
+func (s *Server) SetCentralPeerRegistry(r blockchain.PeerRegistryClientI) {
+	if s.server != nil {
+		s.server.SetCentralPeerRegistry(r)
+	}
+}
+
+// fetchTimeout is how long FetchHeadersFromPeer / FetchBlockFromPeer wait for the wire response.
+const fetchTimeout = 30 * time.Second
+
+// FetchHeadersFromPeer implements PeerServiceServer.
+// It sends a getheaders message to the specified peer and waits for the response.
+func (s *Server) FetchHeadersFromPeer(ctx context.Context, req *peer_api.FetchHeadersFromPeerRequest) (*peer_api.FetchHeadersFromPeerResponse, error) {
+	if s.server == nil {
+		return nil, errors.NewServiceUnavailableError("legacy server not started")
+	}
+
+	sp := s.server.getPeerByAddr(req.PeerAddr)
+	if sp == nil {
+		return nil, errors.NewNotFoundError("peer %s not connected", req.PeerAddr)
+	}
+
+	// Build block locator from request bytes.
+	locator := make([]*chainhash.Hash, 0, len(req.LocatorHashes))
+	for _, b := range req.LocatorHashes {
+		h, err := chainhash.NewHash(b)
+		if err != nil {
+			return nil, errors.NewInvalidArgumentError("invalid locator hash: %v", err)
+		}
+		locator = append(locator, h)
+	}
+
+	var stopHash *chainhash.Hash
+	if len(req.StopHash) == 32 {
+		h, err := chainhash.NewHash(req.StopHash)
+		if err != nil {
+			return nil, errors.NewInvalidArgumentError("invalid stop hash: %v", err)
+		}
+		stopHash = h
+	} else {
+		stopHash = &chainhash.Hash{} // all zeros = up to chain tip
+	}
+
+	// Register one-shot response channel before sending the request.
+	// Use LoadOrStore to reject concurrent header requests to the same peer —
+	// the wire protocol has no request multiplexing so only one getheaders
+	// can be in-flight per peer at a time.
+	respChan := make(chan *wire.MsgHeaders, 1)
+	if _, loaded := s.server.pendingHeaderRequests.LoadOrStore(req.PeerAddr, respChan); loaded {
+		return nil, errors.NewServiceError("concurrent header request already in-flight for peer %s", req.PeerAddr)
+	}
+	defer s.server.pendingHeaderRequests.Delete(req.PeerAddr)
+
+	if err := sp.PushGetHeadersMsg(locator, stopHash); err != nil {
+		return nil, errors.NewServiceError("failed to send getheaders to peer %s: %v", req.PeerAddr, err)
+	}
+
+	select {
+	case msg := <-respChan:
+		// Serialize headers into concatenated 80-byte form.
+		var buf []byte
+		for _, hdr := range msg.Headers {
+			b, err := serializeHeader(hdr)
+			if err != nil {
+				return nil, errors.NewProcessingError("failed to serialize header: %v", err)
+			}
+			buf = append(buf, b...)
+		}
+		return &peer_api.FetchHeadersFromPeerResponse{HeaderBytes: buf}, nil
+	case <-time.After(fetchTimeout):
+		return nil, errors.NewNetworkTimeoutError("timeout waiting for headers from peer %s", req.PeerAddr)
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// FetchBlockFromPeer implements PeerServiceServer.
+// It sends a getdata message to the specified peer and waits for the block response.
+func (s *Server) FetchBlockFromPeer(ctx context.Context, req *peer_api.FetchBlockFromPeerRequest) (*peer_api.FetchBlockFromPeerResponse, error) {
+	if s.server == nil {
+		return nil, errors.NewServiceUnavailableError("legacy server not started")
+	}
+
+	sp := s.server.getPeerByAddr(req.PeerAddr)
+	if sp == nil {
+		return nil, errors.NewNotFoundError("peer %s not connected", req.PeerAddr)
+	}
+
+	blockHash, err := chainhash.NewHash(req.BlockHash)
+	if err != nil {
+		return nil, errors.NewInvalidArgumentError("invalid block hash: %v", err)
+	}
+
+	// Register one-shot response channel. Block hash is unique per request so
+	// concurrent fetches for different blocks are safe. Use LoadOrStore to
+	// reject duplicate requests for the same block.
+	hashStr := blockHash.String()
+	respChan := make(chan *wire.MsgBlock, 1)
+	if _, loaded := s.server.pendingBlockRequests.LoadOrStore(hashStr, respChan); loaded {
+		return nil, errors.NewServiceError("concurrent block request already in-flight for %s", hashStr)
+	}
+	defer s.server.pendingBlockRequests.Delete(hashStr)
+
+	// Send getdata request for the block.
+	gdmsg := wire.NewMsgGetData()
+	iv := wire.NewInvVect(wire.InvTypeBlock, blockHash)
+	if err = gdmsg.AddInvVect(iv); err != nil {
+		return nil, errors.NewProcessingError("failed to build getdata message: %v", err)
+	}
+	sp.QueueMessage(gdmsg, nil)
+
+	select {
+	case msg := <-respChan:
+		var buf bytes.Buffer
+		if err = msg.Serialize(&buf); err != nil {
+			return nil, errors.NewProcessingError("failed to serialize block: %v", err)
+		}
+		return &peer_api.FetchBlockFromPeerResponse{BlockBytes: buf.Bytes()}, nil
+	case <-time.After(fetchTimeout):
+		return nil, errors.NewNetworkTimeoutError("timeout waiting for block %s from peer %s", hashStr, req.PeerAddr)
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// serializeHeader returns the 80-byte raw serialization of a wire.BlockHeader.
+func serializeHeader(hdr *wire.BlockHeader) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := hdr.Serialize(&buf); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }

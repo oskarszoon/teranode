@@ -13,8 +13,8 @@ import (
 
 // NewFiniteStateMachine creates a new finite state machine for the blockchain service.
 //
-// States: IDLE, RUNNING, CATCHINGBLOCKS, LEGACYSYNCING
-// Events: RUN, CATCHUPBLOCKS, LEGACYSYNC, STOP
+// States: IDLE, RUNNING, CATCHINGBLOCKS
+// Events: RUN, CATCHUPBLOCKS, STOP
 //
 // Automatically sends notifications on state transitions and updates Prometheus metrics.
 func (b *Blockchain) NewFiniteStateMachine(opts ...func(*fsm.FSM)) *fsm.FSM {
@@ -49,17 +49,9 @@ func (b *Blockchain) NewFiniteStateMachine(opts ...func(*fsm.FSM)) *fsm.FSM {
 				Name: blockchain_api.FSMEventType_RUN.String(),
 				Src: []string{
 					blockchain_api.FSMStateType_IDLE.String(),
-					blockchain_api.FSMStateType_LEGACYSYNCING.String(),
 					blockchain_api.FSMStateType_CATCHINGBLOCKS.String(),
 				},
 				Dst: blockchain_api.FSMStateType_RUNNING.String(),
-			},
-			{
-				Name: blockchain_api.FSMEventType_LEGACYSYNC.String(),
-				Src: []string{
-					blockchain_api.FSMStateType_IDLE.String(),
-				},
-				Dst: blockchain_api.FSMStateType_LEGACYSYNCING.String(),
 			},
 			{
 				Name: blockchain_api.FSMEventType_CATCHUPBLOCKS.String(),
@@ -72,7 +64,6 @@ func (b *Blockchain) NewFiniteStateMachine(opts ...func(*fsm.FSM)) *fsm.FSM {
 				Name: blockchain_api.FSMEventType_STOP.String(),
 				Src: []string{
 					blockchain_api.FSMStateType_RUNNING.String(),
-					blockchain_api.FSMStateType_LEGACYSYNCING.String(),
 				},
 				Dst: blockchain_api.FSMStateType_IDLE.String(),
 			},
@@ -92,8 +83,8 @@ func (b *Blockchain) NewFiniteStateMachine(opts ...func(*fsm.FSM)) *fsm.FSM {
 // CheckFSM creates a health check function for the blockchain FSM.
 // Returns a function that checks the current FSM state and returns appropriate
 // HTTP status codes:
-//   - StatusOK (200): For CATCHINGBLOCKS, LEGACYSYNCING, RUNNING states
-//   - StatusServiceUnavailable (503): For IDLE state
+//   - StatusOK (200): For IDLE, CATCHINGBLOCKS, RUNNING states
+//   - StatusServiceUnavailable (503): For unknown/invalid states
 func CheckFSM(blockchainClient ClientI) func(ctx context.Context, checkLiveness bool) (int, string, error) {
 	return func(ctx context.Context, checkLiveness bool) (int, string, error) {
 		state, err := blockchainClient.GetFSMCurrentState(ctx)
@@ -107,8 +98,6 @@ func CheckFSM(blockchainClient ClientI) func(ctx context.Context, checkLiveness 
 
 		switch *state {
 		case blockchain_api.FSMStateType_CATCHINGBLOCKS:
-			status = http.StatusOK
-		case blockchain_api.FSMStateType_LEGACYSYNCING:
 			status = http.StatusOK
 		case blockchain_api.FSMStateType_RUNNING:
 			status = http.StatusOK

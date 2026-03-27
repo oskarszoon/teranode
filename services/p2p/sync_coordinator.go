@@ -7,15 +7,11 @@ import (
 	"time"
 
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
-	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/services/blockchain"
 	"github.com/bsv-blockchain/teranode/services/blockchain/blockchain_api"
 	"github.com/bsv-blockchain/teranode/settings"
 	"github.com/bsv-blockchain/teranode/ulogger"
-	"github.com/bsv-blockchain/teranode/util/kafka"
-	kafkamessage "github.com/bsv-blockchain/teranode/util/kafka/kafka_message"
 	"github.com/libp2p/go-libp2p/core/peer"
-	"google.golang.org/protobuf/proto"
 )
 
 // SyncCoordinator orchestrates sync operations
@@ -43,8 +39,7 @@ type SyncCoordinator struct {
 	maxBackoffMultiplier    int       // Maximum backoff multiplier (e.g., 32)
 
 	// Dependencies for sync operations
-	blocksKafkaProducerClient kafka.KafkaAsyncProducerI // Kafka producer for blocks
-	getLocalHeight            func() uint32
+	getLocalHeight func() uint32
 
 	// Control
 	stopCh chan struct{}
@@ -59,19 +54,17 @@ func NewSyncCoordinator(
 	selector *PeerSelector,
 	banManager PeerBanManagerI,
 	blockchainClient blockchain.ClientI,
-	blocksKafkaProducerClient kafka.KafkaAsyncProducerI,
 ) *SyncCoordinator {
 	return &SyncCoordinator{
-		logger:                    logger,
-		settings:                  settings,
-		registry:                  registry,
-		selector:                  selector,
-		banManager:                banManager,
-		blockchainClient:          blockchainClient,
-		blocksKafkaProducerClient: blocksKafkaProducerClient,
-		stopCh:                    make(chan struct{}),
-		backoffMultiplier:         1,
-		maxBackoffMultiplier:      32, // Max backoff of 64 seconds (32 * 2s)
+		logger:               logger,
+		settings:             settings,
+		registry:             registry,
+		selector:             selector,
+		banManager:           banManager,
+		blockchainClient:     blockchainClient,
+		stopCh:               make(chan struct{}),
+		backoffMultiplier:    1,
+		maxBackoffMultiplier: 32, // Max backoff of 64 seconds (32 * 2s)
 	}
 }
 
@@ -179,11 +172,6 @@ func (sc *SyncCoordinator) TriggerSync() error {
 	// Notify if peer changed
 	if newPeer != oldPeer {
 		sc.logger.Infof("[SyncCoordinator] Sync peer changed from %s to %s", oldPeer, newPeer)
-
-		if err := sc.sendSyncMessage(newPeer); err != nil {
-			sc.logger.Errorf("[SyncCoordinator] Failed to send sync message: %v", err)
-			return err
-		}
 	}
 
 	return nil
@@ -357,31 +345,12 @@ func (sc *SyncCoordinator) handleFSMTransition(currentState *blockchain_api.FSMS
 			}
 
 			if peerInfo.Height > localHeight {
-				// Only consider it a failure if we're still behind the sync peer
-				sc.logger.Infof("[SyncCoordinator] Sync with peer %s considered failed (local height: %d < peer height: %d)",
-					currentPeer, localHeight, peerInfo.Height)
-
-				// Record catchup failure for reputation tracking
-				/* if sc.registry != nil {
-					// Get peer info to check failure count
-					peerInfo, _ := sc.registry.GetPeer(currentPeer)
-
-					// If this peer has failed multiple times recently, treat as malicious
-					// (likely on an invalid chain)
-					if peerInfo.InteractionFailures > 2 &&
-						time.Since(peerInfo.LastInteractionFailure) < 5*time.Minute {
-						sc.registry.RecordMaliciousInteraction(currentPeer)
-						sc.logger.Warnf("[SyncCoordinator] Peer %s has failed %d times recently, marking as potentially malicious",
-							currentPeer, peerInfo.InteractionFailures)
-					} else {
-						sc.registry.RecordCatchupFailure(currentPeer)
-						sc.logger.Infof("[SyncCoordinator] Recorded catchup failure for peer %s (reputation will decrease)", currentPeer)
-					}
-				}*/
-
-				sc.ClearSyncPeer()
-				_ = sc.TriggerSync()
-				return true // Transition handled
+				// Being behind a peer in RUNNING state is expected — the central
+				// registry poller in BlockValidation handles catchup orchestration.
+				// Keep the current sync peer and don't rotate.
+				sc.logger.Debugf("[SyncCoordinator] Local height %d behind peer %s height %d, waiting for catchup orchestration",
+					localHeight, currentPeer, peerInfo.Height)
+				return false // No transition — let the poller handle catchup
 			} else {
 				// We've caught up or surpassed the peer, this is success not failure
 				sc.logger.Infof("[SyncCoordinator] Sync completed successfully with peer %s (local height: %d, peer height: %d)",
@@ -483,12 +452,7 @@ func (sc *SyncCoordinator) activateSyncPeer(newSyncPeer peer.ID) {
 	sc.lastSyncTrigger = time.Now()
 	sc.mu.Unlock()
 
-	// Trigger sync directly (sends to Kafka)
-	if err := sc.sendSyncMessage(newSyncPeer); err != nil {
-		sc.logger.Errorf("[SyncCoordinator] Failed to trigger sync: %v", err)
-	} else {
-		sc.logger.Infof("[SyncCoordinator] Triggered sync with peer %s via Kafka", newSyncPeer)
-	}
+	sc.logger.Infof("[SyncCoordinator] Activated sync peer %s", newSyncPeer)
 }
 
 // logPeerList logs the list of peers for debugging
@@ -741,66 +705,4 @@ func (sc *SyncCoordinator) considerReputationRecovery() {
 		// Reset backoff since we have new peers to try
 		sc.resetBackoff()
 	}
-}
-
-// sendSyncTriggerToKafka sends a sync trigger message to Kafka
-func (sc *SyncCoordinator) sendSyncTriggerToKafka(syncPeer peer.ID, bestHash string) {
-	if sc.blocksKafkaProducerClient == nil || bestHash == "" {
-		return
-	}
-
-	// Get the peer's DataHub URL if available
-	dataHubURL := ""
-	if peerInfo, exists := sc.registry.Get(syncPeer); exists {
-		dataHubURL = peerInfo.DataHubURL
-	}
-
-	// No longer collecting fallback URLs - relying on ban scoring and FSM monitoring instead
-	sc.logger.Infof("[sendSyncTriggerToKafka] Sending sync trigger with primary URL %s from peer %s", dataHubURL, syncPeer)
-
-	msg := &kafkamessage.KafkaBlockTopicMessage{
-		Hash:   bestHash,
-		URL:    dataHubURL,
-		PeerId: syncPeer.String(),
-	}
-
-	value, err := proto.Marshal(msg)
-	if err != nil {
-		sc.logger.Errorf("[sendSyncTriggerToKafka] error marshaling sync peer's best block: %v", err)
-		return
-	}
-
-	sc.blocksKafkaProducerClient.Publish(&kafka.Message{
-		Key:   []byte(bestHash),
-		Value: value,
-	})
-	sc.logger.Infof("[sendSyncTriggerToKafka] Sent sync trigger to Kafka for block %s from peer %s", bestHash, syncPeer)
-}
-
-// sendSyncMessage sends a sync message to a specific peer
-func (sc *SyncCoordinator) sendSyncMessage(peerID peer.ID) error {
-	sc.logger.Infof("[sendSyncMessage] Preparing to send sync message to peer %s", peerID)
-	// Get peer's best known block hash from registry
-	var bestHash string
-	if sc.registry != nil {
-		if peerInfo, exists := sc.registry.Get(peerID); exists {
-			if peerInfo.BlockHash != nil {
-				bestHash = peerInfo.BlockHash.String()
-				sc.logger.Infof("[sendSyncMessage] Found block hash %s for peer %s", bestHash, peerID)
-			} else {
-				sc.logger.Warnf("[sendSyncMessage] No block hash found in registry for peer %s", peerID)
-			}
-		} else {
-			sc.logger.Errorf("[sendSyncMessage] Peer %s not found in registry", peerID)
-			return errors.NewServiceError(fmt.Sprintf("peer %s not found in registry", peerID))
-		}
-	}
-
-	if bestHash != "" {
-		sc.logger.Infof("[sendSyncMessage] Sending sync trigger to Kafka for peer %s with hash %s", peerID, bestHash)
-		sc.sendSyncTriggerToKafka(peerID, bestHash)
-		return nil
-	}
-	sc.logger.Errorf("[sendSyncMessage] Cannot send sync - no best block hash available for peer %s", peerID)
-	return errors.NewServiceError(fmt.Sprintf("no block hash available for peer %s", peerID))
 }

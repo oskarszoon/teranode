@@ -567,14 +567,6 @@ func (sm *SyncManager) startSync() {
 
 	sm.logger.Infof("[startSync] Syncing from block height %d to block height %d using peer %v", bestBlockHeaderMeta.Height, bestPeer.LastBlock(), bestPeer.String())
 
-	// If we are behind the peer more than 10 blocks, move to CATCHING BLOCKS
-	if bestPeer.LastBlock()-bestBlockHeightInt32 > 10 {
-		// move FSM state to CATCHING BLOCKS, we are behind the peer more than 10 blocks
-		if err = sm.blockchainClient.CatchUpBlocks(sm.ctx); err != nil {
-			sm.logger.Errorf("[startSync] failed to set blockchain state to catching blocks: %v", err)
-		}
-	}
-
 	// When the current height is less than a known checkpoint we
 	// can use block headers to learn about which blocks comprise
 	// the chain up to the checkpoint and perform less validation
@@ -714,7 +706,7 @@ func (sm *SyncManager) handleNewPeerMsg(peer *peerpkg.Peer) {
 		sm.logger.Debugf("Error getting FSM current state: %v", err)
 	}
 
-	if *state == teranodeblockchain.FSMStateLEGACYSYNCING && sm.currentFeeFilter.Load() != bsvutil.SatoshiPerBitcoin {
+	if *state == teranodeblockchain.FSMStateCATCHINGBLOCKS && sm.currentFeeFilter.Load() != bsvutil.SatoshiPerBitcoin {
 		// Set fee filter to inform peers that we don't want to be notified of transactions while we're syncing
 		feeFilter := wire.NewMsgFeeFilter(bsvutil.SatoshiPerBitcoin)
 
@@ -1148,7 +1140,6 @@ func (sm *SyncManager) handleBlockMsg(bmsg *blockQueueMsg) error {
 		}
 	}
 
-	legacySyncMode := false
 	catchingBlocks := false
 
 	sm.logger.Debugf("[handleBlockMsg][%s] checking current FSM state", bmsg.blockHash)
@@ -1160,8 +1151,6 @@ func (sm *SyncManager) handleBlockMsg(bmsg *blockQueueMsg) error {
 
 	if fsmState != nil {
 		switch *fsmState {
-		case teranodeblockchain.FSMStateLEGACYSYNCING:
-			legacySyncMode = true
 		case teranodeblockchain.FSMStateCATCHINGBLOCKS:
 			catchingBlocks = true
 		}
@@ -1233,7 +1222,7 @@ func (sm *SyncManager) handleBlockMsg(bmsg *blockQueueMsg) error {
 	// promote block to the block validation via kafka (p2p -> blockvalidation message),
 	// without calling HandleBlockDirect. Such that it doesn't interfere with the operation of block validation.
 	if err = sm.HandleBlockDirect(sm.ctx, bmsg.peer, bmsg.blockHash, bmsg.block); err != nil {
-		if (legacySyncMode || catchingBlocks) && errors.Is(err, errors.ErrBlockNotFound) {
+		if catchingBlocks && errors.Is(err, errors.ErrBlockNotFound) {
 			// previous block not found? Probably a new block message from our syncPeer while we are still syncing
 			sm.logger.Errorf("Failed to process new block in legacy mode %v: %v", bmsg.blockHash, err)
 		} else if errors.Is(err, errors.ErrBlockNotFound) {
@@ -1267,7 +1256,7 @@ func (sm *SyncManager) handleBlockMsg(bmsg *blockQueueMsg) error {
 			return nil
 		} else {
 			serviceError := errors.Is(err, errors.ErrServiceError) || errors.Is(err, errors.ErrStorageError)
-			if !legacySyncMode && !catchingBlocks && !serviceError {
+			if !catchingBlocks && !serviceError {
 				peer.PushRejectMsg(wire.CmdBlock, wire.RejectInvalid, "block rejected", &bmsg.blockHash, false)
 			}
 
@@ -2323,7 +2312,7 @@ func (sm *SyncManager) startKafkaListeners(ctx context.Context, _ error) {
 	txControlChan := make(chan bool, 1)    // control channel for transaction-related listeners (buffered to prevent blocking)
 
 	// start a go routine to control the kafka listeners based on FSM state
-	// Block-related listeners (INV, blocks final): enabled when NOT in LEGACYSYNCING state
+	// Block-related listeners (INV, blocks final): enabled when NOT in CATCHINGBLOCKS state
 	// Transaction-related listeners (txmeta): enabled only when in RUNNING state
 	go func() {
 		for {
@@ -2331,9 +2320,9 @@ func (sm *SyncManager) startKafkaListeners(ctx context.Context, _ error) {
 			case <-ctx.Done():
 				return
 			case <-time.After(1 * time.Second):
-				// Block-related listeners: enable when NOT in LEGACYSYNCING
-				isLegacySyncing, _ := sm.blockchainClient.IsFSMCurrentState(sm.ctx, teranodeblockchain.FSMStateLEGACYSYNCING)
-				blockEnabled := !isLegacySyncing
+				// Block-related listeners: enable when NOT in CATCHINGBLOCKS
+				isCatchingBlocks, _ := sm.blockchainClient.IsFSMCurrentState(sm.ctx, teranodeblockchain.FSMStateCATCHINGBLOCKS)
+				blockEnabled := !isCatchingBlocks
 
 				// Non-blocking send to avoid deadlock if no one is reading
 				select {
@@ -2373,7 +2362,7 @@ func (sm *SyncManager) startKafkaListeners(ctx context.Context, _ error) {
 		}()
 
 		// INV listener receives inventory messages from other nodes
-		// Disabled during LEGACYSYNCING to reduce processing load during catch-up
+		// Disabled during CATCHINGBLOCKS to reduce processing load during catch-up
 		controlCh := make(chan bool)
 		blockListenersCh = append(blockListenersCh, controlCh)
 

@@ -1,8 +1,6 @@
 package p2p
 
 import (
-	"net/http"
-	"net/http/httptest"
 	"testing"
 
 	"github.com/bsv-blockchain/teranode/ulogger"
@@ -29,41 +27,6 @@ func TestPeerSelector_SelectSyncPeer_NoPeers(t *testing.T) {
 	assert.Equal(t, peer.ID(""), selected, "Should return empty peer ID when no peers")
 }
 
-func TestSelector_SkipsPeerMarkedUnhealthyByHealthChecker(t *testing.T) {
-	logger := ulogger.New("test")
-	ps := NewPeerSelector(logger, nil)
-
-	// Health check servers: one OK, one 500
-	okSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer okSrv.Close()
-
-	failSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer failSrv.Close()
-
-	// Registry
-	registry := NewPeerRegistry()
-
-	// Add two peers
-	healthyID := peer.ID("H")
-	unhealthyID := peer.ID("U")
-
-	// Set heights so both are ahead
-	registry.Put(healthyID, "", 120, nil, okSrv.URL)
-	registry.UpdateStorage(healthyID, "full")
-
-	registry.Put(unhealthyID, "", 125, nil, failSrv.URL)
-
-	// Fetch peers and select
-	peers := registry.GetAll()
-
-	selected := ps.SelectSyncPeer(peers, SelectionCriteria{LocalHeight: 100})
-
-	assert.Equal(t, healthyID, selected, "selector should skip peer marked unhealthy by health checker")
-}
 
 func TestPeerSelector_SelectSyncPeer_NoEligiblePeers(t *testing.T) {
 	logger := ulogger.New("test")

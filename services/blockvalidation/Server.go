@@ -226,6 +226,17 @@ type Server struct {
 	// This is used to display in the dashboard why we switched from one peer to another.
 	// Protected by activeCatchupCtxMu for thread-safe access.
 	previousCatchupAttempt *PreviousAttempt
+
+	// centralPeerRegistry is the optional centralized peer registry client.
+	// When set, BlockValidation reads peers from this registry and drives catchup independently.
+	centralPeerRegistry blockchain.PeerRegistryClientI
+
+	// httpTransport is the HTTP-based CatchupTransport used for DataHub peers.
+	httpTransport CatchupTransport
+
+	// wireTransport is the wire-protocol CatchupTransport used for legacy peers.
+	// May be nil if no legacy service client is available.
+	wireTransport CatchupTransport
 }
 
 // New creates a new block validation server with the provided dependencies.
@@ -303,6 +314,7 @@ func New(
 		peerCircuitBreakers: catchup.NewPeerCircuitBreakers(*cbConfig),
 		headerChainCache:    catchup.NewHeaderChainCache(logger),
 		p2pClient:           p2pClient,
+		httpTransport:       NewHTTPTransport(),
 	}
 
 	return bVal
@@ -1057,6 +1069,15 @@ func (u *Server) Start(ctx context.Context, readyCh chan<- struct{}) error {
 		return nil
 	})
 
+	// When a centralized peer registry is configured, poll it for peers with a higher
+	// height than ours and initiate catchup independently.
+	if u.centralPeerRegistry != nil {
+		g.Go(func() error {
+			u.runCentralRegistryPoller(gctx)
+			return nil
+		})
+	}
+
 	// Start gRPC server immediately (blocks until shutdown)
 	g.Go(func() error {
 		return util.StartGRPCServer(gctx, u.logger, u.settings, "blockvalidation", u.settings.BlockValidation.GRPCListenAddress, func(server *grpc.Server) {
@@ -1066,6 +1087,18 @@ func (u *Server) Start(ctx context.Context, readyCh chan<- struct{}) error {
 	})
 
 	return g.Wait()
+}
+
+// SetCentralPeerRegistry sets the optional centralized peer registry client.
+// When set, BlockValidation queries this registry to drive transport-agnostic catchup.
+func (u *Server) SetCentralPeerRegistry(r blockchain.PeerRegistryClientI) {
+	u.centralPeerRegistry = r
+}
+
+// SetWireTransport sets the wire-protocol transport used for legacy peers.
+// Must be called before Start for the transport to be available during catchup.
+func (u *Server) SetWireTransport(t CatchupTransport) {
+	u.wireTransport = t
 }
 
 // Stop gracefully shuts down the block validation server by stopping background

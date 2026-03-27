@@ -77,17 +77,11 @@ func (h *FSMHandler) GetFSMEvents(c echo.Context) error {
 	case blockchain_api.FSMStateType_IDLE:
 		events = []string{
 			blockchain_api.FSMEventType_RUN.String(),
-			blockchain_api.FSMEventType_LEGACYSYNC.String(),
 		}
 	case blockchain_api.FSMStateType_RUNNING:
 		events = []string{
 			blockchain_api.FSMEventType_STOP.String(),
 			blockchain_api.FSMEventType_CATCHUPBLOCKS.String(),
-		}
-	case blockchain_api.FSMStateType_LEGACYSYNCING:
-		events = []string{
-			blockchain_api.FSMEventType_RUN.String(),
-			blockchain_api.FSMEventType_STOP.String(),
 		}
 	case blockchain_api.FSMStateType_CATCHINGBLOCKS:
 		events = []string{

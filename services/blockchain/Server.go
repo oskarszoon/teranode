@@ -84,6 +84,7 @@ type subscriber struct {
 // enabling safe parallel processing of blockchain operations while maintaining data integrity.
 type Blockchain struct {
 	blockchain_api.UnimplementedBlockchainAPIServer
+	blockchain_api.UnimplementedPeerRegistryServiceServer
 	addBlockChan                  chan *blockchain_api.AddBlockRequest // Channel for adding blocks
 	store                         blockchain_store.Store               // Storage interface for blockchain data
 	logger                        ulogger.Logger                       // Logger instance
@@ -103,6 +104,9 @@ type Blockchain struct {
 	AppCtx                        context.Context                      // Application context
 	localTestStartState           string                               // Initial state for testing
 	subscriptionManagerReady      atomic.Bool                          // Flag indicating subscription manager is ready
+
+	// Peer registry for tracking peers across all transport types
+	peerRegistry *CentralizedPeerRegistry
 
 	// Blob deletion batch token management
 	batchTokens   map[string]*blobDeletionBatchToken // Active batch tokens
@@ -162,6 +166,7 @@ func New(ctx context.Context, logger ulogger.Logger, tSettings *settings.Setting
 		stats:                         gocore.NewStat("blockchain"),
 		AppCtx:                        ctx,
 		blocksFinalKafkaAsyncProducer: blocksFinalKafkaAsyncProducer,
+		peerRegistry:                  NewCentralizedPeerRegistry(),
 		batchTokens:                   make(map[string]*blobDeletionBatchToken),
 	}
 
@@ -406,6 +411,19 @@ func (b *Blockchain) Start(ctx context.Context, readyCh chan<- struct{}) error {
 
 	b.startKafka()
 
+	if path := b.settings.BlockChain.PeerRegistryPath; path != "" {
+		if err := b.peerRegistry.Load(path, 24*time.Hour); err != nil {
+			b.logger.Warnf("[Blockchain] failed to load peer registry from %s: %v", path, err)
+		} else {
+			b.logger.Infof("[Blockchain] loaded %d peers from %s", b.peerRegistry.Count(), path)
+		}
+		if interval := b.settings.BlockChain.PeerRegistrySaveInterval; interval > 0 {
+			go b.savePeerRegistryPeriodically(ctx, path, interval)
+		} else {
+			b.logger.Warnf("[Blockchain] PeerRegistrySaveInterval not configured, periodic saves disabled")
+		}
+	}
+
 	go b.startSubscriptions()
 
 	// Start heartbeat sender for subscription health monitoring
@@ -421,6 +439,7 @@ func (b *Blockchain) Start(ctx context.Context, readyCh chan<- struct{}) error {
 	// this will block
 	if err := util.StartGRPCServer(ctx, b.logger, b.settings, "blockchain", b.settings.BlockChain.GRPCListenAddress, func(server *grpc.Server) {
 		blockchain_api.RegisterBlockchainAPIServer(server, b)
+		blockchain_api.RegisterPeerRegistryServiceServer(server, b)
 		closeOnce.Do(func() { close(readyCh) })
 	}, nil); err != nil {
 		return errors.WrapGRPC(errors.NewServiceNotStartedError("[Blockchain][Start] can't start GRPC server", err))
@@ -750,7 +769,30 @@ func (b *Blockchain) sendInitialNotification(sub subscriber) {
 // Returns:
 // - Error if shutdown encounters issues, nil on successful shutdown
 func (b *Blockchain) Stop(_ context.Context) error {
+	if path := b.settings.BlockChain.PeerRegistryPath; path != "" {
+		if err := b.peerRegistry.Save(path); err != nil {
+			b.logger.Warnf("[Blockchain] failed to save peer registry on shutdown: %v", err)
+		}
+	}
 	return nil
+}
+
+// savePeerRegistryPeriodically saves the peer registry to disk at the configured interval
+// until ctx is cancelled.
+func (b *Blockchain) savePeerRegistryPeriodically(ctx context.Context, path string, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := b.peerRegistry.Save(path); err != nil {
+				b.logger.Warnf("[Blockchain] failed to save peer registry: %v", err)
+			}
+		}
+	}
 }
 
 // AddBlock processes a request to add a new block to the blockchain.
@@ -2369,7 +2411,6 @@ func (b *Blockchain) GetBlocksSubtreesNotSet(ctx context.Context, _ *emptypb.Emp
 // - RUNNING: Service is actively processing blocks and transactions
 // - SYNCING: Service is synchronizing with the network
 // - CATCHING_BLOCKS: Service is catching up on missing blocks
-// - LEGACY_SYNCING: Service is using legacy synchronization protocols
 // - STOPPING: Service is gracefully shutting down
 // - ERROR: Service has encountered an error condition
 //
@@ -2621,25 +2662,6 @@ func (b *Blockchain) ReportPeerFailure(ctx context.Context, req *blockchain_api.
 	return &emptypb.Empty{}, nil
 }
 
-// LegacySync transitions the service to legacy sync mode.
-func (b *Blockchain) LegacySync(ctx context.Context, _ *emptypb.Empty) (*emptypb.Empty, error) {
-	// check whether the FSM is already in the LEGACYSYNC state
-	if b.finiteStateMachine.Is(blockchain_api.FSMStateType_LEGACYSYNCING.String()) {
-		return &emptypb.Empty{}, nil
-	}
-
-	req := &blockchain_api.SendFSMEventRequest{
-		Event: blockchain_api.FSMEventType_LEGACYSYNC,
-	}
-
-	_, err := b.SendFSMEvent(ctx, req)
-	if err != nil {
-		// unable to send the event, no need to update the state.
-		return nil, err
-	}
-
-	return &emptypb.Empty{}, nil
-}
 
 func (b *Blockchain) Idle(ctx context.Context, _ *emptypb.Empty) (*emptypb.Empty, error) {
 	// check whether the FSM is already in the Idle state

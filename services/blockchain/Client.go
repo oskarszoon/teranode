@@ -77,12 +77,10 @@ const (
 	FSMStateIDLE           = blockchain_api.FSMStateType_IDLE
 	FSMStateRUNNING        = blockchain_api.FSMStateType_RUNNING
 	FSMStateCATCHINGBLOCKS = blockchain_api.FSMStateType_CATCHINGBLOCKS
-	FSMStateLEGACYSYNCING  = blockchain_api.FSMStateType_LEGACYSYNCING
 
 	FSMEventIDLE          = blockchain_api.FSMEventType_STOP
 	FSMEventRUN           = blockchain_api.FSMEventType_RUN
 	FSMEventCATCHUPBLOCKS = blockchain_api.FSMEventType_CATCHUPBLOCKS
-	FSMEventLEGACYSYNC    = blockchain_api.FSMEventType_LEGACYSYNC
 )
 
 // NewClient creates a new blockchain client with default address settings.
@@ -1925,63 +1923,6 @@ func (c *Client) ReportPeerFailure(ctx context.Context, hash *chainhash.Hash, pe
 	}
 
 	_, err := c.client.ReportPeerFailure(ctx, req)
-	if err != nil {
-		return errors.UnwrapGRPC(err)
-	}
-
-	return nil
-}
-
-// LegacySync sends a legacy sync FSM event to the blockchain service.
-// This method initiates a legacy synchronization process by transitioning the
-// blockchain service's finite state machine to the LEGACY_SYNCING state, which
-// triggers compatibility mode synchronization with older Bitcoin SV network
-// protocols and legacy blockchain implementations.
-//
-// The legacy sync mode is essential for:
-// - Maintaining compatibility with older Bitcoin SV network nodes
-// - Synchronizing with legacy blockchain implementations
-// - Supporting migration scenarios from older Teranode versions
-// - Ensuring interoperability across diverse network topologies
-// - Handling edge cases in blockchain synchronization protocols
-//
-// The method first checks if the FSM is already in the LEGACY_SYNCING state
-// to avoid unnecessary state transitions. If not already in legacy sync mode,
-// it sends the appropriate FSM event to trigger the legacy synchronization
-// process.
-//
-// Legacy synchronization differs from standard sync by:
-// - Using older protocol versions for network communication
-// - Implementing backward-compatible block validation rules
-// - Supporting legacy transaction formats and structures
-// - Maintaining compatibility with pre-upgrade network nodes
-//
-// This operation is typically used during:
-// - Network upgrades and migration periods
-// - Integration with legacy Bitcoin SV infrastructure
-// - Debugging synchronization issues with older nodes
-// - Ensuring network-wide compatibility during protocol transitions
-//
-// The method communicates with the blockchain service via gRPC to send the
-// FSM event that initiates the legacy synchronization process.
-//
-// Parameters:
-//   - ctx: Context for the operation with timeout and cancellation support
-//
-// Returns:
-//   - error: Any error encountered during the FSM event transmission
-func (c *Client) LegacySync(ctx context.Context) error {
-	currentState := c.fmsState.Load()
-	if currentState != nil {
-		// check whether the current state is the same as the target state
-		if *currentState == FSMStateLEGACYSYNCING {
-			return nil
-		}
-	}
-
-	c.logger.Infof("[Blockchain Client] Sending Legacy Sync event")
-
-	_, err := c.client.LegacySync(ctx, &emptypb.Empty{})
 	if err != nil {
 		return errors.UnwrapGRPC(err)
 	}

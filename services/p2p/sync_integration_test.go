@@ -61,7 +61,6 @@ func TestSyncCoordination_FullFlow(t *testing.T) {
 		selector,
 		banManager,
 		blockchainSetup.Client,
-		nil, // blocksKafkaProducerClient
 	)
 
 	// Set local height callback
@@ -234,7 +233,6 @@ func TestSyncCoordination_WithHTTPServer(t *testing.T) {
 		selector,
 		banManager,
 		blockchainSetup.Client,
-		nil, // blocksKafkaProducerClient
 	)
 
 	// Start coordinator
@@ -262,7 +260,6 @@ func TestSyncCoordination_ConcurrentOperations(t *testing.T) {
 		selector,
 		banManager,
 		blockchainSetup.Client,
-		nil, // blocksKafkaProducerClient
 	)
 
 	// Add multiple peers
@@ -362,7 +359,6 @@ func TestSyncCoordination_CatchupFailures(t *testing.T) {
 		selector,
 		banManager,
 		blockchainSetup.Client,
-		nil, // blocksKafkaProducerClient
 	)
 
 	// Add test peers
@@ -416,7 +412,6 @@ func TestSyncCoordination_PeerEvaluation(t *testing.T) {
 		selector,
 		banManager,
 		blockchainSetup.Client,
-		nil, // blocksKafkaProducerClient
 	)
 
 	// Test various peer conditions

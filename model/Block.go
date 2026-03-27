@@ -81,6 +81,18 @@ type Block struct {
 	medianTimestamp uint32
 }
 
+// NewSyntheticBlock creates a minimal Block descriptor containing only height and hash.
+// It is used when a full block is not available — for example, when constructing a
+// catchup target from an advertised peer height/hash without the full header data.
+// The hash is pre-stored so Block.Hash() returns it without dereferencing the nil header.
+func NewSyntheticBlock(height uint32, hash *chainhash.Hash) *Block {
+	b := &Block{Height: height}
+	if hash != nil {
+		b.hash.Store(hash)
+	}
+	return b
+}
+
 func NewBlock(header *BlockHeader, coinbase *bt.Tx, subtrees []*chainhash.Hash, transactionCount uint64, sizeInBytes uint64, blockHeight uint32, id uint32) (*Block, error) {
 	return &Block{
 		Header:           header,
@@ -311,6 +323,16 @@ func readBlockFromReader(block *Block, buf io.Reader) (*Block, error) {
 // Returns:
 // - *chainhash.Hash: The hash of the block header
 func (b *Block) GetHash() *chainhash.Hash {
+	if b.Header == nil {
+		// Synthetic blocks (created via NewSyntheticBlock) have no header.
+		// Return the pre-stored hash if available, otherwise a zero hash.
+		if cached := b.hash.Load(); cached != nil {
+			return cached
+		}
+		zero := &chainhash.Hash{}
+		return zero
+	}
+
 	calculatedHash := b.Header.Hash()
 
 	b.hash.Store(calculatedHash)
@@ -329,6 +351,13 @@ func (b *Block) Hash() *chainhash.Hash {
 	cachedHash := b.hash.Load()
 	if cachedHash != nil {
 		return cachedHash
+	}
+
+	if b.Header == nil {
+		// Synthetic blocks created via NewSyntheticBlock have no header;
+		// return a zero hash rather than panic.
+		zero := chainhash.Hash{}
+		return &zero
 	}
 
 	calculatedHash := b.Header.Hash()

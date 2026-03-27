@@ -169,9 +169,6 @@ func TestHandlePeerFailureNotification(t *testing.T) {
 
 		banManager := NewPeerBanManager(context.Background(), nil, tSettings, registry)
 
-		mockKafkaProducer := new(MockKafkaProducer)
-		mockKafkaProducer.On("Publish", mock.Anything).Return().Maybe()
-
 		syncCoord := NewSyncCoordinator(
 			ulogger.New("test"),
 			tSettings,
@@ -179,7 +176,6 @@ func TestHandlePeerFailureNotification(t *testing.T) {
 			peerSelector,
 			banManager,
 			mockBC,
-			mockKafkaProducer,
 		)
 
 		server := &Server{
@@ -1115,9 +1111,6 @@ func TestAddBanScoreGRPC(t *testing.T) {
 		peerSelector := NewPeerSelector(ulogger.New("test"), tSettings)
 		banManager := NewPeerBanManager(context.Background(), nil, tSettings, registry)
 
-		mockKafkaProducer := new(MockKafkaProducer)
-		mockKafkaProducer.On("Publish", mock.Anything).Return().Maybe()
-
 		syncCoord := NewSyncCoordinator(
 			ulogger.New("test"),
 			tSettings,
@@ -1125,7 +1118,6 @@ func TestAddBanScoreGRPC(t *testing.T) {
 			peerSelector,
 			banManager,
 			mockBC,
-			mockKafkaProducer,
 		)
 
 		server := &Server{
