@@ -7,6 +7,7 @@ import (
 	"github.com/bsv-blockchain/teranode/settings"
 	"github.com/bsv-blockchain/teranode/util"
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/types/known/emptypb"
 )
 
 // PeerRegistryClientI is the client interface for the centralized peer registry.
@@ -27,6 +28,18 @@ type PeerRegistryClientI interface {
 
 	// ListPeers returns peers matching the given filters, sorted by reputation.
 	ListPeers(ctx context.Context, transportFilter *blockchain_api.TransportType, minReputation float64, minHeight uint32, excludeBanned bool) ([]*PeerInfo, error)
+
+	// AddBanScore adds penalty points to a peer and returns updated score and ban status.
+	AddBanScore(ctx context.Context, peerID string, reason string, points int32) (int32, bool, error)
+
+	// IsPeerBanned checks if a peer is currently banned.
+	IsPeerBanned(ctx context.Context, peerID string) (bool, error)
+
+	// ListBannedPeers returns all currently banned peer IDs.
+	ListBannedPeers(ctx context.Context) ([]string, error)
+
+	// ClearBannedPeers removes all bans.
+	ClearBannedPeers(ctx context.Context) error
 
 	// Close releases any resources held by the client.
 	// For clients created with NewPeerRegistryClientFromConn, Close is a no-op
@@ -119,6 +132,43 @@ func (c *PeerRegistryClient) ListPeers(ctx context.Context, transportFilter *blo
 		peers = append(peers, protoToPeerInfo(p))
 	}
 	return peers, nil
+}
+
+// AddBanScore implements PeerRegistryClientI.
+func (c *PeerRegistryClient) AddBanScore(ctx context.Context, peerID string, reason string, points int32) (int32, bool, error) {
+	resp, err := c.client.AddBanScore(ctx, &blockchain_api.AddBanScoreRequest{
+		PeerId: peerID,
+		Reason: reason,
+		Points: points,
+	})
+	if err != nil {
+		return 0, false, err
+	}
+	return resp.Score, resp.Banned, nil
+}
+
+// IsPeerBanned implements PeerRegistryClientI.
+func (c *PeerRegistryClient) IsPeerBanned(ctx context.Context, peerID string) (bool, error) {
+	resp, err := c.client.IsPeerBanned(ctx, &blockchain_api.IsPeerBannedRequest{PeerId: peerID})
+	if err != nil {
+		return false, err
+	}
+	return resp.Banned, nil
+}
+
+// ListBannedPeers implements PeerRegistryClientI.
+func (c *PeerRegistryClient) ListBannedPeers(ctx context.Context) ([]string, error) {
+	resp, err := c.client.ListBannedPeers(ctx, &emptypb.Empty{})
+	if err != nil {
+		return nil, err
+	}
+	return resp.PeerIds, nil
+}
+
+// ClearBannedPeers implements PeerRegistryClientI.
+func (c *PeerRegistryClient) ClearBannedPeers(ctx context.Context) error {
+	_, err := c.client.ClearBannedPeers(ctx, &emptypb.Empty{})
+	return err
 }
 
 // Close releases the underlying gRPC connection if this client owns it.

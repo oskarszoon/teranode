@@ -166,7 +166,7 @@ func New(ctx context.Context, logger ulogger.Logger, tSettings *settings.Setting
 		stats:                         gocore.NewStat("blockchain"),
 		AppCtx:                        ctx,
 		blocksFinalKafkaAsyncProducer: blocksFinalKafkaAsyncProducer,
-		peerRegistry:                  NewCentralizedPeerRegistry(),
+		peerRegistry:                  NewCentralizedPeerRegistry(DefaultBanConfig()),
 		batchTokens:                   make(map[string]*blobDeletionBatchToken),
 	}
 

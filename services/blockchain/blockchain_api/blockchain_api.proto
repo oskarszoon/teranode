@@ -661,6 +661,18 @@ service PeerRegistryService {
 
   // GetPeer retrieves a single peer by ID.
   rpc GetPeer(GetPeerRequest) returns (GetPeerResponse) {}
+
+  // AddBanScore adds penalty points for a peer and returns the new score and ban status.
+  rpc AddBanScore(AddBanScoreRequest) returns (AddBanScoreResponse) {}
+
+  // IsPeerBanned checks if a peer is currently banned.
+  rpc IsPeerBanned(IsPeerBannedRequest) returns (IsPeerBannedResponse) {}
+
+  // ListBannedPeers returns all currently banned peer IDs.
+  rpc ListBannedPeers(google.protobuf.Empty) returns (ListBannedPeersResponse) {}
+
+  // ClearBannedPeers removes all bans.
+  rpc ClearBannedPeers(google.protobuf.Empty) returns (google.protobuf.Empty) {}
 }
 
 // PeerRegistryInfo holds all information about a peer in the centralized registry.
@@ -742,6 +754,34 @@ message GetPeerRequest {
 message GetPeerResponse {
   PeerRegistryInfo peer = 1;
   bool not_found = 2;
+}
+
+// AddBanScoreRequest adds penalty points to a peer's ban score.
+message AddBanScoreRequest {
+  string peer_id = 1;     // Peer identifier
+  string reason = 2;      // Reason for the penalty (e.g., "invalid_block", "protocol_violation")
+  int32 points = 3;       // Number of penalty points to add
+}
+
+// AddBanScoreResponse contains the updated ban state after adding points.
+message AddBanScoreResponse {
+  int32 score = 1;        // Current total ban score after adding points
+  bool banned = 2;        // Whether the peer is now banned (score exceeded threshold)
+}
+
+// IsPeerBannedRequest checks ban status of a peer.
+message IsPeerBannedRequest {
+  string peer_id = 1;
+}
+
+// IsPeerBannedResponse contains the ban status.
+message IsPeerBannedResponse {
+  bool banned = 1;
+}
+
+// ListBannedPeersResponse contains all currently banned peer IDs.
+message ListBannedPeersResponse {
+  repeated string peer_ids = 1;
 }
 
 // FSMStateType defines possible states of the blockchain FSM.

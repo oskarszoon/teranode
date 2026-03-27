@@ -72,6 +72,28 @@ func (b *Blockchain) GetPeer(_ context.Context, req *blockchain_api.GetPeerReque
 	return &blockchain_api.GetPeerResponse{Peer: peerInfoToProto(info)}, nil
 }
 
+// AddBanScore adds penalty points to a peer's ban score.
+func (b *Blockchain) AddBanScore(_ context.Context, req *blockchain_api.AddBanScoreRequest) (*blockchain_api.AddBanScoreResponse, error) {
+	score, banned := b.peerRegistry.AddBanScore(req.PeerId, req.Reason, req.Points)
+	return &blockchain_api.AddBanScoreResponse{Score: score, Banned: banned}, nil
+}
+
+// IsPeerBanned checks if a peer is currently banned.
+func (b *Blockchain) IsPeerBanned(_ context.Context, req *blockchain_api.IsPeerBannedRequest) (*blockchain_api.IsPeerBannedResponse, error) {
+	return &blockchain_api.IsPeerBannedResponse{Banned: b.peerRegistry.IsBannedPeer(req.PeerId)}, nil
+}
+
+// ListBannedPeers returns all currently banned peer IDs.
+func (b *Blockchain) ListBannedPeers(_ context.Context, _ *emptypb.Empty) (*blockchain_api.ListBannedPeersResponse, error) {
+	return &blockchain_api.ListBannedPeersResponse{PeerIds: b.peerRegistry.ListBannedPeers()}, nil
+}
+
+// ClearBannedPeers removes all bans.
+func (b *Blockchain) ClearBannedPeers(_ context.Context, _ *emptypb.Empty) (*emptypb.Empty, error) {
+	b.peerRegistry.ClearBannedPeers()
+	return &emptypb.Empty{}, nil
+}
+
 // peerInfoToProto converts the domain PeerInfo type to its protobuf representation.
 func peerInfoToProto(info *PeerInfo) *blockchain_api.PeerRegistryInfo {
 	return &blockchain_api.PeerRegistryInfo{

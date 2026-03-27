@@ -50,7 +50,17 @@ func (m *mockLegacyPeerRegistryClient) GetPeer(_ context.Context, peerID string)
 	return args.Get(0).(*blockchain.PeerInfo), args.Bool(1), args.Error(2)
 }
 
-func (m *mockLegacyPeerRegistryClient) Close() error { return nil }
+func (m *mockLegacyPeerRegistryClient) AddBanScore(_ context.Context, _ string, _ string, _ int32) (int32, bool, error) {
+	return 0, false, nil
+}
+func (m *mockLegacyPeerRegistryClient) IsPeerBanned(_ context.Context, _ string) (bool, error) {
+	return false, nil
+}
+func (m *mockLegacyPeerRegistryClient) ListBannedPeers(_ context.Context) ([]string, error) {
+	return nil, nil
+}
+func (m *mockLegacyPeerRegistryClient) ClearBannedPeers(_ context.Context) error { return nil }
+func (m *mockLegacyPeerRegistryClient) Close() error                             { return nil }
 
 // makePeer creates a minimal peer.Peer with the given address for testing.
 func makePeer(t *testing.T, addr string) *peer.Peer {

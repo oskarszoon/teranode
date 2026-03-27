@@ -11,7 +11,7 @@ import (
 )
 
 func TestCentralizedPeerRegistry_RegisterAndGet(t *testing.T) {
-	r := NewCentralizedPeerRegistry()
+	r := NewCentralizedPeerRegistry(DefaultBanConfig())
 
 	info := &PeerInfo{
 		ID:              "peer-1",
@@ -37,7 +37,7 @@ func TestCentralizedPeerRegistry_RegisterAndGet(t *testing.T) {
 }
 
 func TestCentralizedPeerRegistry_RegisterUpdatesExisting(t *testing.T) {
-	r := NewCentralizedPeerRegistry()
+	r := NewCentralizedPeerRegistry(DefaultBanConfig())
 
 	r.Register(&PeerInfo{ID: "peer-1", Height: 10, DataHubURL: "http://old.example.com"})
 	r.Register(&PeerInfo{ID: "peer-1", Height: 20, DataHubURL: "http://new.example.com"})
@@ -49,7 +49,7 @@ func TestCentralizedPeerRegistry_RegisterUpdatesExisting(t *testing.T) {
 }
 
 func TestCentralizedPeerRegistry_Remove(t *testing.T) {
-	r := NewCentralizedPeerRegistry()
+	r := NewCentralizedPeerRegistry(DefaultBanConfig())
 
 	r.Register(&PeerInfo{ID: "peer-1"})
 	require.Equal(t, 1, r.Count())
@@ -62,7 +62,7 @@ func TestCentralizedPeerRegistry_Remove(t *testing.T) {
 }
 
 func TestCentralizedPeerRegistry_ListFilters(t *testing.T) {
-	r := NewCentralizedPeerRegistry()
+	r := NewCentralizedPeerRegistry(DefaultBanConfig())
 
 	r.Register(&PeerInfo{ID: "http-peer", TransportType: blockchain_api.TransportType_TRANSPORT_HTTP, Height: 100})
 	r.Register(&PeerInfo{ID: "wire-peer", TransportType: blockchain_api.TransportType_TRANSPORT_WIRE_PROTOCOL, Height: 50})
@@ -88,7 +88,7 @@ func TestCentralizedPeerRegistry_ListFilters(t *testing.T) {
 }
 
 func TestCentralizedPeerRegistry_ListSortedByReputation(t *testing.T) {
-	r := NewCentralizedPeerRegistry()
+	r := NewCentralizedPeerRegistry(DefaultBanConfig())
 
 	r.Register(&PeerInfo{ID: "low", Height: 50})
 	r.Register(&PeerInfo{ID: "high", Height: 50})
@@ -104,7 +104,7 @@ func TestCentralizedPeerRegistry_ListSortedByReputation(t *testing.T) {
 }
 
 func TestCentralizedPeerRegistry_UpdateMetrics(t *testing.T) {
-	r := NewCentralizedPeerRegistry()
+	r := NewCentralizedPeerRegistry(DefaultBanConfig())
 
 	r.Register(&PeerInfo{ID: "peer-1"})
 
@@ -120,7 +120,7 @@ func TestCentralizedPeerRegistry_UpdateMetrics(t *testing.T) {
 }
 
 func TestCentralizedPeerRegistry_UpdateMetrics_Malicious(t *testing.T) {
-	r := NewCentralizedPeerRegistry()
+	r := NewCentralizedPeerRegistry(DefaultBanConfig())
 
 	r.Register(&PeerInfo{ID: "bad-peer"})
 	r.UpdateMetrics("bad-peer", 0, 0, 0, false, false, true, 0)
@@ -135,13 +135,13 @@ func TestCentralizedPeerRegistry_Persistence(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "peers.json")
 
-	r := NewCentralizedPeerRegistry()
+	r := NewCentralizedPeerRegistry(DefaultBanConfig())
 	r.Register(&PeerInfo{ID: "peer-1", Height: 42, TransportType: blockchain_api.TransportType_TRANSPORT_WIRE_PROTOCOL})
 	r.Register(&PeerInfo{ID: "peer-2", Height: 99, TransportType: blockchain_api.TransportType_TRANSPORT_HTTP})
 
 	require.NoError(t, r.Save(path))
 
-	r2 := NewCentralizedPeerRegistry()
+	r2 := NewCentralizedPeerRegistry(DefaultBanConfig())
 	require.NoError(t, r2.Load(path, 24*time.Hour))
 
 	require.Equal(t, 2, r2.Count())
@@ -154,7 +154,7 @@ func TestCentralizedPeerRegistry_Persistence(t *testing.T) {
 
 func TestCentralizedPeerRegistry_Persistence_MissingFile(t *testing.T) {
 	dir := t.TempDir()
-	r := NewCentralizedPeerRegistry()
+	r := NewCentralizedPeerRegistry(DefaultBanConfig())
 
 	// Loading from a non-existent path should succeed and leave the registry empty.
 	require.NoError(t, r.Load(filepath.Join(dir, "nonexistent.json"), 24*time.Hour))
@@ -167,7 +167,7 @@ func TestCentralizedPeerRegistry_Persistence_CorruptFile(t *testing.T) {
 
 	require.NoError(t, os.WriteFile(path, []byte("not valid json {{{{"), 0o600))
 
-	r := NewCentralizedPeerRegistry()
+	r := NewCentralizedPeerRegistry(DefaultBanConfig())
 	// Should not return an error — corrupt file is renamed and registry starts empty.
 	require.NoError(t, r.Load(path, 24*time.Hour))
 	require.Equal(t, 0, r.Count())
@@ -181,7 +181,7 @@ func TestCentralizedPeerRegistry_Persistence_TTLCleanup(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "peers.json")
 
-	r := NewCentralizedPeerRegistry()
+	r := NewCentralizedPeerRegistry(DefaultBanConfig())
 	r.Register(&PeerInfo{ID: "fresh"})
 	r.Register(&PeerInfo{ID: "stale"})
 
@@ -192,7 +192,7 @@ func TestCentralizedPeerRegistry_Persistence_TTLCleanup(t *testing.T) {
 
 	require.NoError(t, r.Save(path))
 
-	r2 := NewCentralizedPeerRegistry()
+	r2 := NewCentralizedPeerRegistry(DefaultBanConfig())
 	require.NoError(t, r2.Load(path, 24*time.Hour))
 
 	require.Equal(t, 1, r2.Count())

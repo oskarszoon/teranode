@@ -1,6 +1,7 @@
 package blockchain
 
 import (
+	"context"
 	"sort"
 	"sync"
 	"time"
@@ -38,17 +39,57 @@ type PeerInfo struct {
 	BlockHash              *chainhash.Hash
 }
 
+// banEntry tracks ban scoring state for a single peer.
+type banEntry struct {
+	Score     int32
+	Banned    bool
+	BanUntil  time.Time
+	LastDecay time.Time
+	Reasons   []string
+}
+
+// BanConfig holds ban management configuration.
+type BanConfig struct {
+	Threshold     int32         // Score threshold that triggers a ban (default: 100)
+	Duration      time.Duration // How long a ban lasts (default: 24h)
+	DecayInterval time.Duration // How often scores decay (default: 1min)
+	DecayAmount   int32         // Points removed per decay interval (default: 1)
+	// Reason -> points mapping
+	ReasonPoints map[string]int32
+}
+
+// DefaultBanConfig returns sensible defaults matching the existing P2P BanManager.
+func DefaultBanConfig() BanConfig {
+	return BanConfig{
+		Threshold:     100,
+		Duration:      24 * time.Hour,
+		DecayInterval: time.Minute,
+		DecayAmount:   1,
+		ReasonPoints: map[string]int32{
+			"invalid_subtree":    10,
+			"protocol_violation": 20,
+			"spam":               50,
+			"invalid_block":      10,
+			"catchup_failure":    30,
+		},
+	}
+}
+
 // CentralizedPeerRegistry is a thread-safe, in-memory store of peer information
 // shared across all transport types in the blockchain service.
 type CentralizedPeerRegistry struct {
-	mu    sync.RWMutex
-	peers map[string]*PeerInfo
+	mu        sync.RWMutex
+	peers     map[string]*PeerInfo
+	banScores map[string]*banEntry
+	banConfig BanConfig
 }
 
-// NewCentralizedPeerRegistry creates an empty peer registry.
-func NewCentralizedPeerRegistry() *CentralizedPeerRegistry {
+// NewCentralizedPeerRegistry creates an empty peer registry with the given ban configuration.
+func NewCentralizedPeerRegistry(banCfg BanConfig) *CentralizedPeerRegistry {
 	return &CentralizedPeerRegistry{
-		peers: make(map[string]*PeerInfo),
+		peers:     make(map[string]*PeerInfo),
+		banScores: make(map[string]*banEntry),
+		banConfig: banCfg,
 	}
 }
 
@@ -309,4 +350,180 @@ func calculateSpeedFactorMs(avgMs int64) float64 {
 	default:
 		return 0.6
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Ban Management
+// ---------------------------------------------------------------------------
+
+// AddBanScore adds penalty points to a peer's ban score, applying decay first.
+// Returns the updated score and whether the peer is now banned.
+func (r *CentralizedPeerRegistry) AddBanScore(peerID string, reason string, points int32) (int32, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	now := time.Now()
+	entry, ok := r.banScores[peerID]
+	if !ok {
+		entry = &banEntry{LastDecay: now}
+		r.banScores[peerID] = entry
+	}
+
+	// Apply decay
+	elapsed := now.Sub(entry.LastDecay)
+	decaySteps := int32(elapsed / r.banConfig.DecayInterval)
+	if decaySteps > 0 {
+		entry.Score -= decaySteps * r.banConfig.DecayAmount
+		if entry.Score < 0 {
+			entry.Score = 0
+		}
+		entry.LastDecay = now
+	}
+
+	// Add reason to history
+	entry.Reasons = append(entry.Reasons, reason)
+
+	// Look up points for this reason, default to provided points
+	if configPoints, found := r.banConfig.ReasonPoints[reason]; found {
+		points = configPoints
+	}
+	entry.Score += points
+
+	// Check threshold
+	wasBanned := entry.Banned
+	if entry.Score >= r.banConfig.Threshold && !entry.Banned {
+		entry.Banned = true
+		entry.BanUntil = now.Add(r.banConfig.Duration)
+	}
+
+	// Sync ban status to peer info
+	if peer, exists := r.peers[peerID]; exists {
+		peer.BanScore = entry.Score
+		peer.IsBanned = entry.Banned
+	}
+
+	return entry.Score, entry.Banned && !wasBanned // return true only on NEW ban
+}
+
+// IsBannedPeer checks if a peer is currently banned, auto-unbanning if expired.
+func (r *CentralizedPeerRegistry) IsBannedPeer(peerID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	entry, ok := r.banScores[peerID]
+	if !ok || !entry.Banned {
+		return false
+	}
+
+	if time.Now().After(entry.BanUntil) {
+		// Ban expired
+		entry.Banned = false
+		entry.Score = 0
+		entry.Reasons = nil
+		// Sync to peer info
+		if peer, exists := r.peers[peerID]; exists {
+			peer.BanScore = 0
+			peer.IsBanned = false
+		}
+		return false
+	}
+
+	return true
+}
+
+// ListBannedPeers returns all currently banned peer IDs.
+func (r *CentralizedPeerRegistry) ListBannedPeers() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	now := time.Now()
+	var result []string
+	for peerID, entry := range r.banScores {
+		if entry.Banned && now.Before(entry.BanUntil) {
+			result = append(result, peerID)
+		}
+	}
+	return result
+}
+
+// ClearBannedPeers removes all ban entries and resets ban status on all peers.
+func (r *CentralizedPeerRegistry) ClearBannedPeers() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.banScores = make(map[string]*banEntry)
+	for _, peer := range r.peers {
+		peer.IsBanned = false
+		peer.BanScore = 0
+	}
+}
+
+// StartBanDecay starts a background goroutine that decays ban scores periodically
+// and removes zero-score entries. Call this once during service startup.
+func (r *CentralizedPeerRegistry) StartBanDecay(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(r.banConfig.DecayInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				r.decayBanScores()
+			}
+		}
+	}()
+}
+
+func (r *CentralizedPeerRegistry) decayBanScores() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	now := time.Now()
+	for peerID, entry := range r.banScores {
+		elapsed := now.Sub(entry.LastDecay)
+		decaySteps := int32(elapsed / r.banConfig.DecayInterval)
+		if decaySteps > 0 {
+			entry.Score -= decaySteps * r.banConfig.DecayAmount
+			if entry.Score < 0 {
+				entry.Score = 0
+			}
+			entry.LastDecay = now
+
+			// Sync to peer info
+			if peer, exists := r.peers[peerID]; exists {
+				peer.BanScore = entry.Score
+			}
+		}
+
+		// Cleanup: remove zero-score unbanned entries
+		if entry.Score == 0 && !entry.Banned {
+			delete(r.banScores, peerID)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Additional Peer Methods
+// ---------------------------------------------------------------------------
+
+// ReconsiderBadPeers resets reputation for peers whose last failure is older than cooldown.
+// Returns the number of peers reconsidered.
+func (r *CentralizedPeerRegistry) ReconsiderBadPeers(cooldown time.Duration) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	count := 0
+	cutoff := time.Now().Add(-cooldown)
+	for _, info := range r.peers {
+		if info.ReputationScore < 30 && !info.LastInteractionFailure.IsZero() && info.LastInteractionFailure.Before(cutoff) {
+			info.InteractionSuccesses = 0
+			info.InteractionFailures = 0
+			info.MaliciousCount = 0
+			info.ReputationScore = 50.0
+			count++
+		}
+	}
+	return count
 }
