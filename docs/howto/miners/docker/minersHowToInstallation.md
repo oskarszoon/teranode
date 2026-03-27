@@ -263,20 +263,17 @@ Launch the entire Teranode stack using Docker Compose:
 docker compose up -d
 ```
 
-Force the node to transition to Run mode:
+Force the node to transition to Run mode
 
-**Option 1: Using Admin Dashboard (Easiest)**
+#### Option 1: Using Admin Dashboard (Easiest)
 
-Access the dashboard at <http://localhost:8090/admin> and use the FSM State controls to transition to **RUNNING** or **LEGACYSYNCING**.
+Access the dashboard at <http://localhost:8090/admin> and use the FSM State controls to transition to **RUNNING**.
 
-**Option 2: Using teranode-cli**
+#### Option 2: Using teranode-cli
 
 ```bash
 # Transition to Run mode
 docker exec -it blockchain teranode-cli setfsmstate --fsmstate running
-
-# Or transition to LegacySync mode
-docker exec -it blockchain teranode-cli setfsmstate --fsmstate legacysyncing
 ```
 
 You can verify the current state with:
@@ -580,11 +577,11 @@ Use 'teranode-cli <command> --help' for more information about a command
 docker exec -it blockchain teranode-cli getfsmstate
 ```
 
-**Set FSM State to Legacy Syncing**:
+**Set FSM State to Running**:
 
 ```bash
 # Via teranode-cli
-docker exec -it blockchain teranode-cli setfsmstate --fsmstate LEGACYSYNCING
+docker exec -it blockchain teranode-cli setfsmstate --fsmstate RUNNING
 
 # Or via Admin Dashboard at http://localhost:8090/admin
 ```

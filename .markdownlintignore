@@ -2,3 +2,10 @@
 .claude/
 .github/prompts/
 .github/skills/
+
+# Generated protobuf docs have pre-existing link fragment issues
+docs/references/protobuf_docs/
+
+# MkDocs admonition syntax (!!!) triggers false-positive MD046 indented code block warnings
+docs/howto/miners/docker/minersHowToSyncTheNode.md
+docs/howto/miners/kubernetes/minersHowToSyncTheNode.md

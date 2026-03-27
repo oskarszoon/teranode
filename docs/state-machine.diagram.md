@@ -8,10 +8,7 @@ The mermaid diagram outlined below represents the various states and events that
 stateDiagram-v2
     [*] --> IDLE
     CATCHINGBLOCKS --> RUNNING: RUN
-    IDLE --> LEGACYSYNCING: LEGACYSYNC
     IDLE --> RUNNING: RUN
-    LEGACYSYNCING --> RUNNING: RUN
-    LEGACYSYNCING --> IDLE: STOP
     RUNNING --> CATCHINGBLOCKS: CATCHUPBLOCKS
     RUNNING --> IDLE: STOP
 ```

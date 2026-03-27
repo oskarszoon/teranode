@@ -113,7 +113,7 @@ Force the node to transition to Run mode:
 
 ```bash
 # Access the dashboard at http://localhost:8090/admin (default credentials bitcoin:bitcoin)
-# Navigate to FSM State section and select RUNNING or LEGACYSYNCING
+# Navigate to FSM State section and select RUNNING
 ```
 
 > **Note:** The embedded dashboard is only available when Teranode is built with dashboard support (default in Docker images). The dashboard provides:
@@ -132,9 +132,6 @@ Force the node to transition to Run mode:
 ```bash
 # Transition to Run mode
 docker exec -it blockchain teranode-cli setfsmstate --fsmstate RUNNING
-
-# Or transition to LegacySync mode
-docker exec -it blockchain teranode-cli setfsmstate --fsmstate LEGACYSYNCING
 ```
 
 - Verify services are running:

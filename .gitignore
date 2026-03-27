@@ -106,5 +106,8 @@ teranode.logrotate
 teranode
 
 settings_local.conf
+lint_output.txt
+coderabbit-review.txt
+review-findings.md
 .gitnexus
 .worktrees

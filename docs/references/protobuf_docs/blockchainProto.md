@@ -1,4 +1,5 @@
 # GRPC Documentation - BlockchainAPI
+
 <a name="top"></a>
 
 ## Table of Contents
@@ -85,8 +86,6 @@
 
 - [Scalar Value Types](#scalar-value-types)
 
-
-
 <a name="blockchain_api.proto"></a>
 <p align="right"><a href="#top">Top</a></p>
 
@@ -94,13 +93,11 @@
 
 Package blockchain_api defines the gRPC service interface for blockchain operations.
 
-
-
 <a name="AddBlockRequest"></a>
 
 ### AddBlockRequest
-AddBlockRequest contains data for adding a new block to the blockchain.
 
+AddBlockRequest contains data for adding a new block to the blockchain.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -116,152 +113,102 @@ AddBlockRequest contains data for adding a new block to the blockchain.
 | optionInvalid | [bool](#bool) |  | Option to invalidate block when adding |
 | optionID | [uint64](#uint64) |  | Optional block ID |
 
-
-
-
-
-
 <a name="CheckBlockIsCurrentChainRequest"></a>
 
 ### CheckBlockIsCurrentChainRequest
-CheckBlockIsCurrentChainRequest checks if blocks are in the main chain.
 
+CheckBlockIsCurrentChainRequest checks if blocks are in the main chain.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | blockIDs | [uint32](#uint32) | repeated | List of block IDs to check |
 
-
-
-
-
-
 <a name="CheckBlockIsCurrentChainResponse"></a>
 
 ### CheckBlockIsCurrentChainResponse
-CheckBlockIsCurrentChainResponse indicates if blocks are in the main chain.
 
+CheckBlockIsCurrentChainResponse indicates if blocks are in the main chain.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | isPartOfCurrentChain | [bool](#bool) |  | True if blocks are in main chain |
 
-
-
-
-
-
 <a name="GetBestHeightAndTimeResponse"></a>
 
 ### GetBestHeightAndTimeResponse
-GetBestHeightAndTimeResponse contains chain tip information.
 
+GetBestHeightAndTimeResponse contains chain tip information.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | height | [uint32](#uint32) |  | Current best height |
 | time | [uint32](#uint32) |  | Current median time |
 
-
-
-
-
-
 <a name="GetBlockByHeightRequest"></a>
 
 ### GetBlockByHeightRequest
-GetBlockByHeightRequest represents a request to retrieve a block at a specific height.
 
+GetBlockByHeightRequest represents a request to retrieve a block at a specific height.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | height | [uint32](#uint32) |  | Block height to retrieve |
 
-
-
-
-
-
 <a name="GetChainTipsResponse"></a>
 
 ### GetChainTipsResponse
-GetChainTipsResponse contains information about all known tips in the block tree.
 
+GetChainTipsResponse contains information about all known tips in the block tree.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | tips | [model.ChainTip](#model-ChainTip) | repeated | List of chain tips |
 
-
-
-
-
-
 <a name="GetBlockExistsResponse"></a>
 
 ### GetBlockExistsResponse
-GetBlockExistsResponse indicates whether a block exists.
 
+GetBlockExistsResponse indicates whether a block exists.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | exists | [bool](#bool) |  | True if the block exists |
 
-
-
-
-
-
 <a name="GetBlockGraphDataRequest"></a>
 
 ### GetBlockGraphDataRequest
-GetBlockGraphDataRequest specifies parameters for retrieving blockchain visualization data.
 
+GetBlockGraphDataRequest specifies parameters for retrieving blockchain visualization data.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | period_millis | [uint64](#uint64) |  | Time period in milliseconds |
 
-
-
-
-
-
 <a name="GetBlockHeaderIDsResponse"></a>
 
 ### GetBlockHeaderIDsResponse
-GetBlockHeaderIDsResponse contains block header identifiers.
 
+GetBlockHeaderIDsResponse contains block header identifiers.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | ids | [uint32](#uint32) | repeated | List of block header IDs |
 
-
-
-
-
-
 <a name="GetBlockHeaderRequest"></a>
 
 ### GetBlockHeaderRequest
-GetBlockHeaderRequest requests a specific block header.
 
+GetBlockHeaderRequest requests a specific block header.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | blockHash | [bytes](#bytes) |  | Hash of the block |
 
-
-
-
-
-
 <a name="GetBlockHeaderResponse"></a>
 
 ### GetBlockHeaderResponse
-swagger:model GetBlockHeaderResponse
 
+swagger:model GetBlockHeaderResponse
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -280,32 +227,22 @@ swagger:model GetBlockHeaderResponse
 | invalid | [bool](#bool) |  | Validity status |
 | processed_at | [google.protobuf.Timestamp](#google-protobuf-Timestamp) |  | Timestamp when block was processed |
 
-
-
-
-
-
 <a name="GetLatestBlockHeaderFromBlockLocatorRequest"></a>
 
 ### GetLatestBlockHeaderFromBlockLocatorRequest
-GetLatestBlockHeaderFromBlockLocatorRequest retrieves the latest block header using a block locator.
 
+GetLatestBlockHeaderFromBlockLocatorRequest retrieves the latest block header using a block locator.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | bestBlockHash | [bytes](#bytes) |  | Best block hash |
 | blockLocatorHashes | [bytes](#bytes) | repeated | Block locator hashes |
 
-
-
-
-
-
 <a name="GetBlockHeadersFromOldestRequest"></a>
 
 ### GetBlockHeadersFromOldestRequest
-GetBlockHeadersFromOldestRequest retrieves block headers starting from the oldest block.
 
+GetBlockHeadersFromOldestRequest retrieves block headers starting from the oldest block.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -313,158 +250,104 @@ GetBlockHeadersFromOldestRequest retrieves block headers starting from the oldes
 | targetHash | [bytes](#bytes) |  | Target block hash |
 | numberOfHeaders | [uint64](#uint64) |  | Maximum number of hashes to return |
 
-
-
-
-
-
 <a name="GetBlockHeadersByHeightRequest"></a>
 
 ### GetBlockHeadersByHeightRequest
-swagger:model GetBlockHeadersByHeightRequest
 
+swagger:model GetBlockHeadersByHeightRequest
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | startHeight | [uint32](#uint32) |  |  |
 | endHeight | [uint32](#uint32) |  |  |
 
-
-
-
-
-
 <a name="GetBlockHeadersByHeightResponse"></a>
 
 ### GetBlockHeadersByHeightResponse
-swagger:model GetBlockHeadersByHeightResponse
 
+swagger:model GetBlockHeadersByHeightResponse
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | blockHeaders | [bytes](#bytes) | repeated |  |
 | metas | [bytes](#bytes) | repeated |  |
 
-
-
-
-
-
 <a name="GetBlockHeadersFromHeightRequest"></a>
 
 ### GetBlockHeadersFromHeightRequest
-swagger:model GetBlockHeadersFromHeightRequest
 
+swagger:model GetBlockHeadersFromHeightRequest
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | startHeight | [uint32](#uint32) |  |  |
 | limit | [uint32](#uint32) |  |  |
 
-
-
-
-
-
 <a name="GetBlockHeadersFromHeightResponse"></a>
 
 ### GetBlockHeadersFromHeightResponse
-swagger:model GetBlockHeadersFromHeightResponse
 
+swagger:model GetBlockHeadersFromHeightResponse
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | blockHeaders | [bytes](#bytes) | repeated |  |
 | metas | [bytes](#bytes) | repeated |  |
 
-
-
-
-
-
 <a name="GetBlockHeadersRequest"></a>
 
 ### GetBlockHeadersRequest
-swagger:model GetBlockHeadersRequest
 
+swagger:model GetBlockHeadersRequest
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | startHash | [bytes](#bytes) |  |  |
 | numberOfHeaders | [uint64](#uint64) |  |  |
 
-
-
-
-
-
 <a name="GetBlockHeadersResponse"></a>
 
 ### GetBlockHeadersResponse
-swagger:model GetBlockHeadersResponse
 
+swagger:model GetBlockHeadersResponse
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | blockHeaders | [bytes](#bytes) | repeated |  |
 | metas | [bytes](#bytes) | repeated |  |
 
-
-
-
-
-
 <a name="GetBlockLocatorRequest"></a>
 
 ### GetBlockLocatorRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | hash | [bytes](#bytes) |  |  |
 | height | [uint32](#uint32) |  |  |
 
-
-
-
-
-
 <a name="GetBlockLocatorResponse"></a>
 
 ### GetBlockLocatorResponse
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | locator | [bytes](#bytes) | repeated |  |
 
-
-
-
-
-
 <a name="GetBlockRequest"></a>
 
 ### GetBlockRequest
-GetBlockRequest represents a request to retrieve a block by its hash.
 
+GetBlockRequest represents a request to retrieve a block by its hash.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | hash | [bytes](#bytes) |  | Hash of the block to retrieve |
 
-
-
-
-
-
 <a name="GetBlockResponse"></a>
 
 ### GetBlockResponse
-swagger:model GetBlockResponse
 
+swagger:model GetBlockResponse
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -476,138 +359,91 @@ swagger:model GetBlockResponse
 | size_in_bytes | [uint64](#uint64) |  | Total block size in bytes |
 | id | [uint32](#uint32) |  | Block identifier |
 
-
-
-
-
-
 <a name="GetBlocksMinedNotSetResponse"></a>
 
 ### GetBlocksMinedNotSetResponse
-swagger:model GetBlocksMinedNotSetResponse
 
+swagger:model GetBlocksMinedNotSetResponse
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | blockBytes | [bytes](#bytes) | repeated |  |
 
-
-
-
-
-
 <a name="GetBlocksRequest"></a>
 
 ### GetBlocksRequest
-GetBlocksRequest represents a request to retrieve multiple blocks.
 
+GetBlocksRequest represents a request to retrieve multiple blocks.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | hash | [bytes](#bytes) |  | Starting block hash |
 | count | [uint32](#uint32) |  | Number of blocks to retrieve |
 
-
-
-
-
-
 <a name="GetBlocksResponse"></a>
 
 ### GetBlocksResponse
-swagger:model GetBlocksResponse
 
+swagger:model GetBlocksResponse
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | blocks | [bytes](#bytes) | repeated |  |
 
-
-
-
-
-
 <a name="GetBlocksSubtreesNotSetResponse"></a>
 
 ### GetBlocksSubtreesNotSetResponse
-swagger:model GetBlocksSubtreesNotSetResponse
 
+swagger:model GetBlocksSubtreesNotSetResponse
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | blockBytes | [bytes](#bytes) | repeated |  |
 
-
-
-
-
-
 <a name="GetFSMStateResponse"></a>
 
 ### GetFSMStateResponse
-swagger:model GetFSMStateResponse
 
+swagger:model GetFSMStateResponse
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | state | [FSMStateType](#blockchain_api-FSMStateType) |  |  |
 
-
-
-
-
-
 <a name="GetFullBlockResponse"></a>
 
 ### GetFullBlockResponse
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | full_block_bytes | [bytes](#bytes) |  |  |
 
-
-
-
-
-
 <a name="GetHashOfAncestorBlockRequest"></a>
 
 ### GetHashOfAncestorBlockRequest
-swagger:model GetHashOfAncestorBlockRequest
 
+swagger:model GetHashOfAncestorBlockRequest
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | hash | [bytes](#bytes) |  |  |
 | depth | [uint32](#uint32) |  |  |
 
-
-
-
-
-
 <a name="GetHashOfAncestorBlockResponse"></a>
 
 ### GetHashOfAncestorBlockResponse
-swagger:model GetHashOfAncestorBlockResponse
 
+swagger:model GetHashOfAncestorBlockResponse
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | hash | [bytes](#bytes) |  |  |
 
-
-
-
-
-
 <a name="GetLastNBlocksRequest"></a>
 
 ### GetLastNBlocksRequest
-swagger:model GetLastNBlocksRequest
 
+swagger:model GetLastNBlocksRequest
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -615,148 +451,102 @@ swagger:model GetLastNBlocksRequest
 | includeOrphans | [bool](#bool) |  |  |
 | fromHeight | [uint32](#uint32) |  |  |
 
-
-
-
-
-
 <a name="GetLastNBlocksResponse"></a>
 
 ### GetLastNBlocksResponse
-swagger:model GetLastNBlocksResponse
 
+swagger:model GetLastNBlocksResponse
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | blocks | [model.BlockInfo](#model-BlockInfo) | repeated |  |
 
-
-
-
-
-
 <a name="GetMedianTimeRequest"></a>
 
 ### GetMedianTimeRequest
-GetMedianTimeRequest requests median time calculation for a block.
 
+GetMedianTimeRequest requests median time calculation for a block.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | blockHash | [bytes](#bytes) |  | Hash of the block |
 
-
-
-
-
-
 <a name="GetMedianTimeResponse"></a>
 
 ### GetMedianTimeResponse
-swagger:model GetMedianTimeResponse
 
+swagger:model GetMedianTimeResponse
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | block_header_time | [uint32](#uint32) | repeated | This will return the nTimes of the last 11 (+1) blocks |
 
-
-
-
 <a name="GetNextBlockIDResponse"></a>
 
 ### GetNextBlockIDResponse
-GetNextBlockIDResponse represents the response containing the next available block ID.
 
+GetNextBlockIDResponse represents the response containing the next available block ID.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | next_block_id | [uint64](#uint64) |  | Next available block ID |
 
-
-
-
 <a name="GetNextWorkRequiredRequest"></a>
 
 ### GetNextWorkRequiredRequest
-swagger:model GGetNextWorkRequiredRequest
 
+swagger:model GGetNextWorkRequiredRequest
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | previousBlockHash | [bytes](#bytes) |  | Reference block hash |
 | currentBlockTime | [int64](#int64) |  | Current block time is only used for emergency difficulty adjustment on testnet-type networks |
 
-
-
-
-
-
 <a name="GetNextWorkRequiredResponse"></a>
 
 ### GetNextWorkRequiredResponse
-swagger:model GGetNextWorkRequiredResponse
 
+swagger:model GGetNextWorkRequiredResponse
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | bits | [bytes](#bytes) |  |  |
 
-
-
-
-
-
 <a name="GetStateRequest"></a>
 
 ### GetStateRequest
-swagger:model StateRequest
 
+swagger:model StateRequest
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | key | [string](#string) |  |  |
 
-
-
-
-
-
 <a name="GetSuitableBlockRequest"></a>
 
 ### GetSuitableBlockRequest
-swagger:model GetSuitableBlockRequest
 
+swagger:model GetSuitableBlockRequest
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | hash | [bytes](#bytes) |  |  |
 
-
-
-
-
-
 <a name="GetSuitableBlockResponse"></a>
 
 ### GetSuitableBlockResponse
-swagger:model GetSuitableBlockResponse
 
+swagger:model GetSuitableBlockResponse
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | block | [model.SuitableBlock](#model-SuitableBlock) |  |  |
 
-
-
-
-
-
 <a name="HealthResponse"></a>
 
 ### HealthResponse
-HealthResponse represents the health status of the blockchain service.
 
+HealthResponse represents the health status of the blockchain service.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -764,42 +554,29 @@ HealthResponse represents the health status of the blockchain service.
 | details | [string](#string) |  | Detailed health information |
 | timestamp | [google.protobuf.Timestamp](#google-protobuf-Timestamp) |  | Timestamp of the health check |
 
-
-
-
-
-
 <a name="InvalidateBlockRequest"></a>
 
 ### InvalidateBlockRequest
-swagger:model InvalidateBlockRequest
 
+swagger:model InvalidateBlockRequest
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | blockHash | [bytes](#bytes) |  | Hash of the block to invalidate |
 
-
-
-
 <a name="InvalidateBlockResponse"></a>
 
 ### InvalidateBlockResponse
-InvalidateBlockResponse contains the result of block invalidation.
 
+InvalidateBlockResponse contains the result of block invalidation.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | invalidatedBlocks | [bytes](#bytes) | repeated | List of invalidated block hashes |
 
-
-
-
 <a name="LocateBlockHeadersRequest"></a>
 
 ### LocateBlockHeadersRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -807,31 +584,19 @@ InvalidateBlockResponse contains the result of block invalidation.
 | hash_stop | [bytes](#bytes) |  |  |
 | max_hashes | [uint32](#uint32) |  |  |
 
-
-
-
-
-
 <a name="LocateBlockHeadersResponse"></a>
 
 ### LocateBlockHeadersResponse
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | block_headers | [bytes](#bytes) | repeated |  |
 
-
-
-
-
-
 <a name="Notification"></a>
 
 ### Notification
-swagger:model Notification
 
+swagger:model Notification
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -840,164 +605,113 @@ swagger:model Notification
 | base_URL | [string](#string) |  |  |
 | metadata | [NotificationMetadata](#blockchain_api-NotificationMetadata) |  |  |
 
-
-
-
-
-
 <a name="NotificationMetadata"></a>
 
 ### NotificationMetadata
-swagger:model NotificationMetadata
 
+swagger:model NotificationMetadata
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | metadata | map<string, string> |  | Key-value pairs of metadata |
 
-
-
-
-
-
 <a name="RevalidateBlockRequest"></a>
 
 ### RevalidateBlockRequest
-swagger:model RevalidateBlockRequest
 
+swagger:model RevalidateBlockRequest
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | blockHash | [bytes](#bytes) |  |  |
 
-
-
-
-
-
 <a name="SendFSMEventRequest"></a>
 
 ### SendFSMEventRequest
-swagger:model SendFSMEventRequest
 
+swagger:model SendFSMEventRequest
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | event | [FSMEventType](#blockchain_api-FSMEventType) |  |  |
 
-
-
-
-
-
 <a name="SetBlockMinedSetRequest"></a>
 
 ### SetBlockMinedSetRequest
-SetBlockMinedSetRequest marks a block as mined.
 
+SetBlockMinedSetRequest marks a block as mined.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | blockHash | [bytes](#bytes) |  | Hash of the block to mark as mined |
 
-
-
 <a name="SetBlockProcessedAtRequest"></a>
 
 ### SetBlockProcessedAtRequest
-SetBlockProcessedAtRequest defines parameters for setting or clearing a block's processed_at timestamp.
 
+SetBlockProcessedAtRequest defines parameters for setting or clearing a block's processed_at timestamp.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | block_hash | [bytes](#bytes) |  | Hash of the block |
 | clear | [bool](#bool) |  | Whether to clear the timestamp |
 
-
-
-
-
-
 <a name="SetBlockSubtreesSetRequest"></a>
 
 ### SetBlockSubtreesSetRequest
-swagger:model SetBlockSubtreesSetRequest
 
+swagger:model SetBlockSubtreesSetRequest
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | blockHash | [bytes](#bytes) |  |  |
 
-
-
-
-
-
 <a name="SetStateRequest"></a>
 
 ### SetStateRequest
-swagger:model SetStateRequest
 
+swagger:model SetStateRequest
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | key | [string](#string) |  |  |
 | data | [bytes](#bytes) |  |  |
 
-
-
-
-
-
 <a name="StateResponse"></a>
 
 ### StateResponse
-swagger:model StateResponse
 
+swagger:model StateResponse
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | data | [bytes](#bytes) |  |  |
 
-
-
-
-
-
 <a name="SubscribeRequest"></a>
 
 ### SubscribeRequest
-swagger:model SubscribeRequest
 
+swagger:model SubscribeRequest
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | source | [string](#string) |  |  |
 
-
-
-
-
-
 <a name="WaitFSMToTransitionRequest"></a>
 
 ### WaitFSMToTransitionRequest
-swagger:model WaitFSMToTransitionRequest
 
+swagger:model WaitFSMToTransitionRequest
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | state | [FSMStateType](#blockchain_api-FSMStateType) |  |  |
 
-
-
-
-
 <a name="GetBlockHeadersFromCommonAncestorRequest"></a>
 
 ### GetBlockHeadersFromCommonAncestorRequest
-GetBlockHeadersFromCommonAncestorRequest retrieves headers from a common ancestor to a target block.
 
+GetBlockHeadersFromCommonAncestorRequest retrieves headers from a common ancestor to a target block.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -1005,68 +719,53 @@ GetBlockHeadersFromCommonAncestorRequest retrieves headers from a common ancesto
 | blockLocatorHashes | [bytes](#bytes) | repeated | Block locator hashes |
 | maxHeaders | [uint32](#uint32) |  | Maximum number of headers to retrieve |
 
-
-
-
 <a name="GetBlocksByHeightRequest"></a>
 
 ### GetBlocksByHeightRequest
-GetBlocksByHeightRequest requests full blocks between two heights.
 
+GetBlocksByHeightRequest requests full blocks between two heights.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | startHeight | [uint32](#uint32) |  | Starting height |
 | endHeight | [uint32](#uint32) |  | Ending height |
 
-
-
-
 <a name="GetBlocksByHeightResponse"></a>
 
 ### GetBlocksByHeightResponse
-GetBlocksByHeightResponse contains full blocks between heights.
 
+GetBlocksByHeightResponse contains full blocks between heights.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | blocks | [bytes](#bytes) | repeated | List of serialized full blocks |
 
-
-
-
 <a name="FindBlocksContainingSubtreeRequest"></a>
 
 ### FindBlocksContainingSubtreeRequest
-FindBlocksContainingSubtreeRequest specifies a subtree hash to search for.
 
+FindBlocksContainingSubtreeRequest specifies a subtree hash to search for.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | subtree_hash | [bytes](#bytes) |  | Subtree hash to find |
 | max_blocks | [uint32](#uint32) |  | Maximum number of blocks to return (0 = no limit) |
 
-
-
-
 <a name="FindBlocksContainingSubtreeResponse"></a>
 
 ### FindBlocksContainingSubtreeResponse
-FindBlocksContainingSubtreeResponse contains blocks that contain the subtree.
 
+FindBlocksContainingSubtreeResponse contains blocks that contain the subtree.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | blocks | [bytes](#bytes) | repeated | List of serialized full blocks containing the subtree |
 
-
-
-
 <a name="ReportPeerFailureRequest"></a>
 
 ### ReportPeerFailureRequest
-ReportPeerFailureRequest reports a peer download failure to the blockchain service.
 
+ReportPeerFailureRequest reports a peer download failure to the blockchain service.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -1075,41 +774,33 @@ ReportPeerFailureRequest reports a peer download failure to the blockchain servi
 | failure_type | [string](#string) |  | Type of failure (e.g., "catchup", "subtree", "block") |
 | reason | [string](#string) |  | Description of the failure |
 
-
-
-
  <!-- end messages -->
-
 
 <a name="GetBlockByIDRequest"></a>
 
 ### GetBlockByIDRequest
-GetBlockByIDRequest represents a request to retrieve a block by its ID.
 
+GetBlockByIDRequest represents a request to retrieve a block by its ID.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | id | [uint64](#uint64) |  | Block ID to retrieve |
 
-
-
 <a name="GetBlockInChainByHeightHashRequest"></a>
 
 ### GetBlockInChainByHeightHashRequest
-GetBlockInChainByHeightHashRequest represents a request to retrieve a block by height in a specific chain.
 
+GetBlockInChainByHeightHashRequest represents a request to retrieve a block by height in a specific chain.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | height | [uint32](#uint32) |  | Target block height |
 | start_hash | [bytes](#bytes) |  | Starting block hash defining the chain |
 
-
-
-
 <a name="FSMEventType"></a>
 
 ### FSMEventType
+
 swagger:enum FSMEventType
 
 | Name | Number | Description |
@@ -1117,13 +808,11 @@ swagger:enum FSMEventType
 | STOP | 0 | Stop the blockchain service |
 | RUN | 1 | Run the blockchain service |
 | CATCHUPBLOCKS | 2 | Start catching up blocks |
-| LEGACYSYNC | 3 | Start legacy synchronization |
-
-
 
 <a name="FSMStateType"></a>
 
 ### FSMStateType
+
 FSMStateType defines possible states of the blockchain FSM.
 
 | Name | Number | Description |
@@ -1131,17 +820,15 @@ FSMStateType defines possible states of the blockchain FSM.
 | IDLE | 0 | Service is idle |
 | RUNNING | 1 | Service is running normally |
 | CATCHINGBLOCKS | 2 | Service is catching up blocks |
-| LEGACYSYNCING | 3 | Service is in legacy sync mode |
-
 
  <!-- end enums -->
 
  <!-- end HasExtensions -->
 
-
 <a name="BlockchainAPI"></a>
 
 ### BlockchainAPI
+
 BlockchainAPI service provides comprehensive blockchain management functionality.
 
 | Method Name | Request Type | Response Type | Description |
@@ -1194,7 +881,6 @@ BlockchainAPI service provides comprehensive blockchain management functionality
 | WaitUntilFSMTransitionFromIdleState | [.google.protobuf.Empty](#google-protobuf-Empty) | [.google.protobuf.Empty](#google-protobuf-Empty) | Waits for FSM to transition from IDLE state. |
 | Run | [.google.protobuf.Empty](#google-protobuf-Empty) | [.google.protobuf.Empty](#google-protobuf-Empty) | Transitions the blockchain service to running state. |
 | CatchUpBlocks | [.google.protobuf.Empty](#google-protobuf-Empty) | [.google.protobuf.Empty](#google-protobuf-Empty) | Initiates block catch-up process. |
-| LegacySync | [.google.protobuf.Empty](#google-protobuf-Empty) | [.google.protobuf.Empty](#google-protobuf-Empty) | Initiates legacy synchronization process. |
 | Idle | [.google.protobuf.Empty](#google-protobuf-Empty) | [.google.protobuf.Empty](#google-protobuf-Empty) | Marks the service as idle. |
 | ReportPeerFailure | [ReportPeerFailureRequest](#blockchain_api-ReportPeerFailureRequest) | [.google.protobuf.Empty](#google-protobuf-Empty) | Notifies about peer download failures (catchup, subtree, block, etc). |
 | GetBlockLocator | [GetBlockLocatorRequest](#blockchain_api-GetBlockLocatorRequest) | [GetBlockLocatorResponse](#blockchain_api-GetBlockLocatorResponse) | Retrieves a block locator for chain synchronization. |
@@ -1202,8 +888,6 @@ BlockchainAPI service provides comprehensive blockchain management functionality
 | GetBestHeightAndTime | [.google.protobuf.Empty](#google-protobuf-Empty) | [GetBestHeightAndTimeResponse](#blockchain_api-GetBestHeightAndTimeResponse) | Retrieves the current best height and median time. |
 
  <!-- end services -->
-
-
 
 ## Scalar Value Types
 
@@ -1224,6 +908,5 @@ BlockchainAPI service provides comprehensive blockchain management functionality
 | <a name="bool" /> bool |  | bool | boolean | boolean | bool | bool | boolean | TrueClass/FalseClass |
 | <a name="string" /> string | A string must always contain UTF-8 encoded or 7-bit ASCII text. | string | String | str/unicode | string | string | string | String (UTF-8) |
 | <a name="bytes" /> bytes | May contain any arbitrary sequence of bytes. | string | ByteString | str | []byte | ByteString | string | String (ASCII-8BIT) |
-
 
 ---

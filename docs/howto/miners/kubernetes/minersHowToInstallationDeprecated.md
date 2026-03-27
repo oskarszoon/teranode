@@ -2,7 +2,7 @@
 
 Last modified: 29-January-2025
 
-# Index
+## Index
 
 - [Introduction](#introduction)
 - [Prerequisites](#prerequisites)
@@ -10,13 +10,13 @@ Last modified: 29-January-2025
 - [Software Requirements](#software-requirements)
 - [Network Considerations](#network-considerations)
 - [Installation Process](#installation-process)
-  - [Teranode Initial Synchronization](#teranode-initial-synchronization)
-    - [Full P2P Download](#full-p2p-download)
-    - [Initial Data Set Installation](#initial-data-set-installation)
-  - [Teranode Installation - Introduction to the Kubernetes Operator](#teranode-installation-introduction-to-the-kubernetes-operator)
-  - [Installing Teranode with the Custom Kubernetes Operator](#installing-teranode-with-the-custom-kubernetes-operator)
+    - [Teranode Initial Synchronization](#teranode-initial-synchronization)
+        - [Full P2P Download](#full-p2p-download)
+        - [Initial Data Set Installation](#initial-data-set-installation)
+    - [Teranode Installation - Introduction to the Kubernetes Operator](#teranode-installation---introduction-to-the-kubernetes-operator)
+    - [Installing Teranode with the Custom Kubernetes Operator](#installing-teranode-with-the-custom-kubernetes-operator)
 - [Optimizations](#optimizations)
-- [Reference - Settings](#reference-settings)
+- [Reference - Settings](#reference---settings)
 
 ## Introduction
 
@@ -300,18 +300,12 @@ Standard Kubernetes logging and troubleshooting approaches apply. Users can use 
 - The various Teranode services will be accessible through the configured ingress or service endpoints.
 - Refer to your specific ingress or network configuration for exact URLs and ports.
 
-### Step 9: Change the node status to Run or LegacySync
+### Step 9: Change the node status to Run
 
 1. **Force the node to transition to Run mode:**
 
     ```bash
     kubectl exec -it $(kubectl get pods -n teranode-operator -l app=blockchain -o jsonpath='{.items[0].metadata.name}') -n teranode-operator -- teranode-cli setfsmstate --fsmstate RUNNING
-    ```
-
-2. **Or LegacySync mode:**
-
-    ```bash
-    kubectl exec -it $(kubectl get pods -n teranode-operator -l app=blockchain -o jsonpath='{.items[0].metadata.name}') -n teranode-operator -- teranode-cli setfsmstate --fsmstate LEGACYSYNCING
     ```
 
 ### Step 10: Access Monitoring Tools

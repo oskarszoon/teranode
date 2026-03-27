@@ -56,18 +56,18 @@ This is the standard synchronization method where Teranode downloads the complet
 
 ### Step 1: Initialize Sync Process
 
-Upon startup, Teranode begins in IDLE state. You must explicitly set the state to `legacysyncing` to begin synchronization.
+Upon startup, Teranode begins in IDLE state. You must explicitly set the state to `running` to begin synchronization.
 
 ```bash
-# Set FSM state to begin legacy syncing
-docker exec -it blockchain teranode-cli setfsmstate --fsmstate legacysyncing
+# Set FSM state to begin syncing
+docker exec -it blockchain teranode-cli setfsmstate --fsmstate running
 ```
 
 ### Step 2: Peer Discovery and Block Download
 
 - **Peer Connection**: Teranode automatically discovers and connects to BSV network peers
 - **Block Requests**: Downloads blocks sequentially from genesis, starting with the first available peer
-- **Legacy Mode**: In `legacysyncing` state, connects to traditional BSV nodes for compatibility
+- **Catching Blocks**: The node transitions to `catchingblocks` state to sync from traditional BSV nodes
 
 ### Step 3: Validation and Storage
 
@@ -177,7 +177,7 @@ sudo chown $USER:$(id -gn $USER) /mnt/teranode/seed/export
 ```bash
 # Export UTXO set from Bitcoin SV node
 # Replace /mnt/bitcoin-sv-data with your actual SV node data directory
-# Instead of latest, you could use a specific version of teranode. 
+# Instead of latest, you could use a specific version of teranode.
 # Check for tagged versions here ghcr.io/bsv-blockchain/teranode
 docker run -it \
     -v /mnt/bitcoin-sv-data:/home/ubuntu/bitcoin-data:ro \
@@ -479,7 +479,7 @@ Check current sync status:
 
 ```bash
 # Reset FSM state and restart sync
-docker exec -it blockchain teranode-cli setfsmstate --fsmstate legacysyncing
+docker exec -it blockchain teranode-cli setfsmstate --fsmstate running
 
 # Monitor progress closely
 docker compose logs -f blockchain
@@ -509,7 +509,7 @@ docker exec -it blockchain teranode-cli getpeerinfo
 docker compose restart peer
 
 # Reset FSM state
-docker exec -it blockchain teranode-cli setfsmstate --fsmstate legacysyncing
+docker exec -it blockchain teranode-cli setfsmstate --fsmstate running
 ```
 
 #### Issue: Database Connection Errors

@@ -61,18 +61,16 @@
     return error instanceof Error ? error.message : String(error)
   }
 
-  // duplicates the FSM transition logic from the backend (fsm_handler.go 
-  // If the backend state machine changes, the UI will become out of sync. 
+  // duplicates the FSM transition logic from the backend (fsm_handler.go
+  // If the backend state machine changes, the UI will become out of sync.
   function isEventAllowedForState(state: string | undefined, eventName: string): boolean {
     if (!state || !eventName) return false
 
     switch (state) {
       case 'IDLE':
-        return eventName === 'RUN' || eventName === 'LEGACYSYNC'
+        return eventName === 'RUN'
       case 'RUNNING':
         return eventName === 'STOP' || eventName === 'CATCHUPBLOCKS'
-      case 'LEGACYSYNCING':
-        return eventName === 'RUN' || eventName === 'STOP'
       case 'CATCHINGBLOCKS':
         return eventName === 'RUN'
       default:
@@ -220,7 +218,6 @@
     0: 'IDLE',
     1: 'RUNNING',
     2: 'CATCHING BLOCKS',
-    3: 'LEGACY SYNCING',
     '-1': 'DISCONNECTED',
   }
 
@@ -229,7 +226,6 @@
     0: 'gray',
     1: 'green',
     2: 'blue',
-    3: 'purple',
     '-1': 'red',
   }
 
@@ -251,8 +247,6 @@
         return 'fas fa-stop'
       case 'CATCHUPBLOCKS':
         return 'fas fa-fast-forward'
-      case 'LEGACYSYNC':
-        return 'fas fa-sync'
       default:
         return 'fas fa-question'
     }
@@ -268,8 +262,6 @@
         return 'Stop'
       case 'CATCHUPBLOCKS':
         return 'Catch Up'
-      case 'LEGACYSYNC':
-        return 'Legacy Sync'
       default:
         return eventName
     }
@@ -310,23 +302,6 @@
     } catch (error: unknown) {
       console.error('Error starting catchup:', error)
       failure(getErrorMessage(error) || 'Failed to start catchup')
-    } finally {
-      fsmLoading = false
-    }
-  }
-
-  async function legacySyncBlockchain() {
-    fsmLoading = true
-    try {
-      const result = await api.legacySyncFSM()
-      if (!result.ok) {
-        throw new Error(result.error?.message || 'Failed to start legacy sync')
-      }
-      success('Blockchain is now in legacy sync mode')
-      await fetchFSMState()
-    } catch (error: unknown) {
-      console.error('Error starting legacy sync:', error)
-      failure(getErrorMessage(error) || 'Failed to start legacy sync')
     } finally {
       fsmLoading = false
     }
@@ -1142,14 +1117,6 @@
 
   .action-button[data-event='catchup']:hover {
     background-color: #4f46e5;
-  }
-
-  .action-button[data-event='legacysync'] {
-    background-color: #8b5cf6;
-  }
-
-  .action-button[data-event='legacysync']:hover {
-    background-color: #7c3aed;
   }
 
   .action-button.neutral {
