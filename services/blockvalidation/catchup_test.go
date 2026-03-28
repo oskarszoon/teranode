@@ -1203,6 +1203,11 @@ func TestCatchupIntegrationScenarios(t *testing.T) {
 	// Helper to create server instance with enhanced error handling
 	createServerWithEnhancedCatchup := func(t *testing.T) (*Server, *blockchain.Mock, *blockassembly.Mock, *BlockValidation) {
 		mockBlockchainClient := &blockchain.Mock{}
+		// Mock FSM transitions during catchup (early CATCHINGBLOCKS transition + block fetch)
+		fsmRunning := blockchain_api.FSMStateType_RUNNING
+		mockBlockchainClient.On("CatchUpBlocks", mock.Anything).Return(nil).Maybe()
+		mockBlockchainClient.On("GetFSMCurrentState", mock.Anything).Return(&fsmRunning, nil).Maybe()
+		mockBlockchainClient.On("Run", mock.Anything, mock.Anything).Return(nil).Maybe()
 		mockBAClient := &blockassembly.Mock{}
 		mockUTXOStore := &utxo.MockUtxostore{}
 		mockUTXOStore.On("GetBlockHeight").Return(uint32(1018)) // Current height is block 18

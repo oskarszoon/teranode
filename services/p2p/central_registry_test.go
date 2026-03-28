@@ -79,7 +79,7 @@ func (m *mockPeerRegistryClient) ClearBannedPeers(_ context.Context) error {
 	args := m.Called()
 	return args.Error(0)
 }
-func (m *mockPeerRegistryClient) Close() error                             { return nil }
+func (m *mockPeerRegistryClient) Close() error { return nil }
 
 // newMinimalServer creates a bare-minimum Server for testing central registry operations.
 func newMinimalServer(t *testing.T) *Server {
