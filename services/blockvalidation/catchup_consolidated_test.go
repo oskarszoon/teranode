@@ -385,12 +385,17 @@ func TestCatchup_FSMStateManagement(t *testing.T) {
 		mockBlockchainClient.ExpectedCalls = filterMockCalls(mockBlockchainClient.ExpectedCalls, "Run")
 
 		// Mock FSM state changes
+		// setFSMCatchingBlocks first checks current state, then calls CatchUpBlocks if not already catching.
+		runningState := blockchain.FSMStateRUNNING
+		mockBlockchainClient.On("GetFSMCurrentState", mock.Anything).
+			Return(&runningState, nil).Once()
+
 		mockBlockchainClient.On("CatchUpBlocks", mock.Anything).
 			Return(nil).Once()
 
 		catchingState := blockchain.FSMStateCATCHINGBLOCKS
 		mockBlockchainClient.On("GetFSMCurrentState", mock.Anything).
-			Return(&catchingState, nil).Once()
+			Return(&catchingState, nil).Maybe()
 
 		mockBlockchainClient.On("Run", mock.Anything, "blockvalidation/Server").
 			Return(nil).Once()

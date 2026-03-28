@@ -100,6 +100,21 @@ type bestBlockMsg struct {
 	PeerID string `json:"peerId"`
 }
 
+// newPermissiveMockRegistry creates a mock central registry that accepts all calls.
+func newPermissiveMockRegistry() *mockPeerRegistryClient {
+	reg := &mockPeerRegistryClient{}
+	reg.On("RegisterPeer", mock.Anything).Return(nil).Maybe()
+	reg.On("RemovePeer", mock.Anything).Return(nil).Maybe()
+	reg.On("UpdatePeerMetrics", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
+	reg.On("ListPeers").Return([]*blockchain.PeerInfo{}, nil).Maybe()
+	reg.On("GetPeer", mock.Anything).Return((*blockchain.PeerInfo)(nil), false, nil).Maybe()
+	reg.On("IsPeerBanned", mock.Anything).Return(false, nil).Maybe()
+	reg.On("AddBanScore", mock.Anything, mock.Anything, mock.Anything).Return(int32(0), false, nil).Maybe()
+	reg.On("ListBannedPeers").Return([]string{}, nil).Maybe()
+	reg.On("ClearBannedPeers").Return(nil).Maybe()
+	return reg
+}
+
 // createTestServer creates a test server with necessary dependencies
 func createTestServer(t *testing.T) *Server {
 	logger := ulogger.New("test")
@@ -1792,6 +1807,7 @@ func TestServerInitHTTPPublicAddressSet(t *testing.T) {
 
 	server, err := NewServer(ctx, logger, settings, mockClient, nil, nil, nil, nil, nil, nil)
 	require.NoError(t, err)
+	server.SetCentralPeerRegistry(newPermissiveMockRegistry())
 
 	err = server.Init(ctx)
 	require.NoError(t, err)
@@ -1814,6 +1830,7 @@ func TestServerInitHTTPPublicAddressEmpty(t *testing.T) {
 
 	server, err := NewServer(ctx, logger, settings, mockClient, nil, nil, nil, nil, nil, nil)
 	require.NoError(t, err)
+	server.SetCentralPeerRegistry(newPermissiveMockRegistry())
 
 	err = server.Init(ctx)
 	require.NoError(t, err)
@@ -1836,6 +1853,7 @@ func TestServerInitPropagationURLSet(t *testing.T) {
 
 	server, err := NewServer(ctx, logger, settings, mockClient, nil, nil, nil, nil, nil, nil)
 	require.NoError(t, err)
+	server.SetCentralPeerRegistry(newPermissiveMockRegistry())
 
 	err = server.Init(ctx)
 	require.NoError(t, err)
@@ -1859,6 +1877,7 @@ func TestServerInitPropagationURLEmpty(t *testing.T) {
 
 	server, err := NewServer(ctx, logger, settings, mockClient, nil, nil, nil, nil, nil, nil)
 	require.NoError(t, err)
+	server.SetCentralPeerRegistry(newPermissiveMockRegistry())
 
 	err = server.Init(ctx)
 	require.NoError(t, err)
@@ -1881,6 +1900,7 @@ func TestServerSetupHTTPServer(t *testing.T) {
 
 	server, err := NewServer(ctx, logger, settings, mockClient, nil, nil, nil, nil, nil, nil)
 	require.NoError(t, err)
+	server.SetCentralPeerRegistry(newPermissiveMockRegistry())
 
 	err = server.Init(ctx)
 	require.NoError(t, err)
