@@ -1027,7 +1027,7 @@ func TestCatchup(t *testing.T) {
 
 	// Create mock blockchain client
 	mockBlockchainClient := &blockchain.Mock{}
-	// Mock FSM transitions for early Step 1.5 + setFSMCatchingBlocks
+	// Mock FSM transitions during catchup (early CATCHINGBLOCKS transition + block fetch)
 	fsmRunning := blockchain_api.FSMStateType_RUNNING
 	mockBlockchainClient.On("CatchUpBlocks", mock.Anything).Return(nil).Maybe()
 	mockBlockchainClient.On("GetFSMCurrentState", mock.Anything).Return(&fsmRunning, nil).Maybe()
@@ -3089,7 +3089,7 @@ func setupTestCatchupServer(t *testing.T) (*Server, *blockchain.Mock, *utxo.Mock
 	// Permissive default for locator capping (blockchain height > UTXO height fallback)
 	mockBlockchainClient.On("GetBlockByHeight", mock.Anything, mock.Anything).
 		Return((*model.Block)(nil), errors.NewServiceError("not mocked")).Maybe()
-	// Mock FSM transitions during catchup (early Step 1.5 transition + setFSMCatchingBlocks)
+	// Mock FSM transitions during catchup (early CATCHINGBLOCKS transition + block fetch)
 	runningState := blockchain_api.FSMStateType_RUNNING
 	mockBlockchainClient.On("CatchUpBlocks", mock.Anything).Return(nil).Maybe()
 	mockBlockchainClient.On("GetFSMCurrentState", mock.Anything).Return(&runningState, nil).Maybe()
@@ -3191,7 +3191,7 @@ func setupTestCatchupServerWithConfig(t *testing.T, config *testhelpers.TestServ
 	// Permissive default for locator capping (blockchain height > UTXO height fallback)
 	mockBlockchainClient.On("GetBlockByHeight", mock.Anything, mock.Anything).
 		Return((*model.Block)(nil), errors.NewServiceError("not mocked")).Maybe()
-	// Mock FSM transitions during catchup (early Step 1.5 transition + setFSMCatchingBlocks)
+	// Mock FSM transitions during catchup (early CATCHINGBLOCKS transition + block fetch)
 	runningState := blockchain_api.FSMStateType_RUNNING
 	mockBlockchainClient.On("CatchUpBlocks", mock.Anything).Return(nil).Maybe()
 	mockBlockchainClient.On("GetFSMCurrentState", mock.Anything).Return(&runningState, nil).Maybe()

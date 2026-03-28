@@ -181,7 +181,7 @@ func (u *Server) catchup(ctx context.Context, blockUpTo *model.Block, peerID, ba
 	}
 	defer u.releaseCatchupLock(catchupCtx, &err)
 
-	// Step 1.5: Transition FSM to CATCHINGBLOCKS immediately so other services
+	// Transition FSM to CATCHINGBLOCKS immediately so other services
 	// (subtree validation, etc.) stop processing network messages while we catch up.
 	if fsmErr := u.blockchainClient.CatchUpBlocks(ctx); fsmErr != nil {
 		u.logger.Warnf("[catchup][%s] Could not transition FSM to CATCHINGBLOCKS early: %v (will retry at block fetch stage)",
@@ -996,7 +996,7 @@ func (u *Server) recordMaliciousAttempt(peerID string, reason string) {
 func (u *Server) setFSMCatchingBlocks(ctx context.Context, catchupCtx *CatchupContext, size *atomic.Int64) error {
 	u.logger.Infof("[catchup][%s] Setting node to CATCHINGBLOCKS state for %d blocks", catchupCtx.blockUpTo.Hash().String(), size.Load())
 
-	// Check if already in CATCHINGBLOCKS (early transition in Step 1.5 may have set this).
+	// Check if already in CATCHINGBLOCKS (the early transition at catchup start may have set this).
 	state, stateErr := u.blockchainClient.GetFSMCurrentState(ctx)
 	if stateErr == nil && state != nil && *state == blockchain.FSMStateCATCHINGBLOCKS {
 		return nil
