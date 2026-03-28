@@ -170,7 +170,8 @@ func TestServerHandlers(t *testing.T) {
 	t.Run("Test stream handler behaviour", func(t *testing.T) {
 		// Create a minimal Server for testing
 		server := &Server{
-			gCtx: context.Background(),
+			centralRegistry: newPermissiveMockRegistry(),
+			gCtx:            context.Background(),
 		}
 
 		// Set up a flag to track if handleBlockTopic was called
@@ -225,6 +226,7 @@ func TestServerStart(t *testing.T) {
 
 			// Create server with all necessary fields populated to avoid nil pointer dereference
 			server := &Server{
+				centralRegistry:               newPermissiveMockRegistry(),
 				logger:                        logger,
 				settings:                      emptySettings,
 				blockchainClient:              mockBlockchainClient,
@@ -273,6 +275,7 @@ func TestServerStart(t *testing.T) {
 
 			// Create server with all necessary fields populated to avoid nil pointer dereference
 			server := &Server{
+				centralRegistry:               newPermissiveMockRegistry(),
 				logger:                        logger,
 				settings:                      partialSettings,
 				blockchainClient:              mockBlockchainClient,
@@ -323,6 +326,7 @@ func TestServerStart(t *testing.T) {
 
 			// Create the server with minimal dependencies
 			server := &Server{
+				centralRegistry:        newPermissiveMockRegistry(),
 				logger:                 logger,
 				settings:               completeSettings,
 				blockchainClient:       mockBlockchainClient,
@@ -372,10 +376,11 @@ func TestHandleBlockTopic(t *testing.T) {
 
 		// Create server with mocks
 		server := &Server{
-			P2PClient:      mockP2PNode,
-			banList:        mockBanList,
-			notificationCh: make(chan *notificationMsg, 10),
-			logger:         ulogger.New("test-server"),
+			centralRegistry: newPermissiveMockRegistry(),
+			P2PClient:       mockP2PNode,
+			banList:         mockBanList,
+			notificationCh:  make(chan *notificationMsg, 10),
+			logger:          ulogger.New("test-server"),
 		}
 
 		// Call the real handler method with message from self
@@ -409,9 +414,10 @@ func TestHandleBlockTopic(t *testing.T) {
 
 		// Create server with mock P2PClient and BanManager
 		server := &Server{
-			P2PClient:      mockP2PNode,
-			notificationCh: make(chan *notificationMsg, 10),
-			logger:         logger,
+			centralRegistry: newPermissiveMockRegistry(),
+			P2PClient:       mockP2PNode,
+			notificationCh:  make(chan *notificationMsg, 10),
+			logger:          logger,
 		}
 
 		// Call the real handler method with message from banned peer
@@ -441,10 +447,11 @@ func TestHandleBlockTopic(t *testing.T) {
 
 		// Create server with mock P2PClient
 		server := &Server{
-			P2PClient:      mockP2PNode,
-			notificationCh: make(chan *notificationMsg, 10),
-			logger:         logger,
-			banList:        mockBanList,
+			centralRegistry: newPermissiveMockRegistry(),
+			P2PClient:       mockP2PNode,
+			notificationCh:  make(chan *notificationMsg, 10),
+			logger:          logger,
+			banList:         mockBanList,
 		}
 
 		// Call the real handler method with invalid JSON
@@ -471,9 +478,10 @@ func TestHandleBlockTopic(t *testing.T) {
 
 		// Create server with mock P2PClient and BanManager
 		server := &Server{
-			P2PClient:      mockP2PNode,
-			notificationCh: make(chan *notificationMsg, 10),
-			logger:         logger,
+			centralRegistry: newPermissiveMockRegistry(),
+			P2PClient:       mockP2PNode,
+			notificationCh:  make(chan *notificationMsg, 10),
+			logger:          logger,
 		}
 
 		// Call the real handler method with invalid hash
@@ -504,6 +512,7 @@ func TestHandleBlockTopic(t *testing.T) {
 
 		// Create server with mocks
 		server := &Server{
+			centralRegistry:           newPermissiveMockRegistry(),
 			P2PClient:                 mockP2PNode,
 			notificationCh:            make(chan *notificationMsg, 10),
 			blocksKafkaProducerClient: mockKafkaProducer,
@@ -540,6 +549,7 @@ func TestHandleBlockTopic(t *testing.T) {
 
 		// Create server with mocks
 		server := &Server{
+			centralRegistry:           newPermissiveMockRegistry(),
 			P2PClient:                 mockP2PNode,
 			notificationCh:            make(chan *notificationMsg, 10),
 			blocksKafkaProducerClient: mockKafkaProducer,
@@ -594,6 +604,7 @@ func TestHandleSubtreeTopic(t *testing.T) {
 		}
 
 		server := &Server{
+			centralRegistry:            newPermissiveMockRegistry(),
 			P2PClient:                  mockP2PNode,
 			notificationCh:             make(chan *notificationMsg, 10),
 			subtreeKafkaProducerClient: mockKafkaProducer,
@@ -637,6 +648,7 @@ func TestHandleSubtreeTopic(t *testing.T) {
 
 		// Create server with mocks
 		server := &Server{
+			centralRegistry:           newPermissiveMockRegistry(),
 			P2PClient:                 mockP2PNode,
 			notificationCh:            make(chan *notificationMsg, 10),
 			blocksKafkaProducerClient: mockKafkaProducer,
@@ -886,8 +898,9 @@ func TestHandleBanEvent(t *testing.T) {
 		logger := ulogger.New("test-server")
 		mockP2PNode := new(MockServerP2PClient)
 		server := &Server{
-			P2PClient: mockP2PNode,
-			logger:    logger,
+			centralRegistry: newPermissiveMockRegistry(),
+			P2PClient:       mockP2PNode,
+			logger:          logger,
 		}
 
 		// Test non-add action
@@ -908,8 +921,9 @@ func TestHandleBanEvent(t *testing.T) {
 		logger := ulogger.New("test-server")
 		mockP2PNode := new(MockServerP2PClient)
 		server := &Server{
-			P2PClient: mockP2PNode,
-			logger:    logger,
+			centralRegistry: newPermissiveMockRegistry(),
+			P2PClient:       mockP2PNode,
+			logger:          logger,
 		}
 
 		// Test ban event without PeerID (should be ignored)
@@ -932,8 +946,9 @@ func TestHandleBanEvent(t *testing.T) {
 
 		// Create server with mocks
 		server := &Server{
-			P2PClient: mockP2PNode,
-			logger:    logger,
+			centralRegistry: newPermissiveMockRegistry(),
+			P2PClient:       mockP2PNode,
+			logger:          logger,
 		}
 
 		// Create a ban event with invalid PeerID
@@ -1270,8 +1285,9 @@ func TestBlacklistBaseURL(t *testing.T) {
 
 		// Create server with minimal setup - only need settings and logger for business logic
 		server := &Server{
-			settings: tSettings,
-			logger:   ulogger.New("test-server"),
+			centralRegistry: newPermissiveMockRegistry(),
+			settings:        tSettings,
+			logger:          ulogger.New("test-server"),
 		}
 
 		// Test blacklisted URLs - should return true
@@ -1295,8 +1311,9 @@ func TestBlacklistBaseURL(t *testing.T) {
 		// Don't add anything to blacklist
 
 		server := &Server{
-			settings: tSettings,
-			logger:   ulogger.New("test-server"),
+			centralRegistry: newPermissiveMockRegistry(),
+			settings:        tSettings,
+			logger:          ulogger.New("test-server"),
 		}
 
 		// All URLs should be allowed when blacklist is empty
@@ -1312,8 +1329,9 @@ func TestBlacklistBaseURL(t *testing.T) {
 		}
 
 		server := &Server{
-			settings: tSettings,
-			logger:   ulogger.New("test-server"),
+			centralRegistry: newPermissiveMockRegistry(),
+			settings:        tSettings,
+			logger:          ulogger.New("test-server"),
 		}
 
 		// Should match regardless of case
@@ -1329,8 +1347,9 @@ func TestBlacklistBaseURL(t *testing.T) {
 		}
 
 		server := &Server{
-			settings: tSettings,
-			logger:   ulogger.New("test-server"),
+			centralRegistry: newPermissiveMockRegistry(),
+			settings:        tSettings,
+			logger:          ulogger.New("test-server"),
 		}
 
 		// Should block URLs with same domain but different ports/paths
@@ -1357,6 +1376,7 @@ func TestSelfMessageFiltering(t *testing.T) {
 		mockP2PNode.On("GetID").Return(GetID)
 
 		server := &Server{
+			centralRegistry:           newPermissiveMockRegistry(),
 			settings:                  tSettings,
 			logger:                    ulogger.New("test-server"),
 			blocksKafkaProducerClient: mockBlocksProducer,
@@ -1401,6 +1421,7 @@ func TestSelfMessageFiltering(t *testing.T) {
 		mockP2PNode.On("GetID").Return(GetID)
 
 		server := &Server{
+			centralRegistry:            newPermissiveMockRegistry(),
 			settings:                   tSettings,
 			logger:                     ulogger.New("test-server"),
 			subtreeKafkaProducerClient: mockSubtreeProducer,
@@ -1445,6 +1466,7 @@ func TestSelfMessageFiltering(t *testing.T) {
 		mockP2PNode.On("UpdatePeerHeight", mock.Anything, mock.Anything).Return()
 
 		server := &Server{
+			centralRegistry:           newPermissiveMockRegistry(),
 			settings:                  tSettings,
 			logger:                    ulogger.New("test-server"),
 			blocksKafkaProducerClient: mockBlocksProducer,
@@ -2506,6 +2528,7 @@ func TestHandleSubtreeNotificationSuccess(t *testing.T) {
 	testSettings.P2P.ListenMode = settings.ListenModeFull // Ensure not in listen-only mode
 
 	server := &Server{
+		centralRegistry:     newPermissiveMockRegistry(),
 		settings:            testSettings,
 		P2PClient:           mockP2P,
 		subtreeTopicName:    subtreeTopicName,
@@ -2539,6 +2562,7 @@ func TestProcessBlockchainNotificationSubtree(t *testing.T) {
 	testSettings.P2P.ListenMode = settings.ListenModeFull // Ensure not in listen-only mode
 
 	server := &Server{
+		centralRegistry:     newPermissiveMockRegistry(),
 		settings:            testSettings,
 		P2PClient:           mockP2P,
 		subtreeTopicName:    subtreeTopicName,
@@ -2563,7 +2587,8 @@ func TestProcessBlockchainNotificationUnknownType(t *testing.T) {
 	}
 
 	server := &Server{
-		logger: logger,
+		centralRegistry: newPermissiveMockRegistry(),
+		logger:          logger,
 	}
 
 	err := server.processBlockchainNotification(ctx, notification)
@@ -2580,7 +2605,8 @@ func TestProcessBlockchainNotificationInvalidHash(t *testing.T) {
 	}
 
 	server := &Server{
-		logger: logger,
+		centralRegistry: newPermissiveMockRegistry(),
+		logger:          logger,
 	}
 
 	err := server.processBlockchainNotification(ctx, notification)
@@ -2603,6 +2629,7 @@ func TestServerStopSuccess(t *testing.T) {
 
 	// Pre-load elements into the maps
 	server := &Server{
+		centralRegistry:                  newPermissiveMockRegistry(),
 		logger:                           logger,
 		P2PClient:                        mockP2P,
 		rejectedTxKafkaConsumerClient:    mockKafkaConsumer,
@@ -2649,8 +2676,9 @@ func TestProcessInvalidBlockMessageSuccess(t *testing.T) {
 	}
 
 	server := &Server{
-		blockPeerMap: sync.Map{},
-		logger:       logger,
+		centralRegistry: newPermissiveMockRegistry(),
+		blockPeerMap:    sync.Map{},
+		logger:          logger,
 	}
 	server.blockPeerMap.Store(blockHash, peerMapEntry{peerID: mockPeerID.String()})
 
@@ -2670,7 +2698,8 @@ func TestProcessInvalidBlockMessageUnmarshalError(t *testing.T) {
 		Value: invalidBytes,
 	}
 	server := &Server{
-		logger: logger,
+		centralRegistry: newPermissiveMockRegistry(),
+		logger:          logger,
 	}
 
 	err := server.processInvalidBlockMessage(kafkaMsg)
@@ -2692,8 +2721,9 @@ func TestProcessInvalidBlockMessageNoPeerInMap(t *testing.T) {
 	}
 
 	server := &Server{
-		blockPeerMap: sync.Map{},
-		logger:       logger,
+		centralRegistry: newPermissiveMockRegistry(),
+		blockPeerMap:    sync.Map{},
+		logger:          logger,
 	}
 
 	err := server.processInvalidBlockMessage(kafkaMsg)
@@ -2715,8 +2745,9 @@ func TestProcessInvalidBlockMessageWrongTypeInMap(t *testing.T) {
 	}
 
 	server := &Server{
-		blockPeerMap: sync.Map{},
-		logger:       logger,
+		centralRegistry: newPermissiveMockRegistry(),
+		blockPeerMap:    sync.Map{},
+		logger:          logger,
 	}
 	server.blockPeerMap.Store(blockHash, "string_instead_of_struct")
 
@@ -2741,8 +2772,9 @@ func TestProcessInvalidBlockMessageAddBanScoreFails(t *testing.T) {
 	}
 
 	server := &Server{
-		blockPeerMap: sync.Map{},
-		logger:       logger,
+		centralRegistry: newPermissiveMockRegistry(),
+		blockPeerMap:    sync.Map{},
+		logger:          logger,
 	}
 	server.blockPeerMap.Store(blockHash, peerMapEntry{peerID: mockPeerID.String()})
 
@@ -2756,7 +2788,8 @@ func TestBlockchainSubscriptionListener(t *testing.T) {
 		subscription := make(chan *blockchain.Notification, 1)
 
 		server := &Server{
-			logger: ulogger.New("test"),
+			centralRegistry: newPermissiveMockRegistry(),
+			logger:          ulogger.New("test"),
 		}
 
 		done := make(chan struct{})
@@ -2785,7 +2818,8 @@ func TestBlockchainSubscriptionListener(t *testing.T) {
 		}
 
 		server := &Server{
-			logger: ulogger.New("test"),
+			centralRegistry: newPermissiveMockRegistry(),
+			logger:          ulogger.New("test"),
 		}
 
 		go func() {
@@ -2801,6 +2835,7 @@ func TestBlockchainSubscriptionListener(t *testing.T) {
 func TestServer_GetLocalHeight(t *testing.T) {
 	// Test with nil blockchain client
 	server := &Server{
+		centralRegistry:  newPermissiveMockRegistry(),
 		blockchainClient: nil,
 	}
 	height := server.getLocalHeight()
@@ -2924,9 +2959,12 @@ func TestServer_UpdateBlockHash(t *testing.T) {
 func TestServer_GetPeer(t *testing.T) {
 	testHash, _ := chainhash.NewHashFromStr("000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f")
 
+	nonExistentPeerID := peer.ID("non-existent")
+	testPeerID := peer.ID("test-peer")
+
 	reg := &mockPeerRegistryClient{}
-	reg.On("GetPeer", "non-existent").Return((*blockchain.PeerInfo)(nil), false, nil)
-	reg.On("GetPeer", "test-peer").Return(&blockchain.PeerInfo{
+	reg.On("GetPeer", nonExistentPeerID.String()).Return((*blockchain.PeerInfo)(nil), false, nil)
+	reg.On("GetPeer", testPeerID.String()).Return(&blockchain.PeerInfo{
 		ID:        "test-peer",
 		Height:    100,
 		BlockHash: testHash,
@@ -3023,9 +3061,10 @@ func TestIsBannedChecksBothBanSystems(t *testing.T) {
 		mockBanList.On("IsBanned", "192.168.1.100").Return(true)
 
 		server := &Server{
-			logger:   ulogger.New("test"),
-			settings: &settings.Settings{},
-			banList:  mockBanList,
+			centralRegistry: newPermissiveMockRegistry(),
+			logger:          ulogger.New("test"),
+			settings:        &settings.Settings{},
+			banList:         mockBanList,
 		}
 
 		resp, err := server.IsBanned(ctx, &p2p_api.IsBannedRequest{IpOrSubnet: "192.168.1.100"})
@@ -3313,11 +3352,12 @@ func createEnhancedTestServer(t *testing.T) (*Server, *MockServerP2PClient, *Moc
 
 	// Create server with mocks
 	server := &Server{
-		logger:    logger,
-		settings:  settings,
-		P2PClient: mockP2PNode,
-		banList:   mockBanList,
-		gCtx:      context.Background(),
+		centralRegistry: newPermissiveMockRegistry(),
+		logger:          logger,
+		settings:        settings,
+		P2PClient:       mockP2PNode,
+		banList:         mockBanList,
+		gCtx:            context.Background(),
 	}
 
 	return server, mockP2PNode, mockBanList
@@ -3332,9 +3372,10 @@ func TestBanPeerEnhanced(t *testing.T) {
 	mockBanList := &MockBanList{}
 
 	server := &Server{
-		logger:   ulogger.New("test"),
-		settings: &settings.Settings{},
-		banList:  mockBanList,
+		centralRegistry: newPermissiveMockRegistry(),
+		logger:          ulogger.New("test"),
+		settings:        &settings.Settings{},
+		banList:         mockBanList,
 	}
 
 	// Test successful ban
@@ -3363,9 +3404,10 @@ func TestUnbanPeerEnhanced(t *testing.T) {
 	mockBanList := &MockBanList{}
 
 	server := &Server{
-		logger:   ulogger.New("test"),
-		settings: &settings.Settings{},
-		banList:  mockBanList,
+		centralRegistry: newPermissiveMockRegistry(),
+		logger:          ulogger.New("test"),
+		settings:        &settings.Settings{},
+		banList:         mockBanList,
 	}
 
 	// Test successful unban
@@ -3392,9 +3434,10 @@ func TestListBannedEnhanced(t *testing.T) {
 	mockBanList := &MockBanList{}
 
 	server := &Server{
-		logger:   ulogger.New("test"),
-		settings: &settings.Settings{},
-		banList:  mockBanList,
+		centralRegistry: newPermissiveMockRegistry(),
+		logger:          ulogger.New("test"),
+		settings:        &settings.Settings{},
+		banList:         mockBanList,
 	}
 
 	// Mock return data
@@ -3417,9 +3460,10 @@ func TestClearBannedEnhanced(t *testing.T) {
 	mockBanList := &MockBanList{}
 
 	server := &Server{
-		logger:   ulogger.New("test"),
-		settings: &settings.Settings{},
-		banList:  mockBanList,
+		centralRegistry: newPermissiveMockRegistry(),
+		logger:          ulogger.New("test"),
+		settings:        &settings.Settings{},
+		banList:         mockBanList,
 	}
 
 	// Mock expectations
@@ -3545,10 +3589,11 @@ func TestSilentModeBlockNotification(t *testing.T) {
 	testSettings.P2P.ListenMode = settings.ListenModeSilent
 
 	server := &Server{
-		settings:       testSettings,
-		P2PClient:      mockP2P,
-		blockTopicName: "block-topic",
-		logger:         ulogger.New("test"),
+		centralRegistry: newPermissiveMockRegistry(),
+		settings:        testSettings,
+		P2PClient:       mockP2P,
+		blockTopicName:  "block-topic",
+		logger:          ulogger.New("test"),
 	}
 
 	err := server.handleBlockNotification(ctx, hash)
@@ -3568,6 +3613,7 @@ func TestSilentModeSubtreeNotification(t *testing.T) {
 	testSettings.P2P.ListenMode = settings.ListenModeSilent
 
 	server := &Server{
+		centralRegistry:  newPermissiveMockRegistry(),
 		settings:         testSettings,
 		P2PClient:        mockP2P,
 		subtreeTopicName: "subtree-topic",
@@ -3603,6 +3649,7 @@ func TestSilentModeNodeStatusNotification(t *testing.T) {
 
 	notificationCh := make(chan *notificationMsg, 1)
 	server := &Server{
+		centralRegistry:     newPermissiveMockRegistry(),
 		settings:            testSettings,
 		P2PClient:           mockP2P,
 		blockchainClient:    mockBC,
@@ -3649,6 +3696,7 @@ func TestSilentModeGetNodeStatusMessageURLsSuppressed(t *testing.T) {
 	testSettings.P2P.ListenMode = settings.ListenModeSilent
 
 	server := &Server{
+		centralRegistry:     newPermissiveMockRegistry(),
 		settings:            testSettings,
 		P2PClient:           mockP2P,
 		blockchainClient:    mockBC,
