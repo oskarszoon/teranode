@@ -107,19 +107,19 @@ type Server struct {
 	blockTopicName                    string
 	subtreeTopicName                  string
 	rejectedTxTopicName               string
-	invalidBlocksTopicName            string           // Kafka topic for invalid blocks
-	invalidSubtreeTopicName           string           // Kafka topic for invalid subtrees
-	nodeStatusTopicName               string           // pubsub topic for node status messages
-	topicPrefix                       string           // Chain identifier prefix for topic validation
-	blockPeerMap                      sync.Map         // Map to track which peer sent each block (hash -> peerMapEntry)
-	subtreePeerMap                    sync.Map         // Map to track which peer sent each subtree (hash -> peerMapEntry)
-	startTime                         time.Time        // Server start time for uptime calculation
-	syncConnectionTimes               sync.Map         // Map to track when we first connected to each sync peer (peerID -> timestamp)
+	invalidBlocksTopicName            string    // Kafka topic for invalid blocks
+	invalidSubtreeTopicName           string    // Kafka topic for invalid subtrees
+	nodeStatusTopicName               string    // pubsub topic for node status messages
+	topicPrefix                       string    // Chain identifier prefix for topic validation
+	blockPeerMap                      sync.Map  // Map to track which peer sent each block (hash -> peerMapEntry)
+	subtreePeerMap                    sync.Map  // Map to track which peer sent each subtree (hash -> peerMapEntry)
+	startTime                         time.Time // Server start time for uptime calculation
+	syncConnectionTimes               sync.Map  // Map to track when we first connected to each sync peer (peerID -> timestamp)
 
 	// Cleanup configuration
-	peerMapCleanupTicker    *time.Ticker  // Ticker for periodic cleanup of peer maps
-	peerMapMaxSize          int           // Maximum number of entries in peer maps
-	peerMapTTL              time.Duration // Time-to-live for peer map entries
+	peerMapCleanupTicker *time.Ticker  // Ticker for periodic cleanup of peer maps
+	peerMapMaxSize       int           // Maximum number of entries in peer maps
+	peerMapTTL           time.Duration // Time-to-live for peer map entries
 
 	// Centralized peer registry (REQUIRED -- all peer operations go through this)
 	centralRegistry blockchain.PeerRegistryClientI
@@ -606,7 +606,6 @@ func (s *Server) Start(ctx context.Context, readyCh chan<- struct{}) error {
 
 	// Start periodic cleanup of peer maps
 	s.startPeerMapCleanup(ctx)
-
 
 	// NOTE: SyncCoordinator removed -- catchup orchestration now handled by BlockValidation polling the central registry
 

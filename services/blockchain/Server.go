@@ -173,7 +173,7 @@ func New(ctx context.Context, logger ulogger.Logger, tSettings *settings.Setting
 			DecayAmount:   DefaultBanConfig().DecayAmount,
 			ReasonPoints:  DefaultBanConfig().ReasonPoints,
 		}),
-		batchTokens:                   make(map[string]*blobDeletionBatchToken),
+		batchTokens: make(map[string]*blobDeletionBatchToken),
 	}
 
 	// Initialize subscription manager as not ready

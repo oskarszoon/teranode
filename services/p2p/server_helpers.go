@@ -951,8 +951,6 @@ func (s *Server) startPeerMapCleanup(ctx context.Context) {
 	s.logger.Infof("[startPeerMapCleanup] started peer map cleanup with interval %v", cleanupInterval)
 }
 
-
-
 func (s *Server) listenForBanEvents(ctx context.Context) {
 	for {
 		select {

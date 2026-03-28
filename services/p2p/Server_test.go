@@ -407,7 +407,6 @@ func TestHandleBlockTopic(t *testing.T) {
 		// Create logger
 		logger := ulogger.New("test-server")
 
-
 		// Create server with mock P2PClient and BanManager
 		server := &Server{
 			P2PClient:      mockP2PNode,
@@ -440,7 +439,6 @@ func TestHandleBlockTopic(t *testing.T) {
 		// Create logger
 		logger := ulogger.New("test-server")
 
-
 		// Create server with mock P2PClient
 		server := &Server{
 			P2PClient:      mockP2PNode,
@@ -470,7 +468,6 @@ func TestHandleBlockTopic(t *testing.T) {
 
 		// Create logger
 		logger := ulogger.New("test-server")
-
 
 		// Create server with mock P2PClient and BanManager
 		server := &Server{
@@ -504,7 +501,6 @@ func TestHandleBlockTopic(t *testing.T) {
 		// Create mock kafka producer
 		mockKafkaProducer := new(MockKafkaProducer)
 		mockKafkaProducer.On("Publish", mock.Anything).Return()
-
 
 		// Create server with mocks
 		server := &Server{
@@ -541,7 +537,6 @@ func TestHandleBlockTopic(t *testing.T) {
 		// Create mock kafka producer
 		mockKafkaProducer := new(MockKafkaProducer)
 		mockKafkaProducer.On("Publish", mock.Anything).Return()
-
 
 		// Create server with mocks
 		server := &Server{
@@ -591,7 +586,6 @@ func TestHandleSubtreeTopic(t *testing.T) {
 		mockKafkaProducer := new(MockKafkaProducer)
 		mockKafkaProducer.On("Publish", mock.Anything).Return()
 
-
 		// Create server with mocks
 		// Create settings with blacklisted URLs
 		tSettings := createBaseTestSettings()
@@ -640,7 +634,6 @@ func TestHandleSubtreeTopic(t *testing.T) {
 		// Create mock kafka producer
 		mockKafkaProducer := new(MockKafkaProducer)
 		mockKafkaProducer.On("Publish", mock.Anything).Return()
-
 
 		// Create server with mocks
 		server := &Server{
@@ -3010,7 +3003,6 @@ func TestIsBannedCoverage(t *testing.T) {
 	ctx := context.Background()
 	server := createTestServer(t)
 
-
 	// Test checking ban status for non-banned peer
 	req := &p2p_api.IsBannedRequest{
 		IpOrSubnet: "test-peer-id",
@@ -3321,11 +3313,11 @@ func createEnhancedTestServer(t *testing.T) (*Server, *MockServerP2PClient, *Moc
 
 	// Create server with mocks
 	server := &Server{
-		logger:       logger,
-		settings:     settings,
-		P2PClient:    mockP2PNode,
-		banList:      mockBanList,
-		gCtx:         context.Background(),
+		logger:    logger,
+		settings:  settings,
+		P2PClient: mockP2PNode,
+		banList:   mockBanList,
+		gCtx:      context.Background(),
 	}
 
 	return server, mockP2PNode, mockBanList
