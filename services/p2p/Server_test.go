@@ -3077,7 +3077,7 @@ func TestIsBannedChecksBothBanSystems(t *testing.T) {
 		mockBanList.On("IsBanned", "test-peer-id").Return(false)
 
 		reg := &mockPeerRegistryClient{}
-		reg.On("IsPeerBanned", mock.Anything, "test-peer-id").Return(true, nil)
+		reg.On("IsPeerBanned", "test-peer-id").Return(true, nil)
 
 		server := &Server{
 			logger:          ulogger.New("test"),
@@ -3096,7 +3096,7 @@ func TestIsBannedChecksBothBanSystems(t *testing.T) {
 		mockBanList.On("IsBanned", "192.168.1.200").Return(false)
 
 		reg := &mockPeerRegistryClient{}
-		reg.On("IsPeerBanned", mock.Anything, "192.168.1.200").Return(false, nil)
+		reg.On("IsPeerBanned", "192.168.1.200").Return(false, nil)
 
 		server := &Server{
 			logger:          ulogger.New("test"),

@@ -56,16 +56,29 @@ func (m *mockPeerRegistryClient) GetPeer(_ context.Context, peerID string) (*blo
 	return args.Get(0).(*blockchain.PeerInfo), args.Bool(1), args.Error(2)
 }
 
-func (m *mockPeerRegistryClient) AddBanScore(_ context.Context, _ string, _ string, _ int32) (int32, bool, error) {
-	return 0, false, nil
+func (m *mockPeerRegistryClient) AddBanScore(_ context.Context, peerID string, reason string, points int32) (int32, bool, error) {
+	m.callCount.Add(1)
+	args := m.Called(peerID, reason, points)
+	return args.Get(0).(int32), args.Bool(1), args.Error(2)
 }
-func (m *mockPeerRegistryClient) IsPeerBanned(_ context.Context, _ string) (bool, error) {
-	return false, nil
+func (m *mockPeerRegistryClient) IsPeerBanned(_ context.Context, peerID string) (bool, error) {
+	m.callCount.Add(1)
+	args := m.Called(peerID)
+	return args.Bool(0), args.Error(1)
 }
 func (m *mockPeerRegistryClient) ListBannedPeers(_ context.Context) ([]string, error) {
-	return nil, nil
+	m.callCount.Add(1)
+	args := m.Called()
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).([]string), args.Error(1)
 }
-func (m *mockPeerRegistryClient) ClearBannedPeers(_ context.Context) error { return nil }
+func (m *mockPeerRegistryClient) ClearBannedPeers(_ context.Context) error {
+	m.callCount.Add(1)
+	args := m.Called()
+	return args.Error(0)
+}
 func (m *mockPeerRegistryClient) Close() error                             { return nil }
 
 // newMinimalServer creates a bare-minimum Server for testing central registry operations.

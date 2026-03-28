@@ -1027,6 +1027,11 @@ func TestCatchup(t *testing.T) {
 
 	// Create mock blockchain client
 	mockBlockchainClient := &blockchain.Mock{}
+	// Mock FSM transitions for early Step 1.5 + setFSMCatchingBlocks
+	fsmRunning := blockchain_api.FSMStateType_RUNNING
+	mockBlockchainClient.On("CatchUpBlocks", mock.Anything).Return(nil).Maybe()
+	mockBlockchainClient.On("GetFSMCurrentState", mock.Anything).Return(&fsmRunning, nil).Maybe()
+	mockBlockchainClient.On("Run", mock.Anything, mock.Anything).Return(nil).Maybe()
 
 	// Create mock UTXO store
 	mockUTXOStore := &utxo.MockUtxostore{}

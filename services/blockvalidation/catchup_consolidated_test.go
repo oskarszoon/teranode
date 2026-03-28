@@ -380,23 +380,22 @@ func TestCatchup_FSMStateManagement(t *testing.T) {
 			blockHeaders: testHeaders[1:],
 		}
 
-		// Clear permissive defaults so .Once() expectations are matched
+		// Clear permissive defaults so specific expectations are matched
 		mockBlockchainClient.ExpectedCalls = filterMockCalls(mockBlockchainClient.ExpectedCalls, "CatchUpBlocks")
 		mockBlockchainClient.ExpectedCalls = filterMockCalls(mockBlockchainClient.ExpectedCalls, "Run")
+		mockBlockchainClient.ExpectedCalls = filterMockCalls(mockBlockchainClient.ExpectedCalls, "GetFSMCurrentState")
 
-		// Mock FSM state changes
-		// setFSMCatchingBlocks first checks current state, then calls CatchUpBlocks if not already catching.
+		// setFSMCatchingBlocks: GetFSMCurrentState(RUNNING) → CatchUpBlocks()
+		// restoreFSMState: GetFSMCurrentState(CATCHING) → Run()
 		runningState := blockchain.FSMStateRUNNING
+		catchingState := blockchain.FSMStateCATCHINGBLOCKS
+
 		mockBlockchainClient.On("GetFSMCurrentState", mock.Anything).
 			Return(&runningState, nil).Once()
-
 		mockBlockchainClient.On("CatchUpBlocks", mock.Anything).
 			Return(nil).Once()
-
-		catchingState := blockchain.FSMStateCATCHINGBLOCKS
 		mockBlockchainClient.On("GetFSMCurrentState", mock.Anything).
-			Return(&catchingState, nil).Maybe()
-
+			Return(&catchingState, nil).Once()
 		mockBlockchainClient.On("Run", mock.Anything, "blockvalidation/Server").
 			Return(nil).Once()
 
