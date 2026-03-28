@@ -585,9 +585,12 @@ func (s *Server) SetCentralPeerRegistry(r blockchain.PeerRegistryClientI) {
 }
 
 // enqueueRegistryUpdate sends a registry update function to the worker pool.
-// If the channel is full, the update is dropped with a warning log (best-effort).
+// If the worker pool isn't started yet (e.g., during tests or before Start),
+// the function is executed synchronously. If the channel is full, the update
+// is dropped with a warning log (best-effort).
 func (s *Server) enqueueRegistryUpdate(fn func()) {
 	if s.registryUpdateCh == nil {
+		fn()
 		return
 	}
 	select {
