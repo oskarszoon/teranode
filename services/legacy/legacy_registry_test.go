@@ -2,6 +2,7 @@ package legacy
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,24 +18,29 @@ import (
 // mockLegacyPeerRegistryClient is a testify mock for blockchain.PeerRegistryClientI.
 type mockLegacyPeerRegistryClient struct {
 	mock.Mock
+	callCount atomic.Int32
 }
 
 func (m *mockLegacyPeerRegistryClient) RegisterPeer(_ context.Context, info *blockchain.PeerInfo) error {
+	m.callCount.Add(1)
 	args := m.Called(info)
 	return args.Error(0)
 }
 
 func (m *mockLegacyPeerRegistryClient) UpdatePeerMetrics(_ context.Context, peerID string, height uint32, bytesSentDelta, bytesRecvDelta uint64, recordSuccess, recordFailure, recordMalicious bool, responseTimeMs int64) error {
+	m.callCount.Add(1)
 	args := m.Called(peerID, height, bytesSentDelta, bytesRecvDelta, recordSuccess, recordFailure, recordMalicious, responseTimeMs)
 	return args.Error(0)
 }
 
 func (m *mockLegacyPeerRegistryClient) RemovePeer(_ context.Context, peerID string) error {
+	m.callCount.Add(1)
 	args := m.Called(peerID)
 	return args.Error(0)
 }
 
 func (m *mockLegacyPeerRegistryClient) ListPeers(_ context.Context, _ *blockchain_api.TransportType, _ float64, _ uint32, _ bool) ([]*blockchain.PeerInfo, error) {
+	m.callCount.Add(1)
 	args := m.Called()
 	if args.Get(0) == nil {
 		return nil, args.Error(1)
@@ -43,6 +49,7 @@ func (m *mockLegacyPeerRegistryClient) ListPeers(_ context.Context, _ *blockchai
 }
 
 func (m *mockLegacyPeerRegistryClient) GetPeer(_ context.Context, peerID string) (*blockchain.PeerInfo, bool, error) {
+	m.callCount.Add(1)
 	args := m.Called(peerID)
 	if args.Get(0) == nil {
 		return nil, args.Bool(1), args.Error(2)
@@ -71,16 +78,17 @@ func makePeer(t *testing.T, addr string) *peer.Peer {
 }
 
 // waitForLegacyMockCalls polls until the mock has received at least n calls or 500ms elapses.
+// Uses an atomic counter to avoid data races when reading the call count concurrently.
 func waitForLegacyMockCalls(t *testing.T, reg *mockLegacyPeerRegistryClient, n int) {
 	t.Helper()
 	deadline := time.Now().Add(500 * time.Millisecond)
 	for time.Now().Before(deadline) {
-		if len(reg.Calls) >= n {
+		if int(reg.callCount.Load()) >= n {
 			return
 		}
 		time.Sleep(time.Millisecond)
 	}
-	t.Fatalf("timed out waiting for %d mock calls, got %d", n, len(reg.Calls))
+	t.Fatalf("timed out waiting for %d mock calls, got %d", n, int(reg.callCount.Load()))
 }
 
 func TestLegacyPeerToRegistryInfo_WireProtocolTransport(t *testing.T) {

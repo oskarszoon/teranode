@@ -3174,27 +3174,6 @@ func TestOnPeerBannedCoverage(t *testing.T) {
 	// No assertion needed as this tests error handling path
 }
 
-func TestShouldSkipDuringSync(t *testing.T) {
-	server := createTestServer(t)
-
-	// Test when no sync peer is set
-	result := server.shouldSkipDuringSync("peer1", "originator1", 100, "block")
-	assert.False(t, result, "Should not skip when no sync peer is set")
-
-	// Create a sync peer for further testing
-	_, pub, err := crypto.GenerateKeyPair(crypto.RSA, 2048)
-	require.NoError(t, err)
-	syncPeerID, err := peer.IDFromPublicKey(pub)
-	require.NoError(t, err)
-
-	// Add peer to simulate having a sync peer
-	server.addPeer(syncPeerID, "", 0, nil, "")
-
-	// Test various scenarios - the function should execute without error
-	server.shouldSkipDuringSync("peer2", "originator2", 200, "subtree")
-	server.shouldSkipDuringSync("peer3", "originator3", 50, "block")
-}
-
 func TestGetPeerIDFromDataHubURL(t *testing.T) {
 	server := createTestServer(t)
 

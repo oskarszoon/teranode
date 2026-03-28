@@ -65,7 +65,7 @@ func (s *Server) RecordCatchupMalicious(ctx context.Context, req *p2p_api.Record
 func (s *Server) UpdateCatchupReputation(_ context.Context, req *p2p_api.UpdateCatchupReputationRequest) (*p2p_api.UpdateCatchupReputationResponse, error) {
 	// NOTE: Reputation is computed automatically by the central registry based on interactions.
 	// This explicit setter is a no-op but returns success for backward compatibility.
-	s.logger.Debugf("[UpdateCatchupReputation] Reputation update requested for peer %s (score=%.2f) -- computed by central registry", req.PeerId, req.Score)
+	s.logger.Infof("[P2P] UpdateCatchupReputation called but not yet implemented for central registry (peer=%s, score=%.2f)", req.PeerId, req.Score)
 	return &p2p_api.UpdateCatchupReputationResponse{Ok: true}, nil
 }
 
@@ -73,7 +73,7 @@ func (s *Server) UpdateCatchupReputation(_ context.Context, req *p2p_api.UpdateC
 func (s *Server) UpdateCatchupError(_ context.Context, req *p2p_api.UpdateCatchupErrorRequest) (*p2p_api.UpdateCatchupErrorResponse, error) {
 	// NOTE: Catchup error tracking not yet implemented in central registry.
 	// Log and return success for backward compatibility.
-	s.logger.Debugf("[UpdateCatchupError] Error recorded for peer %s: %s", req.PeerId, req.ErrorMsg)
+	s.logger.Infof("[P2P] UpdateCatchupError called but not yet implemented for central registry (peer=%s, error=%s)", req.PeerId, req.ErrorMsg)
 	return &p2p_api.UpdateCatchupErrorResponse{Ok: true}, nil
 }
 
@@ -138,10 +138,8 @@ func (s *Server) ReportValidSubtree(ctx context.Context, req *p2p_api.ReportVali
 	}
 
 	// Record successful subtree reception in central registry
-	if s.centralRegistry != nil {
-		if err := s.centralRegistry.UpdatePeerMetrics(ctx, req.PeerId, 0, 0, 0, true, false, false, 0); err != nil {
-			s.logger.Warnf("[ReportValidSubtree] failed to record success for peer %s: %v", req.PeerId, err)
-		}
+	if err := s.centralRegistry.UpdatePeerMetrics(ctx, req.PeerId, 0, 0, 0, true, false, false, 0); err != nil {
+		s.logger.Warnf("[ReportValidSubtree] failed to record success for peer %s: %v", req.PeerId, err)
 	}
 	s.logger.Debugf("[ReportValidSubtree] Recorded successful subtree %s from peer %s", req.SubtreeHash, req.PeerId)
 
@@ -175,10 +173,8 @@ func (s *Server) ReportValidBlock(ctx context.Context, req *p2p_api.ReportValidB
 	}
 
 	// Record successful block reception in central registry
-	if s.centralRegistry != nil {
-		if err := s.centralRegistry.UpdatePeerMetrics(ctx, req.PeerId, 0, 0, 0, true, false, false, 0); err != nil {
-			s.logger.Warnf("[ReportValidBlock] failed to record success for peer %s: %v", req.PeerId, err)
-		}
+	if err := s.centralRegistry.UpdatePeerMetrics(ctx, req.PeerId, 0, 0, 0, true, false, false, 0); err != nil {
+		s.logger.Warnf("[ReportValidBlock] failed to record success for peer %s: %v", req.PeerId, err)
 	}
 	s.logger.Debugf("[ReportValidBlock] Recorded successful block %s from peer %s", req.BlockHash, req.PeerId)
 

@@ -163,11 +163,12 @@ func protoTimeToTime(ts *timestamppb.Timestamp) time.Time {
 }
 
 // blockHashToBytes converts a *chainhash.Hash to a byte slice, returning nil if hash is nil.
+// Returns a copy to avoid aliasing the caller's backing array.
 func blockHashToBytes(h *chainhash.Hash) []byte {
 	if h == nil {
 		return nil
 	}
-	return h[:]
+	return append([]byte(nil), h[:]...)
 }
 
 // bytesToBlockHash converts a byte slice to *chainhash.Hash, returning nil if the slice is empty or invalid.

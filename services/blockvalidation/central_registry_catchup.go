@@ -204,6 +204,7 @@ func (u *Server) pollCentralRegistry(ctx context.Context) bool {
 }
 
 // nextCooldownForPeer returns an exponentially increasing cooldown duration for a peer.
+// Cooldown doubles on each consecutive failure: 30s, 60s, 120s, 240s, 300s (capped).
 func (u *Server) nextCooldownForPeer(peerID string) time.Duration {
 	if u.catchupPeerFailCounts == nil {
 		u.catchupPeerFailCounts = make(map[string]int)
@@ -211,12 +212,12 @@ func (u *Server) nextCooldownForPeer(peerID string) time.Duration {
 	u.catchupPeerFailCounts[peerID]++
 	count := u.catchupPeerFailCounts[peerID]
 
-	cooldown := 30 * time.Second
-	for i := 1; i < count && cooldown < 5*time.Minute; i++ {
-		cooldown *= 2
-	}
-	if cooldown > 5*time.Minute {
-		cooldown = 5 * time.Minute
+	const baseCooldown = 30 * time.Second
+	const maxCooldown = 5 * time.Minute
+
+	cooldown := baseCooldown * time.Duration(1<<min(count-1, 10))
+	if cooldown > maxCooldown {
+		cooldown = maxCooldown
 	}
 	return cooldown
 }

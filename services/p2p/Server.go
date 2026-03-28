@@ -123,6 +123,14 @@ type Server struct {
 
 	// Centralized peer registry (REQUIRED -- all peer operations go through this)
 	centralRegistry blockchain.PeerRegistryClientI
+
+	// registryUpdateCh is a buffered channel for serializing central registry updates.
+	// Goroutines send closures to this channel; a small pool of workers executes them.
+	registryUpdateCh chan func()
+
+	// peerRegistrationThrottle tracks when each peer was last registered to avoid
+	// spamming the central registry with redundant updates on every message.
+	peerRegistrationThrottle sync.Map // map[string]time.Time
 }
 
 // NewServer creates a new P2P server instance with the provided configuration and dependencies.
@@ -517,6 +525,17 @@ func (s *Server) Start(ctx context.Context, readyCh chan<- struct{}) error {
 
 	s.logger.Infof("[Start] P2P service starting")
 
+	// Start registry update workers (bounded pool to avoid goroutine explosion)
+	const registryWorkers = 4
+	s.registryUpdateCh = make(chan func(), 256)
+	for i := 0; i < registryWorkers; i++ {
+		go func() {
+			for fn := range s.registryUpdateCh {
+				fn()
+			}
+		}()
+	}
+
 	// For TxMeta, we are using autocommit, as we want to consume every message as fast as possible, and it is okay if some of the messages are not properly processed.
 	// We don't need manual kafka commit and error handling here, as it is not necessary to retry the message, we have the message in stores.
 	// Therefore, autocommit is set to true.
@@ -810,12 +829,22 @@ func generateRandomKey() (string, error) {
 	return apiKey, nil
 }
 
+const registrationThrottleInterval = 30 * time.Second
+
 // updatePeerLastMessageTime updates the last message time for both the sender and originator.
 // It handles the common pattern of updating message timestamps when receiving P2P messages.
 // Parameters:
 //   - from: the immediate sender's peer ID string
 //   - originatorPeerID: the original message creator's peer ID string (may be same as from)
 func (s *Server) updatePeerLastMessageTime(from string, originatorPeerID string) {
+	// Throttle: skip re-registration if we registered this peer recently
+	if lastReg, ok := s.peerRegistrationThrottle.Load(from); ok {
+		if time.Since(lastReg.(time.Time)) < registrationThrottleInterval {
+			return
+		}
+	}
+	s.peerRegistrationThrottle.Store(from, time.Now())
+
 	// Mark sender as connected via central registry (fire-and-forget)
 	senderID, err := peer.Decode(from)
 	if err != nil {
@@ -823,7 +852,7 @@ func (s *Server) updatePeerLastMessageTime(from string, originatorPeerID string)
 		return
 	}
 
-	s.addConnectedPeer(senderID, "", 0, nil, "")
+	s.addPeer(senderID, "", 0, nil, "")
 
 	// Also register the originator if different (gossiped message)
 	if originatorPeerID != "" {
@@ -850,21 +879,21 @@ func (s *Server) updateBytesReceived(from string, originatorPeerID string, messa
 	}
 
 	senderIDStr := senderID.String()
-	go func() {
+	s.enqueueRegistryUpdate(func() {
 		if err := s.centralRegistry.UpdatePeerMetrics(s.gCtx, senderIDStr, 0, 0, messageSize, false, false, false, 0); err != nil {
 			s.logger.Warnf("[P2P] failed to update bytes for peer %s in central registry: %v", senderIDStr, err)
 		}
-	}()
+	})
 
 	// Also update for the originator if different (gossiped message)
 	if originatorPeerID != "" {
 		if peerID, err := peer.Decode(originatorPeerID); err == nil && peerID != senderID {
 			peerIDStr := peerID.String()
-			go func() {
+			s.enqueueRegistryUpdate(func() {
 				if err := s.centralRegistry.UpdatePeerMetrics(s.gCtx, peerIDStr, 0, 0, messageSize, false, false, false, 0); err != nil {
 					s.logger.Warnf("[P2P] failed to update bytes for originator %s in central registry: %v", peerIDStr, err)
 				}
-			}()
+			})
 		}
 	}
 }
@@ -1406,11 +1435,12 @@ func (s *Server) handlePeerFailureNotification(_ context.Context, notification *
 
 	// For catchup failures, record the failure in central registry
 	if failureType == "catchup" && peerID != "" && s.centralRegistry != nil {
-		go func() {
-			if err := s.centralRegistry.UpdatePeerMetrics(s.gCtx, peerID, 0, 0, 0, false, true, false, 0); err != nil {
-				s.logger.Warnf("[handlePeerFailureNotification] failed to record catchup failure for peer %s: %v", peerID, err)
+		pid := peerID // capture for closure
+		s.enqueueRegistryUpdate(func() {
+			if err := s.centralRegistry.UpdatePeerMetrics(s.gCtx, pid, 0, 0, 0, false, true, false, 0); err != nil {
+				s.logger.Warnf("[handlePeerFailureNotification] failed to record catchup failure for peer %s: %v", pid, err)
 			}
-		}()
+		})
 	}
 
 	return nil
@@ -1559,6 +1589,11 @@ func (s *Server) Stop(ctx context.Context) error {
 	s.logger.Infof("[Stop] Stopping P2P service")
 
 	var errs []error
+
+	// Close the registry update channel to stop worker goroutines
+	if s.registryUpdateCh != nil {
+		close(s.registryUpdateCh)
+	}
 
 	// Stop the underlying P2P node
 	if s.P2PClient != nil {
@@ -1792,11 +1827,12 @@ func (s *Server) ReportInvalidBlock(ctx context.Context, blockHash string, reaso
 
 	// Record as malicious interaction in central registry
 	if s.centralRegistry != nil {
-		go func() {
-			if err := s.centralRegistry.UpdatePeerMetrics(s.gCtx, peerID, 0, 0, 0, false, false, true, 0); err != nil {
-				s.logger.Warnf("[ReportInvalidBlock] failed to record malicious interaction for peer %s: %v", peerID, err)
+		pid := peerID // capture for closure
+		s.enqueueRegistryUpdate(func() {
+			if err := s.centralRegistry.UpdatePeerMetrics(s.gCtx, pid, 0, 0, 0, false, false, true, 0); err != nil {
+				s.logger.Warnf("[ReportInvalidBlock] failed to record malicious interaction for peer %s: %v", pid, err)
 			}
-		}()
+		})
 	}
 
 	// Create the request to add ban score
@@ -1847,11 +1883,12 @@ func (s *Server) ReportInvalidSubtree(ctx context.Context, subtreeHash string, p
 
 	// Record as a failed interaction in central registry
 	if s.centralRegistry != nil {
-		go func() {
-			if err := s.centralRegistry.UpdatePeerMetrics(s.gCtx, peerID, 0, 0, 0, false, true, false, 0); err != nil {
-				s.logger.Warnf("[ReportInvalidSubtree] failed to record failure for peer %s: %v", peerID, err)
+		pid := peerID // capture for closure
+		s.enqueueRegistryUpdate(func() {
+			if err := s.centralRegistry.UpdatePeerMetrics(s.gCtx, pid, 0, 0, 0, false, true, false, 0); err != nil {
+				s.logger.Warnf("[ReportInvalidSubtree] failed to record failure for peer %s: %v", pid, err)
 			}
-		}()
+		})
 	}
 
 	// Remove the subtree from the map to avoid memory leaks

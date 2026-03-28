@@ -2754,11 +2754,12 @@ func legacyPeerToRegistryInfo(sp *serverPeer) *blockchain.PeerInfo {
 		height = uint32(h)
 	}
 	return &blockchain.PeerInfo{
-		ID:             sp.Addr(),
-		TransportType:  blockchain_api.TransportType_TRANSPORT_WIRE_PROTOCOL,
-		ClientName:     sp.UserAgent(),
-		Height:         height,
-		NetworkAddress: sp.Addr(),
+		ID:               sp.Addr(),
+		TransportType:    blockchain_api.TransportType_TRANSPORT_WIRE_PROTOCOL,
+		TransportTypeSet: true,
+		ClientName:       sp.UserAgent(),
+		Height:           height,
+		NetworkAddress:   sp.Addr(),
 	}
 }
 

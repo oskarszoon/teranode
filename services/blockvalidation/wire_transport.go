@@ -20,8 +20,8 @@ type legacyFetchClientI interface {
 }
 
 // WireTransport implements CatchupTransport using the Bitcoin wire protocol via
-// the Legacy service's gRPC endpoints. The baseURL parameter used in each method
-// is the legacy peer address ("host:port") rather than an HTTP base URL.
+// the Legacy service's gRPC endpoints. The peerEndpoint parameter used in each
+// method is the legacy peer address ("host:port") rather than an HTTP base URL.
 //
 // FetchSubtree and FetchSubtreeData are not supported over the wire protocol and
 // return errors.ErrServiceUnavailable.
@@ -78,15 +78,15 @@ func (t *WireTransport) FetchBlock(ctx context.Context, peerAddr string, hash *c
 // FetchBlocks is not supported over the wire protocol.
 // Wire protocol requires a separate hash for each block; callers must use FetchBlock individually.
 func (t *WireTransport) FetchBlocks(_ context.Context, _ string, hash *chainhash.Hash, _ uint32) ([]*model.Block, error) {
-	return nil, errors.NewServiceUnavailableError("WireTransport does not support FetchBlocks (use FetchBlock per hash; starting hash %s)", hash.String())
+	return nil, errors.NewServiceUnavailableError("FetchBlocks is not supported over the wire protocol; use FetchBlock per hash (starting hash %s)", hash.String())
 }
 
 // FetchSubtree is not supported over the wire protocol.
 func (t *WireTransport) FetchSubtree(_ context.Context, _ string, hash *chainhash.Hash) ([]byte, error) {
-	return nil, errors.NewServiceUnavailableError("WireTransport does not support FetchSubtree (hash %s)", hash.String())
+	return nil, errors.NewServiceUnavailableError("FetchSubtree is not supported over the wire protocol (hash %s)", hash.String())
 }
 
 // FetchSubtreeData is not supported over the wire protocol.
 func (t *WireTransport) FetchSubtreeData(_ context.Context, _ string, hash *chainhash.Hash) (io.ReadCloser, error) {
-	return nil, errors.NewServiceUnavailableError("WireTransport does not support FetchSubtreeData (hash %s)", hash.String())
+	return nil, errors.NewServiceUnavailableError("FetchSubtreeData is not supported over the wire protocol (hash %s)", hash.String())
 }

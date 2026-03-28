@@ -239,8 +239,10 @@ type Server struct {
 	wireTransport CatchupTransport
 
 	// catchupPeerCooldowns tracks per-peer cooldown expiry after failed catchup attempts.
+	// Only accessed from the runCentralRegistryPoller goroutine — no mutex needed.
 	catchupPeerCooldowns map[string]time.Time
 	// catchupPeerFailCounts tracks consecutive failure counts per peer for exponential backoff.
+	// Only accessed from the runCentralRegistryPoller goroutine — no mutex needed.
 	catchupPeerFailCounts map[string]int
 }
 

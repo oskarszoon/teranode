@@ -66,7 +66,10 @@ func TestCentralizedPeerRegistry_ListFilters(t *testing.T) {
 
 	r.Register(&PeerInfo{ID: "http-peer", TransportType: blockchain_api.TransportType_TRANSPORT_HTTP, Height: 100})
 	r.Register(&PeerInfo{ID: "wire-peer", TransportType: blockchain_api.TransportType_TRANSPORT_WIRE_PROTOCOL, Height: 50})
-	r.Register(&PeerInfo{ID: "banned-peer", TransportType: blockchain_api.TransportType_TRANSPORT_WIRE_PROTOCOL, IsBanned: true, Height: 200})
+	r.Register(&PeerInfo{ID: "banned-peer", TransportType: blockchain_api.TransportType_TRANSPORT_WIRE_PROTOCOL, Height: 200})
+	// Actually ban the peer via AddBanScore so isPeerBannedLocked finds the ban entry.
+	r.AddBanScore("banned-peer", "spam", 100)
+	r.AddBanScore("banned-peer", "spam", 100)
 
 	// No filters — returns all.
 	all := r.List(nil, 0, 0, false)

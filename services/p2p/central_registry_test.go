@@ -90,7 +90,7 @@ func newMinimalServer(t *testing.T) *Server {
 	}
 }
 
-func TestDualWrite_AddConnectedPeer_RegistersInCentralRegistry(t *testing.T) {
+func TestDualWrite_AddPeer_RegistersInCentralRegistry(t *testing.T) {
 	s := newMinimalServer(t)
 
 	reg := &mockPeerRegistryClient{}
@@ -103,7 +103,7 @@ func TestDualWrite_AddConnectedPeer_RegistersInCentralRegistry(t *testing.T) {
 	peerID, err := peer.Decode("12D3KooWNvSZnPi3RrhrTwEY4LuHBeB6K6idsA5DZtEt3yBHk5CQ")
 	require.NoError(t, err)
 
-	s.addConnectedPeer(peerID, "test-client", 100, nil, "http://peer.example.com")
+	s.addPeer(peerID, "test-client", 100, nil, "http://peer.example.com")
 
 	// Allow goroutine to execute.
 	waitForMockCalls(t, reg, 1)

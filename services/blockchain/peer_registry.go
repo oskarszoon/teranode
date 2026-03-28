@@ -15,6 +15,7 @@ import (
 type PeerInfo struct {
 	ID                     string
 	TransportType          blockchain_api.TransportType
+	TransportTypeSet       bool // When true, TransportType was explicitly set by the caller
 	ClientName             string
 	Height                 uint32
 	DataHubURL             string
@@ -136,9 +137,10 @@ func (r *CentralizedPeerRegistry) Register(info *PeerInfo) {
 		hashCopy := *info.BlockHash
 		existing.BlockHash = &hashCopy
 	}
-	// TransportType zero value is TRANSPORT_HTTP which is valid, so always overwrite.
-	// Callers doing partial updates MUST set TransportType explicitly or it resets to HTTP.
-	existing.TransportType = info.TransportType
+	// Only update TransportType when the caller explicitly set it.
+	if info.TransportTypeSet {
+		existing.TransportType = info.TransportType
+	}
 	existing.LastSeen = now
 }
 
@@ -238,7 +240,7 @@ func (r *CentralizedPeerRegistry) List(
 	result := make([]*PeerInfo, 0, len(r.peers))
 
 	for _, info := range r.peers {
-		if excludeBanned && info.IsBanned {
+		if excludeBanned && r.isPeerBannedLocked(info.ID) {
 			continue
 		}
 		if transportFilter != nil && info.TransportType != *transportFilter {
@@ -276,6 +278,16 @@ func (r *CentralizedPeerRegistry) Count() int {
 	defer r.mu.RUnlock()
 
 	return len(r.peers)
+}
+
+// isPeerBannedLocked checks if a peer is currently banned, considering expiry.
+// Must be called with r.mu held (read or write lock).
+func (r *CentralizedPeerRegistry) isPeerBannedLocked(peerID string) bool {
+	entry, ok := r.banScores[peerID]
+	if !ok || !entry.Banned {
+		return false
+	}
+	return time.Now().Before(entry.BanUntil)
 }
 
 // calculateAndUpdateReputation recalculates and stores the reputation score for

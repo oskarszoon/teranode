@@ -252,11 +252,12 @@ func (s *Server) handleSubtreeTopic(_ context.Context, m []byte, fromID string) 
 // addProtocolViolation records a protocol violation against a peer via the central registry.
 func (s *Server) addProtocolViolation(peerID string) {
 	if s.centralRegistry != nil {
-		go func() {
-			if _, _, err := s.centralRegistry.AddBanScore(s.gCtx, peerID, "protocol_violation", 20); err != nil {
-				s.logger.Warnf("[P2P] failed to add protocol violation score for peer %s: %v", peerID, err)
+		pid := peerID // capture for closure
+		s.enqueueRegistryUpdate(func() {
+			if _, _, err := s.centralRegistry.AddBanScore(s.gCtx, pid, "protocol_violation", 20); err != nil {
+				s.logger.Warnf("[P2P] failed to add protocol violation score for peer %s: %v", pid, err)
 			}
-		}()
+		})
 	}
 }
 
@@ -583,10 +584,25 @@ func (s *Server) SetCentralPeerRegistry(r blockchain.PeerRegistryClientI) {
 	s.centralRegistry = r
 }
 
+// enqueueRegistryUpdate sends a registry update function to the worker pool.
+// If the channel is full, the update is dropped with a warning log (best-effort).
+func (s *Server) enqueueRegistryUpdate(fn func()) {
+	if s.registryUpdateCh == nil {
+		return
+	}
+	select {
+	case s.registryUpdateCh <- fn:
+	default:
+		s.logger.Warnf("[P2P] registry update channel full, dropping update")
+	}
+}
+
 func (s *Server) addPeer(peerID peer.ID, clientName string, height uint32, blockHash *chainhash.Hash, dataHubURL string) {
 	if s.centralRegistry != nil {
 		info := p2pPeerToRegistryInfo(peerID, clientName, height, blockHash, dataHubURL, false)
-		go s.registerInCentralRegistry(info)
+		s.enqueueRegistryUpdate(func() {
+			s.registerInCentralRegistry(info)
+		})
 	}
 }
 
@@ -594,7 +610,9 @@ func (s *Server) addPeer(peerID peer.ID, clientName string, height uint32, block
 func (s *Server) addConnectedPeer(peerID peer.ID, clientName string, height uint32, blockHash *chainhash.Hash, dataHubURL string) {
 	if s.centralRegistry != nil {
 		info := p2pPeerToRegistryInfo(peerID, clientName, height, blockHash, dataHubURL, false)
-		go s.registerInCentralRegistry(info)
+		s.enqueueRegistryUpdate(func() {
+			s.registerInCentralRegistry(info)
+		})
 	}
 }
 
@@ -615,11 +633,11 @@ func (s *Server) InjectPeerForTesting(peerID peer.ID, clientName, dataHubURL str
 func (s *Server) removePeer(peerID peer.ID) {
 	if s.centralRegistry != nil {
 		peerIDStr := peerID.String()
-		go func() {
+		s.enqueueRegistryUpdate(func() {
 			if err := s.centralRegistry.RemovePeer(s.gCtx, peerIDStr); err != nil {
 				s.logger.Warnf("[P2P] failed to remove peer %s from central registry: %v", peerIDStr, err)
 			}
-		}()
+		})
 	}
 }
 
@@ -649,7 +667,9 @@ func (s *Server) updateStorage(peerID peer.ID, mode string) {
 			ID:      peerID.String(),
 			Storage: mode,
 		}
-		go s.registerInCentralRegistry(info)
+		s.enqueueRegistryUpdate(func() {
+			s.registerInCentralRegistry(info)
+		})
 	}
 }
 
@@ -916,7 +936,6 @@ func (s *Server) parseHash(hashStr string, context string) (*chainhash.Hash, err
 		s.logger.Errorf("[%s] error getting chainhash from string %s: %v", context, hashStr, err)
 		return nil, err
 	}
-
 	return hash, nil
 }
 
@@ -987,7 +1006,7 @@ func (s *Server) handleBanEvent(ctx context.Context, event BanEvent) {
 }
 
 // registerInCentralRegistry sends a RegisterPeer call to the centralized registry.
-// Always called in a goroutine so it never blocks the hot path.
+// Always called via enqueueRegistryUpdate so it never blocks the hot path.
 func (s *Server) registerInCentralRegistry(info *blockchain.PeerInfo) {
 	if err := s.centralRegistry.RegisterPeer(s.gCtx, info); err != nil {
 		s.logger.Warnf("[P2P] failed to register peer %s in central registry: %v", info.ID, err)
@@ -997,13 +1016,14 @@ func (s *Server) registerInCentralRegistry(info *blockchain.PeerInfo) {
 // p2pPeerToRegistryInfo converts P2P peer fields to the transport-agnostic PeerInfo used by the centralized registry.
 func p2pPeerToRegistryInfo(peerID peer.ID, clientName string, height uint32, blockHash *chainhash.Hash, dataHubURL string, isBanned bool) *blockchain.PeerInfo {
 	return &blockchain.PeerInfo{
-		ID:            peerID.String(),
-		TransportType: blockchain_api.TransportType_TRANSPORT_HTTP,
-		ClientName:    clientName,
-		Height:        height,
-		BlockHash:     blockHash,
-		DataHubURL:    dataHubURL,
-		IsBanned:      isBanned,
+		ID:               peerID.String(),
+		TransportType:    blockchain_api.TransportType_TRANSPORT_HTTP,
+		TransportTypeSet: true,
+		ClientName:       clientName,
+		Height:           height,
+		BlockHash:        blockHash,
+		DataHubURL:       dataHubURL,
+		IsBanned:         isBanned,
 	}
 }
 
