@@ -525,7 +525,6 @@ func (m *Mock) ReportPeerFailure(ctx context.Context, hash *chainhash.Hash, peer
 	return args.Error(0)
 }
 
-
 // Idle mocks the Idle method
 func (m *Mock) Idle(ctx context.Context) error {
 	args := m.Called(ctx)
@@ -1283,7 +1282,6 @@ func (m *mockBlockClient) Run(ctx context.Context, req *emptypb.Empty, opts ...g
 func (m *mockBlockClient) CatchUpBlocks(ctx context.Context, req *emptypb.Empty, opts ...grpc.CallOption) (*emptypb.Empty, error) {
 	return &emptypb.Empty{}, m.err
 }
-
 
 func (m *mockBlockClient) Idle(ctx context.Context, req *emptypb.Empty, opts ...grpc.CallOption) (*emptypb.Empty, error) {
 	return &emptypb.Empty{}, m.err

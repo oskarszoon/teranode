@@ -2665,7 +2665,6 @@ func (b *Blockchain) ReportPeerFailure(ctx context.Context, req *blockchain_api.
 	return &emptypb.Empty{}, nil
 }
 
-
 func (b *Blockchain) Idle(ctx context.Context, _ *emptypb.Empty) (*emptypb.Empty, error) {
 	// check whether the FSM is already in the Idle state
 	if b.finiteStateMachine.Is(blockchain_api.FSMStateType_IDLE.String()) {
