@@ -283,9 +283,47 @@ func (u *Server) catchup(ctx context.Context, blockUpTo *model.Block, peerID, ba
 		return err
 	}
 
-	// Step 10: Fetch and validate blocks
+	// Step 10: Fetch and validate blocks — with peer fallback on BLOCK_INCOMPLETE.
+	// If a peer can't provide full block data (pruned), try alternative peers
+	// using the same validated headers.
 	if err = u.fetchAndValidateBlocks(ctx, catchupCtx); err != nil {
-		return err
+		if !errors.Is(err, errors.ErrBlockIncomplete) || u.centralPeerRegistry == nil {
+			return err
+		}
+
+		u.logger.Warnf("[catchup][%s] Peer %s has incomplete blocks, trying alternative peers",
+			blockUpTo.Hash().String(), catchupCtx.peerID)
+
+		// Find alternative peers from the central registry
+		altPeers, listErr := u.selectBestPeersFromCentralRegistry(ctx, 0)
+		if listErr != nil || len(altPeers) == 0 {
+			return err // no alternatives, return original error
+		}
+
+		retried := false
+		for _, alt := range altPeers {
+			if alt.ID == catchupCtx.peerID || alt.BlockHash == nil {
+				continue
+			}
+			u.logger.Infof("[catchup][%s] Retrying block fetch from alternative peer %s (%s)",
+				blockUpTo.Hash().String(), alt.ID, alt.DataHubURL)
+
+			catchupCtx.peerID = alt.ID
+			catchupCtx.baseURL = alt.DataHubURL
+			if retryErr := u.fetchAndValidateBlocks(ctx, catchupCtx); retryErr != nil {
+				if errors.Is(retryErr, errors.ErrBlockIncomplete) {
+					u.logger.Warnf("[catchup][%s] Alternative peer %s also has incomplete blocks, trying next",
+						blockUpTo.Hash().String(), alt.ID)
+					continue
+				}
+				return retryErr
+			}
+			retried = true
+			break
+		}
+		if !retried {
+			return err // all alternatives failed
+		}
 	}
 
 	// Step 11: Clean up resources
