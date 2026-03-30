@@ -112,6 +112,7 @@ func (u *Server) runCentralRegistryPoller(ctx context.Context) {
 	defer ticker.Stop()
 
 	attempts := 0
+	usingFastInterval := true
 	for {
 		select {
 		case <-ctx.Done():
@@ -121,10 +122,26 @@ func (u *Server) runCentralRegistryPoller(ctx context.Context) {
 			triggered := u.pollCentralRegistry(ctx)
 			attempts++
 
-			// Switch to normal interval once catchup has been triggered or
-			// the initial burst of fast polls is exhausted.
-			if triggered || attempts >= centralRegistryInitialPollAttempts {
-				ticker.Reset(centralRegistryPollInterval)
+			if usingFastInterval {
+				// Switch to normal interval once the initial peer discovery burst is done.
+				// Don't switch just because catchup was triggered — we may still be far behind.
+				if attempts >= centralRegistryInitialPollAttempts {
+					ticker.Reset(centralRegistryPollInterval)
+					usingFastInterval = false
+				}
+			}
+
+			// If catchup just completed successfully and we're still behind, poll again quickly.
+			if triggered && !u.isCatchingUp.Load() {
+				localHeight := u.utxoStore.GetBlockHeight()
+				if localHeight > 0 {
+					// Check if we're still significantly behind any peer
+					peers, _ := u.selectBestPeersFromCentralRegistry(ctx, localHeight+1)
+					if len(peers) > 0 {
+						ticker.Reset(centralRegistryInitialPollInterval)
+						usingFastInterval = true
+					}
+				}
 			}
 		}
 	}
