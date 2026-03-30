@@ -475,36 +475,55 @@ func (u *Server) releaseCatchupLock(ctx *CatchupContext, err *error) {
 func (u *Server) fetchHeaders(ctx context.Context, catchupCtx *CatchupContext) error {
 	u.logger.Debugf("[catchup][%s] Step 1: Fetching headers from peer %s", catchupCtx.blockUpTo.Hash().String(), catchupCtx.baseURL)
 
-	// Calculate the header cap for this catchup round based on the next checkpoint.
-	// We want to accumulate just enough headers to reach the next checkpoint (+ 1 batch buffer),
-	// then start block fetching with quick validation enabled. If the checkpoint is further than
-	// the configured default, raise the cap. If closer, lower it for faster block processing.
-	maxAccumulated := u.settings.BlockValidation.CatchupMaxAccumulatedHeaders
-	if len(catchupCtx.checkpoints) > 0 {
-		localHeight := uint32(0)
-		if u.utxoStore != nil {
-			localHeight = u.utxoStore.GetBlockHeight()
-		}
-		for _, cp := range catchupCtx.checkpoints {
-			if uint32(cp.Height) > localHeight {
-				// Fetch exactly up to the checkpoint (+1 for common ancestor header).
-				// Blocks beyond this checkpoint are left for the next round where
-				// the next checkpoint will be verified for quick validation.
-				needed := int(uint32(cp.Height)-localHeight) + 1
-				u.logger.Infof("[catchup][%s] Targeting checkpoint at height %d (local: %d, need %d headers, default cap: %d)",
-					catchupCtx.blockUpTo.Hash().String(), cp.Height, localHeight, needed, maxAccumulated)
-				maxAccumulated = needed
-				break
-			}
+	localHeight := uint32(0)
+	if u.utxoStore != nil {
+		localHeight = u.utxoStore.GetBlockHeight()
+	}
+
+	// Strategy: if the next checkpoint is known, use the fast /headers backward walk.
+	// This is significantly faster than headers_from_common_ancestor because it avoids
+	// the expensive common ancestor computation on the peer. Beyond the last checkpoint,
+	// fall back to the original method.
+	nextCheckpoint := findNextCheckpointForHeight(catchupCtx.checkpoints, localHeight)
+
+	if nextCheckpoint != nil && nextCheckpoint.Hash != nil {
+		u.logger.Infof("[catchup][%s] Using backward walk from checkpoint at height %d (local: %d)",
+			catchupCtx.blockUpTo.Hash().String(), nextCheckpoint.Height, localHeight)
+
+		headers, fetchErr := u.fetchHeadersBackwardFromCheckpoint(
+			ctx, catchupCtx.baseURL, nextCheckpoint.Hash,
+			uint32(nextCheckpoint.Height), localHeight,
+		)
+		if fetchErr != nil {
+			u.logger.Warnf("[catchup][%s] Backward walk failed, falling back to headers_from_common_ancestor: %v",
+				catchupCtx.blockUpTo.Hash().String(), fetchErr)
+			// Fall through to the original method below
+		} else {
+			// Build a CatchupResult from the backward-walked headers
+			startHash := catchupCtx.blockUpTo.Hash()
+			result := catchup.CreateCatchupResult(headers, startHash, nil, 0, time.Now(), catchupCtx.baseURL, 0, nil, true, "checkpoint backward walk")
+			catchupCtx.headersFetchResult = result
+			u.logger.Infof("[catchup][%s] Fetched %d headers from peer via backward walk", catchupCtx.blockUpTo.Hash().String(), len(headers))
+			return nil
 		}
 	}
+
+	// Fallback: use headers_from_common_ancestor (for blocks beyond last checkpoint,
+	// or when backward walk fails).
+	maxAccumulated := u.settings.BlockValidation.CatchupMaxAccumulatedHeaders
+	if nextCheckpoint != nil {
+		needed := int(uint32(nextCheckpoint.Height)-localHeight) + 1
+		u.logger.Infof("[catchup][%s] Targeting checkpoint at height %d (local: %d, need %d headers, default cap: %d)",
+			catchupCtx.blockUpTo.Hash().String(), nextCheckpoint.Height, localHeight, needed, maxAccumulated)
+		maxAccumulated = needed
+	}
+
 	result, _, err := u.catchupGetBlockHeaders(ctx, catchupCtx.blockUpTo, catchupCtx.peerID, catchupCtx.baseURL, catchupCtx.transport, maxAccumulated)
 	if err != nil {
 		return errors.NewProcessingError("[catchup][%s] failed to get block headers: %w", catchupCtx.blockUpTo.Hash().String(), err)
 	}
 
 	catchupCtx.headersFetchResult = result
-
 	u.logger.Infof("[catchup][%s] Fetched %d headers from peer", catchupCtx.blockUpTo.Hash().String(), len(result.Headers))
 
 	return nil
