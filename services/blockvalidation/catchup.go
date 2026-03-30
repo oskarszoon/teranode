@@ -437,9 +437,10 @@ func (u *Server) releaseCatchupLock(ctx *CatchupContext, err *error) {
 func (u *Server) fetchHeaders(ctx context.Context, catchupCtx *CatchupContext) error {
 	u.logger.Debugf("[catchup][%s] Step 1: Fetching headers from peer %s", catchupCtx.blockUpTo.Hash().String(), catchupCtx.baseURL)
 
-	// Calculate the header cap for this catchup round. If the next checkpoint
-	// requires more headers than the configured default, raise the cap so we
-	// accumulate enough headers for checkpoint verification and quick validation.
+	// Calculate the header cap for this catchup round based on the next checkpoint.
+	// We want to accumulate just enough headers to reach the next checkpoint (+ 1 batch buffer),
+	// then start block fetching with quick validation enabled. If the checkpoint is further than
+	// the configured default, raise the cap. If closer, lower it for faster block processing.
 	maxAccumulated := u.settings.BlockValidation.CatchupMaxAccumulatedHeaders
 	if len(catchupCtx.checkpoints) > 0 {
 		localHeight := uint32(0)
@@ -449,11 +450,9 @@ func (u *Server) fetchHeaders(ctx context.Context, catchupCtx *CatchupContext) e
 		for _, cp := range catchupCtx.checkpoints {
 			if uint32(cp.Height) > localHeight {
 				needed := int(uint32(cp.Height)-localHeight) + maxBlockHeadersPerRequest
-				if needed > maxAccumulated {
-					u.logger.Infof("[catchup][%s] Raising max accumulated headers from %d to %d to reach checkpoint at height %d",
-						catchupCtx.blockUpTo.Hash().String(), maxAccumulated, needed, cp.Height)
-					maxAccumulated = needed
-				}
+				u.logger.Infof("[catchup][%s] Targeting checkpoint at height %d (local: %d, need %d headers, default cap: %d)",
+					catchupCtx.blockUpTo.Hash().String(), cp.Height, localHeight, needed, maxAccumulated)
+				maxAccumulated = needed
 				break
 			}
 		}
