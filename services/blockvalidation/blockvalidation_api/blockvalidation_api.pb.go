@@ -544,6 +544,7 @@ type CatchupStatusResponse struct {
 	CommonAncestorHash   string                  `protobuf:"bytes,13,opt,name=common_ancestor_hash,json=commonAncestorHash,proto3" json:"common_ancestor_hash,omitempty"`
 	CommonAncestorHeight uint32                  `protobuf:"varint,14,opt,name=common_ancestor_height,json=commonAncestorHeight,proto3" json:"common_ancestor_height,omitempty"`
 	PreviousAttempt      *PreviousCatchupAttempt `protobuf:"bytes,15,opt,name=previous_attempt,json=previousAttempt,proto3" json:"previous_attempt,omitempty"`
+	Phase                string                  `protobuf:"bytes,16,opt,name=phase,proto3" json:"phase,omitempty"` // "downloading_headers", "validating_blocks", "finalizing"
 	unknownFields        protoimpl.UnknownFields
 	sizeCache            protoimpl.SizeCache
 }
@@ -683,6 +684,13 @@ func (x *CatchupStatusResponse) GetPreviousAttempt() *PreviousCatchupAttempt {
 	return nil
 }
 
+func (x *CatchupStatusResponse) GetPhase() string {
+	if x != nil {
+		return x.Phase
+	}
+	return ""
+}
+
 var File_services_blockvalidation_blockvalidation_api_blockvalidation_api_proto protoreflect.FileDescriptor
 
 const file_services_blockvalidation_blockvalidation_api_blockvalidation_api_proto_rawDesc = "" +
@@ -723,7 +731,7 @@ const file_services_blockvalidation_blockvalidation_api_blockvalidation_api_prot
 	"\fattempt_time\x18\a \x01(\x03R\vattemptTime\x12\x1f\n" +
 	"\vduration_ms\x18\b \x01(\x03R\n" +
 	"durationMs\x12)\n" +
-	"\x10blocks_validated\x18\t \x01(\x03R\x0fblocksValidated\"\x88\x05\n" +
+	"\x10blocks_validated\x18\t \x01(\x03R\x0fblocksValidated\"\x9e\x05\n" +
 	"\x15CatchupStatusResponse\x12$\n" +
 	"\x0eis_catching_up\x18\x01 \x01(\bR\fisCatchingUp\x12\x17\n" +
 	"\apeer_id\x18\x02 \x01(\tR\x06peerId\x12\x19\n" +
@@ -743,7 +751,8 @@ const file_services_blockvalidation_blockvalidation_api_blockvalidation_api_prot
 	"fork_depth\x18\f \x01(\rR\tforkDepth\x120\n" +
 	"\x14common_ancestor_hash\x18\r \x01(\tR\x12commonAncestorHash\x124\n" +
 	"\x16common_ancestor_height\x18\x0e \x01(\rR\x14commonAncestorHeight\x12V\n" +
-	"\x10previous_attempt\x18\x0f \x01(\v2+.blockvalidation_api.PreviousCatchupAttemptR\x0fpreviousAttempt2\xda\x04\n" +
+	"\x10previous_attempt\x18\x0f \x01(\v2+.blockvalidation_api.PreviousCatchupAttemptR\x0fpreviousAttempt\x12\x14\n" +
+	"\x05phase\x18\x10 \x01(\tR\x05phase2\xda\x04\n" +
 	"\x12BlockValidationAPI\x12V\n" +
 	"\n" +
 	"HealthGRPC\x12!.blockvalidation_api.EmptyMessage\x1a#.blockvalidation_api.HealthResponse\"\x00\x12Y\n" +

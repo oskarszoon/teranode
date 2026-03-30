@@ -90,4 +90,5 @@ message CatchupStatusResponse {
   string common_ancestor_hash = 13;
   uint32 common_ancestor_height = 14;
   PreviousCatchupAttempt previous_attempt = 15;
+  string phase = 16;  // "downloading_headers", "validating_blocks", "finalizing"
 }

@@ -83,6 +83,9 @@ type CatchupStatus struct {
 	// CommonAncestorHeight is the height of the common ancestor block
 	CommonAncestorHeight uint32 `json:"common_ancestor_height,omitempty"`
 
+	// Phase indicates the current catchup phase: "downloading_headers", "validating_blocks", or "finalizing"
+	Phase string `json:"phase,omitempty"`
+
 	// PreviousAttempt contains details about the last failed catchup attempt, if any
 	PreviousAttempt *PreviousAttempt `json:"previous_attempt,omitempty"`
 }
@@ -124,13 +127,29 @@ func (u *Server) getCatchupStatusInternal() *CatchupStatus {
 	status.PeerURL = ctx.baseURL
 	status.TargetBlockHash = ctx.blockUpTo.Hash().String()
 	status.TargetBlockHeight = ctx.blockUpTo.Height
-	status.CurrentHeight = ctx.currentHeight
 	status.TotalBlocks = len(ctx.blockHeaders)
 	status.BlocksFetched = u.blocksFetched.Load()
 	status.BlocksValidated = u.blocksValidated.Load()
 	status.StartTime = ctx.startTime.UnixMilli()
 	status.DurationMs = time.Since(ctx.startTime).Milliseconds()
 	status.ForkDepth = ctx.forkDepth
+
+	// Use UTXO height as current height — catchupCtx.currentHeight is only set
+	// after findCommonAncestor, but we want to show progress during header fetch too.
+	if ctx.currentHeight > 0 {
+		status.CurrentHeight = ctx.currentHeight
+	} else if u.utxoStore != nil {
+		status.CurrentHeight = u.utxoStore.GetBlockHeight()
+	}
+
+	// Determine the catchup phase for the dashboard
+	if status.TotalBlocks == 0 && status.BlocksFetched == 0 {
+		status.Phase = "downloading_headers"
+	} else if status.BlocksValidated < int64(status.TotalBlocks) {
+		status.Phase = "validating_blocks"
+	} else {
+		status.Phase = "finalizing"
+	}
 
 	// Add common ancestor info if available
 	if ctx.commonAncestorHash != nil {

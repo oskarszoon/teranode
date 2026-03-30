@@ -49,6 +49,7 @@ func (h *HTTP) GetCatchupStatus(c echo.Context) error {
 		"fork_depth":             status.ForkDepth,
 		"common_ancestor_hash":   status.CommonAncestorHash,
 		"common_ancestor_height": status.CommonAncestorHeight,
+		"phase":                  status.Phase,
 	}
 
 	// Add previous attempt if available

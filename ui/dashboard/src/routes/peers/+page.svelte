@@ -73,6 +73,7 @@
     start_time: number
     duration_ms: number
     fork_depth: number
+    phase: string
     common_ancestor_hash: string
     common_ancestor_height: number
     previous_attempt?: PreviousAttemptData
@@ -684,17 +685,21 @@
           </span>
         </div>
         <div class="catchup-detail-item">
-          <span class="catchup-label">Starting Height</span>
+          <span class="catchup-label">Current Height</span>
           <span class="catchup-value">#{catchupStatus.current_height?.toLocaleString()}</span>
         </div>
         <div class="catchup-detail-item">
           <span class="catchup-label">Progress</span>
           <span class="catchup-value progress-value">
-            {catchupStatus.blocks_validated || 0} / {catchupStatus.total_blocks || 0} blocks
-            {#if catchupStatus.total_blocks > 0}
-              <span class="progress-percentage">
-                ({((catchupStatus.blocks_validated / catchupStatus.total_blocks) * 100).toFixed(1)}%)
-              </span>
+            {#if catchupStatus.phase === 'downloading_headers'}
+              Downloading headers...
+            {:else}
+              {catchupStatus.blocks_validated || 0} / {catchupStatus.total_blocks || 0} blocks
+              {#if catchupStatus.total_blocks > 0}
+                <span class="progress-percentage">
+                  ({((catchupStatus.blocks_validated / catchupStatus.total_blocks) * 100).toFixed(1)}%)
+                </span>
+              {/if}
             {/if}
           </span>
         </div>

@@ -499,6 +499,7 @@ func (u *Server) GetCatchupStatus(ctx context.Context, _ *blockvalidation_api.Em
 		ForkDepth:            status.ForkDepth,
 		CommonAncestorHash:   status.CommonAncestorHash,
 		CommonAncestorHeight: status.CommonAncestorHeight,
+		Phase:                status.Phase,
 	}
 
 	// Add previous attempt if available
