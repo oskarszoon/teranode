@@ -449,7 +449,8 @@ func (u *Server) fetchHeaders(ctx context.Context, catchupCtx *CatchupContext) e
 		}
 		for _, cp := range catchupCtx.checkpoints {
 			if uint32(cp.Height) > localHeight {
-				needed := int(uint32(cp.Height)-localHeight) + maxBlockHeadersPerRequest
+				// Small buffer for common ancestor header that precedes the actual chain headers.
+				needed := int(uint32(cp.Height)-localHeight) + 100
 				u.logger.Infof("[catchup][%s] Targeting checkpoint at height %d (local: %d, need %d headers, default cap: %d)",
 					catchupCtx.blockUpTo.Hash().String(), cp.Height, localHeight, needed, maxAccumulated)
 				maxAccumulated = needed

@@ -7,6 +7,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/model"
 	"github.com/bsv-blockchain/teranode/services/blockchain"
 	"github.com/bsv-blockchain/teranode/services/blockchain/blockchain_api"
@@ -184,10 +185,17 @@ func (u *Server) pollCentralRegistry(ctx context.Context) bool {
 		u.logger.Warnf("[central_registry] Catchup from peer %s failed: %v", best.ID, err)
 		u.reportCatchupMetricsToCentralRegistry(ctx, best.ID, false, false, responseMs)
 
-		// Put the peer on cooldown (exponential: 30s, 60s, 120s, max 5min).
-		cooldown := u.nextCooldownForPeer(best.ID)
-		u.catchupPeerCooldowns[best.ID] = time.Now().Add(cooldown)
-		u.logger.Infof("[central_registry] Peer %s on cooldown for %s after failure", best.ID, cooldown)
+		// BLOCK_INCOMPLETE means the peer is pruned and can't provide full block data.
+		// Put them on a very long cooldown — they'll never have this data.
+		if errors.Is(err, errors.ErrBlockIncomplete) {
+			u.catchupPeerCooldowns[best.ID] = time.Now().Add(24 * time.Hour)
+			u.logger.Infof("[central_registry] Peer %s is pruned (incomplete block data), skipping for 24h", best.ID)
+		} else {
+			// Transient failure — exponential cooldown: 30s, 60s, 120s, max 5min.
+			cooldown := u.nextCooldownForPeer(best.ID)
+			u.catchupPeerCooldowns[best.ID] = time.Now().Add(cooldown)
+			u.logger.Infof("[central_registry] Peer %s on cooldown for %s after failure", best.ID, cooldown)
+		}
 
 		return true
 	}
