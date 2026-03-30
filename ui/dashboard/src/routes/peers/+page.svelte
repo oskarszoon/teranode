@@ -286,10 +286,11 @@
         throw new Error(result.error)
       }
 
-      // Filter out peers whose last message was over 1 minute ago
+      // Filter out peers whose last message was over 5 minutes ago.
+      // Peers with last_message_time=0 are included (recently registered, no message time yet).
       const now = Math.floor(Date.now() / 1000)
-      const oneMinuteAgo = now - 60
-      allData = (result.peers || []).filter(peer => peer.last_message_time > oneMinuteAgo)
+      const fiveMinutesAgo = now - 300
+      allData = (result.peers || []).filter(peer => peer.last_message_time === 0 || peer.last_message_time > fiveMinutesAgo)
       updatePaginatedData()
     } catch (err) {
       console.error('Failed to fetch peers:', err)

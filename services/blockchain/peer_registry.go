@@ -112,6 +112,7 @@ func (r *CentralizedPeerRegistry) Register(info *PeerInfo) {
 		}
 		entry.ConnectedAt = now
 		entry.LastSeen = now
+		entry.LastMessageTime = now
 		entry.ReputationScore = 50.0
 		r.peers[info.ID] = &entry
 		return
@@ -142,6 +143,7 @@ func (r *CentralizedPeerRegistry) Register(info *PeerInfo) {
 		existing.TransportType = info.TransportType
 	}
 	existing.LastSeen = now
+	existing.LastMessageTime = now
 }
 
 // UpdateMetrics atomically applies delta network counters and interaction outcome
