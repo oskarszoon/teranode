@@ -113,6 +113,10 @@ type Server struct {
 	// Used to validate incoming blocks before acceptance
 	blockValidation blockvalidation.Interface
 
+	// pendingCentralRegistry is stored when SetCentralPeerRegistry is called before Start().
+	// Applied to the inner server during Start().
+	pendingCentralRegistry blockchain.PeerRegistryClientI
+
 	// blockAssemblyClient handles block assembly operations
 	// Used for mining and block template generation
 	blockAssemblyClient *blockassembly.Client
@@ -328,6 +332,11 @@ func (s *Server) Init(ctx context.Context) error {
 	)
 	if err != nil {
 		return err
+	}
+
+	// Apply the central peer registry if it was set before Start().
+	if s.pendingCentralRegistry != nil {
+		s.server.SetCentralPeerRegistry(s.pendingCentralRegistry)
 	}
 
 	// TODO: is this still needed? Also defined in services/legacy/peer_server.go:2271
@@ -718,9 +727,10 @@ func (s *Server) Stop(_ context.Context) error {
 }
 
 // SetCentralPeerRegistry sets the optional central peer registry client.
-// When set, Legacy peers are registered/removed from the centralized registry
-// in addition to local tracking (dual-write phase).
+// If called before Start() (which is typical), the client is stored and
+// applied to the inner server once it's created during Start().
 func (s *Server) SetCentralPeerRegistry(r blockchain.PeerRegistryClientI) {
+	s.pendingCentralRegistry = r
 	if s.server != nil {
 		s.server.SetCentralPeerRegistry(r)
 	}

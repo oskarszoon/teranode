@@ -5,8 +5,10 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/bsv-blockchain/teranode/services/blockchain"
 	"github.com/bsv-blockchain/teranode/services/p2p"
 	"github.com/labstack/echo/v4"
+	"github.com/libp2p/go-libp2p/core/peer"
 )
 
 // PeerInfoResponse represents the JSON response for a single peer
@@ -45,28 +47,18 @@ type PeersResponse struct {
 	Count int                `json:"count"`
 }
 
-// GetPeers returns the current peer registry data from the P2P service
+// GetPeers returns the current peer registry data from the centralized registry
+// in the blockchain service. All peers (P2P and legacy) are stored there.
 func (h *HTTP) GetPeers(c echo.Context) error {
 	ctx, cancel := context.WithTimeout(c.Request().Context(), 5*time.Second)
 	defer cancel()
 
-	p2pClient := h.repository.GetP2PClient()
-
-	// Check if P2P client connection is available
-	if p2pClient == nil {
-		h.logger.Errorf("[GetPeers] P2P client not available")
-		return c.JSON(http.StatusServiceUnavailable, PeersResponse{
-			Peers: []PeerInfoResponse{},
-			Count: 0,
-		})
-	}
-
-	// Get comprehensive peer registry data using the p2p.ClientI interface
-	// Returns []*p2p.PeerInfo
-	peers, err := p2pClient.GetPeerRegistry(ctx)
+	// Query the central registry directly — it's the single source of truth
+	// for all peers regardless of transport (HTTP/P2P and wire/legacy).
+	peers, err := h.getPeersFromCentralRegistry(ctx)
 	if err != nil {
-		h.logger.Errorf("[GetPeers] Failed to get peer registry: %v", err)
-		return c.JSON(http.StatusInternalServerError, PeersResponse{
+		h.logger.Errorf("[GetPeers] Failed to get peers from central registry: %v", err)
+		return c.JSON(http.StatusServiceUnavailable, PeersResponse{
 			Peers: []PeerInfoResponse{},
 			Count: 0,
 		})
@@ -117,4 +109,61 @@ func (h *HTTP) GetPeers(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, response)
+}
+
+// getPeersFromCentralRegistry queries the blockchain service's PeerRegistryService directly.
+// Used as a fallback when P2P is not running (e.g., legacy-only mode).
+func (h *HTTP) getPeersFromCentralRegistry(ctx context.Context) ([]*p2p.PeerInfo, error) {
+	blockchainClient := h.repository.GetBlockchainClient()
+	if blockchainClient == nil {
+		return nil, nil
+	}
+
+	// Use the blockchain gRPC address to create a peer registry client.
+	// The PeerRegistryService is served on the same gRPC port as BlockchainAPI.
+	registryClient, err := blockchain.NewPeerRegistryClient(ctx, h.settings.BlockChain.GRPCAddress, h.settings)
+	if err != nil {
+		return nil, err
+	}
+	defer registryClient.Close()
+
+	centralPeers, err := registryClient.ListPeers(ctx, nil, 0, 0, false)
+	if err != nil {
+		return nil, err
+	}
+
+	peers := make([]*p2p.PeerInfo, 0, len(centralPeers))
+	for _, cp := range centralPeers {
+		peerInfo := &p2p.PeerInfo{
+			ClientName:             cp.ClientName,
+			Height:                 cp.Height,
+			DataHubURL:             cp.DataHubURL,
+			BanScore:               int(cp.BanScore),
+			IsBanned:               cp.IsBanned,
+			ConnectedAt:            cp.ConnectedAt,
+			BytesReceived:          cp.BytesReceived,
+			LastMessageTime:        cp.LastMessageTime,
+			Storage:                cp.Storage,
+			InteractionAttempts:    cp.InteractionAttempts,
+			InteractionSuccesses:   cp.InteractionSuccesses,
+			InteractionFailures:    cp.InteractionFailures,
+			LastInteractionAttempt: cp.LastInteractionAttempt,
+			LastInteractionSuccess: cp.LastInteractionSuccess,
+			LastInteractionFailure: cp.LastInteractionFailure,
+			ReputationScore:        cp.ReputationScore,
+			MaliciousCount:         cp.MaliciousCount,
+		}
+		// For legacy peers, ID is the network address (host:port) — not a valid libp2p peer ID.
+		// Set it as raw bytes so .String() returns the address.
+		peerInfo.ID = peer.ID(cp.ID)
+		if cp.BlockHash != nil {
+			peerInfo.BlockHash = cp.BlockHash
+		}
+		if cp.NetworkAddress != "" {
+			peerInfo.DataHubURL = cp.NetworkAddress
+		}
+		peers = append(peers, peerInfo)
+	}
+
+	return peers, nil
 }

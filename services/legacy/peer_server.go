@@ -1812,7 +1812,7 @@ func (s *server) handleUpdatePeerHeights(state *peerState, umsg updatePeerHeight
 				addr := sp.Addr()
 				h := umsg.newHeight
 				go func() {
-					if e := s.centralRegistry.UpdatePeerMetrics(s.ctx, addr, uint32(h), 0, 0, false, false, false, 0); e != nil {
+					if e := s.centralRegistry.UpdatePeerMetrics(s.ctx, addr, uint32(h), 0, 0, true, false, false, 0); e != nil {
 						s.logger.Warnf("[Legacy] centralRegistry.UpdatePeerMetrics height %s: %v", addr, e)
 					}
 				}()
@@ -1940,8 +1940,12 @@ func (s *server) handleAddPeerMsg(state *peerState, sp *serverPeer) bool {
 		go func() {
 			if err := s.centralRegistry.RegisterPeer(s.ctx, info); err != nil {
 				s.logger.Warnf("[Legacy] centralRegistry.RegisterPeer %s: %v", sp.Addr(), err)
+			} else {
+				s.logger.Infof("[Legacy] centralRegistry.RegisterPeer %s: success (height=%d, transport=WIRE)", sp.Addr(), info.Height)
 			}
 		}()
+	} else {
+		s.logger.Warnf("[Legacy] centralRegistry is nil, cannot register peer %s", sp.Addr())
 	}
 
 	return true
