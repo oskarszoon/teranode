@@ -39,6 +39,7 @@ import (
 	"github.com/bsv-blockchain/teranode/services/blockassembly"
 	"github.com/bsv-blockchain/teranode/services/blockchain"
 	"github.com/bsv-blockchain/teranode/services/blockvalidation"
+	"github.com/bsv-blockchain/teranode/services/legacy/netsync"
 	"github.com/bsv-blockchain/teranode/services/legacy/peer_api"
 	"github.com/bsv-blockchain/teranode/services/subtreevalidation"
 	"github.com/bsv-blockchain/teranode/services/validator"
@@ -851,6 +852,75 @@ func (s *Server) FetchBlockFromPeer(ctx context.Context, req *peer_api.FetchBloc
 		return nil, errors.NewNetworkTimeoutError("timeout waiting for block %s from peer %s", hashStr, req.PeerAddr)
 	case <-ctx.Done():
 		return nil, ctx.Err()
+	}
+}
+
+// DelegateCatchup implements PeerServiceServer.
+// It delegates a catchup operation to the legacy sync manager on behalf of BlockValidation.
+// The specified wire-protocol peer is used to sync up to the target height.
+// Progress is streamed back to the caller.
+func (s *Server) DelegateCatchup(req *peer_api.DelegateCatchupRequest, stream peer_api.PeerService_DelegateCatchupServer) error {
+	if s.server == nil {
+		return errors.NewServiceUnavailableError("legacy server not started")
+	}
+
+	sp := s.server.getPeerByAddr(req.PeerAddr)
+	if sp == nil {
+		return errors.NewNotFoundError("peer %s not connected", req.PeerAddr)
+	}
+
+	s.logger.Infof("[DelegateCatchup] Starting delegated catchup to height %d via peer %s", req.TargetHeight, req.PeerAddr)
+
+	// Buffered channel so the sync manager doesn't block on progress sends.
+	progressCh := make(chan netsync.DelegatedCatchupProgress, 32)
+
+	// Run the delegated catchup in a goroutine and relay progress on the gRPC stream.
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- s.server.syncManager.RunDelegatedCatchup(stream.Context(), sp.Peer, req.TargetHeight, progressCh)
+	}()
+
+	// Relay progress from the sync manager to the gRPC stream.
+	for {
+		select {
+		case progress, ok := <-progressCh:
+			if !ok {
+				// Channel closed — catchup is done, wait for result.
+				return <-errCh
+			}
+
+			msg := &peer_api.CatchupProgress{
+				CurrentHeight:   progress.CurrentHeight,
+				TargetHeight:    progress.TargetHeight,
+				BlocksRemaining: progress.BlocksRemaining,
+				ErrorMessage:    progress.ErrorMessage,
+				ErrorCategory:   progress.ErrorCategory,
+			}
+
+			switch progress.Phase {
+			case netsync.DelegatedPhaseHeaders:
+				msg.Phase = peer_api.CatchupProgress_DOWNLOADING_HEADERS
+			case netsync.DelegatedPhaseBlocks:
+				msg.Phase = peer_api.CatchupProgress_DOWNLOADING_BLOCKS
+			case netsync.DelegatedPhaseComplete:
+				msg.Phase = peer_api.CatchupProgress_COMPLETE
+			case netsync.DelegatedPhaseFailed:
+				msg.Phase = peer_api.CatchupProgress_FAILED
+			}
+
+			if err := stream.Send(msg); err != nil {
+				s.logger.Warnf("[DelegateCatchup] Failed to send progress: %v", err)
+				return err
+			}
+
+			// Terminal phases — wait for final error.
+			if progress.Phase == netsync.DelegatedPhaseComplete || progress.Phase == netsync.DelegatedPhaseFailed {
+				return <-errCh
+			}
+
+		case <-stream.Context().Done():
+			return stream.Context().Err()
+		}
 	}
 }
 

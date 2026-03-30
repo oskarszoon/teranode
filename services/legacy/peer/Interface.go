@@ -39,4 +39,9 @@ type ClientI interface {
 	// FetchBlockFromPeer sends a getdata wire-protocol message to the specified connected peer
 	// and returns the raw serialized block bytes received in the response.
 	FetchBlockFromPeer(ctx context.Context, peerAddr string, blockHash *chainhash.Hash) ([]byte, error)
+
+	// DelegateCatchup asks the legacy service to run wire-protocol catchup using the
+	// specified peer up to targetHeight. Progress messages are sent on progressCh.
+	// The channel is closed when the operation completes. The method blocks until done.
+	DelegateCatchup(ctx context.Context, peerAddr string, targetHeight uint32, progressCh chan<- *peer_api.CatchupProgress) error
 }

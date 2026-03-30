@@ -2761,9 +2761,10 @@ func legacyPeerToRegistryInfo(sp *serverPeer) *blockchain.PeerInfo {
 		ID:               sp.Addr(),
 		TransportType:    blockchain_api.TransportType_TRANSPORT_WIRE_PROTOCOL,
 		TransportTypeSet: true,
-		ClientName:       sp.UserAgent(),
+		ClientName:       "legacy:" + sp.UserAgent(),
 		Height:           height,
 		NetworkAddress:   sp.Addr(),
+		BlockHash:        sp.LastAnnouncedBlock(),
 	}
 }
 
@@ -3233,6 +3234,25 @@ func newServer(ctx context.Context, logger ulogger.Logger, tSettings *settings.S
 	if err != nil {
 		return nil, err
 	}
+
+	// Wire up block-accepted callback so the central registry records interaction
+	// successes for legacy peers, driving reputation above the 50.0 baseline.
+	// The callback checks centralRegistry at call time (not capture time) because
+	// SetCentralPeerRegistry is called after newServer returns.
+	s.syncManager.SetOnBlockAccepted(func(peerAddr string, height int32) {
+		if s.centralRegistry == nil {
+			return
+		}
+		h := uint32(0)
+		if height > 0 {
+			h = uint32(height)
+		}
+		go func() {
+			if e := s.centralRegistry.UpdatePeerMetrics(ctx, peerAddr, h, 0, 0, true, false, false, 0); e != nil {
+				s.logger.Warnf("[Legacy] centralRegistry.UpdatePeerMetrics block success %s: %v", peerAddr, e)
+			}
+		}()
+	})
 
 	// Add the peers that are defined in teranode settings...
 	// also retrieved in services/legacy/Server.go:118

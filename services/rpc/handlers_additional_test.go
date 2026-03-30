@@ -5333,6 +5333,11 @@ func (m *mockLegacyPeerClient) FetchBlockFromPeer(_ context.Context, _ string, _
 	return nil, nil
 }
 
+func (m *mockLegacyPeerClient) DelegateCatchup(_ context.Context, _ string, _ uint32, progressCh chan<- *peer_api.CatchupProgress) error {
+	close(progressCh)
+	return nil
+}
+
 type mockP2PClient struct {
 	getPeersFunc           func(ctx context.Context) ([]*p2p.PeerInfo, error)
 	getPeerFunc            func(ctx context.Context, peerID string) (*p2p.PeerInfo, error)

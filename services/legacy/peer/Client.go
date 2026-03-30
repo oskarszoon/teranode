@@ -2,6 +2,7 @@ package peer
 
 import (
 	"context"
+	"io"
 
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	"github.com/bsv-blockchain/teranode/errors"
@@ -128,4 +129,31 @@ func (c *Client) FetchBlockFromPeer(ctx context.Context, peerAddr string, blockH
 		return nil, errors.NewNetworkError("[LegacyClient.FetchBlockFromPeer] gRPC call failed", err)
 	}
 	return resp.BlockBytes, nil
+}
+
+// DelegateCatchup opens a streaming RPC to the legacy service requesting
+// wire-protocol catchup using the specified peer. Progress messages are
+// forwarded to progressCh, which is closed when the stream ends.
+func (c *Client) DelegateCatchup(ctx context.Context, peerAddr string, targetHeight uint32, progressCh chan<- *peer_api.CatchupProgress) error {
+	defer close(progressCh)
+
+	stream, err := c.client.DelegateCatchup(ctx, &peer_api.DelegateCatchupRequest{
+		PeerAddr:     peerAddr,
+		TargetHeight: targetHeight,
+	})
+	if err != nil {
+		return errors.NewNetworkError("[LegacyClient.DelegateCatchup] gRPC call failed", err)
+	}
+
+	for {
+		msg, err := stream.Recv()
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return errors.NewNetworkError("[LegacyClient.DelegateCatchup] stream error", err)
+		}
+
+		progressCh <- msg
+	}
 }

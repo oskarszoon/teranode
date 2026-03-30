@@ -234,9 +234,10 @@ type Server struct {
 	// httpTransport is the HTTP-based CatchupTransport used for DataHub peers.
 	httpTransport CatchupTransport
 
-	// wireTransport is the wire-protocol CatchupTransport used for legacy peers.
-	// May be nil if no legacy service client is available.
-	wireTransport CatchupTransport
+	// legacyCatchupClient delegates wire-protocol catchup to the legacy service.
+	// When set, wire-protocol peers are synced by calling DelegateCatchup instead
+	// of using the CatchupTransport pipeline directly.
+	legacyCatchupClient legacyCatchupClientI
 
 	// catchupPeerCooldowns tracks per-peer cooldown expiry after failed catchup attempts.
 	// Only accessed from the runCentralRegistryPoller goroutine — no mutex needed.
@@ -1105,10 +1106,10 @@ func (u *Server) SetCentralPeerRegistry(r blockchain.PeerRegistryClientI) {
 	u.centralPeerRegistry = r
 }
 
-// SetWireTransport sets the wire-protocol transport used for legacy peers.
-// Must be called before Start for the transport to be available during catchup.
-func (u *Server) SetWireTransport(t CatchupTransport) {
-	u.wireTransport = t
+// SetWireTransport is deprecated. Use SetLegacyCatchupClient instead.
+// Wire-protocol catchup is now delegated to the legacy service directly.
+func (u *Server) SetWireTransport(_ CatchupTransport) {
+	u.logger.Warnf("[BlockValidation] SetWireTransport is deprecated; use SetLegacyCatchupClient instead")
 }
 
 // Stop gracefully shuts down the block validation server by stopping background

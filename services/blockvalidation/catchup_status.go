@@ -130,6 +130,12 @@ func (u *Server) getCatchupStatusInternal() *CatchupStatus {
 	status.TotalBlocks = len(ctx.blockHeaders)
 	status.BlocksFetched = u.blocksFetched.Load()
 	status.BlocksValidated = u.blocksValidated.Load()
+
+	// For delegated (wire-protocol) catchup, blockHeaders is empty but blocksFetched
+	// holds the total block count. Use it so the dashboard shows progress.
+	if status.TotalBlocks == 0 && status.BlocksFetched > 0 {
+		status.TotalBlocks = int(status.BlocksFetched)
+	}
 	status.StartTime = ctx.startTime.UnixMilli()
 	status.DurationMs = time.Since(ctx.startTime).Milliseconds()
 	status.ForkDepth = ctx.forkDepth

@@ -871,13 +871,14 @@ func (d *Daemon) startValidationService(
 			d.blockValidationSrv.SetCentralPeerRegistry(bvPeerRegistryClient)
 		}
 
-		// Wire the wire-protocol transport if the legacy service gRPC address is configured.
+		// Wire the legacy catchup client if the legacy service gRPC address is configured.
+		// Wire-protocol peers are synced by delegating to the legacy service directly.
 		if appSettings.Legacy.GRPCAddress != "" {
 			legacyPeerClient, legacyErr := peer.NewClient(ctx, createLogger(loggerBlockValidation), appSettings)
 			if legacyErr != nil {
 				createLogger(loggerBlockValidation).Warnf("[BlockValidation] failed to create legacy peer client: %v; wire-protocol catchup will be unavailable", legacyErr)
 			} else {
-				d.blockValidationSrv.SetWireTransport(blockvalidation.NewWireTransport(legacyPeerClient))
+				d.blockValidationSrv.SetLegacyCatchupClient(legacyPeerClient)
 			}
 		}
 

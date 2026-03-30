@@ -18,6 +18,7 @@ type PeerForCatchup struct {
 	CatchupAttempts        int64
 	CatchupSuccesses       int64
 	CatchupFailures        int64
+	TransportType          int32 // 0 = HTTP, 1 = TRANSPORT_WIRE_PROTOCOL
 }
 
 // selectBestPeersForCatchup queries the P2P service for peers suitable for catchup,

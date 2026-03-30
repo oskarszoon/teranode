@@ -370,6 +370,16 @@ type SyncManager struct {
 	nextCheckpoint   *chaincfg.Checkpoint
 	blockSizeTracker *blockSizeTracker // tracks block sizes for dynamic in-flight adjustment
 
+	// delegated holds state for a BlockValidation-delegated catchup operation.
+	// When active, legacy runs its sync pipeline on behalf of BlockValidation
+	// and reports progress rather than touching the FSM.
+	delegated delegatedCatchupState
+
+	// onBlockAccepted is an optional callback invoked after a block is accepted
+	// from a peer. Used by the server to record interaction success in the
+	// central peer registry. Set via SetOnBlockAccepted.
+	onBlockAccepted func(peerAddr string, height int32)
+
 	// An optional fee estimator.
 	// feeEstimator *mempool.FeeEstimator
 	currentFeeFilter atomic.Uint64
@@ -453,6 +463,12 @@ func (sm *SyncManager) findNextHeaderCheckpoint(height int32) *chaincfg.Checkpoi
 // simply returns.  It also examines the candidates for any which are no longer
 // candidates and removes them as needed.
 func (sm *SyncManager) startSync() {
+	// Return if a delegated catchup from BlockValidation is active.
+	// Legacy must not select its own sync peer while BlockValidation is driving.
+	if sm.delegated.active.Load() {
+		return
+	}
+
 	// Return now if we're already syncing.
 	if sm.loadSyncPeer() != nil {
 		return
@@ -734,6 +750,12 @@ func (sm *SyncManager) handleCheckSyncPeer() {
 		return
 	}
 
+	// During delegated catchup, BlockValidation manages peer rotation.
+	// Don't interfere with the sync peer.
+	if sm.delegated.active.Load() {
+		return
+	}
+
 	sp, sps := sm.loadSyncPeerAndState()
 
 	// If we don't have a sync peer, select a new one and return.
@@ -821,8 +843,15 @@ func (sm *SyncManager) handleDonePeerMsg(peer *peerpkg.Peer) {
 	// Cleanup state of requested items.
 	sm.clearRequestedState(state)
 
-	// Fetch a new sync peer if this is the sync peer.
+	// If this is the sync peer during a delegated catchup, signal failure
+	// instead of rotating to a new peer (BlockValidation decides the next peer).
 	if peer == sm.loadSyncPeer() {
+		if sm.delegated.active.Load() {
+			sm.logger.Infof("[delegated_catchup] Sync peer %s disconnected during delegated catchup", peer.String())
+			sm.storeSyncPeer(nil, nil)
+			sm.delegatedSignalError(fmt.Errorf("sync peer %s disconnected", peer.String()), "network")
+			return
+		}
 		sm.updateSyncPeer(state)
 	}
 }
@@ -1253,8 +1282,22 @@ func (sm *SyncManager) handleBlockMsg(bmsg *blockQueueMsg) error {
 
 			return nil
 		} else if errors.Is(err, context.Canceled) {
+			if sm.delegated.active.Load() {
+				sm.delegatedSignalError(err, "network")
+			}
 			return nil
 		} else {
+			// During delegated catchup, signal the error to BlockValidation
+			// instead of panicking.
+			if sm.delegated.active.Load() {
+				category := "validation"
+				if errors.Is(err, errors.ErrServiceError) || errors.Is(err, errors.ErrStorageError) {
+					category = "network"
+				}
+				sm.delegatedSignalError(fmt.Errorf("block %v processing failed: %w", bmsg.blockHash, err), category)
+				return nil
+			}
+
 			serviceError := errors.Is(err, errors.ErrServiceError) || errors.Is(err, errors.ErrStorageError)
 			if !catchingBlocks && !serviceError {
 				peer.PushRejectMsg(wire.CmdBlock, wire.RejectInvalid, "block rejected", &bmsg.blockHash, false)
@@ -1313,6 +1356,19 @@ func (sm *SyncManager) handleBlockMsg(bmsg *blockQueueMsg) error {
 
 	sm.logger.Infof("accepted block %v at height %d", bmsg.blockHash, heightUpdate)
 
+	// Record successful block delivery for peer reputation.
+	if sm.onBlockAccepted != nil {
+		sm.onBlockAccepted(peer.Addr(), heightUpdate)
+	}
+
+	// Report progress to BlockValidation if this is a delegated catchup.
+	if sm.delegated.active.Load() {
+		sm.delegatedSendProgress(heightUpdate)
+		if sm.delegatedCheckComplete(heightUpdate) {
+			return nil
+		}
+	}
+
 	// Clear the rejected transactions.
 	sm.rejectedTxns.Clear()
 
@@ -1324,11 +1380,12 @@ func (sm *SyncManager) handleBlockMsg(bmsg *blockQueueMsg) error {
 		peer.UpdateLastBlockHeight(heightUpdate)
 		sm.logger.Debugf("peer %s reports new best height %d, current %v", peer.String(), peer.LastBlock(), sm.current())
 
-		if sm.current() { // used to check for isOrphan || sm.current()
+		if sm.current() && !sm.delegated.active.Load() { // used to check for isOrphan || sm.current()
 			go sm.peerNotifier.UpdatePeerHeights(blkHashUpdate, heightUpdate, peer)
 
 			// Since we are current, we can tell FSM to transition to RUN
 			// Blockchain client will check if miner is registered, if so it will send Mine event, and FSM will transition to Mine
+			// During delegated catchup, BlockValidation owns FSM transitions.
 			if err = sm.blockchainClient.Run(sm.ctx, "legacy/netsync/manager/handleBlockMsg"); err != nil {
 				sm.logger.Errorf("[Sync Manager] failed to send FSM RUN event %v", err)
 			}
@@ -1954,7 +2011,8 @@ out:
 			}
 
 			// we reached current in legacy, and current FSM state is not Running, send RUN event
-			if currentState != nil && *currentState != teranodeblockchain.FSMStateRUNNING {
+			// During delegated catchup, BlockValidation owns FSM transitions.
+			if !sm.delegated.active.Load() && currentState != nil && *currentState != teranodeblockchain.FSMStateRUNNING {
 				if sm.current() { // only call this when we are not in the running state, it's an expensive call
 					sm.logger.Infof("[SyncManager] Legacy reached current, sending RUN event to FSM")
 					if err = sm.blockchainClient.Run(sm.ctx, "legacy/netsync/manager/blockHandler"); err != nil {

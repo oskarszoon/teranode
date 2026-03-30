@@ -29,6 +29,7 @@ const (
 	PeerService_GetPeerCount_FullMethodName         = "/peer_api.PeerService/GetPeerCount"
 	PeerService_FetchHeadersFromPeer_FullMethodName = "/peer_api.PeerService/FetchHeadersFromPeer"
 	PeerService_FetchBlockFromPeer_FullMethodName   = "/peer_api.PeerService/FetchBlockFromPeer"
+	PeerService_DelegateCatchup_FullMethodName      = "/peer_api.PeerService/DelegateCatchup"
 )
 
 // PeerServiceClient is the client API for PeerService service.
@@ -46,6 +47,9 @@ type PeerServiceClient interface {
 	GetPeerCount(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*GetPeerCountResponse, error)
 	FetchHeadersFromPeer(ctx context.Context, in *FetchHeadersFromPeerRequest, opts ...grpc.CallOption) (*FetchHeadersFromPeerResponse, error)
 	FetchBlockFromPeer(ctx context.Context, in *FetchBlockFromPeerRequest, opts ...grpc.CallOption) (*FetchBlockFromPeerResponse, error)
+	// DelegateCatchup asks legacy to run wire-protocol catchup using the specified
+	// peer up to the target height. Progress is streamed back; context cancellation aborts.
+	DelegateCatchup(ctx context.Context, in *DelegateCatchupRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[CatchupProgress], error)
 }
 
 type peerServiceClient struct {
@@ -146,6 +150,25 @@ func (c *peerServiceClient) FetchBlockFromPeer(ctx context.Context, in *FetchBlo
 	return out, nil
 }
 
+func (c *peerServiceClient) DelegateCatchup(ctx context.Context, in *DelegateCatchupRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[CatchupProgress], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &PeerService_ServiceDesc.Streams[0], PeerService_DelegateCatchup_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[DelegateCatchupRequest, CatchupProgress]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type PeerService_DelegateCatchupClient = grpc.ServerStreamingClient[CatchupProgress]
+
 // PeerServiceServer is the server API for PeerService service.
 // All implementations must embed UnimplementedPeerServiceServer
 // for forward compatibility.
@@ -161,6 +184,9 @@ type PeerServiceServer interface {
 	GetPeerCount(context.Context, *emptypb.Empty) (*GetPeerCountResponse, error)
 	FetchHeadersFromPeer(context.Context, *FetchHeadersFromPeerRequest) (*FetchHeadersFromPeerResponse, error)
 	FetchBlockFromPeer(context.Context, *FetchBlockFromPeerRequest) (*FetchBlockFromPeerResponse, error)
+	// DelegateCatchup asks legacy to run wire-protocol catchup using the specified
+	// peer up to the target height. Progress is streamed back; context cancellation aborts.
+	DelegateCatchup(*DelegateCatchupRequest, grpc.ServerStreamingServer[CatchupProgress]) error
 	mustEmbedUnimplementedPeerServiceServer()
 }
 
@@ -197,6 +223,9 @@ func (UnimplementedPeerServiceServer) FetchHeadersFromPeer(context.Context, *Fet
 }
 func (UnimplementedPeerServiceServer) FetchBlockFromPeer(context.Context, *FetchBlockFromPeerRequest) (*FetchBlockFromPeerResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method FetchBlockFromPeer not implemented")
+}
+func (UnimplementedPeerServiceServer) DelegateCatchup(*DelegateCatchupRequest, grpc.ServerStreamingServer[CatchupProgress]) error {
+	return status.Error(codes.Unimplemented, "method DelegateCatchup not implemented")
 }
 func (UnimplementedPeerServiceServer) mustEmbedUnimplementedPeerServiceServer() {}
 func (UnimplementedPeerServiceServer) testEmbeddedByValue()                     {}
@@ -381,6 +410,17 @@ func _PeerService_FetchBlockFromPeer_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _PeerService_DelegateCatchup_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(DelegateCatchupRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(PeerServiceServer).DelegateCatchup(m, &grpc.GenericServerStream[DelegateCatchupRequest, CatchupProgress]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type PeerService_DelegateCatchupServer = grpc.ServerStreamingServer[CatchupProgress]
+
 // PeerService_ServiceDesc is the grpc.ServiceDesc for PeerService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -425,6 +465,12 @@ var PeerService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _PeerService_FetchBlockFromPeer_Handler,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "DelegateCatchup",
+			Handler:       _PeerService_DelegateCatchup_Handler,
+			ServerStreams: true,
+		},
+	},
 	Metadata: "services/legacy/peer_api/peer_api.proto",
 }

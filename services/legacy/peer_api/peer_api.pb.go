@@ -22,6 +22,58 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+type CatchupProgress_Phase int32
+
+const (
+	CatchupProgress_DOWNLOADING_HEADERS CatchupProgress_Phase = 0
+	CatchupProgress_DOWNLOADING_BLOCKS  CatchupProgress_Phase = 1
+	CatchupProgress_COMPLETE            CatchupProgress_Phase = 2
+	CatchupProgress_FAILED              CatchupProgress_Phase = 3
+)
+
+// Enum value maps for CatchupProgress_Phase.
+var (
+	CatchupProgress_Phase_name = map[int32]string{
+		0: "DOWNLOADING_HEADERS",
+		1: "DOWNLOADING_BLOCKS",
+		2: "COMPLETE",
+		3: "FAILED",
+	}
+	CatchupProgress_Phase_value = map[string]int32{
+		"DOWNLOADING_HEADERS": 0,
+		"DOWNLOADING_BLOCKS":  1,
+		"COMPLETE":            2,
+		"FAILED":              3,
+	}
+)
+
+func (x CatchupProgress_Phase) Enum() *CatchupProgress_Phase {
+	p := new(CatchupProgress_Phase)
+	*p = x
+	return p
+}
+
+func (x CatchupProgress_Phase) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (CatchupProgress_Phase) Descriptor() protoreflect.EnumDescriptor {
+	return file_services_legacy_peer_api_peer_api_proto_enumTypes[0].Descriptor()
+}
+
+func (CatchupProgress_Phase) Type() protoreflect.EnumType {
+	return &file_services_legacy_peer_api_peer_api_proto_enumTypes[0]
+}
+
+func (x CatchupProgress_Phase) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use CatchupProgress_Phase.Descriptor instead.
+func (CatchupProgress_Phase) EnumDescriptor() ([]byte, []int) {
+	return file_services_legacy_peer_api_peer_api_proto_rawDescGZIP(), []int{17, 0}
+}
+
 type StreamInfo struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	StreamType    uint32                 `protobuf:"varint,1,opt,name=stream_type,json=streamType,proto3" json:"stream_type,omitempty"`
@@ -1004,6 +1056,155 @@ func (x *FetchBlockFromPeerResponse) GetBlockBytes() []byte {
 	return nil
 }
 
+// DelegateCatchupRequest asks the legacy service to sync from a specific
+// wire-protocol peer up to a target height. BlockValidation uses this to
+// delegate wire-protocol catchup to legacy while retaining peer selection
+// and retry decisions.
+type DelegateCatchupRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// peer_addr is the "host:port" of the already-connected wire peer.
+	PeerAddr string `protobuf:"bytes,1,opt,name=peer_addr,json=peerAddr,proto3" json:"peer_addr,omitempty"`
+	// target_height is the block height to sync up to.
+	TargetHeight  uint32 `protobuf:"varint,2,opt,name=target_height,json=targetHeight,proto3" json:"target_height,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DelegateCatchupRequest) Reset() {
+	*x = DelegateCatchupRequest{}
+	mi := &file_services_legacy_peer_api_peer_api_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DelegateCatchupRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DelegateCatchupRequest) ProtoMessage() {}
+
+func (x *DelegateCatchupRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_services_legacy_peer_api_peer_api_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DelegateCatchupRequest.ProtoReflect.Descriptor instead.
+func (*DelegateCatchupRequest) Descriptor() ([]byte, []int) {
+	return file_services_legacy_peer_api_peer_api_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *DelegateCatchupRequest) GetPeerAddr() string {
+	if x != nil {
+		return x.PeerAddr
+	}
+	return ""
+}
+
+func (x *DelegateCatchupRequest) GetTargetHeight() uint32 {
+	if x != nil {
+		return x.TargetHeight
+	}
+	return 0
+}
+
+// CatchupProgress is streamed back to the caller during a delegated catchup.
+type CatchupProgress struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// phase indicates the current stage of the catchup operation.
+	Phase CatchupProgress_Phase `protobuf:"varint,1,opt,name=phase,proto3,enum=peer_api.CatchupProgress_Phase" json:"phase,omitempty"`
+	// current_height is the height of the last successfully processed block.
+	CurrentHeight uint32 `protobuf:"varint,2,opt,name=current_height,json=currentHeight,proto3" json:"current_height,omitempty"`
+	// target_height is the height we are syncing to.
+	TargetHeight uint32 `protobuf:"varint,3,opt,name=target_height,json=targetHeight,proto3" json:"target_height,omitempty"`
+	// blocks_remaining is how many blocks are left to process.
+	BlocksRemaining int32 `protobuf:"varint,4,opt,name=blocks_remaining,json=blocksRemaining,proto3" json:"blocks_remaining,omitempty"`
+	// error_message is non-empty only when phase == FAILED.
+	ErrorMessage string `protobuf:"bytes,5,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"`
+	// error_category classifies the failure: "network", "validation", "pruned", "peer_misbehavior".
+	ErrorCategory string `protobuf:"bytes,6,opt,name=error_category,json=errorCategory,proto3" json:"error_category,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CatchupProgress) Reset() {
+	*x = CatchupProgress{}
+	mi := &file_services_legacy_peer_api_peer_api_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CatchupProgress) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CatchupProgress) ProtoMessage() {}
+
+func (x *CatchupProgress) ProtoReflect() protoreflect.Message {
+	mi := &file_services_legacy_peer_api_peer_api_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CatchupProgress.ProtoReflect.Descriptor instead.
+func (*CatchupProgress) Descriptor() ([]byte, []int) {
+	return file_services_legacy_peer_api_peer_api_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *CatchupProgress) GetPhase() CatchupProgress_Phase {
+	if x != nil {
+		return x.Phase
+	}
+	return CatchupProgress_DOWNLOADING_HEADERS
+}
+
+func (x *CatchupProgress) GetCurrentHeight() uint32 {
+	if x != nil {
+		return x.CurrentHeight
+	}
+	return 0
+}
+
+func (x *CatchupProgress) GetTargetHeight() uint32 {
+	if x != nil {
+		return x.TargetHeight
+	}
+	return 0
+}
+
+func (x *CatchupProgress) GetBlocksRemaining() int32 {
+	if x != nil {
+		return x.BlocksRemaining
+	}
+	return 0
+}
+
+func (x *CatchupProgress) GetErrorMessage() string {
+	if x != nil {
+		return x.ErrorMessage
+	}
+	return ""
+}
+
+func (x *CatchupProgress) GetErrorCategory() string {
+	if x != nil {
+		return x.ErrorCategory
+	}
+	return ""
+}
+
 var File_services_legacy_peer_api_peer_api_proto protoreflect.FileDescriptor
 
 const file_services_legacy_peer_api_peer_api_proto_rawDesc = "" +
@@ -1086,7 +1287,23 @@ const file_services_legacy_peer_api_peer_api_proto_rawDesc = "" +
 	"block_hash\x18\x02 \x01(\fR\tblockHash\"=\n" +
 	"\x1aFetchBlockFromPeerResponse\x12\x1f\n" +
 	"\vblock_bytes\x18\x01 \x01(\fR\n" +
-	"blockBytes2\xc2\x05\n" +
+	"blockBytes\"Z\n" +
+	"\x16DelegateCatchupRequest\x12\x1b\n" +
+	"\tpeer_addr\x18\x01 \x01(\tR\bpeerAddr\x12#\n" +
+	"\rtarget_height\x18\x02 \x01(\rR\ftargetHeight\"\xdf\x02\n" +
+	"\x0fCatchupProgress\x125\n" +
+	"\x05phase\x18\x01 \x01(\x0e2\x1f.peer_api.CatchupProgress.PhaseR\x05phase\x12%\n" +
+	"\x0ecurrent_height\x18\x02 \x01(\rR\rcurrentHeight\x12#\n" +
+	"\rtarget_height\x18\x03 \x01(\rR\ftargetHeight\x12)\n" +
+	"\x10blocks_remaining\x18\x04 \x01(\x05R\x0fblocksRemaining\x12#\n" +
+	"\rerror_message\x18\x05 \x01(\tR\ferrorMessage\x12%\n" +
+	"\x0eerror_category\x18\x06 \x01(\tR\rerrorCategory\"R\n" +
+	"\x05Phase\x12\x17\n" +
+	"\x13DOWNLOADING_HEADERS\x10\x00\x12\x16\n" +
+	"\x12DOWNLOADING_BLOCKS\x10\x01\x12\f\n" +
+	"\bCOMPLETE\x10\x02\x12\n" +
+	"\n" +
+	"\x06FAILED\x10\x032\x96\x06\n" +
 	"\vPeerService\x12@\n" +
 	"\bGetPeers\x12\x16.google.protobuf.Empty\x1a\x1a.peer_api.GetPeersResponse\"\x00\x12@\n" +
 	"\aBanPeer\x12\x18.peer_api.BanPeerRequest\x1a\x19.peer_api.BanPeerResponse\"\x00\x12F\n" +
@@ -1097,7 +1314,8 @@ const file_services_legacy_peer_api_peer_api_proto_rawDesc = "" +
 	"\vClearBanned\x12\x16.google.protobuf.Empty\x1a\x1d.peer_api.ClearBannedResponse\"\x00\x12H\n" +
 	"\fGetPeerCount\x12\x16.google.protobuf.Empty\x1a\x1e.peer_api.GetPeerCountResponse\"\x00\x12g\n" +
 	"\x14FetchHeadersFromPeer\x12%.peer_api.FetchHeadersFromPeerRequest\x1a&.peer_api.FetchHeadersFromPeerResponse\"\x00\x12a\n" +
-	"\x12FetchBlockFromPeer\x12#.peer_api.FetchBlockFromPeerRequest\x1a$.peer_api.FetchBlockFromPeerResponse\"\x00B\rZ\v./;peer_apib\x06proto3"
+	"\x12FetchBlockFromPeer\x12#.peer_api.FetchBlockFromPeerRequest\x1a$.peer_api.FetchBlockFromPeerResponse\"\x00\x12R\n" +
+	"\x0fDelegateCatchup\x12 .peer_api.DelegateCatchupRequest\x1a\x19.peer_api.CatchupProgress\"\x000\x01B\rZ\v./;peer_apib\x06proto3"
 
 var (
 	file_services_legacy_peer_api_peer_api_proto_rawDescOnce sync.Once
@@ -1111,52 +1329,59 @@ func file_services_legacy_peer_api_peer_api_proto_rawDescGZIP() []byte {
 	return file_services_legacy_peer_api_peer_api_proto_rawDescData
 }
 
-var file_services_legacy_peer_api_peer_api_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
+var file_services_legacy_peer_api_peer_api_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_services_legacy_peer_api_peer_api_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
 var file_services_legacy_peer_api_peer_api_proto_goTypes = []any{
-	(*StreamInfo)(nil),                   // 0: peer_api.StreamInfo
-	(*Peer)(nil),                         // 1: peer_api.Peer
-	(*GetPeersResponse)(nil),             // 2: peer_api.GetPeersResponse
-	(*GetPeerCountResponse)(nil),         // 3: peer_api.GetPeerCountResponse
-	(*BanPeerRequest)(nil),               // 4: peer_api.BanPeerRequest
-	(*BanPeerResponse)(nil),              // 5: peer_api.BanPeerResponse
-	(*UnbanPeerRequest)(nil),             // 6: peer_api.UnbanPeerRequest
-	(*UnbanPeerResponse)(nil),            // 7: peer_api.UnbanPeerResponse
-	(*IsBannedRequest)(nil),              // 8: peer_api.IsBannedRequest
-	(*IsBannedResponse)(nil),             // 9: peer_api.IsBannedResponse
-	(*ListBannedResponse)(nil),           // 10: peer_api.ListBannedResponse
-	(*ClearBannedResponse)(nil),          // 11: peer_api.ClearBannedResponse
-	(*FetchHeadersFromPeerRequest)(nil),  // 12: peer_api.FetchHeadersFromPeerRequest
-	(*FetchHeadersFromPeerResponse)(nil), // 13: peer_api.FetchHeadersFromPeerResponse
-	(*FetchBlockFromPeerRequest)(nil),    // 14: peer_api.FetchBlockFromPeerRequest
-	(*FetchBlockFromPeerResponse)(nil),   // 15: peer_api.FetchBlockFromPeerResponse
-	(*emptypb.Empty)(nil),                // 16: google.protobuf.Empty
+	(CatchupProgress_Phase)(0),           // 0: peer_api.CatchupProgress.Phase
+	(*StreamInfo)(nil),                   // 1: peer_api.StreamInfo
+	(*Peer)(nil),                         // 2: peer_api.Peer
+	(*GetPeersResponse)(nil),             // 3: peer_api.GetPeersResponse
+	(*GetPeerCountResponse)(nil),         // 4: peer_api.GetPeerCountResponse
+	(*BanPeerRequest)(nil),               // 5: peer_api.BanPeerRequest
+	(*BanPeerResponse)(nil),              // 6: peer_api.BanPeerResponse
+	(*UnbanPeerRequest)(nil),             // 7: peer_api.UnbanPeerRequest
+	(*UnbanPeerResponse)(nil),            // 8: peer_api.UnbanPeerResponse
+	(*IsBannedRequest)(nil),              // 9: peer_api.IsBannedRequest
+	(*IsBannedResponse)(nil),             // 10: peer_api.IsBannedResponse
+	(*ListBannedResponse)(nil),           // 11: peer_api.ListBannedResponse
+	(*ClearBannedResponse)(nil),          // 12: peer_api.ClearBannedResponse
+	(*FetchHeadersFromPeerRequest)(nil),  // 13: peer_api.FetchHeadersFromPeerRequest
+	(*FetchHeadersFromPeerResponse)(nil), // 14: peer_api.FetchHeadersFromPeerResponse
+	(*FetchBlockFromPeerRequest)(nil),    // 15: peer_api.FetchBlockFromPeerRequest
+	(*FetchBlockFromPeerResponse)(nil),   // 16: peer_api.FetchBlockFromPeerResponse
+	(*DelegateCatchupRequest)(nil),       // 17: peer_api.DelegateCatchupRequest
+	(*CatchupProgress)(nil),              // 18: peer_api.CatchupProgress
+	(*emptypb.Empty)(nil),                // 19: google.protobuf.Empty
 }
 var file_services_legacy_peer_api_peer_api_proto_depIdxs = []int32{
-	0,  // 0: peer_api.Peer.streams:type_name -> peer_api.StreamInfo
-	1,  // 1: peer_api.GetPeersResponse.peers:type_name -> peer_api.Peer
-	16, // 2: peer_api.PeerService.GetPeers:input_type -> google.protobuf.Empty
-	4,  // 3: peer_api.PeerService.BanPeer:input_type -> peer_api.BanPeerRequest
-	6,  // 4: peer_api.PeerService.UnbanPeer:input_type -> peer_api.UnbanPeerRequest
-	8,  // 5: peer_api.PeerService.IsBanned:input_type -> peer_api.IsBannedRequest
-	16, // 6: peer_api.PeerService.ListBanned:input_type -> google.protobuf.Empty
-	16, // 7: peer_api.PeerService.ClearBanned:input_type -> google.protobuf.Empty
-	16, // 8: peer_api.PeerService.GetPeerCount:input_type -> google.protobuf.Empty
-	12, // 9: peer_api.PeerService.FetchHeadersFromPeer:input_type -> peer_api.FetchHeadersFromPeerRequest
-	14, // 10: peer_api.PeerService.FetchBlockFromPeer:input_type -> peer_api.FetchBlockFromPeerRequest
-	2,  // 11: peer_api.PeerService.GetPeers:output_type -> peer_api.GetPeersResponse
-	5,  // 12: peer_api.PeerService.BanPeer:output_type -> peer_api.BanPeerResponse
-	7,  // 13: peer_api.PeerService.UnbanPeer:output_type -> peer_api.UnbanPeerResponse
-	9,  // 14: peer_api.PeerService.IsBanned:output_type -> peer_api.IsBannedResponse
-	10, // 15: peer_api.PeerService.ListBanned:output_type -> peer_api.ListBannedResponse
-	11, // 16: peer_api.PeerService.ClearBanned:output_type -> peer_api.ClearBannedResponse
-	3,  // 17: peer_api.PeerService.GetPeerCount:output_type -> peer_api.GetPeerCountResponse
-	13, // 18: peer_api.PeerService.FetchHeadersFromPeer:output_type -> peer_api.FetchHeadersFromPeerResponse
-	15, // 19: peer_api.PeerService.FetchBlockFromPeer:output_type -> peer_api.FetchBlockFromPeerResponse
-	11, // [11:20] is the sub-list for method output_type
-	2,  // [2:11] is the sub-list for method input_type
-	2,  // [2:2] is the sub-list for extension type_name
-	2,  // [2:2] is the sub-list for extension extendee
-	0,  // [0:2] is the sub-list for field type_name
+	1,  // 0: peer_api.Peer.streams:type_name -> peer_api.StreamInfo
+	2,  // 1: peer_api.GetPeersResponse.peers:type_name -> peer_api.Peer
+	0,  // 2: peer_api.CatchupProgress.phase:type_name -> peer_api.CatchupProgress.Phase
+	19, // 3: peer_api.PeerService.GetPeers:input_type -> google.protobuf.Empty
+	5,  // 4: peer_api.PeerService.BanPeer:input_type -> peer_api.BanPeerRequest
+	7,  // 5: peer_api.PeerService.UnbanPeer:input_type -> peer_api.UnbanPeerRequest
+	9,  // 6: peer_api.PeerService.IsBanned:input_type -> peer_api.IsBannedRequest
+	19, // 7: peer_api.PeerService.ListBanned:input_type -> google.protobuf.Empty
+	19, // 8: peer_api.PeerService.ClearBanned:input_type -> google.protobuf.Empty
+	19, // 9: peer_api.PeerService.GetPeerCount:input_type -> google.protobuf.Empty
+	13, // 10: peer_api.PeerService.FetchHeadersFromPeer:input_type -> peer_api.FetchHeadersFromPeerRequest
+	15, // 11: peer_api.PeerService.FetchBlockFromPeer:input_type -> peer_api.FetchBlockFromPeerRequest
+	17, // 12: peer_api.PeerService.DelegateCatchup:input_type -> peer_api.DelegateCatchupRequest
+	3,  // 13: peer_api.PeerService.GetPeers:output_type -> peer_api.GetPeersResponse
+	6,  // 14: peer_api.PeerService.BanPeer:output_type -> peer_api.BanPeerResponse
+	8,  // 15: peer_api.PeerService.UnbanPeer:output_type -> peer_api.UnbanPeerResponse
+	10, // 16: peer_api.PeerService.IsBanned:output_type -> peer_api.IsBannedResponse
+	11, // 17: peer_api.PeerService.ListBanned:output_type -> peer_api.ListBannedResponse
+	12, // 18: peer_api.PeerService.ClearBanned:output_type -> peer_api.ClearBannedResponse
+	4,  // 19: peer_api.PeerService.GetPeerCount:output_type -> peer_api.GetPeerCountResponse
+	14, // 20: peer_api.PeerService.FetchHeadersFromPeer:output_type -> peer_api.FetchHeadersFromPeerResponse
+	16, // 21: peer_api.PeerService.FetchBlockFromPeer:output_type -> peer_api.FetchBlockFromPeerResponse
+	18, // 22: peer_api.PeerService.DelegateCatchup:output_type -> peer_api.CatchupProgress
+	13, // [13:23] is the sub-list for method output_type
+	3,  // [3:13] is the sub-list for method input_type
+	3,  // [3:3] is the sub-list for extension type_name
+	3,  // [3:3] is the sub-list for extension extendee
+	0,  // [0:3] is the sub-list for field type_name
 }
 
 func init() { file_services_legacy_peer_api_peer_api_proto_init() }
@@ -1169,13 +1394,14 @@ func file_services_legacy_peer_api_peer_api_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_services_legacy_peer_api_peer_api_proto_rawDesc), len(file_services_legacy_peer_api_peer_api_proto_rawDesc)),
-			NumEnums:      0,
-			NumMessages:   16,
+			NumEnums:      1,
+			NumMessages:   18,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
 		GoTypes:           file_services_legacy_peer_api_peer_api_proto_goTypes,
 		DependencyIndexes: file_services_legacy_peer_api_peer_api_proto_depIdxs,
+		EnumInfos:         file_services_legacy_peer_api_peer_api_proto_enumTypes,
 		MessageInfos:      file_services_legacy_peer_api_peer_api_proto_msgTypes,
 	}.Build()
 	File_services_legacy_peer_api_peer_api_proto = out.File

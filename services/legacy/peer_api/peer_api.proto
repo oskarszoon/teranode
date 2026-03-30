@@ -157,6 +157,39 @@ message Peer {
       bytes block_bytes = 1;
   }
 
+  // DelegateCatchupRequest asks the legacy service to sync from a specific
+  // wire-protocol peer up to a target height. BlockValidation uses this to
+  // delegate wire-protocol catchup to legacy while retaining peer selection
+  // and retry decisions.
+  message DelegateCatchupRequest {
+      // peer_addr is the "host:port" of the already-connected wire peer.
+      string peer_addr = 1;
+      // target_height is the block height to sync up to.
+      uint32 target_height = 2;
+  }
+
+  // CatchupProgress is streamed back to the caller during a delegated catchup.
+  message CatchupProgress {
+      enum Phase {
+          DOWNLOADING_HEADERS = 0;
+          DOWNLOADING_BLOCKS  = 1;
+          COMPLETE            = 2;
+          FAILED              = 3;
+      }
+      // phase indicates the current stage of the catchup operation.
+      Phase  phase            = 1;
+      // current_height is the height of the last successfully processed block.
+      uint32 current_height   = 2;
+      // target_height is the height we are syncing to.
+      uint32 target_height    = 3;
+      // blocks_remaining is how many blocks are left to process.
+      int32  blocks_remaining = 4;
+      // error_message is non-empty only when phase == FAILED.
+      string error_message    = 5;
+      // error_category classifies the failure: "network", "validation", "pruned", "peer_misbehavior".
+      string error_category   = 6;
+  }
+
   // Add new service for peer operations
   service PeerService {
     rpc GetPeers(google.protobuf.Empty) returns (GetPeersResponse) {}
@@ -168,4 +201,7 @@ message Peer {
     rpc GetPeerCount(google.protobuf.Empty) returns (GetPeerCountResponse) {}
     rpc FetchHeadersFromPeer(FetchHeadersFromPeerRequest) returns (FetchHeadersFromPeerResponse) {}
     rpc FetchBlockFromPeer(FetchBlockFromPeerRequest) returns (FetchBlockFromPeerResponse) {}
+    // DelegateCatchup asks legacy to run wire-protocol catchup using the specified
+    // peer up to the target height. Progress is streamed back; context cancellation aborts.
+    rpc DelegateCatchup(DelegateCatchupRequest) returns (stream CatchupProgress) {}
   }

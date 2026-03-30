@@ -37,8 +37,10 @@ func (u *Server) selectBestPeersFromCentralRegistry(ctx context.Context, targetH
 
 	peers, err := u.centralPeerRegistry.ListPeers(ctx, nil, 0, targetHeight, true)
 	if err != nil {
+		u.logger.Warnf("[central_registry] ListPeers(minHeight=%d) failed: %v", targetHeight, err)
 		return nil, err
 	}
+	u.logger.Infof("[central_registry] ListPeers(minHeight=%d) returned %d peers", targetHeight, len(peers))
 
 	result := make([]PeerForCatchup, 0, len(peers))
 	for _, p := range peers {
@@ -64,6 +66,7 @@ func (u *Server) selectBestPeersFromCentralRegistry(ctx context.Context, targetH
 			CatchupAttempts:        p.InteractionAttempts,
 			CatchupSuccesses:       p.InteractionSuccesses,
 			CatchupFailures:        p.InteractionFailures,
+			TransportType:          int32(p.TransportType),
 		})
 	}
 
@@ -80,12 +83,10 @@ func (u *Server) selectBestPeersFromCentralRegistry(ctx context.Context, targetH
 	return result, nil
 }
 
-// selectTransport returns the appropriate CatchupTransport for the given peer.
-// Wire-protocol peers use wireTransport; all others use httpTransport.
-func (u *Server) selectTransport(peer *blockchain.PeerInfo) CatchupTransport {
-	if peer.TransportType == blockchain_api.TransportType_TRANSPORT_WIRE_PROTOCOL && u.wireTransport != nil {
-		return u.wireTransport
-	}
+// selectTransport returns the CatchupTransport for the given peer.
+// Wire-protocol peers are handled separately via catchupViaLegacy, so this
+// always returns the HTTP transport.
+func (u *Server) selectTransport(_ *blockchain.PeerInfo) CatchupTransport {
 	return u.httpTransport
 }
 
@@ -160,7 +161,7 @@ func (u *Server) pollCentralRegistry(ctx context.Context) bool {
 	}
 
 	if len(peers) == 0 {
-		u.logger.Debugf("[central_registry] No peers with height > %d in centralized registry", ourHeight)
+		u.logger.Infof("[central_registry] No peers with height > %d in centralized registry (registry=%v)", ourHeight, u.centralPeerRegistry != nil)
 		return false
 	}
 
@@ -189,7 +190,9 @@ func (u *Server) pollCentralRegistry(ctx context.Context) bool {
 	u.logger.Infof("[central_registry] Found peer %s at height %d (our height: %d) — triggering catchup", best.ID, best.Height, ourHeight)
 
 	// Build a synthetic block representing the target we want to catch up to.
-	if best.BlockHash == nil {
+	// Wire-protocol peers may not have BlockHash in the registry (it's populated
+	// asynchronously), but catchupViaLegacy only needs the height so a nil hash is OK.
+	if best.BlockHash == nil && best.TransportType != int32(blockchain_api.TransportType_TRANSPORT_WIRE_PROTOCOL) {
 		u.logger.Warnf("[central_registry] Peer %s has no block hash in registry, skipping", best.ID)
 		return false
 	}
@@ -197,7 +200,16 @@ func (u *Server) pollCentralRegistry(ctx context.Context) bool {
 	targetBlock := model.NewSyntheticBlock(best.Height, best.BlockHash)
 
 	startTime := now
-	if err = u.catchup(ctx, targetBlock, best.ID, best.DataHubURL); err != nil {
+
+	// Wire-protocol peers are synced by delegating to the legacy service.
+	// HTTP peers use the existing catchup pipeline directly.
+	if best.TransportType == int32(blockchain_api.TransportType_TRANSPORT_WIRE_PROTOCOL) && u.legacyCatchupClient != nil {
+		err = u.catchupViaLegacy(ctx, best.ID, best.DataHubURL, targetBlock)
+	} else {
+		err = u.catchup(ctx, targetBlock, best.ID, best.DataHubURL)
+	}
+
+	if err != nil {
 		u.logger.Warnf("[central_registry] Catchup from peer %s failed after %s: %v", best.ID, time.Since(startTime).Round(time.Millisecond), err)
 		u.reportCatchupMetricsToCentralRegistry(ctx, best.ID, false, false, 0)
 
