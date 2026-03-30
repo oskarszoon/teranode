@@ -1489,13 +1489,19 @@ func (u *BlockValidation) ValidateBlockWithOptions(ctx context.Context, block *m
 				return errors.NewBlockInvalidError("[ValidateBlock][%s] block is not valid", block.String(), err)
 			}
 
-			if iterationError := u.checkOldBlockIDs(ctx, oldBlockIDsMap, block); iterationError != nil {
-				if errors.Is(iterationError, errors.ErrBlockInvalid) && !opts.IsRevalidation {
-					reason := iterationError.Error()
-					u.storeInvalidBlock(ctx, block, opts.PeerID, reason)
-				}
+			// Skip checkOldBlockIDs during catchup mode — blocks verified by checkpoint
+			// chain are guaranteed to be on the correct chain. Additionally, quick
+			// validation may have partially committed the block (AddBlock before UTXO
+			// unlock), making the block ID chain temporarily inconsistent.
+			if !opts.IsCatchupMode {
+				if iterationError := u.checkOldBlockIDs(ctx, oldBlockIDsMap, block); iterationError != nil {
+					if errors.Is(iterationError, errors.ErrBlockInvalid) && !opts.IsRevalidation {
+						reason := iterationError.Error()
+						u.storeInvalidBlock(ctx, block, opts.PeerID, reason)
+					}
 
-				return iterationError
+					return iterationError
+				}
 			}
 
 			u.logger.Infof("[ValidateBlock][%s] validating block DONE", block.Hash().String())

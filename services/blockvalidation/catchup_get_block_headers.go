@@ -207,7 +207,14 @@ func (u *Server) catchupGetBlockHeaders(ctx context.Context, blockUpTo *model.Bl
 		}
 		iterCtx, iterCancel := context.WithTimeout(ctx, iterationTimeout)
 
-		u.logger.Debugf("[catchup][%s] iteration %d: requesting headers with locator starting at %s (timeout: %v)", chainTipHash.String(), iteration, currentLocatorHashes[0].String(), iterationTimeout)
+		// Request only as many headers as we still need to reach the cap.
+		// This avoids fetching 10,000 headers when we only need 600 to reach a checkpoint.
+		headersToRequest := maxBlockHeadersPerRequest
+		if remaining := maxAccumulatedHeaders - len(allCatchupHeaders); remaining < headersToRequest && remaining > 0 {
+			headersToRequest = remaining
+		}
+
+		u.logger.Debugf("[catchup][%s] iteration %d: requesting %d headers with locator starting at %s (timeout: %v)", chainTipHash.String(), iteration, headersToRequest, currentLocatorHashes[0].String(), iterationTimeout)
 
 		// Fetch headers — use the pluggable CatchupTransport when available (centralized
 		// orchestration), otherwise fall back to the legacy HTTP code path.
@@ -216,12 +223,12 @@ func (u *Server) catchupGetBlockHeaders(ctx context.Context, blockUpTo *model.Bl
 
 		if transport != nil {
 			// Centralized orchestration path: transport handles URL construction and parsing.
-			blockHeaders, fetchErr = transport.FetchHeaders(iterCtx, baseURL, chainTipHash, currentLocatorHashes, maxBlockHeadersPerRequest)
+			blockHeaders, fetchErr = transport.FetchHeaders(iterCtx, baseURL, chainTipHash, currentLocatorHashes, headersToRequest)
 		} else {
 			// Legacy HTTP path: build URL, fetch raw bytes, validate, parse.
 			blockLocatorStr := catchup.BuildBlockLocatorString(currentLocatorHashes)
 			requestURL := fmt.Sprintf("%s/headers_from_common_ancestor/%s?block_locator_hashes=%s&n=%d",
-				baseURL, chainTipHash.String(), blockLocatorStr, maxBlockHeadersPerRequest)
+				baseURL, chainTipHash.String(), blockLocatorStr, headersToRequest)
 
 			var blockHeadersBytes []byte
 			blockHeadersBytes, fetchErr = catchup.FetchHeadersWithRetry(iterCtx, u.logger, requestURL, maxRetries)
