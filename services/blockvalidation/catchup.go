@@ -768,15 +768,14 @@ func (u *Server) verifyCheckpointsInHeaderChain(catchupCtx *CatchupContext) erro
 //   - int: Number of checkpoints successfully verified
 //   - error: If checkpoint verification fails (hash mismatch)
 func (u *Server) verifyCheckpointsAgainstHeaders(catchupCtx *CatchupContext) (int, error) {
-	// Get the highest checkpoint height for reference
-	highestCheckpointHeight := getHighestCheckpointHeight(catchupCtx.checkpoints)
-	catchupCtx.highestCheckpointHeight = highestCheckpointHeight
-
 	firstBlockHeight := catchupCtx.commonAncestorMeta.Height + 1
 	lastBlockHeight := catchupCtx.commonAncestorMeta.Height + uint32(len(catchupCtx.blockHeaders))
 
 	u.logger.Debugf("[catchup][%s] Verifying checkpoints in height range %d-%d (common ancestor at %d)", catchupCtx.blockUpTo.Hash().String(), firstBlockHeight, lastBlockHeight, catchupCtx.commonAncestorMeta.Height)
 
+	// Track the highest checkpoint actually verified within our header range.
+	// Only blocks at or below this height can use quick validation.
+	var highestVerifiedCheckpoint uint32
 	checkpointsChecked := 0
 	for _, checkpoint := range catchupCtx.checkpoints {
 		checkpointHeight := uint32(checkpoint.Height)
@@ -802,9 +801,13 @@ func (u *Server) verifyCheckpointsAgainstHeaders(catchupCtx *CatchupContext) (in
 			}
 
 			u.logger.Infof("[catchup][%s] Verified checkpoint at height %d with hash %s", catchupCtx.blockUpTo.Hash().String(), checkpointHeight, checkpoint.Hash.String())
+			highestVerifiedCheckpoint = checkpointHeight
 			checkpointsChecked++
 		}
 	}
+
+	catchupCtx.highestCheckpointHeight = highestVerifiedCheckpoint
+	u.logger.Infof("[catchup][%s] Quick validation enabled up to height %d (%d checkpoints verified)", catchupCtx.blockUpTo.Hash().String(), highestVerifiedCheckpoint, checkpointsChecked)
 
 	return checkpointsChecked, nil
 }
