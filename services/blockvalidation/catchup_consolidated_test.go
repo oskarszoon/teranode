@@ -12,6 +12,7 @@ import (
 	"github.com/bsv-blockchain/teranode/services/blockchain"
 	"github.com/bsv-blockchain/teranode/services/blockvalidation/catchup"
 	"github.com/bsv-blockchain/teranode/services/blockvalidation/testhelpers"
+	"github.com/bsv-blockchain/teranode/stores/utxo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -398,6 +399,10 @@ func TestCatchup_FSMStateManagement(t *testing.T) {
 			Return(&catchingState, nil).Once()
 		mockBlockchainClient.On("Run", mock.Anything, "blockvalidation/Server").
 			Return(nil).Once()
+
+		// Mock GetBlockHeight for restoreFSMState — return a height close to
+		// target so it doesn't stay in CATCHINGBLOCKS.
+		server.utxoStore.(*utxo.MockUtxostore).On("GetBlockHeight").Return(uint32(1005)).Maybe()
 
 		// Test setting CATCHINGBLOCKS state
 		size := atomic.Int64{}

@@ -72,10 +72,10 @@ func (u *Server) selectBestPeersFromCentralRegistry(ctx context.Context, targetH
 
 	// Sort: full nodes first, then by reputation descending.
 	sort.Slice(result, func(i, j int) bool {
-		isFull_i := result[i].Storage == "full"
-		isFull_j := result[j].Storage == "full"
-		if isFull_i != isFull_j {
-			return isFull_i
+		fullI := result[i].Storage == "full"
+		fullJ := result[j].Storage == "full"
+		if fullI != fullJ {
+			return fullI
 		}
 		return result[i].CatchupReputationScore > result[j].CatchupReputationScore
 	})
