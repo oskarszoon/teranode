@@ -198,9 +198,8 @@ func (u *Server) pollCentralRegistry(ctx context.Context) bool {
 
 	startTime := now
 	if err = u.catchup(ctx, targetBlock, best.ID, best.DataHubURL); err != nil {
-		responseMs := time.Since(startTime).Milliseconds()
-		u.logger.Warnf("[central_registry] Catchup from peer %s failed: %v", best.ID, err)
-		u.reportCatchupMetricsToCentralRegistry(ctx, best.ID, false, false, responseMs)
+		u.logger.Warnf("[central_registry] Catchup from peer %s failed after %s: %v", best.ID, time.Since(startTime).Round(time.Millisecond), err)
+		u.reportCatchupMetricsToCentralRegistry(ctx, best.ID, false, false, 0)
 
 		// BLOCK_INCOMPLETE means the peer is pruned and can't provide full block data.
 		// Put them on a very long cooldown — they'll never have this data.
@@ -217,9 +216,11 @@ func (u *Server) pollCentralRegistry(ctx context.Context) bool {
 		return true
 	}
 
-	responseMs := time.Since(startTime).Milliseconds()
-	u.logger.Infof("[central_registry] Catchup from peer %s succeeded in %dms", best.ID, responseMs)
-	u.reportCatchupMetricsToCentralRegistry(ctx, best.ID, true, false, responseMs)
+	elapsed := time.Since(startTime)
+	u.logger.Infof("[central_registry] Catchup from peer %s succeeded in %s", best.ID, elapsed.Round(time.Millisecond))
+	// Report success without response time — catchup round duration (tens of seconds)
+	// is not a meaningful per-request metric and would skew the reputation speed factor.
+	u.reportCatchupMetricsToCentralRegistry(ctx, best.ID, true, false, 0)
 
 	// Clear cooldowns on success — all peers get a fresh start.
 	u.catchupPeerCooldowns = make(map[string]time.Time)
