@@ -1946,7 +1946,11 @@ func (s *Server) GetPeerRegistry(ctx context.Context, _ *emptypb.Empty) (*p2p_ap
 		}, nil
 	}
 
-	allPeers, err := s.centralRegistry.ListPeers(ctx, nil, 0, 0, false)
+	// Use a short timeout to avoid blocking the dashboard if the registry is slow.
+	listCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	allPeers, err := s.centralRegistry.ListPeers(listCtx, nil, 0, 0, false)
 	if err != nil {
 		s.logger.Errorf("[GetPeerRegistry] failed to list peers from central registry: %v", err)
 		return &p2p_api.GetPeerRegistryResponse{Peers: []*p2p_api.PeerRegistryInfo{}}, nil
