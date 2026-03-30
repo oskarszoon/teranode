@@ -1025,12 +1025,26 @@ func (u *Server) restoreFSMState(ctx context.Context, catchupCtx *CatchupContext
 		return
 	}
 
-	if state != nil && *state == blockchain.FSMStateCATCHINGBLOCKS {
-		u.logger.Infof("[catchup][%s] Restoring FSM to RUN state", catchupCtx.blockUpTo.Hash().String())
+	if state == nil || *state != blockchain.FSMStateCATCHINGBLOCKS {
+		return
+	}
 
-		if err = u.blockchainClient.Run(ctx, "blockvalidation/Server"); err != nil {
-			u.logger.Errorf("[catchup][%s] failed to send RUN event: %v", catchupCtx.blockUpTo.Hash().String(), err)
+	// Don't restore to RUNNING if we're still significantly behind — another
+	// catchup round will start shortly and toggling FSM states causes unnecessary
+	// notifications to all subscribers.
+	if u.utxoStore != nil && catchupCtx.blockUpTo != nil {
+		localHeight := u.utxoStore.GetBlockHeight()
+		targetHeight := catchupCtx.blockUpTo.Height
+		if targetHeight > 0 && localHeight < targetHeight-100 {
+			u.logger.Infof("[catchup][%s] Staying in CATCHINGBLOCKS (local: %d, target: %d)",
+				catchupCtx.blockUpTo.Hash().String(), localHeight, targetHeight)
+			return
 		}
+	}
+
+	u.logger.Infof("[catchup][%s] Restoring FSM to RUN state", catchupCtx.blockUpTo.Hash().String())
+	if err = u.blockchainClient.Run(ctx, "blockvalidation/Server"); err != nil {
+		u.logger.Errorf("[catchup][%s] failed to send RUN event: %v", catchupCtx.blockUpTo.Hash().String(), err)
 	}
 }
 
