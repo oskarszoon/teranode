@@ -135,6 +135,7 @@ func (s *SQL) StoreBlock(ctx context.Context, block *model.Block, peerID string,
 		if bestErr != nil {
 			s.logger.Errorf("StoreBlock: failed to get best block ID: %v", bestErr)
 		} else if uint64(postBestID) != newBlockID {
+			s.mtpCache.Clear()
 			rebuildCtx, rebuildCancel := context.WithTimeout(context.Background(), rebuildOffChainSetTimeout)
 			defer rebuildCancel()
 			if rebuildErr := s.triggerRebuildOffChainSet(rebuildCtx); rebuildErr != nil {
@@ -145,6 +146,7 @@ func (s *SQL) StoreBlock(ctx context.Context, block *model.Block, peerID string,
 		} else if preBestHash == nil || *block.Header.HashPrevBlock != *preBestHash {
 			// Case 2: new block is the best but doesn't extend the old best (reorg),
 			// or preBestHash was unavailable — take the conservative path and rebuild.
+			s.mtpCache.Clear()
 			s.resetChainWalkCache()
 			rebuildCtx, rebuildCancel := context.WithTimeout(context.Background(), rebuildOffChainSetTimeout)
 			defer rebuildCancel()
@@ -508,6 +510,12 @@ RETURNING id
 		return 0, 0, nil, false, errors.NewStorageError("failed to scan new block id", err)
 	}
 
+	// Update MTP cache with this block's timestamp for future MTP calculations.
+	// Only cache valid blocks — invalid blocks are excluded from MTP queries.
+	if !storeAsInvalid {
+		s.mtpCache.Add(height, block.Header.Timestamp)
+	}
+
 	return newBlockID, height, cumulativeChainWorkBytes, storeAsInvalid, nil
 }
 
@@ -795,8 +803,24 @@ func (s *SQL) calculateMedianTimePastForHeight(ctx context.Context, height uint3
 	startHeight := height - medianTimeBlocks
 	endHeight := height - 1
 
-	// Fetch block timestamps for the canonical chain in the range.
-	// Filter invalid = FALSE to exclude orphan/stale blocks that may share the same height.
+	// Fast path: check in-memory cache before hitting the database.
+	if cached := s.mtpCache.GetRange(startHeight, endHeight); cached != nil {
+		return calculateMTPFromTimestamps(cached)
+	}
+
+	// Slow path: fetch from database.
+	timestamps, err := s.fetchBlockTimestamps(ctx, startHeight, endHeight, medianTimeBlocks)
+	if err != nil {
+		return 0, err
+	}
+
+	return calculateMTPFromTimestamps(timestamps)
+}
+
+// fetchBlockTimestamps retrieves block timestamps from the database for the given
+// height range [startHeight, endHeight]. Returns an error if the number of rows
+// returned does not match expectedCount (indicating missing or duplicate blocks).
+func (s *SQL) fetchBlockTimestamps(ctx context.Context, startHeight, endHeight uint32, expectedCount int) ([]uint32, error) {
 	q := `
 		SELECT block_time
 		FROM blocks
@@ -806,42 +830,43 @@ func (s *SQL) calculateMedianTimePastForHeight(ctx context.Context, height uint3
 	`
 	rows, err := s.db.QueryContext(ctx, q, startHeight, endHeight)
 	if err != nil {
-		return 0, errors.NewStorageError("failed to fetch block timestamps from %d to %d", startHeight, endHeight, err)
+		return nil, errors.NewStorageError("failed to fetch block timestamps from %d to %d", startHeight, endHeight, err)
 	}
 	defer rows.Close()
 
-	// Collect timestamps
-	timestamps := make([]uint32, 0, medianTimeBlocks)
+	timestamps := make([]uint32, 0, expectedCount)
 	for rows.Next() {
 		var blockTime uint32
 		if err := rows.Scan(&blockTime); err != nil {
-			return 0, errors.NewStorageError("failed to scan block timestamp", err)
+			return nil, errors.NewStorageError("failed to scan block timestamp", err)
 		}
 		timestamps = append(timestamps, blockTime)
 	}
 
 	if err := rows.Err(); err != nil {
-		return 0, errors.NewStorageError("error iterating block timestamps", err)
+		return nil, errors.NewStorageError("error iterating block timestamps", err)
 	}
 
-	// Verify we got exactly 11 timestamps
-	if len(timestamps) != medianTimeBlocks {
-		return 0, errors.NewStorageError("expected %d timestamps, got %d", medianTimeBlocks, len(timestamps))
+	if len(timestamps) != expectedCount {
+		return nil, errors.NewStorageError("expected %d timestamps, got %d", expectedCount, len(timestamps))
 	}
 
-	// Convert to time.Time for median calculation
-	times := make([]time.Time, medianTimeBlocks)
+	return timestamps, nil
+}
+
+// calculateMTPFromTimestamps computes the Median Time Past from a slice of
+// block timestamps (expected to be in ascending height order).
+func calculateMTPFromTimestamps(timestamps []uint32) (uint32, error) {
+	times := make([]time.Time, len(timestamps))
 	for i, ts := range timestamps {
 		times[i] = time.Unix(int64(ts), 0)
 	}
 
-	// Calculate median using existing function
 	medianTime, err := model.CalculateMedianTimestamp(times)
 	if err != nil {
 		return 0, errors.NewStorageError("failed to calculate median timestamp", err)
 	}
 
-	// Convert back to uint32
 	return uint32(medianTime.Unix()), nil
 }
 

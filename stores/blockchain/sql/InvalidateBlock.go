@@ -108,6 +108,7 @@ func (s *SQL) InvalidateBlock(ctx context.Context, blockHash *chainhash.Hash) (i
 		err = errors.Join(err, rows.Close())
 
 		// Invalidate caches to ensure cached blocks reflect updated invalid field
+		s.mtpCache.Clear()
 		s.ResetResponseCache()
 		if s.useInMemoryChainCheck {
 			s.resetChainWalkCache()
