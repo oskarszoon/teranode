@@ -33,7 +33,7 @@ func newMTPTimestampCache() *mtpTimestampCache {
 // If the height already exists in the cache (fork), all entries at that height
 // and above are evicted before the new value is stored. This guarantees that
 // subsequent MTP lookups never mix timestamps from different chain branches.
-func (c *mtpTimestampCache) Add(height uint32, blockTime uint32) {
+func (c *mtpTimestampCache) Add(height, blockTime uint32) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
