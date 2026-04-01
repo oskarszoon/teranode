@@ -106,10 +106,10 @@ type SQL struct {
 	// in-memory off-chain set (true) or the original SQL recursive CTE (false).
 	// Read once at construction from settings; not changed at runtime.
 	useInMemoryChainCheck bool
-	// mtpCache is a sliding-window cache of recent block timestamps, eliminating
-	// per-block SQL queries in calculateMedianTimePastForHeight during sequential
-	// block processing (seeder, catchup). Cleared on fork detection/invalidation.
-	mtpCache *mtpTimestampCache
+	// blockTimestampCache is a sliding-window cache of recent block timestamps,
+	// eliminating per-block SQL queries in calculateMedianTimePastForHeight during
+	// sequential block processing (seeder, catchup). Cleared on fork detection/invalidation.
+	blockTimestampCache *blockTimestampCache
 }
 
 // New creates and initializes a new SQL blockchain store instance.
@@ -200,7 +200,7 @@ func New(logger ulogger.Logger, storeURL *url.URL, tSettings *settings.Settings)
 		cacheTTL:              2 * time.Minute,
 		chainParams:           tSettings.ChainCfgParams,
 		useInMemoryChainCheck: useInMemory,
-		mtpCache:              newMTPTimestampCache(),
+		blockTimestampCache:   newBlockTimestampCache(),
 	}
 
 	if useInMemory {

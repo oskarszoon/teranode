@@ -2,13 +2,13 @@ package sql
 
 import "sync"
 
-// mtpCacheCapacity is the maximum number of block timestamps to keep in the
-// MTP sliding-window cache. Only the most recent entries are retained; older
+// blockTimestampCacheCapacity is the maximum number of block timestamps to keep
+// in the sliding-window cache. Only the most recent entries are retained; older
 // entries are pruned on each Add. 50 is well above the 11 needed for a single
 // MTP calculation and provides headroom for minor out-of-order inserts.
-const mtpCacheCapacity = 50
+const blockTimestampCacheCapacity = 50
 
-// mtpTimestampCache is a concurrency-safe, bounded cache of block timestamps
+// blockTimestampCache is a concurrency-safe, bounded cache of block timestamps
 // keyed by height. It eliminates per-block SQL queries in
 // calculateMedianTimePastForHeight during sequential block processing (seeder,
 // catchup) where the previous 11 blocks are always already in the cache.
@@ -17,14 +17,14 @@ const mtpCacheCapacity = 50
 // entry, all entries from that height onward are evicted so that stale
 // timestamps from the old chain are never served. InvalidateBlock and
 // RevalidateBlock clear the entire cache as a conservative safety net.
-type mtpTimestampCache struct {
+type blockTimestampCache struct {
 	mu         sync.RWMutex
 	timestamps map[uint32]uint32 // height → block_time (unix)
 }
 
-func newMTPTimestampCache() *mtpTimestampCache {
-	return &mtpTimestampCache{
-		timestamps: make(map[uint32]uint32, mtpCacheCapacity),
+func newBlockTimestampCache() *blockTimestampCache {
+	return &blockTimestampCache{
+		timestamps: make(map[uint32]uint32, blockTimestampCacheCapacity),
 	}
 }
 
@@ -33,7 +33,7 @@ func newMTPTimestampCache() *mtpTimestampCache {
 // If the height already exists in the cache (fork), all entries at that height
 // and above are evicted before the new value is stored. This guarantees that
 // subsequent MTP lookups never mix timestamps from different chain branches.
-func (c *mtpTimestampCache) Add(height, blockTime uint32) {
+func (c *blockTimestampCache) Add(height, blockTime uint32) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -45,7 +45,7 @@ func (c *mtpTimestampCache) Add(height, blockTime uint32) {
 	c.timestamps[height] = blockTime
 
 	// Keep the cache bounded by pruning entries that are too far behind.
-	if len(c.timestamps) > mtpCacheCapacity {
+	if len(c.timestamps) > blockTimestampCacheCapacity {
 		c.pruneLocked(height)
 	}
 }
@@ -53,7 +53,7 @@ func (c *mtpTimestampCache) Add(height, blockTime uint32) {
 // GetRange returns the block timestamps for every height in [startHeight, endHeight]
 // (inclusive) in ascending order. If any height in the range is missing from the
 // cache, nil is returned to signal a cache miss.
-func (c *mtpTimestampCache) GetRange(startHeight, endHeight uint32) []uint32 {
+func (c *blockTimestampCache) GetRange(startHeight, endHeight uint32) []uint32 {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -72,27 +72,27 @@ func (c *mtpTimestampCache) GetRange(startHeight, endHeight uint32) []uint32 {
 }
 
 // InvalidateFrom removes all cached entries at heights >= fromHeight.
-func (c *mtpTimestampCache) InvalidateFrom(fromHeight uint32) {
+func (c *blockTimestampCache) InvalidateFrom(fromHeight uint32) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.invalidateFromLocked(fromHeight)
 }
 
 // Clear removes all cached entries.
-func (c *mtpTimestampCache) Clear() {
+func (c *blockTimestampCache) Clear() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.timestamps = make(map[uint32]uint32, mtpCacheCapacity)
+	c.timestamps = make(map[uint32]uint32, blockTimestampCacheCapacity)
 }
 
 // Len returns the number of entries in the cache (used for testing).
-func (c *mtpTimestampCache) Len() int {
+func (c *blockTimestampCache) Len() int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return len(c.timestamps)
 }
 
-func (c *mtpTimestampCache) invalidateFromLocked(fromHeight uint32) {
+func (c *blockTimestampCache) invalidateFromLocked(fromHeight uint32) {
 	for h := range c.timestamps {
 		if h >= fromHeight {
 			delete(c.timestamps, h)
@@ -100,10 +100,10 @@ func (c *mtpTimestampCache) invalidateFromLocked(fromHeight uint32) {
 	}
 }
 
-func (c *mtpTimestampCache) pruneLocked(currentHeight uint32) {
+func (c *blockTimestampCache) pruneLocked(currentHeight uint32) {
 	minKeep := uint32(0)
-	if currentHeight > mtpCacheCapacity {
-		minKeep = currentHeight - mtpCacheCapacity
+	if currentHeight > blockTimestampCacheCapacity {
+		minKeep = currentHeight - blockTimestampCacheCapacity
 	}
 	for h := range c.timestamps {
 		if h < minKeep {

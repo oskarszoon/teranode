@@ -135,7 +135,7 @@ func (s *SQL) StoreBlock(ctx context.Context, block *model.Block, peerID string,
 		if bestErr != nil {
 			s.logger.Errorf("StoreBlock: failed to get best block ID: %v", bestErr)
 		} else if uint64(postBestID) != newBlockID {
-			s.mtpCache.Clear()
+			s.blockTimestampCache.Clear()
 			rebuildCtx, rebuildCancel := context.WithTimeout(context.Background(), rebuildOffChainSetTimeout)
 			defer rebuildCancel()
 			if rebuildErr := s.triggerRebuildOffChainSet(rebuildCtx); rebuildErr != nil {
@@ -146,7 +146,7 @@ func (s *SQL) StoreBlock(ctx context.Context, block *model.Block, peerID string,
 		} else if preBestHash == nil || *block.Header.HashPrevBlock != *preBestHash {
 			// Case 2: new block is the best but doesn't extend the old best (reorg),
 			// or preBestHash was unavailable — take the conservative path and rebuild.
-			s.mtpCache.Clear()
+			s.blockTimestampCache.Clear()
 			s.resetChainWalkCache()
 			rebuildCtx, rebuildCancel := context.WithTimeout(context.Background(), rebuildOffChainSetTimeout)
 			defer rebuildCancel()
@@ -513,7 +513,7 @@ RETURNING id
 	// Update MTP cache with this block's timestamp for future MTP calculations.
 	// Only cache valid blocks — invalid blocks are excluded from MTP queries.
 	if !storeAsInvalid {
-		s.mtpCache.Add(height, block.Header.Timestamp)
+		s.blockTimestampCache.Add(height, block.Header.Timestamp)
 	}
 
 	return newBlockID, height, cumulativeChainWorkBytes, storeAsInvalid, nil
@@ -804,12 +804,12 @@ func (s *SQL) calculateMedianTimePastForHeight(ctx context.Context, height uint3
 	endHeight := height - 1
 
 	// Fast path: check in-memory cache before hitting the database.
-	if cached := s.mtpCache.GetRange(startHeight, endHeight); cached != nil {
+	if cached := s.blockTimestampCache.GetRange(startHeight, endHeight); cached != nil {
 		return calculateMTPFromTimestamps(cached)
 	}
 
 	// Slow path: fetch from database.
-	timestamps, err := s.fetchBlockTimestamps(ctx, startHeight, endHeight, medianTimeBlocks)
+	timestamps, err := s.fetchBlockTimestamps(ctx, startHeight, endHeight)
 	if err != nil {
 		return 0, err
 	}
@@ -818,9 +818,12 @@ func (s *SQL) calculateMedianTimePastForHeight(ctx context.Context, height uint3
 }
 
 // fetchBlockTimestamps retrieves block timestamps from the database for the given
-// height range [startHeight, endHeight]. Returns an error if the number of rows
-// returned does not match expectedCount (indicating missing or duplicate blocks).
-func (s *SQL) fetchBlockTimestamps(ctx context.Context, startHeight, endHeight uint32, expectedCount int) ([]uint32, error) {
+// height range [startHeight, endHeight] (inclusive). Returns an error if the
+// number of rows returned does not match the expected count derived from the
+// range (indicating missing or duplicate blocks).
+func (s *SQL) fetchBlockTimestamps(ctx context.Context, startHeight, endHeight uint32) ([]uint32, error) {
+	expectedCount := int(endHeight-startHeight) + 1
+
 	q := `
 		SELECT block_time
 		FROM blocks

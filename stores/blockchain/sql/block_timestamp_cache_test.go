@@ -17,11 +17,11 @@ import (
 )
 
 // ============================================================
-// Unit tests for mtpTimestampCache
+// Unit tests for blockTimestampCache
 // ============================================================
 
 func TestMTPCache_AddAndGetRange(t *testing.T) {
-	c := newMTPTimestampCache()
+	c := newBlockTimestampCache()
 
 	for h := uint32(0); h < 11; h++ {
 		c.Add(h, 1000+h)
@@ -36,7 +36,7 @@ func TestMTPCache_AddAndGetRange(t *testing.T) {
 }
 
 func TestMTPCache_GetRange_Miss(t *testing.T) {
-	c := newMTPTimestampCache()
+	c := newBlockTimestampCache()
 
 	// Add heights 5-10, request 0-10 → miss because 0-4 are absent
 	for h := uint32(5); h <= 10; h++ {
@@ -48,13 +48,13 @@ func TestMTPCache_GetRange_Miss(t *testing.T) {
 }
 
 func TestMTPCache_GetRange_EmptyCache(t *testing.T) {
-	c := newMTPTimestampCache()
+	c := newBlockTimestampCache()
 	got := c.GetRange(0, 10)
 	assert.Nil(t, got)
 }
 
 func TestMTPCache_ForkDetection(t *testing.T) {
-	c := newMTPTimestampCache()
+	c := newBlockTimestampCache()
 
 	// Build a chain: heights 0-15
 	for h := uint32(0); h <= 15; h++ {
@@ -88,7 +88,7 @@ func TestMTPCache_ForkDetection(t *testing.T) {
 }
 
 func TestMTPCache_InvalidateFrom(t *testing.T) {
-	c := newMTPTimestampCache()
+	c := newBlockTimestampCache()
 
 	for h := uint32(0); h < 20; h++ {
 		c.Add(h, 1000+h)
@@ -109,7 +109,7 @@ func TestMTPCache_InvalidateFrom(t *testing.T) {
 }
 
 func TestMTPCache_Clear(t *testing.T) {
-	c := newMTPTimestampCache()
+	c := newBlockTimestampCache()
 
 	for h := uint32(0); h < 10; h++ {
 		c.Add(h, 1000+h)
@@ -124,25 +124,25 @@ func TestMTPCache_Clear(t *testing.T) {
 }
 
 func TestMTPCache_Pruning(t *testing.T) {
-	c := newMTPTimestampCache()
+	c := newBlockTimestampCache()
 
-	// Add more entries than mtpCacheCapacity
-	for h := uint32(0); h < mtpCacheCapacity+30; h++ {
+	// Add more entries than blockTimestampCacheCapacity
+	for h := uint32(0); h < blockTimestampCacheCapacity+30; h++ {
 		c.Add(h, 1000+h)
 	}
 
 	// Cache should be bounded
-	assert.LessOrEqual(t, c.Len(), mtpCacheCapacity+1, "cache should not grow unbounded")
+	assert.LessOrEqual(t, c.Len(), blockTimestampCacheCapacity+1, "cache should not grow unbounded")
 
 	// Recent entries should still be present
-	maxH := uint32(mtpCacheCapacity + 29)
+	maxH := uint32(blockTimestampCacheCapacity + 29)
 	got := c.GetRange(maxH-10, maxH)
 	require.NotNil(t, got, "recent entries should be cached")
 	require.Len(t, got, 11)
 }
 
 func TestMTPCache_ConcurrentAccess(t *testing.T) {
-	c := newMTPTimestampCache()
+	c := newBlockTimestampCache()
 
 	var wg sync.WaitGroup
 	// Writers
@@ -264,10 +264,10 @@ func TestMTPCache_SequentialInserts_CacheHit(t *testing.T) {
 	// Store 15 blocks — MTP kicks in at height 11 (needs 11 previous blocks)
 	storeMTPChain(t, s, 15, 1600000000)
 
-	assert.Greater(t, s.mtpCache.Len(), 0, "cache should have entries after sequential inserts")
+	assert.Greater(t, s.blockTimestampCache.Len(), 0, "cache should have entries after sequential inserts")
 
 	// heights 4-14 needed for MTP of block 15
-	cached := s.mtpCache.GetRange(4, 14)
+	cached := s.blockTimestampCache.GetRange(4, 14)
 	require.NotNil(t, cached, "cache should have all timestamps needed for MTP of block 15")
 	require.Len(t, cached, 11)
 }
@@ -279,13 +279,13 @@ func TestMTPCache_MTPValueCorrectness(t *testing.T) {
 	storeMTPChain(t, s, 15, 1600000000)
 
 	// Clear cache and compute MTP from DB (ground truth)
-	s.mtpCache.Clear()
+	s.blockTimestampCache.Clear()
 	mtpFromDB, err := s.calculateMedianTimePastForHeight(ctx, 15)
 	require.NoError(t, err)
 
 	// Re-populate cache with the same timestamps the blocks were stored with
 	for h := uint32(1); h <= 14; h++ {
-		s.mtpCache.Add(h, 1600000000+h)
+		s.blockTimestampCache.Add(h, 1600000000+h)
 	}
 
 	// Compute MTP from cache
@@ -302,7 +302,7 @@ func TestMTPCache_DBFallbackOnCacheMiss(t *testing.T) {
 	storeMTPChain(t, s, 15, 1600000000)
 
 	// Clear cache to force DB fallback
-	s.mtpCache.Clear()
+	s.blockTimestampCache.Clear()
 
 	mtp, err := s.calculateMedianTimePastForHeight(ctx, 15)
 	require.NoError(t, err)
@@ -313,13 +313,13 @@ func TestMTPCache_InvalidateBlockClearsCache(t *testing.T) {
 	s := newMTPTestStore(t)
 
 	hashes := storeMTPChain(t, s, 15, 1600000000)
-	assert.Greater(t, s.mtpCache.Len(), 0)
+	assert.Greater(t, s.blockTimestampCache.Len(), 0)
 
 	// Invalidate block at height 10
 	_, err := s.InvalidateBlock(context.Background(), hashes[9])
 	require.NoError(t, err)
 
-	assert.Equal(t, 0, s.mtpCache.Len(), "InvalidateBlock should clear MTP cache")
+	assert.Equal(t, 0, s.blockTimestampCache.Len(), "InvalidateBlock should clear MTP cache")
 }
 
 func TestMTPCache_RevalidateBlockClearsCache(t *testing.T) {
@@ -330,15 +330,15 @@ func TestMTPCache_RevalidateBlockClearsCache(t *testing.T) {
 	require.NoError(t, err)
 
 	// Manually repopulate cache
-	s.mtpCache.Add(1, 1000)
-	s.mtpCache.Add(2, 2000)
-	assert.Greater(t, s.mtpCache.Len(), 0)
+	s.blockTimestampCache.Add(1, 1000)
+	s.blockTimestampCache.Add(2, 2000)
+	assert.Greater(t, s.blockTimestampCache.Len(), 0)
 
 	// Revalidate
 	err = s.RevalidateBlock(context.Background(), hashes[9])
 	require.NoError(t, err)
 
-	assert.Equal(t, 0, s.mtpCache.Len(), "RevalidateBlock should clear MTP cache")
+	assert.Equal(t, 0, s.blockTimestampCache.Len(), "RevalidateBlock should clear MTP cache")
 }
 
 func TestMTPCache_ForkHandling_NewBlockAtExistingHeight(t *testing.T) {
@@ -349,7 +349,7 @@ func TestMTPCache_ForkHandling_NewBlockAtExistingHeight(t *testing.T) {
 	hashes := storeMTPChain(t, s, 5, 1600000000)
 
 	// Cache should have heights 1-5
-	cached := s.mtpCache.GetRange(1, 5)
+	cached := s.blockTimestampCache.GetRange(1, 5)
 	require.NotNil(t, cached)
 
 	// Store a fork block at height 2 (parent = block 1)
@@ -358,16 +358,16 @@ func TestMTPCache_ForkHandling_NewBlockAtExistingHeight(t *testing.T) {
 	require.NoError(t, err)
 
 	// Cache should have invalidated heights 2+ due to fork detection in Add()
-	cached = s.mtpCache.GetRange(3, 5)
+	cached = s.blockTimestampCache.GetRange(3, 5)
 	assert.Nil(t, cached, "heights above fork point should be evicted")
 
 	// Height 1 should still be cached
-	cached = s.mtpCache.GetRange(1, 1)
+	cached = s.blockTimestampCache.GetRange(1, 1)
 	require.NotNil(t, cached)
 	assert.Equal(t, uint32(1600000001), cached[0])
 
 	// Height 2 should have the fork block's timestamp
-	cached = s.mtpCache.GetRange(2, 2)
+	cached = s.blockTimestampCache.GetRange(2, 2)
 	require.NotNil(t, cached)
 	assert.Equal(t, uint32(1700000000), cached[0])
 }
