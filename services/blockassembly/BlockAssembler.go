@@ -1907,7 +1907,7 @@ func (b *BlockAssembler) loadUnminedTransactions(ctx context.Context, fullScan b
 							b.logger.Infof("[loadUnminedTransactions] input validation progress: %d txs checked, %d invalid", validatedCount, invalidInputCount.Load())
 						}
 
-						if !b.validateUnminedTxInputs(ctx, unminedTransaction.Hash) {
+						if !b.validateUnminedTxInputs(ctx, unminedTransaction.Hash, bestBlockHeaderIDsMap) {
 							invalidInputCount.Add(1)
 							continue
 						}
@@ -2134,10 +2134,14 @@ type sortEntry struct {
 	Sequence  uint64 // 8 bytes - key to retrieve from temp store
 }
 
-// validateUnminedTxInputs checks that each input of an unmined transaction is still spent
-// by THIS transaction. If any input is spent by a different tx, marks the tx as conflicting.
+// validateUnminedTxInputs checks that each input of an unmined transaction is still validly
+// spent by THIS transaction. Catches two cases:
+//  1. Input is spent by a DIFFERENT tx (spending data doesn't match)
+//  2. Input is spent by THIS tx, but a counter-conflicting tx is confirmed on the current chain
+//     (e.g. ProcessConflicting incorrectly made this tx the winner over a confirmed tx)
+//
 // Returns true if the transaction is valid for inclusion in block assembly.
-func (b *BlockAssembler) validateUnminedTxInputs(ctx context.Context, txHash chainhash.Hash) bool {
+func (b *BlockAssembler) validateUnminedTxInputs(ctx context.Context, txHash chainhash.Hash, bestBlockIDsMap map[uint32]bool) bool {
 	// Load only inputs and conflicting flag — NOT full Tx (avoids loading heavy output data)
 	txMeta, err := b.utxoStore.Get(ctx, &txHash, fields.Inputs, fields.Conflicting)
 	if err != nil || txMeta == nil || txMeta.Tx == nil || txMeta.Tx.Inputs == nil {
@@ -2153,8 +2157,6 @@ func (b *BlockAssembler) validateUnminedTxInputs(ctx context.Context, txHash cha
 
 		parentMeta, err := b.utxoStore.Get(ctx, parentHash, fields.Utxos)
 		if err != nil || parentMeta == nil {
-			// Parent not found — tx may be stale/pruned, skip it
-			b.logger.Debugf("[validateUnminedTxInputs][%s] parent %s not found, skipping", txHash.String(), parentHash.String())
 			return false
 		}
 
@@ -2169,18 +2171,52 @@ func (b *BlockAssembler) validateUnminedTxInputs(ctx context.Context, txHash cha
 		}
 
 		if !spendingData.TxID.IsEqual(&txHash) {
+			// Case 1: input spent by a different tx
 			b.logger.Warnf("[validateUnminedTxInputs][%s] input %s:%d is spent by different tx %s — marking conflicting",
 				txHash.String(), parentHash.String(), vout, spendingData.TxID.String())
 
-			if _, _, setErr := b.utxoStore.SetConflicting(ctx, []chainhash.Hash{txHash}, true); setErr != nil {
-				b.logger.Errorf("[validateUnminedTxInputs][%s] failed to mark as conflicting: %v", txHash.String(), setErr)
+			b.markAsConflicting(ctx, txHash)
+			return false
+		}
+
+		// Case 2: spending data matches, but check if the counter-conflicting tx
+		// (the one this tx replaced via ProcessConflicting) is on the current chain.
+		// This catches the scenario where ProcessConflicting incorrectly flipped a
+		// confirmed transaction to "loser" status.
+		counterTxMeta, err := b.utxoStore.Get(ctx, parentHash, fields.ConflictingChildren)
+		if err != nil || counterTxMeta == nil {
+			continue
+		}
+
+		for _, counterChild := range counterTxMeta.ConflictingChildren {
+			if counterChild.IsEqual(&txHash) {
+				continue
 			}
 
-			return false
+			counterMeta, err := b.utxoStore.Get(ctx, &counterChild, fields.BlockIDs)
+			if err != nil || counterMeta == nil {
+				continue
+			}
+
+			for _, blockID := range counterMeta.BlockIDs {
+				if bestBlockIDsMap[blockID] {
+					b.logger.Warnf("[validateUnminedTxInputs][%s] input %s:%d has counter-conflicting tx %s confirmed on chain (blockID %d) — marking conflicting",
+						txHash.String(), parentHash.String(), vout, counterChild.String(), blockID)
+
+					b.markAsConflicting(ctx, txHash)
+					return false
+				}
+			}
 		}
 	}
 
 	return true
+}
+
+func (b *BlockAssembler) markAsConflicting(ctx context.Context, txHash chainhash.Hash) {
+	if _, _, err := b.utxoStore.SetConflicting(ctx, []chainhash.Hash{txHash}, true); err != nil {
+		b.logger.Errorf("[validateUnminedTxInputs][%s] failed to mark as conflicting: %v", txHash.String(), err)
+	}
 }
 
 // loadUnminedTransactionsWithDiskSort loads unmined transactions using disk-based sorting
