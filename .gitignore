@@ -4,7 +4,8 @@
 
 .history/**
 *.tar.gz
-build/
+/build/
+ui/dashboard/build/
 data
 data/
 *.run
@@ -109,5 +110,8 @@ settings_local.conf
 lint_output.txt
 coderabbit-review.txt
 review-findings.md
+.teranode-dev.yaml
+.teranode-dev.pid
+teranode-dev
 .gitnexus
 .worktrees

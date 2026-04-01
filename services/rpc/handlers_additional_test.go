@@ -5820,6 +5820,10 @@ func (m *mockBlockAssemblyClient) ResetBlockAssemblyFully(ctx context.Context) e
 	return nil
 }
 
+func (m *mockBlockAssemblyClient) ResetBlockAssemblyValidateInputs(ctx context.Context) error {
+	return nil
+}
+
 func (m *mockBlockAssemblyClient) GetBlockAssemblyState(ctx context.Context) (*blockassembly_api.StateMessage, error) {
 	return nil, nil
 }
