@@ -614,7 +614,16 @@ func (v *Validator) validateInternal(ctx context.Context, tx *bt.Tx, blockHeight
 							return nil, err
 						}
 
-						// Tx already exists — treat as conflicting (same as successful create)
+						// Tx already exists — ensure it's marked as conflicting in the store
+						if !txMetaData.Conflicting {
+							if _, _, setErr := v.utxoStore.SetConflicting(decoupledCtx, []chainhash.Hash{*tx.TxIDChainHash()}, true); setErr != nil {
+								err = errors.NewProcessingError("[Validate][%s] failed to mark existing tx as conflicting", txID, setErr)
+								span.RecordError(err)
+
+								return nil, err
+							}
+						}
+
 						err = errors.NewTxConflictingError("[Validate][%s] tx is conflicting (already exists)", txID, err)
 						span.RecordError(err)
 

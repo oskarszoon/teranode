@@ -590,8 +590,11 @@ func TestValidator_ValidateInternal_CreateConflicting_TxAlreadyExists(t *testing
 	// CreateInUtxoStore returns ErrTxExists — tx was already validated via P2P
 	mockStore.On("Create", mock.Anything, tx, uint32(100), mock.Anything).Return(&meta.Data{}, errors.NewTxExistsError("already exists"))
 
-	// GetMeta succeeds — tx exists in store
+	// GetMeta succeeds — tx exists in store (not yet marked conflicting)
 	mockStore.On("GetMeta", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+
+	// SetConflicting is called to mark the existing tx as conflicting
+	mockStore.On("SetConflicting", mock.Anything, mock.Anything, true).Return([]*utxo.Spend{}, []chainhash.Hash{}, nil)
 
 	options := &Options{CreateConflicting: true}
 	_, err = v.validateInternal(ctx, tx, 100, options)
