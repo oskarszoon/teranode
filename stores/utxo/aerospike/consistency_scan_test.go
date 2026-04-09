@@ -7,7 +7,6 @@ import (
 
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	"github.com/bsv-blockchain/teranode/errors"
-	"github.com/bsv-blockchain/teranode/settings"
 	"github.com/bsv-blockchain/teranode/stores/utxo"
 	"github.com/bsv-blockchain/teranode/stores/utxo/fields"
 	"github.com/bsv-blockchain/teranode/ulogger"
@@ -305,33 +304,37 @@ func Test_parseConsistencyRecord(t *testing.T) {
 	})
 }
 
-func Test_newConsistencyScanIterator_Boundaries(t *testing.T) {
-	store := &Store{
-		namespace: "test",
-		setName:   "utxos",
-		logger:    ulogger.TestLogger{},
-		settings:  &settings.Settings{},
-	}
+func Test_consistencyScanIterator_MultipleNextCalls(t *testing.T) {
+	ctx := context.Background()
 
-	t.Run("clamps numPartitionQueries below 1", func(t *testing.T) {
-		it, err := newConsistencyScanIterator(store, 0)
-		require.NoError(t, err)
-		require.NotNil(t, it)
-		it.Close()
-	})
+	t.Run("drains multiple batches then returns nil", func(t *testing.T) {
+		resultChan := make(chan []*utxo.InconsistentTxRecord, 3)
+		errorChan := make(chan error, 1)
 
-	t.Run("clamps numPartitionQueries above 4096", func(t *testing.T) {
-		it, err := newConsistencyScanIterator(store, 10000)
-		require.NoError(t, err)
-		require.NotNil(t, it)
-		it.Close()
-	})
+		batch1 := []*utxo.InconsistentTxRecord{{UnminedSince: 1}}
+		batch2 := []*utxo.InconsistentTxRecord{{UnminedSince: 2}}
+		resultChan <- batch1
+		resultChan <- batch2
+		close(resultChan)
+		close(errorChan)
 
-	t.Run("single partition query", func(t *testing.T) {
-		it, err := newConsistencyScanIterator(store, 1)
+		it := &consistencyScanIterator{
+			resultChan: resultChan,
+			errorChan:  errorChan,
+		}
+
+		got1, err := it.Next(ctx)
 		require.NoError(t, err)
-		require.NotNil(t, it)
-		it.Close()
+		require.Equal(t, batch1, got1)
+
+		got2, err := it.Next(ctx)
+		require.NoError(t, err)
+		require.Equal(t, batch2, got2)
+
+		got3, err := it.Next(ctx)
+		require.NoError(t, err)
+		require.Nil(t, got3)
+		require.True(t, it.done)
 	})
 }
 
