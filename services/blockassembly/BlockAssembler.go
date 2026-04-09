@@ -1760,8 +1760,6 @@ func (b *BlockAssembler) loadUnminedTransactions(ctx context.Context, fullScan b
 		return b.loadUnminedTransactionsWithDiskSort(ctx, fullScan)
 	}
 
-	scanHeaders := uint64(1000)
-
 	if !fullScan {
 		// Wait for the unmined_since index to be ready before attempting to get the iterator
 		// This is similar to how the cleanup service waits for the delete_at_height index
@@ -1788,21 +1786,22 @@ func (b *BlockAssembler) loadUnminedTransactions(ctx context.Context, fullScan b
 			b.logger.Warnf("[BlockAssembler] utxo store does not support WaitForIndexReady")
 			prometheusBlockAssemblerUtxoIndexWaitDuration.WithLabelValues("unminedSinceIndex", "skipped").Observe(0)
 		}
-	} else {
-		// get the full header count so we can do a full scan of all unmined transactions
-		_, bestBlockHeaderMeta, err := b.blockchainClient.GetBestBlockHeader(ctx)
-		if err != nil {
-			return errors.NewProcessingError("error getting best block header meta", err)
-		}
-
-		if bestBlockHeaderMeta.Height > 0 {
-			scanHeaders = uint64(bestBlockHeaderMeta.Height)
-		} else {
-			scanHeaders = 1000
-		}
-
-		b.logger.Infof("[BlockAssembler] doing full scan of unmined transactions, scanning last %d headers", scanHeaders)
 	}
+
+	// Load all block header IDs on the current best chain so we can correctly
+	// identify already-mined transactions and validate parent chains. The
+	// recursive CTE result is cached (10 min TTL), so the cost is one-time per
+	// restart — a few seconds of SQL for full chain coverage vs false positives
+	// from a truncated window.
+	_, bestBlockHeaderMeta, err := b.blockchainClient.GetBestBlockHeader(ctx)
+	if err != nil {
+		return errors.NewProcessingError("error getting best block header meta", err)
+	}
+	scanHeaders := uint64(bestBlockHeaderMeta.Height)
+	if scanHeaders == 0 {
+		scanHeaders = 1 // genesis
+	}
+	b.logger.Infof("[loadUnminedTransactions] scanning all %d headers for best chain coverage", scanHeaders)
 
 	bestBlockHeader, _ := b.CurrentBlock()
 	bestBlockHeaderIDs, err := b.blockchainClient.GetBlockHeaderIDs(ctx, bestBlockHeader.Hash(), scanHeaders)
