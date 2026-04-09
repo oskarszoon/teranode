@@ -1754,7 +1754,6 @@ func (b *BlockAssembler) fixUnminedSinceInconsistencies(ctx context.Context) err
 	// Start progress reporting
 	progressDone := make(chan struct{})
 	go func() {
-		defer close(progressDone)
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
 		for {

@@ -277,3 +277,31 @@ func (m *MockUnminedTxIterator) Close() error {
 	args := m.Called()
 	return args.Error(0)
 }
+
+// MockConsistencyScanIterator is a mock implementation of utxo.ConsistencyScanIterator for testing
+type MockConsistencyScanIterator struct {
+	mock.Mock
+}
+
+func (m *MockConsistencyScanIterator) Next(ctx context.Context) ([]*InconsistentTxRecord, error) {
+	args := m.Called(ctx)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).([]*InconsistentTxRecord), args.Error(1)
+}
+
+func (m *MockConsistencyScanIterator) TotalScanned() int64 {
+	args := m.Called()
+	return args.Get(0).(int64)
+}
+
+func (m *MockConsistencyScanIterator) Err() error {
+	args := m.Called()
+	return args.Error(0)
+}
+
+func (m *MockConsistencyScanIterator) Close() error {
+	args := m.Called()
+	return args.Error(0)
+}
