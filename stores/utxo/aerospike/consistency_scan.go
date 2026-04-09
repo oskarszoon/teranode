@@ -163,32 +163,12 @@ func (it *consistencyScanIterator) partitionWorker(ctx context.Context, policy *
 
 		it.totalScanned.Add(1)
 
-		bins := rec.Record.Bins
-
-		// Extract txid
-		txidVal, ok := bins[fields.TxID.String()].([]byte)
+		record, ok := parseConsistencyRecord(rec.Record.Bins)
 		if !ok {
 			continue
 		}
-		hash, err := chainhash.NewHash(txidVal)
-		if err != nil {
-			continue
-		}
 
-		// Extract unmined_since
-		unminedSince, _ := bins[fields.UnminedSince.String()].(int)
-
-		// Extract block_ids
-		blockIDs, err := processBlockIDs(bins)
-		if err != nil {
-			continue
-		}
-
-		localBuffer = append(localBuffer, &utxo.InconsistentTxRecord{
-			Hash:         *hash,
-			BlockIDs:     blockIDs,
-			UnminedSince: unminedSince,
-		})
+		localBuffer = append(localBuffer, record)
 
 		if len(localBuffer) >= batchSize {
 			if err := flush(); err != nil {
@@ -196,6 +176,33 @@ func (it *consistencyScanIterator) partitionWorker(ctx context.Context, policy *
 			}
 		}
 	}
+}
+
+// parseConsistencyRecord extracts txid, block_ids, and unmined_since from an Aerospike
+// bin map. Returns the record and true if parsing succeeded, or nil and false if the
+// record should be skipped (missing/invalid txid, bad block_ids, etc.).
+func parseConsistencyRecord(bins map[string]interface{}) (*utxo.InconsistentTxRecord, bool) {
+	txidVal, ok := bins[fields.TxID.String()].([]byte)
+	if !ok {
+		return nil, false
+	}
+	hash, err := chainhash.NewHash(txidVal)
+	if err != nil {
+		return nil, false
+	}
+
+	unminedSince, _ := bins[fields.UnminedSince.String()].(int)
+
+	blockIDs, err := processBlockIDs(bins)
+	if err != nil {
+		return nil, false
+	}
+
+	return &utxo.InconsistentTxRecord{
+		Hash:         *hash,
+		BlockIDs:     blockIDs,
+		UnminedSince: unminedSince,
+	}, true
 }
 
 func (it *consistencyScanIterator) Next(ctx context.Context) ([]*utxo.InconsistentTxRecord, error) {

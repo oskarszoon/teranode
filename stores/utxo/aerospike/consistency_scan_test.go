@@ -3,9 +3,14 @@ package aerospike
 import (
 	"context"
 	"testing"
+	"time"
 
+	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	"github.com/bsv-blockchain/teranode/errors"
+	"github.com/bsv-blockchain/teranode/settings"
 	"github.com/bsv-blockchain/teranode/stores/utxo"
+	"github.com/bsv-blockchain/teranode/stores/utxo/fields"
+	"github.com/bsv-blockchain/teranode/ulogger"
 	"github.com/stretchr/testify/require"
 )
 
@@ -206,4 +211,150 @@ func Test_consistencyScanIterator_Next_EdgeCases(t *testing.T) {
 		require.Contains(t, err.Error(), "partition query failed")
 		require.True(t, it.done)
 	})
+}
+
+func Test_parseConsistencyRecord(t *testing.T) {
+	validHash := chainhash.HashH([]byte("test-tx"))
+
+	t.Run("valid record with all fields", func(t *testing.T) {
+		bins := map[string]interface{}{
+			fields.TxID.String():         validHash[:],
+			fields.UnminedSince.String(): int(42),
+			fields.BlockIDs.String():     []interface{}{int(1), int(2), int(3)},
+		}
+
+		rec, ok := parseConsistencyRecord(bins)
+		require.True(t, ok)
+		require.Equal(t, validHash, rec.Hash)
+		require.Equal(t, 42, rec.UnminedSince)
+		require.Equal(t, []uint32{1, 2, 3}, rec.BlockIDs)
+	})
+
+	t.Run("valid record with no block IDs", func(t *testing.T) {
+		bins := map[string]interface{}{
+			fields.TxID.String():         validHash[:],
+			fields.UnminedSince.String(): int(5),
+		}
+
+		rec, ok := parseConsistencyRecord(bins)
+		require.True(t, ok)
+		require.Equal(t, validHash, rec.Hash)
+		require.Equal(t, 5, rec.UnminedSince)
+		require.Equal(t, []uint32{}, rec.BlockIDs)
+	})
+
+	t.Run("valid record with unmined_since zero", func(t *testing.T) {
+		bins := map[string]interface{}{
+			fields.TxID.String():         validHash[:],
+			fields.UnminedSince.String(): int(0),
+			fields.BlockIDs.String():     []interface{}{int(10)},
+		}
+
+		rec, ok := parseConsistencyRecord(bins)
+		require.True(t, ok)
+		require.Equal(t, 0, rec.UnminedSince)
+		require.Equal(t, []uint32{10}, rec.BlockIDs)
+	})
+
+	t.Run("missing unmined_since defaults to zero", func(t *testing.T) {
+		bins := map[string]interface{}{
+			fields.TxID.String(): validHash[:],
+		}
+
+		rec, ok := parseConsistencyRecord(bins)
+		require.True(t, ok)
+		require.Equal(t, 0, rec.UnminedSince)
+	})
+
+	t.Run("missing txid returns false", func(t *testing.T) {
+		bins := map[string]interface{}{
+			fields.UnminedSince.String(): int(5),
+		}
+
+		rec, ok := parseConsistencyRecord(bins)
+		require.False(t, ok)
+		require.Nil(t, rec)
+	})
+
+	t.Run("txid wrong type returns false", func(t *testing.T) {
+		bins := map[string]interface{}{
+			fields.TxID.String(): "not-bytes",
+		}
+
+		rec, ok := parseConsistencyRecord(bins)
+		require.False(t, ok)
+		require.Nil(t, rec)
+	})
+
+	t.Run("txid too short returns false", func(t *testing.T) {
+		bins := map[string]interface{}{
+			fields.TxID.String(): []byte{0x01, 0x02, 0x03}, // too short for a hash
+		}
+
+		rec, ok := parseConsistencyRecord(bins)
+		require.False(t, ok)
+		require.Nil(t, rec)
+	})
+
+	t.Run("empty bins returns false", func(t *testing.T) {
+		bins := map[string]interface{}{}
+
+		rec, ok := parseConsistencyRecord(bins)
+		require.False(t, ok)
+		require.Nil(t, rec)
+	})
+}
+
+func Test_newConsistencyScanIterator_Boundaries(t *testing.T) {
+	store := &Store{
+		namespace: "test",
+		setName:   "utxos",
+		logger:    ulogger.TestLogger{},
+		settings:  &settings.Settings{},
+	}
+
+	t.Run("clamps numPartitionQueries below 1", func(t *testing.T) {
+		it, err := newConsistencyScanIterator(store, 0)
+		require.NoError(t, err)
+		require.NotNil(t, it)
+		it.Close()
+	})
+
+	t.Run("clamps numPartitionQueries above 4096", func(t *testing.T) {
+		it, err := newConsistencyScanIterator(store, 10000)
+		require.NoError(t, err)
+		require.NotNil(t, it)
+		it.Close()
+	})
+
+	t.Run("single partition query", func(t *testing.T) {
+		it, err := newConsistencyScanIterator(store, 1)
+		require.NoError(t, err)
+		require.NotNil(t, it)
+		it.Close()
+	})
+}
+
+func Test_consistencyScanIterator_ProgressReporter(t *testing.T) {
+	store := &Store{
+		logger: ulogger.TestLogger{},
+	}
+
+	it := &consistencyScanIterator{
+		store: store,
+	}
+
+	it.totalScanned.Add(1000)
+
+	stop := it.ProgressReporter(50 * time.Millisecond)
+	require.NotNil(t, stop)
+
+	// Let it tick at least once
+	time.Sleep(100 * time.Millisecond)
+
+	// Stop should not panic
+	stop()
+
+	// Calling stop again should be safe
+	stop()
 }
