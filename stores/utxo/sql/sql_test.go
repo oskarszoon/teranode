@@ -304,7 +304,7 @@ func TestSetMinedMulti(t *testing.T) {
 		require.NoError(t, err)
 
 		// check that the tx is marked as unmined
-		it, err := utxoStore.GetUnminedTxIterator(false)
+		it, err := utxoStore.GetUnminedTxIterator()
 		require.NoError(t, err)
 
 		rec, err := it.Next(ctx)
@@ -332,7 +332,7 @@ func TestSetMinedMulti(t *testing.T) {
 		assert.Equal(t, uint32(1), metaData.BlockIDs[0])
 
 		// check that the tx is marked as unmined
-		it, err = utxoStore.GetUnminedTxIterator(false)
+		it, err = utxoStore.GetUnminedTxIterator()
 		require.NoError(t, err)
 
 		rec, err = it.Next(ctx)

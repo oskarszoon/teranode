@@ -2003,7 +2003,7 @@ func TestBlockAssembly_LoadUnminedTransactions_ReseedsMinedTx_WhenUnminedSinceNo
 	require.NoError(t, items.utxoStore.MarkTransactionsOnLongestChain(ctx, []chainhash.Hash{*txHash}, false))
 
 	// Now force the assembler to reload unmined transactions
-	err = items.blockAssembler.loadUnminedTransactions(ctx, false)
+	err = items.blockAssembler.loadUnminedTransactions(ctx)
 	require.NoError(t, err)
 
 	// Verify the transaction was (incorrectly) re-added to the assembler
@@ -2050,7 +2050,7 @@ func TestBlockAssembly_LoadUnminedTransactions_ReorgCornerCase_MisUnsetMinedStat
 	}
 
 	// Reload unmined transactions as would happen after reset/reorg
-	err = items.blockAssembler.loadUnminedTransactions(ctx, false)
+	err = items.blockAssembler.loadUnminedTransactions(ctx)
 	require.NoError(t, err)
 
 	// The mined tx should now be present in the assembler due to the incorrect flip
@@ -2122,7 +2122,7 @@ func TestBlockAssembly_LoadUnminedTransactions_SkipsTransactionsOnCurrentChain(t
 	items.blockAssembler.subtreeProcessor.SetCurrentBlockHeader(blockHeader1)
 
 	// Load unmined transactions
-	err = items.blockAssembler.loadUnminedTransactions(ctx, false)
+	err = items.blockAssembler.loadUnminedTransactions(ctx)
 	require.NoError(t, err)
 
 	// Verify results
@@ -2148,22 +2148,22 @@ func TestResetCoverage(t *testing.T) {
 		cancel() // Cancel immediately
 
 		// Test reset with cancelled context
-		_ = ba.reset(ctx, false)
+		_ = ba.reset(ctx)
 
 		// Should handle cancelled context gracefully
 		assert.True(t, true, "reset should handle cancelled context")
 	})
 
-	t.Run("reset with force flag", func(t *testing.T) {
+	t.Run("reset with validateInputs", func(t *testing.T) {
 		testItems := setupBlockAssemblyTest(t)
 		require.NotNil(t, testItems)
 		ba := testItems.blockAssembler
 
-		// Test reset with force flag
+		// Test reset with validateInputs=true
 		_ = ba.reset(t.Context(), true)
 
-		// Should handle forced reset
-		assert.True(t, true, "reset should handle forced reset")
+		// Should handle reset with input validation
+		assert.True(t, true, "reset should handle validateInputs flag")
 	})
 
 	t.Run("reset multiple times", func(t *testing.T) {
@@ -2174,9 +2174,9 @@ func TestResetCoverage(t *testing.T) {
 		ctx := t.Context()
 
 		// Reset multiple times
-		_ = ba.reset(ctx, false)
+		_ = ba.reset(ctx)
 		_ = ba.reset(ctx, true)
-		_ = ba.reset(ctx, false)
+		_ = ba.reset(ctx)
 
 		// Should handle multiple resets gracefully
 		assert.True(t, true, "reset should handle multiple calls gracefully")
@@ -2258,22 +2258,22 @@ func TestLoadUnminedTransactionsCoverage(t *testing.T) {
 		ba := testItems.blockAssembler
 
 		// Test loadUnminedTransactions
-		_ = ba.loadUnminedTransactions(t.Context(), false)
+		_ = ba.loadUnminedTransactions(t.Context())
 
 		// Should complete loading
 		assert.True(t, true, "loadUnminedTransactions should complete successfully")
 	})
 
-	t.Run("loadUnminedTransactions with reseed flag", func(t *testing.T) {
+	t.Run("loadUnminedTransactions with validateInputs", func(t *testing.T) {
 		testItems := setupBlockAssemblyTest(t)
 		require.NotNil(t, testItems)
 		ba := testItems.blockAssembler
 
-		// Test loadUnminedTransactions with reseed
+		// Test loadUnminedTransactions with validateInputs=true
 		_ = ba.loadUnminedTransactions(t.Context(), true)
 
-		// Should complete loading with reseed
-		assert.True(t, true, "loadUnminedTransactions should handle reseed flag")
+		// Should complete loading with input validation
+		assert.True(t, true, "loadUnminedTransactions should handle validateInputs flag")
 	})
 
 	t.Run("loadUnminedTransactions with context cancellation", func(t *testing.T) {
@@ -2285,7 +2285,7 @@ func TestLoadUnminedTransactionsCoverage(t *testing.T) {
 		cancel() // Cancel immediately
 
 		// Test loadUnminedTransactions with cancelled context
-		_ = ba.loadUnminedTransactions(ctx, false)
+		_ = ba.loadUnminedTransactions(ctx)
 
 		// Should handle cancellation gracefully
 		assert.True(t, true, "loadUnminedTransactions should handle cancelled context")
