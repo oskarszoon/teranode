@@ -299,6 +299,17 @@ func Test_parseConsistencyRecord(t *testing.T) {
 		require.Nil(t, rec)
 	})
 
+	t.Run("invalid block_ids type returns false", func(t *testing.T) {
+		bins := map[string]interface{}{
+			fields.TxID.String():     validHash[:],
+			fields.BlockIDs.String(): []interface{}{"not-an-int"},
+		}
+
+		rec, ok := parseConsistencyRecord(bins)
+		require.False(t, ok)
+		require.Nil(t, rec)
+	})
+
 	t.Run("empty bins returns false", func(t *testing.T) {
 		bins := map[string]interface{}{}
 
@@ -590,6 +601,42 @@ func Test_consistencyScanIterator_processResults(t *testing.T) {
 		err := <-errorChan
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "Timeout")
+	})
+
+	t.Run("flush returns error when context cancelled with buffered data", func(t *testing.T) {
+		resultChan := make(chan []*utxo.InconsistentTxRecord) // unbuffered — will block on send
+		errorChan := make(chan error, 1)
+		it := &consistencyScanIterator{
+			resultChan: resultChan,
+			errorChan:  errorChan,
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+
+		// Use a channel we control to feed records one at a time
+		results := make(chan *as.Result, 1)
+
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			it.processResults(ctx, results)
+		}()
+
+		// Send a valid record — it will be parsed and buffered
+		results <- makeResult(as.BinMap{
+			fields.TxID.String():         validHash[:],
+			fields.UnminedSince.String(): int(1),
+		})
+
+		// Give processResults time to consume the record
+		time.Sleep(50 * time.Millisecond)
+
+		// Now cancel context and close results — flush will hit ctx.Done()
+		cancel()
+		close(results)
+
+		<-done
+		require.Equal(t, int64(1), it.TotalScanned())
 	})
 
 	t.Run("handles nil result from channel", func(t *testing.T) {
