@@ -260,7 +260,9 @@ type Store interface {
 	SetMinedMulti(ctx context.Context, hashes []*chainhash.Hash, minedBlockInfo MinedBlockInfo) (map[chainhash.Hash][]uint32, error)
 
 	// GetUnminedTxIterator returns an iterator for unmined transactions in the store.
-	// Uses the unmined_since index to efficiently query only unmined transactions.
+	// Uses the unmined_since secondary index to query only transactions with unmined_since set,
+	// and does NOT scan all records. For full consistency checking that scans all records
+	// regardless of unmined_since, see ScanInconsistentUnminedTxs.
 	GetUnminedTxIterator() (UnminedTxIterator, error)
 
 	// ScanInconsistentUnminedTxs returns a lightweight iterator that scans all records
