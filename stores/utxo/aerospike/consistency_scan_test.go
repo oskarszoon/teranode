@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	as "github.com/aerospike/aerospike-client-go/v8"
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/stores/utxo"
@@ -360,4 +361,139 @@ func Test_consistencyScanIterator_ProgressReporter(t *testing.T) {
 
 	// Calling stop again should be safe
 	stop()
+}
+
+func Test_consistencyScanIterator_processResults(t *testing.T) {
+	validHash := chainhash.HashH([]byte("test-tx-1"))
+	validHash2 := chainhash.HashH([]byte("test-tx-2"))
+
+	makeResult := func(bins as.BinMap) *as.Result {
+		return &as.Result{
+			Record: &as.Record{Bins: bins},
+		}
+	}
+
+	t.Run("processes valid records and flushes on channel close", func(t *testing.T) {
+		resultChan := make(chan []*utxo.InconsistentTxRecord, 10)
+		errorChan := make(chan error, 1)
+		it := &consistencyScanIterator{
+			resultChan: resultChan,
+			errorChan:  errorChan,
+		}
+
+		results := make(chan *as.Result, 3)
+		results <- makeResult(as.BinMap{
+			fields.TxID.String():         validHash[:],
+			fields.UnminedSince.String(): int(5),
+			fields.BlockIDs.String():     []interface{}{int(1)},
+		})
+		results <- makeResult(as.BinMap{
+			fields.TxID.String():         validHash2[:],
+			fields.UnminedSince.String(): int(0),
+		})
+		close(results)
+
+		it.processResults(context.Background(), results)
+
+		batch := <-resultChan
+		require.Len(t, batch, 2)
+		require.Equal(t, validHash, batch[0].Hash)
+		require.Equal(t, 5, batch[0].UnminedSince)
+		require.Equal(t, []uint32{1}, batch[0].BlockIDs)
+		require.Equal(t, validHash2, batch[1].Hash)
+		require.Equal(t, int64(2), it.TotalScanned())
+	})
+
+	t.Run("skips records with invalid txid", func(t *testing.T) {
+		resultChan := make(chan []*utxo.InconsistentTxRecord, 10)
+		errorChan := make(chan error, 1)
+		it := &consistencyScanIterator{
+			resultChan: resultChan,
+			errorChan:  errorChan,
+		}
+
+		results := make(chan *as.Result, 3)
+		// Invalid: no txid
+		results <- makeResult(as.BinMap{
+			fields.UnminedSince.String(): int(5),
+		})
+		// Invalid: txid wrong type
+		results <- makeResult(as.BinMap{
+			fields.TxID.String(): "not-bytes",
+		})
+		// Valid
+		results <- makeResult(as.BinMap{
+			fields.TxID.String():         validHash[:],
+			fields.UnminedSince.String(): int(3),
+		})
+		close(results)
+
+		it.processResults(context.Background(), results)
+
+		batch := <-resultChan
+		require.Len(t, batch, 1)
+		require.Equal(t, validHash, batch[0].Hash)
+		require.Equal(t, int64(3), it.TotalScanned()) // all 3 counted, but only 1 parsed
+	})
+
+	t.Run("stops on context cancellation", func(t *testing.T) {
+		resultChan := make(chan []*utxo.InconsistentTxRecord, 10)
+		errorChan := make(chan error, 1)
+		it := &consistencyScanIterator{
+			resultChan: resultChan,
+			errorChan:  errorChan,
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel() // Cancel immediately
+
+		results := make(chan *as.Result, 1)
+		results <- makeResult(as.BinMap{
+			fields.TxID.String():         validHash[:],
+			fields.UnminedSince.String(): int(1),
+		})
+
+		it.processResults(ctx, results)
+
+		// Should have returned early without sending to resultChan
+		require.Equal(t, int64(0), it.TotalScanned())
+	})
+
+	t.Run("sends error on record error", func(t *testing.T) {
+		resultChan := make(chan []*utxo.InconsistentTxRecord, 10)
+		errorChan := make(chan error, 1)
+		it := &consistencyScanIterator{
+			resultChan: resultChan,
+			errorChan:  errorChan,
+		}
+
+		results := make(chan *as.Result, 2)
+		results <- &as.Result{
+			Err: as.ErrTimeout,
+		}
+		close(results)
+
+		it.processResults(context.Background(), results)
+
+		err := <-errorChan
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "Timeout")
+	})
+
+	t.Run("handles nil result from channel", func(t *testing.T) {
+		resultChan := make(chan []*utxo.InconsistentTxRecord, 10)
+		errorChan := make(chan error, 1)
+		it := &consistencyScanIterator{
+			resultChan: resultChan,
+			errorChan:  errorChan,
+		}
+
+		results := make(chan *as.Result, 1)
+		results <- nil
+		close(results)
+
+		it.processResults(context.Background(), results)
+
+		require.Equal(t, int64(0), it.TotalScanned())
+	})
 }

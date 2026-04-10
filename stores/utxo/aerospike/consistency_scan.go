@@ -119,6 +119,13 @@ func (it *consistencyScanIterator) partitionWorker(ctx context.Context, policy *
 	}
 	defer recordset.Close()
 
+	it.processResults(ctx, recordset.Results())
+}
+
+// processResults reads Aerospike results from a channel, parses consistency records,
+// batches them, and sends batches to resultChan. Extracted from partitionWorker to
+// enable testing without a live Aerospike connection.
+func (it *consistencyScanIterator) processResults(ctx context.Context, results <-chan *as.Result) {
 	const batchSize = 16 * 1024
 	localBuffer := make([]*utxo.InconsistentTxRecord, 0, batchSize)
 
@@ -148,7 +155,7 @@ func (it *consistencyScanIterator) partitionWorker(ctx context.Context, policy *
 		default:
 		}
 
-		rec, ok := <-recordset.Results()
+		rec, ok := <-results
 		if !ok || rec == nil {
 			return
 		}
