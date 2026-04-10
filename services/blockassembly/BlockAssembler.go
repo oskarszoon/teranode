@@ -2333,7 +2333,7 @@ func (b *BlockAssembler) CheckInputValidation(ctx context.Context) (int, error) 
 		bestBlockHeaderIDsMap[id] = true
 	}
 
-	it, err := b.utxoStore.GetUnminedTxIterator(false)
+	it, err := b.utxoStore.GetUnminedTxIterator()
 	if err != nil {
 		return 0, errors.NewProcessingError("error getting unmined tx iterator", err)
 	}
