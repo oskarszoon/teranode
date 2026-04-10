@@ -1788,22 +1788,16 @@ func (b *BlockAssembler) loadUnminedTransactions(ctx context.Context, fullScan b
 		}
 	}
 
-	// Load all block header IDs on the current best chain so we can correctly
-	// identify already-mined transactions and validate parent chains. The
-	// recursive CTE result is cached (10 min TTL), so the cost is one-time per
-	// restart — a few seconds of SQL for full chain coverage vs false positives
-	// from a truncated window.
-	_, bestBlockHeaderMeta, err := b.blockchainClient.GetBestBlockHeader(ctx)
-	if err != nil {
-		return errors.NewProcessingError("error getting best block header meta", err)
-	}
-	scanHeaders := uint64(bestBlockHeaderMeta.Height)
-	if scanHeaders == 0 {
-		scanHeaders = 1 // genesis
-	}
+	// Load all block header IDs from the current block back to genesis so we can
+	// correctly identify already-mined transactions and validate parent chains.
+	// The recursive CTE result is cached (10 min TTL), so the cost is one-time
+	// per restart. We use CurrentBlock's height (not GetBestBlockHeader) because
+	// during reset, CurrentBlock may still point to a pre-reorg tip that differs
+	// from the blockchain service's best block.
+	bestBlockHeader, bestBlockHeight := b.CurrentBlock()
+	scanHeaders := uint64(bestBlockHeight) + 1 // +1 to include genesis
 	b.logger.Infof("[loadUnminedTransactions] scanning all %d headers for best chain coverage", scanHeaders)
 
-	bestBlockHeader, _ := b.CurrentBlock()
 	bestBlockHeaderIDs, err := b.blockchainClient.GetBlockHeaderIDs(ctx, bestBlockHeader.Hash(), scanHeaders)
 	if err != nil {
 		return errors.NewProcessingError("error getting best block headers", err)
