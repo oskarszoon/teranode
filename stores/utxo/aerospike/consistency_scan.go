@@ -47,6 +47,20 @@ func (s *Store) ScanInconsistentUnminedTxs() (utxo.ConsistencyScanIterator, erro
 }
 
 func newConsistencyScanIterator(store *Store, numPartitionQueries int) (*consistencyScanIterator, error) {
+	policy := util.GetAerospikeQueryPolicy(store.settings)
+	policy.IncludeBinData = true
+	policy.RecordQueueSize = 1024
+
+	workerFunc := func(ctx context.Context, it *consistencyScanIterator, partitionStart, partitionCount int) {
+		it.partitionWorker(ctx, policy, partitionStart, partitionCount)
+	}
+
+	return launchConsistencyScan(store, numPartitionQueries, workerFunc)
+}
+
+// launchConsistencyScan sets up the partition-parallel scan infrastructure and launches workers.
+// The workerFunc parameter allows testing without a live Aerospike connection.
+func launchConsistencyScan(store *Store, numPartitionQueries int, workerFunc func(ctx context.Context, it *consistencyScanIterator, partitionStart, partitionCount int)) (*consistencyScanIterator, error) {
 	const totalPartitions = 4096
 
 	if numPartitionQueries < 1 {
@@ -58,10 +72,6 @@ func newConsistencyScanIterator(store *Store, numPartitionQueries int) (*consist
 
 	partitionsPerQuery := totalPartitions / numPartitionQueries
 	remainingPartitions := totalPartitions % numPartitionQueries
-
-	policy := util.GetAerospikeQueryPolicy(store.settings)
-	policy.IncludeBinData = true
-	policy.RecordQueueSize = 1024
 
 	workerCtx, cancel := context.WithCancel(context.Background())
 
@@ -80,7 +90,10 @@ func newConsistencyScanIterator(store *Store, numPartitionQueries int) (*consist
 		}
 
 		it.wg.Add(1)
-		go it.partitionWorker(workerCtx, policy, partitionStart, partitionCount)
+		go func(ps, pc int) {
+			defer it.wg.Done()
+			workerFunc(workerCtx, it, ps, pc)
+		}(partitionStart, partitionCount)
 
 		partitionStart += partitionCount
 	}
@@ -95,8 +108,6 @@ func newConsistencyScanIterator(store *Store, numPartitionQueries int) (*consist
 }
 
 func (it *consistencyScanIterator) partitionWorker(ctx context.Context, policy *as.QueryPolicy, partitionStart, partitionCount int) {
-	defer it.wg.Done()
-
 	stmt := as.NewStatement(it.store.namespace, it.store.setName)
 
 	// No filter — scan all records. Only fetch 3 lightweight bins.

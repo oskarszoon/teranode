@@ -2,12 +2,15 @@ package aerospike
 
 import (
 	"context"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	as "github.com/aerospike/aerospike-client-go/v8"
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	"github.com/bsv-blockchain/teranode/errors"
+	"github.com/bsv-blockchain/teranode/settings"
 	"github.com/bsv-blockchain/teranode/stores/utxo"
 	"github.com/bsv-blockchain/teranode/stores/utxo/fields"
 	"github.com/bsv-blockchain/teranode/ulogger"
@@ -361,6 +364,115 @@ func Test_consistencyScanIterator_ProgressReporter(t *testing.T) {
 
 	// Calling stop again should be safe
 	stop()
+}
+
+func Test_launchConsistencyScan(t *testing.T) {
+	store := &Store{
+		namespace: "test",
+		setName:   "utxos",
+		logger:    ulogger.TestLogger{},
+		settings:  &settings.Settings{},
+	}
+
+	t.Run("launches workers and produces results", func(t *testing.T) {
+		validHash := chainhash.HashH([]byte("launch-test"))
+		workerFunc := func(ctx context.Context, it *consistencyScanIterator, partitionStart, partitionCount int) {
+			it.resultChan <- []*utxo.InconsistentTxRecord{
+				{Hash: validHash, BlockIDs: []uint32{1}, UnminedSince: 5},
+			}
+		}
+
+		it, err := launchConsistencyScan(store, 1, workerFunc)
+		require.NoError(t, err)
+		require.NotNil(t, it)
+
+		batch, err := it.Next(context.Background())
+		require.NoError(t, err)
+		require.Len(t, batch, 1)
+		require.Equal(t, validHash, batch[0].Hash)
+
+		// Drain remaining
+		batch, err = it.Next(context.Background())
+		require.NoError(t, err)
+		require.Nil(t, batch)
+		it.Close()
+	})
+
+	t.Run("clamps numPartitionQueries below 1", func(t *testing.T) {
+		workerCalled := false
+		workerFunc := func(ctx context.Context, it *consistencyScanIterator, partitionStart, partitionCount int) {
+			workerCalled = true
+			require.Equal(t, 0, partitionStart)
+			require.Equal(t, 4096, partitionCount)
+		}
+
+		it, err := launchConsistencyScan(store, 0, workerFunc)
+		require.NoError(t, err)
+
+		// Drain to let worker finish
+		batch, _ := it.Next(context.Background())
+		require.Nil(t, batch)
+		require.True(t, workerCalled)
+		it.Close()
+	})
+
+	t.Run("clamps numPartitionQueries above 4096", func(t *testing.T) {
+		var workerCount atomic.Int32
+		workerFunc := func(ctx context.Context, it *consistencyScanIterator, partitionStart, partitionCount int) {
+			workerCount.Add(1)
+		}
+
+		it, err := launchConsistencyScan(store, 10000, workerFunc)
+		require.NoError(t, err)
+
+		// Drain — wait for channels to close (all workers done)
+		for range it.resultChan {
+		}
+		require.Equal(t, int32(4096), workerCount.Load())
+		it.Close()
+	})
+
+	t.Run("multiple workers with correct partition distribution", func(t *testing.T) {
+		partitions := make([]struct{ start, count int }, 0)
+		var mu sync.Mutex
+		workerFunc := func(ctx context.Context, it *consistencyScanIterator, partitionStart, partitionCount int) {
+			mu.Lock()
+			partitions = append(partitions, struct{ start, count int }{partitionStart, partitionCount})
+			mu.Unlock()
+		}
+
+		it, err := launchConsistencyScan(store, 4, workerFunc)
+		require.NoError(t, err)
+
+		// Drain
+		batch, _ := it.Next(context.Background())
+		require.Nil(t, batch)
+
+		require.Len(t, partitions, 4)
+
+		// Total partitions should sum to 4096
+		totalPartitions := 0
+		for _, p := range partitions {
+			totalPartitions += p.count
+		}
+		require.Equal(t, 4096, totalPartitions)
+		it.Close()
+	})
+
+	t.Run("worker error propagates through errorChan", func(t *testing.T) {
+		workerFunc := func(ctx context.Context, it *consistencyScanIterator, partitionStart, partitionCount int) {
+			it.errorChan <- errors.NewProcessingError("worker failed")
+		}
+
+		it, err := launchConsistencyScan(store, 1, workerFunc)
+		require.NoError(t, err)
+
+		batch, err := it.Next(context.Background())
+		require.Error(t, err)
+		require.Nil(t, batch)
+		require.Contains(t, err.Error(), "worker failed")
+		it.Close()
+	})
 }
 
 func Test_consistencyScanIterator_processResults(t *testing.T) {
