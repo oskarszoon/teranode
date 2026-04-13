@@ -30,6 +30,7 @@ import (
 	safeconversion "github.com/bsv-blockchain/go-safe-conversion"
 	txmap "github.com/bsv-blockchain/go-tx-map"
 	"github.com/bsv-blockchain/go-wire"
+	tnerrors "github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/services/blockassembly"
 	"github.com/bsv-blockchain/teranode/services/blockchain"
 	"github.com/bsv-blockchain/teranode/services/blockvalidation"
@@ -933,8 +934,14 @@ func (sp *serverPeer) OnBlock(_ *peer.Peer, msg *wire.MsgBlock, buf []byte) {
 		err = <-sp.blockProcessed
 		if err != nil {
 			sp.server.logger.Errorf("block processing failed: %v", err)
-			sp.DisconnectWithWarning(fmt.Sprintf("block %s processing failed, disconnecting to trigger sync peer rotation", block.Hash()))
-			return
+
+			// Only disconnect on block validation failures, not on local
+			// infrastructure issues (database, Kafka, etc.) which would
+			// just cause unnecessary sync peer rotation.
+			if !tnerrors.Is(err, tnerrors.ErrServiceError) && !tnerrors.Is(err, tnerrors.ErrStorageError) {
+				sp.DisconnectWithWarning(fmt.Sprintf("block %s processing failed, disconnecting to trigger sync peer rotation", block.Hash()))
+				return
+			}
 		}
 	}
 }
