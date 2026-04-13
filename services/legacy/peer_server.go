@@ -933,6 +933,8 @@ func (sp *serverPeer) OnBlock(_ *peer.Peer, msg *wire.MsgBlock, buf []byte) {
 		err = <-sp.blockProcessed
 		if err != nil {
 			sp.server.logger.Errorf("block processing failed: %v", err)
+			sp.DisconnectWithWarning(fmt.Sprintf("block %s processing failed, disconnecting to trigger sync peer rotation", block.Hash()))
+			return
 		}
 	}
 }
