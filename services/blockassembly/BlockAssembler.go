@@ -1176,7 +1176,9 @@ func (b *BlockAssembler) handleReorg(ctx context.Context, header *model.BlockHea
 		b.logger.Warnf("[BlockAssembler] large reorg detected, resetting block assembly, moveBackBlocks: %d, moveForwardBlocks: %d", len(moveBackBlocksWithMeta), len(moveForwardBlocksWithMeta))
 
 		// make sure we wait for the reset to complete
-		if err = b.reset(ctx); err != nil {
+		// validateInputs=true: getConflictingNodes() may miss conflicts not stored in subtree
+		// files; validateUnminedTxInputs() independently catches them via SpendingData.
+		if err = b.reset(ctx, true); err != nil {
 			b.logger.Errorf("[BlockAssembler] error resetting after large reorg: %v", err)
 		}
 
@@ -1213,7 +1215,9 @@ func (b *BlockAssembler) handleReorg(ctx context.Context, header *model.BlockHea
 		// we have an invalid block in the reorg or reorg failed, we need to reset the block assembly and load the unmined transactions again
 		b.logger.Warnf("[BlockAssembler] reorg contains invalid block, resetting block assembly, moveBackBlocks: %d, moveForwardBlocks: %d", len(moveBackBlocks), len(moveForwardBlocks))
 
-		if err = b.reset(ctx); err != nil {
+		// validateInputs=true: getConflictingNodes() may miss conflicts not stored in subtree
+		// files; validateUnminedTxInputs() independently catches them via SpendingData.
+		if err = b.reset(ctx, true); err != nil {
 			return errors.NewProcessingError("error resetting block assembly after reorg with invalid block", err)
 		}
 	}
