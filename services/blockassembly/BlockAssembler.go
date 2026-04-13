@@ -1864,8 +1864,6 @@ func (b *BlockAssembler) loadUnminedTransactions(ctx context.Context, validateIn
 		return b.loadUnminedTransactionsWithDiskSort(ctx)
 	}
 
-	scanHeaders := uint64(1000)
-
 	// Wait for the unmined_since index to be ready before attempting to get the iterator
 	if indexWaiter, ok := b.utxoStore.(interface {
 		WaitForIndexReady(ctx context.Context, indexName string) error
@@ -1886,12 +1884,18 @@ func (b *BlockAssembler) loadUnminedTransactions(ctx context.Context, validateIn
 			prometheusBlockAssemblerUtxoIndexReady.WithLabelValues(indexName).Set(1)
 			prometheusBlockAssemblerUtxoIndexWaitDuration.WithLabelValues(indexName, "success").Observe(duration)
 		}
-	} else {
-		b.logger.Warnf("[BlockAssembler] utxo store does not support WaitForIndexReady")
-		prometheusBlockAssemblerUtxoIndexWaitDuration.WithLabelValues("unminedSinceIndex", "skipped").Observe(0)
 	}
 
-	bestBlockHeader, _ := b.CurrentBlock()
+	// Load all block header IDs from the current block back to genesis so we can
+	// correctly identify already-mined transactions and validate parent chains.
+	// The recursive CTE result is cached (10 min TTL), so the cost is one-time
+	// per restart. We use CurrentBlock's height (not GetBestBlockHeader) because
+	// during reset, CurrentBlock may still point to a pre-reorg tip that differs
+	// from the blockchain service's best block.
+	bestBlockHeader, bestBlockHeight := b.CurrentBlock()
+	scanHeaders := uint64(bestBlockHeight) + 1 // +1 to include genesis
+	b.logger.Infof("[loadUnminedTransactions] scanning all %d headers for best chain coverage", scanHeaders)
+
 	bestBlockHeaderIDs, err := b.blockchainClient.GetBlockHeaderIDs(ctx, bestBlockHeader.Hash(), scanHeaders)
 	if err != nil {
 		return errors.NewProcessingError("error getting best block headers", err)
