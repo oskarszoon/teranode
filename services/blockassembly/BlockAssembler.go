@@ -1753,6 +1753,7 @@ func (b *BlockAssembler) fixUnminedSinceInconsistencies(ctx context.Context) err
 
 	// Start progress reporting
 	progressDone := make(chan struct{})
+	defer close(progressDone) // Always close, even on error paths
 	go func() {
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
@@ -1800,9 +1801,6 @@ func (b *BlockAssembler) fixUnminedSinceInconsistencies(ctx context.Context) err
 			}
 		}
 	}
-
-	// Stop progress reporter
-	close(progressDone)
 
 	totalScanned := it.TotalScanned()
 	elapsed := time.Since(start)
