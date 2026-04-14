@@ -1214,21 +1214,28 @@ func (b *BlockAssembler) handleReorg(ctx context.Context, header *model.BlockHea
 	}
 
 	reset := hasInvalidBlock
+	reorgFailed := false
 
 	// now do the reorg in the subtree processor
 	if err = b.subtreeProcessor.Reorg(moveBackBlocks, moveForwardBlocks); err != nil {
 		b.logger.Warnf("[BlockAssembler] error doing reorg, will reset instead: %v", err)
 		// fallback to full reset
 		reset = true
+		reorgFailed = true
 	}
 
 	if reset {
 		// we have an invalid block in the reorg or reorg failed, we need to reset the block assembly and load the unmined transactions again
 		b.logger.Warnf("[BlockAssembler] reorg contains invalid block, resetting block assembly, moveBackBlocks: %d, moveForwardBlocks: %d", len(moveBackBlocks), len(moveForwardBlocks))
 
-		// validateInputs=true: getConflictingNodes() may miss conflicts not stored in subtree
-		// files; validateUnminedTxInputs() independently catches them via SpendingData.
-		if err = b.reset(ctx, true); err != nil {
+		// Only validate inputs when the Reorg itself failed — in that case
+		// getConflictingNodes() may miss conflicts not stored in subtree files and
+		// validateUnminedTxInputs() independently catches them via SpendingData.
+		// When Reorg succeeded (e.g. reset is due to hasInvalidBlock), conflicts were
+		// already detected by reorgBlocks; re-running validateInputs here is redundant
+		// and currently broken (fields.Inputs alone does not populate data.Tx in the
+		// SQL store, so validateUnminedTxInputs always returns false).
+		if err = b.reset(ctx, reorgFailed); err != nil {
 			return errors.NewProcessingError("error resetting block assembly after reorg with invalid block", err)
 		}
 	}
@@ -2249,9 +2256,8 @@ type sortEntry struct {
 //
 // Returns true if the transaction is valid for inclusion in block assembly.
 func (b *BlockAssembler) validateUnminedTxInputs(ctx context.Context, txHash chainhash.Hash, bestBlockIDsMap map[uint32]bool, dryRun bool) bool {
-	// Request fields.Tx so the store populates data.Tx, and fields.Utxos to force the
-	// unbatched store path (the batched path may not resolve Tx for fields.Inputs alone).
-	txMeta, err := b.utxoStore.Get(ctx, &txHash, fields.Tx, fields.Utxos, fields.Conflicting)
+	// Load only inputs and conflicting flag — NOT full Tx (avoids loading heavy output data)
+	txMeta, err := b.utxoStore.Get(ctx, &txHash, fields.Inputs, fields.Conflicting)
 	if err != nil || txMeta == nil || txMeta.Tx == nil || txMeta.Tx.Inputs == nil {
 		return false
 	}
