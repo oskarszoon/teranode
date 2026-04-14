@@ -508,6 +508,17 @@ func (b *BlockAssembler) reset(ctx context.Context, validateInputs ...bool) erro
 
 	baBestBlockHeader, _ := b.CurrentBlock()
 
+	// Update the internal best block reference before SubtreeProcessor.Reset runs the
+	// postProcessFn (which calls loadUnminedTransactions). Without this, CurrentBlock()
+	// still returns the pre-reorg tip — which may be an invalidated block. That causes
+	// loadUnminedTransactions to include the invalid block's ID in bestBlockHeaderIDsMap,
+	// incorrectly skipping transactions from the invalidated block as "already mined".
+	// The notification-bearing setBestBlockHeader is called below after the full reset.
+	b.bestBlock.Store(&BestBlockInfo{
+		Header: bestBlockchainBlockHeader,
+		Height: currentHeight,
+	})
+
 	if response := b.subtreeProcessor.Reset(baBestBlockHeader, moveBackBlocks, moveForwardBlocks, isLegacySync, postProcessFn); response.Err != nil {
 		b.logger.Errorf("[BlockAssembler][Reset] resetting error resetting subtree processor: %v", response.Err)
 		// something went wrong, we need to set the best block header in the block assembly to be the
@@ -2238,8 +2249,9 @@ type sortEntry struct {
 //
 // Returns true if the transaction is valid for inclusion in block assembly.
 func (b *BlockAssembler) validateUnminedTxInputs(ctx context.Context, txHash chainhash.Hash, bestBlockIDsMap map[uint32]bool, dryRun bool) bool {
-	// Load only inputs and conflicting flag — NOT full Tx (avoids loading heavy output data)
-	txMeta, err := b.utxoStore.Get(ctx, &txHash, fields.Inputs, fields.Conflicting)
+	// Request fields.Tx so the store populates data.Tx, and fields.Utxos to force the
+	// unbatched store path (the batched path may not resolve Tx for fields.Inputs alone).
+	txMeta, err := b.utxoStore.Get(ctx, &txHash, fields.Tx, fields.Utxos, fields.Conflicting)
 	if err != nil || txMeta == nil || txMeta.Tx == nil || txMeta.Tx.Inputs == nil {
 		return false
 	}
