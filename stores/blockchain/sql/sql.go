@@ -345,7 +345,17 @@ func (s *SQL) Close() error {
 	return s.db.Close()
 }
 
+// Advisory lock IDs for schema creation serialization across pods.
+// These must be unique per schema-creation context and stable across releases.
+const blockchainSchemaLockID int64 = 7_265_726_101 // "tera" + "bc" in ASCII-ish
+
 func createPostgresSchema(db *usql.DB, withIndexes bool) error {
+	return usql.WithAdvisoryLock(context.Background(), db, blockchainSchemaLockID, func() error {
+		return createPostgresSchemaUnlocked(db, withIndexes)
+	})
+}
+
+func createPostgresSchemaUnlocked(db *usql.DB, withIndexes bool) error {
 	if _, err := db.Exec(`
       CREATE TABLE IF NOT EXISTS state (
 	    key            VARCHAR(32) PRIMARY KEY
