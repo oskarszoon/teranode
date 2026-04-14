@@ -513,7 +513,10 @@ func (b *BlockAssembler) reset(ctx context.Context, validateInputs ...bool) erro
 	// still returns the pre-reorg tip — which may be an invalidated block. That causes
 	// loadUnminedTransactions to include the invalid block's ID in bestBlockHeaderIDsMap,
 	// incorrectly skipping transactions from the invalidated block as "already mined".
-	// The notification-bearing setBestBlockHeader is called below after the full reset.
+	//
+	// If SubtreeProcessor.Reset fails, setBestBlockHeader below overwrites this with the
+	// subtree processor's fallback state. The intermediate value only affects
+	// loadUnminedTransactions (inside postProcessFn), where the target chain is correct.
 	b.bestBlock.Store(&BestBlockInfo{
 		Header: bestBlockchainBlockHeader,
 		Height: currentHeight,
