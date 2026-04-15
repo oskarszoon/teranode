@@ -1,0 +1,74 @@
+// Package repairconflicts repairs inconsistent conflicting transaction state in the UTXO store.
+// It must be run while the node is stopped (offline repair).
+package repairconflicts
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/bsv-blockchain/go-bt/v2/chainhash"
+	"github.com/bsv-blockchain/teranode/errors"
+	"github.com/bsv-blockchain/teranode/services/blockchain"
+	"github.com/bsv-blockchain/teranode/settings"
+	"github.com/bsv-blockchain/teranode/stores/utxo"
+	utxofactory "github.com/bsv-blockchain/teranode/stores/utxo/factory"
+	"github.com/bsv-blockchain/teranode/ulogger"
+)
+
+// blockchainAdapter wraps blockchain.ClientI to implement utxo.BlockchainQuerier.
+type blockchainAdapter struct {
+	client blockchain.ClientI
+}
+
+func (a *blockchainAdapter) GetBestBlockHeaderInfo(ctx context.Context) (utxo.BlockHeaderInfo, error) {
+	header, meta, err := a.client.GetBestBlockHeader(ctx)
+	if err != nil {
+		return utxo.BlockHeaderInfo{}, err
+	}
+
+	return utxo.BlockHeaderInfo{Hash: header.Hash(), Height: meta.Height}, nil
+}
+
+func (a *blockchainAdapter) GetBlockHeaderIDs(ctx context.Context, blockHash *chainhash.Hash, numberOfHeaders uint64) ([]uint32, error) {
+	return a.client.GetBlockHeaderIDs(ctx, blockHash, numberOfHeaders)
+}
+
+// RepairConflicts detects and fixes inconsistent conflicting transaction state in the UTXO store.
+// Run this command while the node is stopped.
+// dryRun=true reports issues without writing any changes.
+func RepairConflicts(ctx context.Context, logger ulogger.Logger, tSettings *settings.Settings, dryRun bool) error {
+	store, err := utxofactory.NewStore(ctx, logger, tSettings, "RepairConflicts", false)
+	if err != nil {
+		return errors.NewConfigurationError("failed to create UTXO store", err)
+	}
+
+	blockchainClient, err := blockchain.NewClient(ctx, logger, tSettings, "RepairConflicts")
+	if err != nil {
+		return errors.NewConfigurationError("failed to create blockchain client", err)
+	}
+
+	adapter := &blockchainAdapter{client: blockchainClient}
+
+	report, err := utxo.RepairConflictingChains(ctx, store, adapter, dryRun)
+	if err != nil {
+		return errors.NewProcessingError("repair failed", err)
+	}
+
+	if dryRun {
+		fmt.Println("Dry run — no changes written.")
+	}
+
+	fmt.Printf("Repair report:\n")
+	fmt.Printf("  UnminedSince inconsistencies fixed: %d\n", report.UnminedSinceFixed)
+	fmt.Printf("  Case A (loser not marked) fixed:    %d\n", report.CaseAFixed)
+	fmt.Printf("  Case C (inverted winner/loser) fixed: %d\n", report.CaseCFixed)
+
+	if len(report.Errors) > 0 {
+		fmt.Printf("  Non-fatal errors encountered: %d\n", len(report.Errors))
+		for _, e := range report.Errors {
+			fmt.Printf("    - %v\n", e)
+		}
+	}
+
+	return nil
+}

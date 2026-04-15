@@ -19,6 +19,7 @@ import (
 	"github.com/bsv-blockchain/teranode/cmd/logs"
 	"github.com/bsv-blockchain/teranode/cmd/monitor"
 	"github.com/bsv-blockchain/teranode/cmd/reconsiderblock"
+	"github.com/bsv-blockchain/teranode/cmd/repairconflicts"
 	"github.com/bsv-blockchain/teranode/cmd/resetblockassembly"
 	"github.com/bsv-blockchain/teranode/cmd/seeder"
 	"github.com/bsv-blockchain/teranode/cmd/setfsmstate"
@@ -59,6 +60,7 @@ var commandHelp = map[string]string{
 	"monitor":                 "Live TUI dashboard for monitoring node status",
 	"logs":                    "Interactive log viewer with filtering and search",
 	"diagnose":                "Diagnose node health and validate configuration",
+	"repair-conflicts":        "Repair conflicting transaction chains in the UTXO store (offline — run with node stopped)",
 }
 
 var dangerousCommands = map[string]bool{}
@@ -398,6 +400,12 @@ func Start(args []string, version, commit string) {
 			}
 			fmt.Println("Block assembly validation passed: all unmined transactions have valid inputs")
 			return nil
+		}
+	case "repair-conflicts":
+		dryRun := cmd.FlagSet.Bool("dry-run", false, "Report issues without writing any changes")
+
+		cmd.Execute = func(args []string) error {
+			return repairconflicts.RepairConflicts(context.Background(), logger, tSettings, *dryRun)
 		}
 	case "fix-chainwork":
 		dbURL := cmd.FlagSet.String("db-url", "", "Database URL (postgres://... or sqlite://...)")
