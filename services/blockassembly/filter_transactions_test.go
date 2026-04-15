@@ -167,24 +167,22 @@ func TestValidateParentChain_BatchingAndOrdering(t *testing.T) {
 		// Create bestBlockHeaderIDsMap
 		bestBlockHeaderIDsMap := map[uint32]bool{1: true}
 
-		// Call validateParentChain
-		validTxs, err := blockAssembler.validateParentChain(ctx, unminedTxs, bestBlockHeaderIDsMap)
+		// Call validateParentChain — expects no error (all 101 txs have valid parent chains)
+		err := blockAssembler.validateParentChain(ctx, unminedTxs, bestBlockHeaderIDsMap)
 		require.NoError(t, err)
 
-		// All 101 transactions should be valid
-		// Before the fix, the bug would cause the grandchild transaction (and potentially others)
-		// to be incorrectly filtered due to wrong currentIdx calculation
-		require.Equal(t, 101, len(validTxs), "All transactions should be valid with correct parent ordering")
+		// All 101 transactions remain valid (the original slice is unchanged)
+		require.Equal(t, 101, len(unminedTxs), "All transactions should be valid with correct parent chains")
 
-		// Verify the grandchild transaction is included
+		// Verify the grandchild transaction is present
 		foundGrandchild := false
-		for _, tx := range validTxs {
+		for _, tx := range unminedTxs {
 			if tx.Hash.IsEqual(&grandchildHash) {
 				foundGrandchild = true
 				break
 			}
 		}
-		require.True(t, foundGrandchild, "Grandchild transaction should be included in valid transactions")
+		require.True(t, foundGrandchild, "Grandchild transaction should be present")
 
 		mockStore.AssertExpectations(t)
 	})
@@ -283,13 +281,15 @@ func TestValidateParentChain_BatchingAndOrdering(t *testing.T) {
 
 		bestBlockHeaderIDsMap := map[uint32]bool{1: true}
 
-		// Call validateParentChain
-		validTxs, err := blockAssembler.validateParentChain(ctx, unminedTxs, bestBlockHeaderIDsMap)
+		// Call validateParentChain — both transactions have valid parent chains.
+		// The parent is in the unmined set, so the child is valid regardless of sort order.
+		// The old ordering-based skip has been removed: validateParentChain now either
+		// validates all transactions or returns an error.
+		err := blockAssembler.validateParentChain(ctx, unminedTxs, bestBlockHeaderIDsMap)
 		require.NoError(t, err)
 
-		// Only the parent should be valid, child should be skipped due to invalid ordering
-		require.Equal(t, 1, len(validTxs), "Only parent transaction should be valid")
-		require.Equal(t, parentHash.String(), validTxs[0].Hash.String(), "Valid transaction should be the parent")
+		// Both transactions are valid — the original slice is unchanged
+		require.Equal(t, 2, len(unminedTxs), "Both transactions should be valid")
 
 		mockStore.AssertExpectations(t)
 	})

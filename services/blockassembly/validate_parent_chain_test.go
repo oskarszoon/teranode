@@ -140,7 +140,7 @@ func TestValidateParentChain_HardFailsWithFSMIdle_UnminedParentNotInList(t *test
 	bestBlockHeaderIDsMap := map[uint32]bool{} // empty = no blocks on best chain
 
 	// validateParentChain should fail because TX_PARENT is unmined but not in list.
-	_, err = ba.validateParentChain(ctx, []*utxoStore.UnminedTransaction{unminedChild}, bestBlockHeaderIDsMap)
+	err = ba.validateParentChain(ctx, []*utxoStore.UnminedTransaction{unminedChild}, bestBlockHeaderIDsMap)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "repair-conflicts")
 
@@ -175,10 +175,8 @@ func TestValidateParentChain_SucceedsForCleanState(t *testing.T) {
 	unminedChild := makeUnminedTx(t, txChild, 1)
 	bestBlockHeaderIDsMap := map[uint32]bool{blockID: true}
 
-	validTxs, err := ba.validateParentChain(ctx, []*utxoStore.UnminedTransaction{unminedChild}, bestBlockHeaderIDsMap)
+	err = ba.validateParentChain(ctx, []*utxoStore.UnminedTransaction{unminedChild}, bestBlockHeaderIDsMap)
 	require.NoError(t, err)
-	require.Len(t, validTxs, 1, "TX_CHILD should be in valid list")
-	require.Equal(t, *txChild.TxIDChainHash(), validTxs[0].Node.Hash)
 
 	// SendFSMEvent must NOT have been called.
 	blockchainClientMock.AssertNotCalled(t, "SendFSMEvent")
@@ -231,10 +229,8 @@ func TestValidateParentChain_SucceedsWhenParentIsInList(t *testing.T) {
 	unminedChild := makeUnminedTx(t, txChild, 1)
 	bestBlockHeaderIDsMap := map[uint32]bool{bestBlockID: true}
 
-	validTxs, err := ba.validateParentChain(ctx, []*utxoStore.UnminedTransaction{unminedParent, unminedChild}, bestBlockHeaderIDsMap)
+	err = ba.validateParentChain(ctx, []*utxoStore.UnminedTransaction{unminedParent, unminedChild}, bestBlockHeaderIDsMap)
 	require.NoError(t, err)
-	// Both should be valid — txParent is mined's unmined child (in list), txChild depends on txParent (in list before it).
-	require.Len(t, validTxs, 2, "both TX_PARENT and TX_CHILD should be valid")
 
 	// SendFSMEvent must NOT have been called.
 	blockchainClientMock.AssertNotCalled(t, "SendFSMEvent")
