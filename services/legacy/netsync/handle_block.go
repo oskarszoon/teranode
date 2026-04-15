@@ -19,6 +19,7 @@ import (
 	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/model"
 	"github.com/bsv-blockchain/teranode/pkg/fileformat"
+	teranodeblockchain "github.com/bsv-blockchain/teranode/services/blockchain"
 	"github.com/bsv-blockchain/teranode/services/blockchain/blockchain_api"
 	"github.com/bsv-blockchain/teranode/services/legacy/bsvutil"
 	"github.com/bsv-blockchain/teranode/services/legacy/peer"
@@ -33,6 +34,14 @@ import (
 )
 
 func (sm *SyncManager) HandleBlockDirect(ctx context.Context, peer *peer.Peer, blockHash chainhash.Hash, msgBlock *wire.MsgBlock) (err error) {
+	isIdle, err := sm.blockchainClient.IsFSMCurrentState(ctx, teranodeblockchain.FSMStateIDLE)
+	if err != nil {
+		sm.logger.Warnf("[HandleBlockDirect] failed to check FSM state: %v", err)
+	} else if isIdle {
+		sm.logger.Warnf("[HandleBlockDirect] node is in IDLE state — skipping block. Run 'teranodecli repair-conflicts' to fix.")
+		return nil
+	}
+
 	sm.logger.Debugf("[HandleBlockDirect][%s] starting handling block", blockHash.String())
 
 	// Make sure we have the correct height for this block before continuing

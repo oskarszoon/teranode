@@ -46,6 +46,7 @@ func TestPropagationServiceErrors(t *testing.T) {
 	mockClient := &blockchain.Mock{}
 
 	mockClient.On("WaitUntilFSMTransitionFromIdleState", mock.Anything).Return(nil)
+	mockClient.On("IsFSMCurrentState", mock.Anything, mock.Anything).Return(false, nil)
 
 	// Create a server with a null validator that always returns an error
 	server := New(

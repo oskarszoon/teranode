@@ -1026,6 +1026,15 @@ func (ps *PropagationServer) ProcessTransactionBatch(ctx context.Context, req *p
 // Returns:
 //   - error: error if any processing step fails
 func (ps *PropagationServer) processTransaction(ctx context.Context, req *propagation_api.ProcessTransactionRequest) error {
+	if ps.blockchainClient != nil {
+		if isIdle, fsmErr := ps.blockchainClient.IsFSMCurrentState(ctx, blockchain.FSMStateIDLE); fsmErr != nil {
+			ps.logger.Warnf("[processTransaction] failed to check FSM state: %v", fsmErr)
+		} else if isIdle {
+			ps.logger.Warnf("[processTransaction] node is in IDLE state — rejecting transaction. Run 'teranodecli repair-conflicts' to fix.")
+			return errors.NewProcessingError("node is in IDLE state")
+		}
+	}
+
 	ctx, span, endSpan := tracing.Tracer("propagation").Start(ctx, "processTransaction",
 		tracing.WithParentStat(ps.stats),
 	)

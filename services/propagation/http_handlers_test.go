@@ -190,6 +190,7 @@ func setupPropagationServer(t *testing.T, mockValidator validator.Interface, sto
 	*/
 	mockBlockchainClient := &blockchain.Mock{}
 	mockBlockchainClient.On("Health", mock.Anything, false).Return(http.StatusOK, "OK", nil)
+	mockBlockchainClient.On("IsFSMCurrentState", mock.Anything, mock.Anything).Return(false, nil)
 
 	// Initialize with a simple mock block (removing model references)
 	// mockBlockchainClient.Block = nil
@@ -419,12 +420,14 @@ func TestHTTPIntegration(t *testing.T) {
 	mockStore := &MockTxStore{}
 
 	// Create a minimal PropagationServer with just the dependencies needed for the test
+	mockBlockchain := &blockchain.Mock{}
+	mockBlockchain.On("IsFSMCurrentState", mock.Anything, mock.Anything).Return(false, nil)
 	ps := &MockPropagationServer{
 		PropagationServer: PropagationServer{
 			logger:           ulogger.New("test-logger"),
 			validator:        mockValidator,
 			txStore:          mockStore,
-			blockchainClient: &blockchain.Mock{},
+			blockchainClient: mockBlockchain,
 			settings:         &settings.Settings{Policy: &settings.PolicySettings{}},
 		},
 	}
