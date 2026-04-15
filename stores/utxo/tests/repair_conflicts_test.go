@@ -3,7 +3,9 @@ package tests
 
 import (
 	"context"
+	"fmt"
 	"net/url"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -18,7 +20,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// setupSQLiteFileStore creates a file-based SQLite store using t.TempDir().
+// setupSQLiteFileStore creates a file-based SQLite store in t.TempDir().
 // File SQLite uses WAL mode which allows concurrent reads and writes —
 // required by RepairConflictingChains because SetConflicting issues writes
 // while other queries are running on separate connections.
@@ -28,7 +30,8 @@ func setupSQLiteFileStore(ctx context.Context, t *testing.T) utxo.Store {
 	tSettings := test.CreateBaseTestSettings(t)
 	tSettings.UtxoStore.DBTimeout = 30 * time.Second
 
-	storeURL, err := url.Parse("sqlite:///repair-test")
+	dbPath := filepath.Join(t.TempDir(), "repair-test.db")
+	storeURL, err := url.Parse(fmt.Sprintf("sqlite:///%s", dbPath))
 	require.NoError(t, err)
 
 	store, err := sql.New(ctx, logger, tSettings, storeURL)
