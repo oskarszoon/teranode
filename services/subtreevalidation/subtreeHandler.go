@@ -59,6 +59,17 @@ func (u *Server) subtreeMessageHandler(ctx context.Context) func(msg *kafka.Kafk
 			return nil
 		}
 
+		if *state == blockchain.FSMStateIDLE {
+			u.logger.Warnf("[subtreeMessageHandler] node is in IDLE state — pausing Kafka consumers to preserve unread subtrees. Run 'teranodecli repair-conflicts' to fix.")
+			if u.subtreeConsumerClient != nil {
+				u.subtreeConsumerClient.PauseAll()
+			}
+			if u.txmetaConsumerClient != nil {
+				u.txmetaConsumerClient.PauseAll()
+			}
+			return nil
+		}
+
 		// In BlocksOnly mode, skip processing peer-announced subtrees (only process subtrees from blocks)
 		if u.settings.SubtreeValidation.BlocksOnly {
 			return nil

@@ -595,16 +595,6 @@ func (u *Server) Stop(_ context.Context) error {
 // making it resilient to temporary contention when multiple services attempt to validate
 // the same subtree simultaneously.
 func (u *Server) CheckSubtreeFromBlock(ctx context.Context, request *subtreevalidation_api.CheckSubtreeFromBlockRequest) (*subtreevalidation_api.CheckSubtreeFromBlockResponse, error) {
-	if u.blockchainClient != nil {
-		isIdle, err := u.blockchainClient.IsFSMCurrentState(ctx, blockchain.FSMStateIDLE)
-		if err != nil {
-			u.logger.Warnf("[CheckSubtreeFromBlock] failed to check FSM state: %v", err)
-		} else if isIdle {
-			u.logger.Warnf("[CheckSubtreeFromBlock] node is in IDLE state — skipping subtree processing. Run 'teranodecli repair-conflicts' to fix.")
-			return nil, errors.NewProcessingError("node is in IDLE state")
-		}
-	}
-
 	subtreeBlessed, err := u.checkSubtreeFromBlock(ctx, request)
 	if err != nil {
 		return nil, errors.WrapGRPC(err)

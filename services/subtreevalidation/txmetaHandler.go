@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
+	"github.com/bsv-blockchain/teranode/services/blockchain"
 	"github.com/bsv-blockchain/teranode/util/kafka"
 )
 
@@ -43,6 +44,19 @@ func (u *Server) txmetaMessageHandler(ctx context.Context) func(msg *kafka.Kafka
 func (u *Server) txmetaHandler(ctx context.Context, msg *kafka.KafkaMessage) error {
 	if msg == nil || len(msg.Value) < 4 {
 		return nil
+	}
+
+	if u.blockchainClient != nil {
+		state, err := u.blockchainClient.GetFSMCurrentState(ctx)
+		if err != nil {
+			u.logger.Warnf("[txmetaHandler] failed to check FSM state: %v", err)
+		} else if state != nil && *state == blockchain.FSMStateIDLE {
+			u.logger.Warnf("[txmetaHandler] node is in IDLE state — pausing txmeta Kafka consumer to preserve unread messages.")
+			if u.txmetaConsumerClient != nil {
+				u.txmetaConsumerClient.PauseAll()
+			}
+			return nil
+		}
 	}
 
 	// Process the message asynchronously to avoid blocking the Kafka consumer.
