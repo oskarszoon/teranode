@@ -233,9 +233,22 @@ func TestLoadUnminedTransactionsWithDiskSort(t *testing.T) {
 
 		ctx := context.Background()
 
-		transactions := generateTestTransactionsForDiskSort(t, 5)
-
-		for _, tx := range transactions {
+		// Use transactions with no inputs so validateParentChain passes trivially.
+		// (All parent hashes would be empty, so allParentsValid stays true.)
+		prevLockingScript := bscript.NewFromBytes([]byte{
+			0x76, 0xa9, 0x14,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x88, 0xac,
+		})
+		for i := 0; i < 5; i++ {
+			tx := bt.NewTx()
+			tx.LockTime = uint32(i % 1000)
+			tx.Outputs = []*bt.Output{{
+				Satoshis:      900,
+				LockingScript: prevLockingScript,
+			}}
+			// No inputs — GetParentTxHashes() returns empty, parent validation passes trivially
 			_, err := utxoStore.Create(ctx, tx, 1)
 			require.NoError(t, err)
 		}
