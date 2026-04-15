@@ -119,7 +119,7 @@ func ProcessConflicting(ctx context.Context, s Store, blockHeight uint32, confli
 	losingTxHashes := losingTxHashesMap.Keys()
 
 	// - 1: mark all losingTxHashesPerConflictingTx as conflicting + all its spending transactions recursively
-	affectedParentSpends, err := markConflictingRecursively(ctx, s, losingTxHashes)
+	affectedParentSpends, err := MarkConflictingRecursively(ctx, s, losingTxHashes)
 	if err != nil {
 		return nil, err
 	}
@@ -175,7 +175,7 @@ func ProcessConflicting(ctx context.Context, s Store, blockHeight uint32, confli
 	return losingTxHashesMap, nil
 }
 
-// markConflictingRecursively marks the given transactions as conflicting, and iteratively marks all their spending
+// MarkConflictingRecursively marks the given transactions as conflicting, and iteratively marks all their spending
 // children as conflicting too using breadth-first traversal.
 //
 // Parameters:
@@ -186,8 +186,8 @@ func ProcessConflicting(ctx context.Context, s Store, blockHeight uint32, confli
 // Returns:
 //   - A slice of pointers to Spend structs representing the affected parent spends.
 //   - An error if any issues occur during the process.
-func markConflictingRecursively(ctx context.Context, s Store, hashes []chainhash.Hash) ([]*Spend, error) {
-	ctx, _, deferFn := tracing.Tracer("utxo").Start(ctx, "markConflictingRecursively")
+func MarkConflictingRecursively(ctx context.Context, s Store, hashes []chainhash.Hash) ([]*Spend, error) {
+	ctx, _, deferFn := tracing.Tracer("utxo").Start(ctx, "MarkConflictingRecursively")
 
 	defer deferFn()
 
