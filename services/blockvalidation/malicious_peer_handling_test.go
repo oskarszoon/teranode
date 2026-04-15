@@ -230,6 +230,9 @@ func TestKafkaConsumerMessageHandling(t *testing.T) {
 		// Create mock blockchain client that returns service error
 		mockBlockchain := &blockchain.Mock{}
 		// Set up mock expectations
+		notIdle := blockchain_api.FSMStateType_RUNNING
+		mockBlockchain.On("IsFSMCurrentState", mock.Anything, mock.Anything).Return(false, nil)
+		mockBlockchain.On("GetFSMCurrentState", mock.Anything).Return(&notIdle, nil)
 		mockBlockchain.On("GetBlockExists", mock.Anything, mock.Anything).
 			Return(false, errors.NewServiceError("temporary failure"))
 		mockBlockchain.On("Subscribe", mock.Anything, mock.Anything).
