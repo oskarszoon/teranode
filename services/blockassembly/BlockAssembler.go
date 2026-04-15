@@ -1448,8 +1448,8 @@ func (b *BlockAssembler) getNextNbits(baBestBlockHeader *model.BlockHeader, next
 //   - bestBlockHeaderIDsMap: Map of block IDs on the best chain
 //
 // Returns:
-//   - []*utxo.UnminedTransaction: List of transactions (filtered if OnRestartRemoveInvalidParentChainTxs is enabled)
-//   - error: Context cancellation error if cancelled, nil otherwise
+//   - []*utxo.UnminedTransaction: List of valid transactions
+//   - error: Processing error if an invalid parent chain is detected (sets FSM to IDLE), or context cancellation error
 func (b *BlockAssembler) validateParentChain(
 	ctx context.Context,
 	unminedTxs []*utxo.UnminedTransaction,
@@ -1571,12 +1571,13 @@ func (b *BlockAssembler) validateParentChain(
 					// Transaction is already on the best chain
 					// (though it shouldn't be in unmined list - this is a data inconsistency)
 					b.logger.Warnf("[BlockAssembler][validateParentChain] Transaction %s is already on best chain but marked as unmined", tx.Hash.String())
-					if b.settings.BlockAssembly.OnRestartRemoveInvalidParentChainTxs {
-						// Filtering enabled - skip this transaction
-						skippedCount++
-						continue
+					// Invalid parent chain detected — set FSM to IDLE and fail hard
+					if fsmErr := b.blockchainClient.SendFSMEvent(ctx, blockchain.FSMEventIDLE); fsmErr != nil {
+						b.logger.Errorf("[validateParentChain] failed to set FSM to IDLE: %v", fsmErr)
 					}
-					// Filtering disabled - keep transaction despite being on best chain
+					return nil, errors.NewProcessingError(
+						"[validateParentChain] tx %s has invalid parent chain (%s). Run 'teranodecli repair-conflicts' to fix UTXO store state.",
+						tx.Hash.String(), "tx is already on best chain but marked as unmined")
 				}
 				// Transaction has BlockIDs but not on best chain - it's on an orphaned chain
 				// Continue to validate its parents to decide if it can be re-included
@@ -1697,29 +1698,23 @@ func (b *BlockAssembler) validateParentChain(
 			if allParentsValid {
 				validTxs = append(validTxs, tx)
 			} else {
-				// Transaction has invalid parent chain - use setting to decide whether to exclude
-				if b.settings.BlockAssembly.OnRestartRemoveInvalidParentChainTxs {
-					// Filtering enabled - skip this transaction
-					skippedCount++
-				} else {
-					// Filtering disabled (default) - keep transaction despite invalid parents
-					validTxs = append(validTxs, tx)
+				// Invalid parent chain detected — set FSM to IDLE and fail hard
+				if fsmErr := b.blockchainClient.SendFSMEvent(ctx, blockchain.FSMEventIDLE); fsmErr != nil {
+					b.logger.Errorf("[validateParentChain] failed to set FSM to IDLE: %v", fsmErr)
 				}
+				return nil, errors.NewProcessingError(
+					"[validateParentChain] tx %s has invalid parent chain (%s). Run 'teranodecli repair-conflicts' to fix UTXO store state.",
+					tx.Hash.String(), invalidReason)
 			}
 		}
 	}
 
-	filteringStatus := "disabled"
-	if b.settings.BlockAssembly.OnRestartRemoveInvalidParentChainTxs {
-		filteringStatus = "enabled"
-	}
-
 	if skippedCount > 0 {
-		b.logger.Warnf("[BlockAssembler][validateParentChain] Skipped %d transactions due to invalid/missing parent chains (filtering: %s)", skippedCount, filteringStatus)
+		b.logger.Warnf("[BlockAssembler][validateParentChain] Skipped %d transactions due to invalid ordering", skippedCount)
 	}
 
-	b.logger.Infof("[BlockAssembler][validateParentChain] Parent chain validation complete: %d valid, %d skipped (filtering: %s)",
-		len(validTxs), skippedCount, filteringStatus)
+	b.logger.Infof("[BlockAssembler][validateParentChain] Parent chain validation complete: %d valid, %d skipped",
+		len(validTxs), skippedCount)
 
 	return validTxs, nil
 }
@@ -2335,8 +2330,8 @@ func (b *BlockAssembler) validateUnminedTxInputs(ctx context.Context, txHash cha
 }
 
 func (b *BlockAssembler) markAsConflicting(ctx context.Context, txHash chainhash.Hash) {
-	if _, _, err := b.utxoStore.SetConflicting(ctx, []chainhash.Hash{txHash}, true); err != nil {
-		b.logger.Errorf("[validateUnminedTxInputs][%s] failed to mark as conflicting: %v", txHash.String(), err)
+	if _, err := utxo.MarkConflictingRecursively(ctx, b.utxoStore, []chainhash.Hash{txHash}); err != nil {
+		b.logger.Errorf("[validateUnminedTxInputs][%s] failed to mark as conflicting (cascade): %v", txHash.String(), err)
 	}
 }
 
