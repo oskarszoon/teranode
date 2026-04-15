@@ -790,12 +790,14 @@ func (u *Server) consumerMessageHandler(ctx context.Context) func(msg *kafka.Kaf
 }
 
 func (u *Server) blockHandler(kafkaMsg *kafkamessage.KafkaBlockTopicMessage) error {
-	isIdle, err := u.blockchainClient.IsFSMCurrentState(context.Background(), blockchain.FSMStateIDLE)
-	if err != nil {
-		u.logger.Warnf("[blockHandler] failed to check FSM state: %v", err)
-	} else if isIdle {
-		u.logger.Warnf("[blockHandler] node is in IDLE state — skipping block processing. Run 'teranodecli repair-conflicts' to fix.")
-		return nil
+	if u.blockchainClient != nil {
+		isIdle, err := u.blockchainClient.IsFSMCurrentState(context.Background(), blockchain.FSMStateIDLE)
+		if err != nil {
+			u.logger.Warnf("[blockHandler] failed to check FSM state: %v", err)
+		} else if isIdle {
+			u.logger.Warnf("[blockHandler] node is in IDLE state — skipping block processing. Run 'teranodecli repair-conflicts' to fix.")
+			return nil
+		}
 	}
 
 	u.logger.Debugf("[blockHandler] Starting to process block %s from peer %s", kafkaMsg.Hash, kafkaMsg.GetPeerId())

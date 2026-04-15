@@ -1572,6 +1572,7 @@ func (b *BlockAssembler) validateParentChain(
 					// (though it shouldn't be in unmined list - this is a data inconsistency)
 					b.logger.Warnf("[BlockAssembler][validateParentChain] Transaction %s is already on best chain but marked as unmined", tx.Hash.String())
 					// Invalid parent chain detected — set FSM to IDLE and fail hard
+					b.logger.Errorf("[validateParentChain] invalid parent chain detected for tx %s (tx is already on best chain but marked as unmined) — setting FSM to IDLE. Run 'teranodecli repair-conflicts' to fix.", tx.Hash.String())
 					if fsmErr := b.blockchainClient.SendFSMEvent(ctx, blockchain.FSMEventIDLE); fsmErr != nil {
 						b.logger.Errorf("[validateParentChain] failed to set FSM to IDLE: %v", fsmErr)
 					}
@@ -1699,6 +1700,7 @@ func (b *BlockAssembler) validateParentChain(
 				validTxs = append(validTxs, tx)
 			} else {
 				// Invalid parent chain detected — set FSM to IDLE and fail hard
+				b.logger.Errorf("[validateParentChain] invalid parent chain detected for tx %s (%s) — setting FSM to IDLE. Run 'teranodecli repair-conflicts' to fix.", tx.Hash.String(), invalidReason)
 				if fsmErr := b.blockchainClient.SendFSMEvent(ctx, blockchain.FSMEventIDLE); fsmErr != nil {
 					b.logger.Errorf("[validateParentChain] failed to set FSM to IDLE: %v", fsmErr)
 				}
