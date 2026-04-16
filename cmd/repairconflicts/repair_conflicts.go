@@ -25,7 +25,9 @@ func (a *blockchainAdapter) GetBestBlockHeaderInfo(ctx context.Context) (utxo.Bl
 	if err != nil {
 		return utxo.BlockHeaderInfo{}, err
 	}
-
+	if header == nil || meta == nil {
+		return utxo.BlockHeaderInfo{}, errors.NewProcessingError("GetBestBlockHeader returned nil header or meta")
+	}
 	return utxo.BlockHeaderInfo{Hash: header.Hash(), Height: meta.Height}, nil
 }
 

@@ -206,9 +206,11 @@ func RepairConflictingChains(ctx context.Context, s Store, blockchainClient Bloc
 	}
 
 	// Fix Case C first so SpendingData is corrected before the Case A sweep.
+	// Dedup key is pair.loser (the fake winner tx being corrected): each unmined loser should be
+	// processed at most once even if multiple inputs point to the same real winner.
 	currentBlockHeight := bestHeader.Height
 	for _, pair := range caseCPairs {
-		if processedMap[pair.winner] {
+		if processedMap[pair.loser] {
 			continue
 		}
 		if !dryRun {
@@ -218,7 +220,7 @@ func RepairConflictingChains(ctx context.Context, s Store, blockchainClient Bloc
 			}
 		}
 		report.CaseCFixed++
-		processedMap[pair.winner] = true
+		processedMap[pair.loser] = true
 	}
 
 	// Fix Case A, skipping any already resolved by Case C.

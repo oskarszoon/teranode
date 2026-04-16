@@ -75,6 +75,20 @@ func (u *Server) subtreeMessageHandler(ctx context.Context) func(msg *kafka.Kafk
 			if u.txmetaConsumerClient != nil {
 				u.txmetaConsumerClient.PauseAll()
 			}
+			// Resume both consumers when FSM leaves IDLE.
+			go func() {
+				if waitErr := u.blockchainClient.WaitUntilFSMTransitionFromIdleState(gCtx); waitErr != nil {
+					u.logger.Errorf("[subtreeMessageHandler] error waiting for FSM transition from IDLE: %v", waitErr)
+					return
+				}
+				u.logger.Infof("[subtreeMessageHandler] FSM left IDLE, resuming Kafka consumers")
+				if u.subtreeConsumerClient != nil {
+					u.subtreeConsumerClient.ResumeAll()
+				}
+				if u.txmetaConsumerClient != nil {
+					u.txmetaConsumerClient.ResumeAll()
+				}
+			}()
 			return nil
 		}
 

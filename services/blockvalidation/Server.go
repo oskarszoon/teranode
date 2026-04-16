@@ -798,6 +798,15 @@ func (u *Server) blockHandler(kafkaMsg *kafkamessage.KafkaBlockTopicMessage) err
 			u.logger.Warnf("[blockHandler] node is in IDLE state — pausing Kafka consumer to preserve unread blocks. Run 'teranodecli repair-conflicts' to fix.")
 			if u.kafkaConsumerClient != nil {
 				u.kafkaConsumerClient.PauseAll()
+				// Resume when FSM leaves IDLE (e.g. after repair + setfsmstate running without restart).
+				go func() {
+					if waitErr := u.blockchainClient.WaitUntilFSMTransitionFromIdleState(context.Background()); waitErr != nil {
+						u.logger.Errorf("[blockHandler] error waiting for FSM transition from IDLE: %v", waitErr)
+						return
+					}
+					u.logger.Infof("[blockHandler] FSM left IDLE, resuming Kafka consumer")
+					u.kafkaConsumerClient.ResumeAll()
+				}()
 			}
 			return nil
 		}

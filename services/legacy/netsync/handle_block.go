@@ -34,6 +34,9 @@ import (
 )
 
 func (sm *SyncManager) HandleBlockDirect(ctx context.Context, peer *peer.Peer, blockHash chainhash.Hash, msgBlock *wire.MsgBlock) (err error) {
+	if sm.blockchainClient == nil {
+		return nil
+	}
 	isIdle, err := sm.blockchainClient.IsFSMCurrentState(ctx, teranodeblockchain.FSMStateIDLE)
 	if err != nil {
 		sm.logger.Warnf("[HandleBlockDirect] failed to check FSM state: %v", err)

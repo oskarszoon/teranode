@@ -51,10 +51,27 @@ func (u *Server) txmetaHandler(ctx context.Context, msg *kafka.KafkaMessage) err
 		if err != nil {
 			u.logger.Warnf("[txmetaHandler] failed to check FSM state: %v", err)
 		} else if state != nil && *state == blockchain.FSMStateIDLE {
-			u.logger.Warnf("[txmetaHandler] node is in IDLE state — pausing txmeta Kafka consumer to preserve unread messages.")
+			u.logger.Warnf("[txmetaHandler] node is in IDLE state — pausing Kafka consumers to preserve unread messages.")
+			if u.subtreeConsumerClient != nil {
+				u.subtreeConsumerClient.PauseAll()
+			}
 			if u.txmetaConsumerClient != nil {
 				u.txmetaConsumerClient.PauseAll()
 			}
+			// Resume both consumers when FSM leaves IDLE.
+			go func() {
+				if waitErr := u.blockchainClient.WaitUntilFSMTransitionFromIdleState(ctx); waitErr != nil {
+					u.logger.Errorf("[txmetaHandler] error waiting for FSM transition from IDLE: %v", waitErr)
+					return
+				}
+				u.logger.Infof("[txmetaHandler] FSM left IDLE, resuming Kafka consumers")
+				if u.subtreeConsumerClient != nil {
+					u.subtreeConsumerClient.ResumeAll()
+				}
+				if u.txmetaConsumerClient != nil {
+					u.txmetaConsumerClient.ResumeAll()
+				}
+			}()
 			return nil
 		}
 	}
