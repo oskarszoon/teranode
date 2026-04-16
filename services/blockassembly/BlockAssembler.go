@@ -1572,7 +1572,7 @@ func (b *BlockAssembler) idleAndError(ctx context.Context, format string, args .
 	if fsmErr := b.blockchainClient.SendFSMEvent(ctx, blockchain.FSMEventIDLE); fsmErr != nil {
 		b.logger.Errorf("[validateParentChain] failed to set FSM to IDLE: %v", fsmErr)
 	}
-	return errors.NewProcessingError("%s. Run 'teranodecli repair-conflicts' to fix UTXO store state.", msg)
+	return errors.NewProcessingError("%s — run 'teranodecli repair-conflicts' to fix UTXO store state", msg)
 }
 
 // fixUnminedSinceInconsistencies performs a lightweight scan of all records in the UTXO store

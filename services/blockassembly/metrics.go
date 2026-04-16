@@ -36,37 +36,36 @@ var (
 	prometheusBlockAssemblySubmitMiningSolution prometheus.Histogram
 
 	// Additional metrics for block assembler operations
-	prometheusBlockAssemblerGetMiningCandidate          prometheus.Counter
-	prometheusBlockAssemblerSubtreeCreated              prometheus.Counter
-	prometheusBlockAssemblerTransactions                prometheus.Gauge
-	prometheusBlockAssemblerQueuedTransactions          prometheus.Gauge
-	prometheusBlockAssemblerSubtrees                    prometheus.Gauge
-	prometheusBlockAssemblerTxMetaGetDuration           prometheus.Histogram
-	prometheusBlockAssemblerReorg                       prometheus.Counter
-	prometheusBlockAssemblerReorgDuration               prometheus.Histogram
-	prometheusBlockAssemblerGetReorgBlocksDuration      prometheus.Histogram
-	prometheusBlockAssemblerUpdateBestBlock             prometheus.Histogram
-	prometheusBlockAssemblyBestBlockHeight              prometheus.Gauge
-	prometheusBlockAssemblyCurrentBlockHeight           prometheus.Gauge
-	prometheusBlockAssemblerCurrentState                prometheus.Gauge
-	prometheusBlockAssemblerStateTransitions            *prometheus.CounterVec
-	prometheusBlockAssemblerStateDuration               *prometheus.HistogramVec
-	prometheusBlockAssemblerGenerateBlocks              prometheus.Histogram
-	prometheusBlockAssemblerUtxoIndexReady              *prometheus.GaugeVec
-	prometheusBlockAssemblerUtxoIndexWaitDuration       *prometheus.HistogramVec
-	prometheusBlockAssemblerGetUnminedTxIteratorTime    *prometheus.HistogramVec
-	prometheusBlockAssemblerIteratorProcessingTime      *prometheus.HistogramVec
-	prometheusBlockAssemblerIteratorTransactionsTotal   *prometheus.CounterVec
-	prometheusBlockAssemblerIteratorTransactionsStats   *prometheus.CounterVec
-	prometheusBlockAssemblerMarkTransactionsTime        prometheus.Histogram
-	prometheusBlockAssemblerMarkTransactionsCount       prometheus.Counter
-	prometheusBlockAssemblerSortTransactionsTime        *prometheus.HistogramVec
-	prometheusBlockAssemblerValidateParentChainTime     prometheus.Histogram
-	prometheusBlockAssemblerValidateParentChainFiltered prometheus.Counter
-	prometheusBlockAssemblerAddDirectlyTime             prometheus.Histogram
-	prometheusBlockAssemblerAddDirectlyTotal            prometheus.Counter
-	prometheusBlockAssemblerAddDirectlyBatchTime        prometheus.Histogram
-	prometheusBlockAssemblerSubtreeStoredHist           prometheus.Histogram
+	prometheusBlockAssemblerGetMiningCandidate        prometheus.Counter
+	prometheusBlockAssemblerSubtreeCreated            prometheus.Counter
+	prometheusBlockAssemblerTransactions              prometheus.Gauge
+	prometheusBlockAssemblerQueuedTransactions        prometheus.Gauge
+	prometheusBlockAssemblerSubtrees                  prometheus.Gauge
+	prometheusBlockAssemblerTxMetaGetDuration         prometheus.Histogram
+	prometheusBlockAssemblerReorg                     prometheus.Counter
+	prometheusBlockAssemblerReorgDuration             prometheus.Histogram
+	prometheusBlockAssemblerGetReorgBlocksDuration    prometheus.Histogram
+	prometheusBlockAssemblerUpdateBestBlock           prometheus.Histogram
+	prometheusBlockAssemblyBestBlockHeight            prometheus.Gauge
+	prometheusBlockAssemblyCurrentBlockHeight         prometheus.Gauge
+	prometheusBlockAssemblerCurrentState              prometheus.Gauge
+	prometheusBlockAssemblerStateTransitions          *prometheus.CounterVec
+	prometheusBlockAssemblerStateDuration             *prometheus.HistogramVec
+	prometheusBlockAssemblerGenerateBlocks            prometheus.Histogram
+	prometheusBlockAssemblerUtxoIndexReady            *prometheus.GaugeVec
+	prometheusBlockAssemblerUtxoIndexWaitDuration     *prometheus.HistogramVec
+	prometheusBlockAssemblerGetUnminedTxIteratorTime  *prometheus.HistogramVec
+	prometheusBlockAssemblerIteratorProcessingTime    *prometheus.HistogramVec
+	prometheusBlockAssemblerIteratorTransactionsTotal *prometheus.CounterVec
+	prometheusBlockAssemblerIteratorTransactionsStats *prometheus.CounterVec
+	prometheusBlockAssemblerMarkTransactionsTime      prometheus.Histogram
+	prometheusBlockAssemblerMarkTransactionsCount     prometheus.Counter
+	prometheusBlockAssemblerSortTransactionsTime      *prometheus.HistogramVec
+	prometheusBlockAssemblerValidateParentChainTime   prometheus.Histogram
+	prometheusBlockAssemblerAddDirectlyTime           prometheus.Histogram
+	prometheusBlockAssemblerAddDirectlyTotal          prometheus.Counter
+	prometheusBlockAssemblerAddDirectlyBatchTime      prometheus.Histogram
+	prometheusBlockAssemblerSubtreeStoredHist         prometheus.Histogram
 )
 
 var (
@@ -403,15 +402,6 @@ func _initPrometheusMetrics() {
 			Name:      "validate_parent_chain_seconds",
 			Help:      "Time taken to validate parent chain for unmined transactions",
 			Buckets:   util.MetricsBucketsSeconds,
-		},
-	)
-
-	prometheusBlockAssemblerValidateParentChainFiltered = promauto.NewCounter(
-		prometheus.CounterOpts{
-			Namespace: "teranode",
-			Subsystem: "blockassembly",
-			Name:      "validate_parent_chain_filtered_total",
-			Help:      "Total number of transactions filtered out during parent chain validation",
 		},
 	)
 

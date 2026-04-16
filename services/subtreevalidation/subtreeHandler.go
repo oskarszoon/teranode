@@ -50,9 +50,17 @@ func (u *Server) subtreeMessageHandler(ctx context.Context) func(msg *kafka.Kafk
 		default:
 		}
 
+		if u.blockchainClient == nil {
+			return errors.NewProcessingError("[subtreeMessageHandler] blockchain client is nil")
+		}
+
 		state, err := u.blockchainClient.GetFSMCurrentState(gCtx)
 		if err != nil {
 			return errors.NewProcessingError("[subtreeMessageHandler] failed to get FSM current state", err)
+		}
+
+		if state == nil {
+			return errors.NewProcessingError("[subtreeMessageHandler] FSM state is nil")
 		}
 
 		if *state == blockchain.FSMStateCATCHINGBLOCKS {
