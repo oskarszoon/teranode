@@ -739,7 +739,10 @@ func (b *BlockAssembler) Start(ctx context.Context) (err error) {
 
 	// Load unmined transactions (this includes cleanup of old unmined transactions first)
 	if err = b.loadUnminedTransactions(ctx); err != nil {
-		// we cannot start block assembly if we have not loaded unmined transactions successfully
+		if strings.Contains(err.Error(), "repair-conflicts") {
+			b.logger.Errorf("[BlockAssembler] UTXO store needs repair — block assembly paused in IDLE. Run 'teranodecli repair-conflicts' then restart.")
+			return nil
+		}
 		return errors.NewStorageError("[BlockAssembler] failed to load un-mined transactions: %v", err)
 	}
 
@@ -1569,7 +1572,7 @@ func (b *BlockAssembler) validateParentChain(
 func (b *BlockAssembler) idleAndError(ctx context.Context, format string, args ...interface{}) error {
 	msg := fmt.Sprintf(format, args...)
 	b.logger.Errorf("%s — setting FSM to IDLE. Run 'teranodecli repair-conflicts' to fix.", msg)
-	if fsmErr := b.blockchainClient.SendFSMEvent(ctx, blockchain.FSMEventIDLE); fsmErr != nil {
+	if fsmErr := b.blockchainClient.Idle(ctx); fsmErr != nil {
 		b.logger.Errorf("[validateParentChain] failed to set FSM to IDLE: %v", fsmErr)
 	}
 	return errors.NewProcessingError("%s — run 'teranodecli repair-conflicts' to fix UTXO store state", msg)

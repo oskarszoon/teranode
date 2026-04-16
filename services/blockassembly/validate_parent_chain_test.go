@@ -113,7 +113,7 @@ func makeUnminedTx(t *testing.T, tx *bt.Tx, createdAt int) *utxoStore.UnminedTra
 // TestValidateParentChain_HardFailsWithFSMIdle_UnminedParentNotInList tests that
 // when a TX_CHILD has an unmined parent TX_PARENT that is NOT in the processing list,
 // validateParentChain returns an error containing "repair-conflicts" and calls
-// SendFSMEvent with FSMEventIDLE.
+// Idle to transition FSM.
 func TestValidateParentChain_HardFailsWithFSMIdle_UnminedParentNotInList(t *testing.T) {
 	ctx := context.Background()
 	store := setupValidateParentChainStore(ctx, t)
@@ -129,9 +129,9 @@ func TestValidateParentChain_HardFailsWithFSMIdle_UnminedParentNotInList(t *test
 	_, err = store.Create(ctx, txChild, 100)
 	require.NoError(t, err)
 
-	// Set up blockchain client mock — only SendFSMEvent should be called.
+	// Set up blockchain client mock — Idle should be called to transition FSM.
 	blockchainClientMock := &blockchain.Mock{}
-	blockchainClientMock.On("SendFSMEvent", mock.Anything, blockchain.FSMEventIDLE).Return(nil)
+	blockchainClientMock.On("Idle", mock.Anything).Return(nil)
 
 	ba := setupValidateParentChainBA(store, blockchainClientMock)
 
@@ -144,8 +144,8 @@ func TestValidateParentChain_HardFailsWithFSMIdle_UnminedParentNotInList(t *test
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "repair-conflicts")
 
-	// SendFSMEvent must have been called with IDLE.
-	blockchainClientMock.AssertCalled(t, "SendFSMEvent", mock.Anything, blockchain.FSMEventIDLE)
+	// Idle must have been called to transition FSM.
+	blockchainClientMock.AssertCalled(t, "Idle", mock.Anything)
 }
 
 // TestValidateParentChain_SucceedsForCleanState tests that when TX_PARENT is mined
@@ -169,7 +169,7 @@ func TestValidateParentChain_SucceedsForCleanState(t *testing.T) {
 	require.NoError(t, err)
 
 	blockchainClientMock := &blockchain.Mock{}
-	// SendFSMEvent should NOT be called for success path.
+	// Idle should NOT be called for success path.
 	ba := setupValidateParentChainBA(store, blockchainClientMock)
 
 	unminedChild := makeUnminedTx(t, txChild, 1)
@@ -178,8 +178,8 @@ func TestValidateParentChain_SucceedsForCleanState(t *testing.T) {
 	err = ba.validateParentChain(ctx, []*utxoStore.UnminedTransaction{unminedChild}, bestBlockHeaderIDsMap)
 	require.NoError(t, err)
 
-	// SendFSMEvent must NOT have been called.
-	blockchainClientMock.AssertNotCalled(t, "SendFSMEvent")
+	// Idle must NOT have been called.
+	blockchainClientMock.AssertNotCalled(t, "Idle")
 }
 
 // TestValidateParentChain_SucceedsWhenParentIsInList tests that when both TX_PARENT
@@ -232,6 +232,6 @@ func TestValidateParentChain_SucceedsWhenParentIsInList(t *testing.T) {
 	err = ba.validateParentChain(ctx, []*utxoStore.UnminedTransaction{unminedParent, unminedChild}, bestBlockHeaderIDsMap)
 	require.NoError(t, err)
 
-	// SendFSMEvent must NOT have been called.
-	blockchainClientMock.AssertNotCalled(t, "SendFSMEvent")
+	// Idle must NOT have been called.
+	blockchainClientMock.AssertNotCalled(t, "Idle")
 }
