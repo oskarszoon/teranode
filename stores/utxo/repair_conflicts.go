@@ -150,7 +150,10 @@ func RepairConflictingChains(ctx context.Context, s Store, blockchainClient Bloc
 				parentHash := input.PreviousTxIDChainHash()
 				vout := input.PreviousTxOutIndex
 
-				parentMeta, pErr := s.Get(ctx, parentHash, fields.Utxos)
+				// Fetch parent SpendingDatas + ConflictingChildren in one call.
+				// ConflictingChildren is needed for Case C: siblings of txHash that are
+				// recorded as (PARENT, sibling) in conflicting_children — not (txHash, sibling).
+				parentMeta, pErr := s.Get(ctx, parentHash, fields.Utxos, fields.ConflictingChildren)
 				if pErr != nil {
 					report.Errors = append(report.Errors, pErr)
 					continue
@@ -173,32 +176,26 @@ func RepairConflictingChains(ctx context.Context, s Store, blockchainClient Bloc
 					break inputLoop
 				}
 
-				// tx appears to be the winner per SpendingData — check for inversion.
-				counterTxs, cErr := GetCounterConflictingTxHashes(ctx, s, txHash)
-				if cErr != nil {
-					report.Errors = append(report.Errors, cErr)
-					break inputLoop
-				}
-
-			counterLoop:
-				for _, c := range counterTxs {
-					if c.IsEqual(&txHash) {
+				// txHash is the recorded winner per SpendingData — check PARENT's
+				// ConflictingChildren for any sibling that is confirmed on the best chain.
+				// GetCounterConflictingTxHashes is intentionally avoided here: it traverses
+				// txHash's own ConflictingChildren, missing siblings stored as (PARENT, sibling).
+				for _, sibling := range parentMeta.ConflictingChildren {
+					sibling := sibling
+					siblingMeta, sErr := s.Get(ctx, &sibling, fields.BlockIDs)
+					if sErr != nil {
+						report.Errors = append(report.Errors, sErr)
 						continue
 					}
-					cCopy := c
-					cMeta, cErr := s.Get(ctx, &cCopy, fields.BlockIDs)
-					if cErr != nil {
-						report.Errors = append(report.Errors, cErr)
+					if siblingMeta == nil {
 						continue
 					}
-					if cMeta == nil {
-						continue
-					}
-					for _, blockID := range cMeta.BlockIDs {
+					for _, blockID := range siblingMeta.BlockIDs {
 						if bestBlockIDsMap[blockID] {
-							// Case C: c is confirmed on best chain — it's the real winner.
-							caseCPairs = append(caseCPairs, caseCPair{loser: txHash, winner: c})
-							break counterLoop
+							// Case C: sibling is confirmed on best chain — it's the real winner,
+							// txHash is the fake winner.
+							caseCPairs = append(caseCPairs, caseCPair{loser: txHash, winner: sibling})
+							break
 						}
 					}
 				}

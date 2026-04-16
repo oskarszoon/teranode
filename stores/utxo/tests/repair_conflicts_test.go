@@ -287,3 +287,204 @@ func TestRepairConflictingChains_UnminedSinceFix(t *testing.T) {
 	require.Equal(t, 0, report.UnminedSinceFixed)
 	require.Empty(t, report.Errors)
 }
+
+// TestRepairConflictingChains_CaseC_InvertedWinnerLoser verifies that Case C (inverted winner/loser)
+// is detected and repaired via ProcessConflicting.
+//
+// Setup:
+//   - TX_A is in the unmined list; SpendingData says TX_A won PARENT[0].
+//   - TX_B is confirmed on the best chain AND is in PARENT's ConflictingChildren
+//     (i.e. SetConflicting(TX_B) was called previously, adding (PARENT, TX_B) to the DB).
+//   - The bug: GetCounterConflictingTxHashes(TX_A) only traverses TX_A's own ConflictingChildren,
+//     missing TX_B which is stored as (PARENT, TX_B). The fix queries parentMeta.ConflictingChildren.
+//
+// Expected: report.CaseCFixed == 1, TX_A becomes Conflicting=true after ProcessConflicting.
+func TestRepairConflictingChains_CaseC_InvertedWinnerLoser(t *testing.T) {
+	ctx := context.Background()
+	store := setupSQLiteFileStore(ctx, t)
+
+	const bestChainBlockID uint32 = 42
+
+	// rootTx is a known mined tx whose outputs we can spend.
+	// It acts as the "genesis" for the test chain — stored in the DB as confirmed.
+	// We use a hardcoded hex tx here; its own parents do not need to be in the store
+	// because ProcessConflicting never traverses above parentTx.
+	rootTx, err := bt.NewTxFromString("010000000000000000ef01032e38e9c0a84c6046d687d10556dcacc41d275ec55fc00779ac88fdf357a18700000000" +
+		"8c493046022100c352d3dd993a981beba4a63ad15c209275ca9470abfcd57da93b58e4eb5dce82022100840792bc1f456062819f15d33ee7055cf7b5" +
+		"ee1af1ebcc6028d9cdb1c3af7748014104f46db5e9d61a9dc27b8d64ad23e7383a4e6ca164593c2527c038c0857eb67ee8e825dca65046b82c933158" +
+		"6c82e0fd1f633f25f87c161bc6f8a630121df2b3d3ffffffff00f2052a010000001976a91471d7dd96d9edda09180fe9d57a477b5acc9cad1188ac02" +
+		"00e32321000000001976a914c398efa9c392ba6013c5e04ee729755ef7f58b3288ac000fe208010000001976a914948c765a6914d43f2a7ac177da2c" +
+		"2f6b52de3d7c88ac00000000")
+	require.NoError(t, err)
+	_, err = store.Create(ctx, rootTx, 0,
+		utxo.WithMinedBlockInfo(utxo.MinedBlockInfo{BlockID: 1, BlockHeight: 0}),
+	)
+	require.NoError(t, err)
+
+	// parentTx is built via makeTxSpendingOutput so its inputs carry a proper PreviousTxScript.
+	// This is critical: ProcessConflicting calls SetConflicting([txA], true) which uses
+	// UTXOHashFromInput on txA's inputs — txA.PreviousTxScript must be non-nil.
+	// Similarly, updateParentConflictingChildren on txA requires parentTx to be in the store,
+	// which it is. And parentTx.Inputs[0].PreviousTxID = rootTx.hash, which is also in the store.
+	parentTx := makeTxSpendingOutput(t, rootTx, 0, rootTx.Outputs[0].Satoshis/2)
+	_, err = store.Create(ctx, parentTx, 100) // unmined
+	require.NoError(t, err)
+
+	// TX_A: unmined, recorded as winner (SpendingData[0] = TX_A).
+	txA := makeTxSpendingOutput(t, parentTx, 0, 10000)
+	_, err = store.Create(ctx, txA, 100)
+	require.NoError(t, err)
+	_, err = store.Spend(ctx, txA, store.GetBlockHeight()+1, utxo.IgnoreFlags{})
+	require.NoError(t, err)
+
+	// TX_B: the real winner, confirmed on best chain.
+	// Created with MinedBlockInfo so it has BlockIDs=[bestChainBlockID] and unmined_since=0.
+	txB := makeTxSpendingOutput(t, parentTx, 0, 20000)
+	_, err = store.Create(ctx, txB, 0,
+		utxo.WithMinedBlockInfo(utxo.MinedBlockInfo{BlockID: bestChainBlockID, BlockHeight: 1}),
+	)
+	require.NoError(t, err)
+
+	// SetConflicting(TX_B, true) adds (PARENT, TX_B) to conflicting_children in the DB
+	// and sets TX_B.Conflicting=true. This simulates the state after SetConflicting ran (as
+	// part of detecting TX_B as a double-spend) but ProcessConflicting never completed — so
+	// SpendingData still says TX_A is the winner.
+	// TX_B must remain Conflicting=true: ProcessConflicting requires the winning tx to be
+	// flagged before it can execute the 5-phase commit.
+	txBHash := txB.TxIDChainHash()
+	_, _, err = store.SetConflicting(ctx, []chainhash.Hash{*txBHash}, true)
+	require.NoError(t, err)
+
+	querier := &testBlockchainQuerier{
+		bestBlockHash:   &chainhash.Hash{},
+		bestBlockHeight: 1,
+		blockHeaderIDs:  []uint32{bestChainBlockID},
+	}
+
+	report, err := utxo.RepairConflictingChains(ctx, store, querier, false)
+	require.NoError(t, err)
+	require.Empty(t, report.Errors, "no errors expected during repair")
+	require.Equal(t, 1, report.CaseCFixed, "Case C should be detected and fixed")
+	require.Equal(t, 0, report.CaseAFixed, "TX_A's loser state is handled by ProcessConflicting in Case C, not Case A")
+
+	// TX_A must now be Conflicting=true (ProcessConflicting flipped the roles).
+	txAMeta, err := store.Get(ctx, txA.TxIDChainHash(), fields.Conflicting)
+	require.NoError(t, err)
+	require.NotNil(t, txAMeta)
+	require.True(t, txAMeta.Conflicting, "TX_A must be marked Conflicting after Case C repair")
+}
+
+// TestRepairConflictingChains_CaseC_DryRun verifies that dryRun=true reports Case C without fixing.
+func TestRepairConflictingChains_CaseC_DryRun(t *testing.T) {
+	ctx := context.Background()
+	store := setupSQLiteFileStore(ctx, t)
+
+	const bestChainBlockID uint32 = 43
+
+	rootTx43, err := bt.NewTxFromString("010000000000000000ef01032e38e9c0a84c6046d687d10556dcacc41d275ec55fc00779ac88fdf357a18700000000" +
+		"8c493046022100c352d3dd993a981beba4a63ad15c209275ca9470abfcd57da93b58e4eb5dce82022100840792bc1f456062819f15d33ee7055cf7b5" +
+		"ee1af1ebcc6028d9cdb1c3af7748014104f46db5e9d61a9dc27b8d64ad23e7383a4e6ca164593c2527c038c0857eb67ee8e825dca65046b82c933158" +
+		"6c82e0fd1f633f25f87c161bc6f8a630121df2b3d3ffffffff00f2052a010000001976a91471d7dd96d9edda09180fe9d57a477b5acc9cad1188ac02" +
+		"00e32321000000001976a914c398efa9c392ba6013c5e04ee729755ef7f58b3288ac000fe208010000001976a914948c765a6914d43f2a7ac177da2c" +
+		"2f6b52de3d7c88ac00000000")
+	require.NoError(t, err)
+	_, err = store.Create(ctx, rootTx43, 0,
+		utxo.WithMinedBlockInfo(utxo.MinedBlockInfo{BlockID: 1, BlockHeight: 0}),
+	)
+	require.NoError(t, err)
+	parentTx := makeTxSpendingOutput(t, rootTx43, 0, rootTx43.Outputs[0].Satoshis/2)
+	_, err = store.Create(ctx, parentTx, 100)
+	require.NoError(t, err)
+
+	txA := makeTxSpendingOutput(t, parentTx, 0, 10000)
+	_, err = store.Create(ctx, txA, 100)
+	require.NoError(t, err)
+	_, err = store.Spend(ctx, txA, store.GetBlockHeight()+1, utxo.IgnoreFlags{})
+	require.NoError(t, err)
+
+	txB := makeTxSpendingOutput(t, parentTx, 0, 20000)
+	_, err = store.Create(ctx, txB, 0,
+		utxo.WithMinedBlockInfo(utxo.MinedBlockInfo{BlockID: bestChainBlockID, BlockHeight: 1}),
+	)
+	require.NoError(t, err)
+	txBHash := txB.TxIDChainHash()
+	_, _, err = store.SetConflicting(ctx, []chainhash.Hash{*txBHash}, true)
+	require.NoError(t, err)
+
+	querier := &testBlockchainQuerier{
+		bestBlockHash:   &chainhash.Hash{},
+		bestBlockHeight: 1,
+		blockHeaderIDs:  []uint32{bestChainBlockID},
+	}
+
+	// dry-run: report but don't write
+	report, err := utxo.RepairConflictingChains(ctx, store, querier, true)
+	require.NoError(t, err)
+	require.Equal(t, 1, report.CaseCFixed, "Case C should be reported")
+
+	// TX_A must still be Conflicting=false — nothing written.
+	txAMeta, err := store.Get(ctx, txA.TxIDChainHash(), fields.Conflicting)
+	require.NoError(t, err)
+	require.False(t, txAMeta.Conflicting, "dryRun must not modify TX_A")
+}
+
+// TestRepairConflictingChains_CaseASkippedAfterCaseC verifies that when a tx is detected as
+// Case A but ProcessConflicting (Case C) already marked it Conflicting=true, it is skipped in
+// the Case A sweep (freshMeta.Conflicting check at end of repair).
+func TestRepairConflictingChains_CaseASkippedAfterCaseC(t *testing.T) {
+	ctx := context.Background()
+	store := setupSQLiteFileStore(ctx, t)
+
+	const bestChainBlockID uint32 = 44
+
+	rootTx44, err := bt.NewTxFromString("010000000000000000ef01032e38e9c0a84c6046d687d10556dcacc41d275ec55fc00779ac88fdf357a18700000000" +
+		"8c493046022100c352d3dd993a981beba4a63ad15c209275ca9470abfcd57da93b58e4eb5dce82022100840792bc1f456062819f15d33ee7055cf7b5" +
+		"ee1af1ebcc6028d9cdb1c3af7748014104f46db5e9d61a9dc27b8d64ad23e7383a4e6ca164593c2527c038c0857eb67ee8e825dca65046b82c933158" +
+		"6c82e0fd1f633f25f87c161bc6f8a630121df2b3d3ffffffff00f2052a010000001976a91471d7dd96d9edda09180fe9d57a477b5acc9cad1188ac02" +
+		"00e32321000000001976a914c398efa9c392ba6013c5e04ee729755ef7f58b3288ac000fe208010000001976a914948c765a6914d43f2a7ac177da2c" +
+		"2f6b52de3d7c88ac00000000")
+	require.NoError(t, err)
+	_, err = store.Create(ctx, rootTx44, 0,
+		utxo.WithMinedBlockInfo(utxo.MinedBlockInfo{BlockID: 1, BlockHeight: 0}),
+	)
+	require.NoError(t, err)
+	parentTx := makeTxSpendingOutput(t, rootTx44, 0, rootTx44.Outputs[0].Satoshis/2)
+	_, err = store.Create(ctx, parentTx, 100)
+	require.NoError(t, err)
+
+	// TX_A: unmined, recorded winner.
+	txA := makeTxSpendingOutput(t, parentTx, 0, 10000)
+	_, err = store.Create(ctx, txA, 100)
+	require.NoError(t, err)
+	_, err = store.Spend(ctx, txA, store.GetBlockHeight()+1, utxo.IgnoreFlags{})
+	require.NoError(t, err)
+
+	// TX_B: confirmed on best chain, in PARENT's ConflictingChildren → Case C winner.
+	txB := makeTxSpendingOutput(t, parentTx, 0, 20000)
+	_, err = store.Create(ctx, txB, 0,
+		utxo.WithMinedBlockInfo(utxo.MinedBlockInfo{BlockID: bestChainBlockID, BlockHeight: 1}),
+	)
+	require.NoError(t, err)
+	txBHash := txB.TxIDChainHash()
+	_, _, err = store.SetConflicting(ctx, []chainhash.Hash{*txBHash}, true)
+	require.NoError(t, err)
+
+	// TX_A is also in caseALosers from some OTHER input perspective (simulate by marking
+	// TX_A manually as a loser that would be in caseALosers, then verifying the re-check
+	// skips it because Case C ProcessConflicting already set Conflicting=true on TX_A).
+	//
+	// In practice this is tested end-to-end: after Case C ProcessConflicting runs, TX_A
+	// gets Conflicting=true. The Case A sweep re-checks freshMeta.Conflicting and skips it.
+	// We verify the net result: report.CaseAFixed == 0 (TX_A not double-counted).
+
+	querier := &testBlockchainQuerier{
+		bestBlockHash:   &chainhash.Hash{},
+		bestBlockHeight: 1,
+		blockHeaderIDs:  []uint32{bestChainBlockID},
+	}
+
+	report, err := utxo.RepairConflictingChains(ctx, store, querier, false)
+	require.NoError(t, err)
+	require.Equal(t, 1, report.CaseCFixed)
+	require.Equal(t, 0, report.CaseAFixed, "TX_A must not be double-counted: Case C ProcessConflicting already fixed it")
+}
