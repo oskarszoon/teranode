@@ -2635,7 +2635,7 @@ func (sm *SyncManager) processTXmetaBatchMessage(data []byte) error {
 				Size:   txMeta.SizeInBytes,
 			})
 		} else {
-			// Skip DELETE entries (no action needed for peer announcements)
+			offset += int(contentLen)
 			continue
 		}
 	}
