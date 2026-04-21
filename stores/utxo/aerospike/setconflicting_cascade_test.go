@@ -58,7 +58,8 @@ func TestSetConflictingCascade_Aerospike(t *testing.T) {
 		parentHash := *tx.TxIDChainHash()
 		_, markedHashes, err := utxo.MarkConflictingRecursively(ctx, store, []chainhash.Hash{parentHash})
 		require.NoError(t, err)
-		require.Len(t, markedHashes, 2, "parent + child should both be marked")
+		require.Equal(t, []chainhash.Hash{parentHash, *childTx.TxIDChainHash()}, markedHashes,
+			"marked set must be returned in BFS order: parent first, then cascaded child")
 
 		parentMeta, err := store.Get(ctx, tx.TxIDChainHash(), fields.Conflicting)
 		require.NoError(t, err)
@@ -96,7 +97,10 @@ func TestSetConflictingCascade_Aerospike(t *testing.T) {
 		parentHash := *tx.TxIDChainHash()
 		_, markedHashes, err := utxo.MarkConflictingRecursively(ctx, store, []chainhash.Hash{parentHash})
 		require.NoError(t, err)
-		require.Len(t, markedHashes, 3, "parent + child + grandchild should all be marked")
+		require.Equal(t,
+			[]chainhash.Hash{parentHash, *childTx.TxIDChainHash(), *grandchildTx.TxIDChainHash()},
+			markedHashes,
+			"marked set must be returned in BFS order: parent, child, grandchild")
 
 		parentMeta, err := store.Get(ctx, tx.TxIDChainHash(), fields.Conflicting)
 		require.NoError(t, err)

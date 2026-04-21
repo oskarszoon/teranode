@@ -185,7 +185,10 @@ func ProcessConflicting(ctx context.Context, s Store, blockHeight uint32, confli
 //
 // Returns:
 //   - A slice of pointers to Spend structs representing the affected parent spends.
-//   - A slice of all transaction hashes that were marked conflicting (initial + cascaded descendants).
+//   - A slice of all transaction hashes that were marked conflicting by this call,
+//     including the input hashes and every descendant reached via BFS. Insertion
+//     order is BFS order (input level first, then each descendant level) — callers
+//     can rely on this for deterministic logs, traces, and eviction ordering.
 //   - An error if any issues occur during the process.
 func MarkConflictingRecursively(ctx context.Context, s Store, hashes []chainhash.Hash) ([]*Spend, []chainhash.Hash, error) {
 	ctx, _, deferFn := tracing.Tracer("utxo").Start(ctx, "MarkConflictingRecursively")
@@ -196,8 +199,12 @@ func MarkConflictingRecursively(ctx context.Context, s Store, hashes []chainhash
 	toProcess := hashes
 
 	visited := make(map[chainhash.Hash]struct{}, len(hashes))
+	markedOrder := make([]chainhash.Hash, 0, len(hashes))
 	for _, h := range hashes {
-		visited[h] = struct{}{}
+		if _, ok := visited[h]; !ok {
+			visited[h] = struct{}{}
+			markedOrder = append(markedOrder, h)
+		}
 	}
 
 	for len(toProcess) > 0 {
@@ -213,18 +220,14 @@ func MarkConflictingRecursively(ctx context.Context, s Store, hashes []chainhash
 		for _, child := range spendingChildTxs {
 			if _, ok := visited[child]; !ok {
 				visited[child] = struct{}{}
+				markedOrder = append(markedOrder, child)
 				nextBatch = append(nextBatch, child)
 			}
 		}
 		toProcess = nextBatch
 	}
 
-	allMarked := make([]chainhash.Hash, 0, len(visited))
-	for h := range visited {
-		allMarked = append(allMarked, h)
-	}
-
-	return allAffectedSpends, allMarked, nil
+	return allAffectedSpends, markedOrder, nil
 }
 
 func GetAndLockChildren(ctx context.Context, s Store, hash chainhash.Hash) ([]chainhash.Hash, error) {

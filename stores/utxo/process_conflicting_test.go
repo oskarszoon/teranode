@@ -256,8 +256,9 @@ func TestMarkConflictingRecursively_Success(t *testing.T) {
 
 	// Assertions
 	require.NoError(t, err)
-	assert.Len(t, result, 2)       // Should contain both parent and child spends
-	assert.Len(t, markedHashes, 2) // parent + child
+	assert.Len(t, result, 2) // Should contain both parent and child spends
+	assert.Equal(t, []chainhash.Hash{txHash, childHash}, markedHashes,
+		"marked set must be returned in BFS order: input first, then cascaded child")
 	mockStore.AssertExpectations(t)
 }
 
@@ -300,7 +301,7 @@ func TestMarkConflictingRecursively_NoChildren(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, result, 1)
 	assert.Equal(t, txHash, *result[0].TxID)
-	assert.Len(t, markedHashes, 1)
+	assert.Equal(t, []chainhash.Hash{txHash}, markedHashes)
 	mockStore.AssertExpectations(t)
 }
 

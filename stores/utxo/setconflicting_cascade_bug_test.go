@@ -30,7 +30,8 @@ func TestSetConflicting_MustCascadeToChildren(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Len(t, allSpends, 2, "parent + child spends")
-	require.Len(t, markedHashes, 2, "parent + child marked")
+	require.Equal(t, []chainhash.Hash{parentHash, childHash}, markedHashes,
+		"marked set must be returned in BFS order: parent first, then child")
 	mockStore.AssertCalled(t, "SetConflicting", mock.Anything, []chainhash.Hash{parentHash}, true)
 	mockStore.AssertCalled(t, "SetConflicting", mock.Anything, []chainhash.Hash{childHash}, true)
 	mockStore.AssertExpectations(t)
@@ -80,7 +81,8 @@ func TestMarkConflictingRecursively_DoesCascade(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Len(t, allSpends, 3)
-	require.Len(t, markedHashes, 3)
+	require.Equal(t, []chainhash.Hash{parentHash, childHash, grandchildHash}, markedHashes,
+		"marked set must be returned in BFS order: parent, then child, then grandchild")
 	mockStore.AssertCalled(t, "SetConflicting", mock.Anything, []chainhash.Hash{parentHash}, true)
 	mockStore.AssertCalled(t, "SetConflicting", mock.Anything, []chainhash.Hash{childHash}, true)
 	mockStore.AssertCalled(t, "SetConflicting", mock.Anything, []chainhash.Hash{grandchildHash}, true)
