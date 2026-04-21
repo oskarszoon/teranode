@@ -24,12 +24,10 @@ import (
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	"github.com/bsv-blockchain/go-chaincfg"
 	safeconversion "github.com/bsv-blockchain/go-safe-conversion"
-	subtreepkg "github.com/bsv-blockchain/go-subtree"
 	txmap "github.com/bsv-blockchain/go-tx-map"
 	"github.com/bsv-blockchain/go-wire"
 	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/model"
-	"github.com/bsv-blockchain/teranode/pkg/fileformat"
 	"github.com/bsv-blockchain/teranode/services/blockassembly"
 	teranodeblockchain "github.com/bsv-blockchain/teranode/services/blockchain"
 	"github.com/bsv-blockchain/teranode/services/blockvalidation"
@@ -2408,55 +2406,9 @@ func (sm *SyncManager) startKafkaListeners(ctx context.Context, _ error) {
 		go kafka.StartKafkaControlledListener(ctx, sm.logger, "txmeta.legacy"+"."+sm.settings.ClientName, controlCh, txmetaKafkaURL, sm.kafkaTXmetaListener)
 	}
 
-	// Listen to blockchain notifications for subtree announcements
-	go func() {
-		// will never return an error
-		blockchainSubscription, _ := sm.blockchainClient.Subscribe(ctx, teranodeblockchain.SubscriberLegacy)
-
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case notification := <-blockchainSubscription:
-				if notification == nil {
-					continue
-				}
-
-				// check if the notification is a new subtree
-				if notification.Type == model.NotificationType_Subtree {
-					// we just got notified of a new subtree internally, announce all the transactions to our peers
-					sm.logger.Debugf("[Legacy Manager] received new subtree notification: %v", notification)
-
-					subtreeReader, err := sm.subtreeStore.GetIoReader(ctx, notification.Hash, fileformat.FileTypeSubtree)
-					if err != nil {
-						sm.logger.Errorf("[Legacy Manager] failed to get subtree from store: %v", err)
-						continue
-					}
-
-					subtree, err := subtreepkg.NewSubtreeFromReader(subtreeReader)
-					_ = subtreeReader.Close()
-					if err != nil {
-						sm.logger.Errorf("[Legacy Manager] failed to create subtree from bytes: %v", err)
-						continue
-					}
-
-					// announce all the transactions in the subtree
-					// the batcher should de-duplicate the transactions that have already been sent in the last minute
-					for _, subtreeNode := range subtree.Nodes {
-						if subtreeNode.Hash.Equal(subtreepkg.CoinbasePlaceholderHashValue) {
-							continue
-						}
-
-						sm.txAnnounceBatcher.Put(&TxHashAndFee{
-							TxHash: subtreeNode.Hash,
-							Fee:    subtreeNode.Fee,
-							Size:   subtreeNode.SizeInBytes,
-						})
-					}
-				}
-			}
-		}
-	}()
+	// Tx announcements to legacy peers are handled entirely by the txmeta Kafka path.
+	// Subtree notifications are NOT used for tx announcements — they caused all txs in
+	// reorganized subtrees to be re-announced to peers after every new block.
 
 	// Control block listeners based on blockControlChan
 	go func() {
