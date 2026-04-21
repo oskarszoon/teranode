@@ -2407,7 +2407,7 @@ func (b *BlockAssembler) validateUnminedTxInputs(ctx context.Context, txHash cha
 }
 
 func (b *BlockAssembler) markAsConflicting(ctx context.Context, txHash chainhash.Hash) {
-	if _, _, err := b.utxoStore.SetConflicting(ctx, []chainhash.Hash{txHash}, true); err != nil {
+	if _, err := utxo.MarkConflictingRecursively(ctx, b.utxoStore, []chainhash.Hash{txHash}); err != nil {
 		b.logger.Errorf("[validateUnminedTxInputs][%s] failed to mark as conflicting: %v", txHash.String(), err)
 	}
 }
