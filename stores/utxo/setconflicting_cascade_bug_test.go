@@ -26,10 +26,11 @@ func TestSetConflicting_MustCascadeToChildren(t *testing.T) {
 	mockStore.On("SetConflicting", mock.Anything, []chainhash.Hash{childHash}, true).
 		Return(childSpends, []chainhash.Hash{}, nil)
 
-	allSpends, err := MarkConflictingRecursively(ctx, mockStore, []chainhash.Hash{parentHash})
+	allSpends, markedHashes, err := MarkConflictingRecursively(ctx, mockStore, []chainhash.Hash{parentHash})
 	require.NoError(t, err)
 
 	require.Len(t, allSpends, 2, "parent + child spends")
+	require.Len(t, markedHashes, 2, "parent + child marked")
 	mockStore.AssertCalled(t, "SetConflicting", mock.Anything, []chainhash.Hash{parentHash}, true)
 	mockStore.AssertCalled(t, "SetConflicting", mock.Anything, []chainhash.Hash{childHash}, true)
 	mockStore.AssertExpectations(t)
@@ -50,7 +51,7 @@ func TestSetConflicting_CallerMustCascade(t *testing.T) {
 	mockStore.On("SetConflicting", mock.Anything, []chainhash.Hash{childHash}, true).
 		Return([]*Spend{{TxID: &childHash, Vout: 0}}, []chainhash.Hash{}, nil)
 
-	_, err := MarkConflictingRecursively(ctx, mockStore, []chainhash.Hash{parentHash})
+	_, _, err := MarkConflictingRecursively(ctx, mockStore, []chainhash.Hash{parentHash})
 	require.NoError(t, err)
 
 	mockStore.AssertNumberOfCalls(t, "SetConflicting", 2)
@@ -75,10 +76,11 @@ func TestMarkConflictingRecursively_DoesCascade(t *testing.T) {
 	mockStore.On("SetConflicting", mock.Anything, []chainhash.Hash{grandchildHash}, true).
 		Return([]*Spend{{TxID: &grandchildHash, Vout: 0}}, []chainhash.Hash{}, nil)
 
-	allSpends, err := MarkConflictingRecursively(ctx, mockStore, []chainhash.Hash{parentHash})
+	allSpends, markedHashes, err := MarkConflictingRecursively(ctx, mockStore, []chainhash.Hash{parentHash})
 	require.NoError(t, err)
 
 	require.Len(t, allSpends, 3)
+	require.Len(t, markedHashes, 3)
 	mockStore.AssertCalled(t, "SetConflicting", mock.Anything, []chainhash.Hash{parentHash}, true)
 	mockStore.AssertCalled(t, "SetConflicting", mock.Anything, []chainhash.Hash{childHash}, true)
 	mockStore.AssertCalled(t, "SetConflicting", mock.Anything, []chainhash.Hash{grandchildHash}, true)

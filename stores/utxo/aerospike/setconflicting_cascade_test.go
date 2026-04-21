@@ -55,17 +55,15 @@ func TestSetConflictingCascade_Aerospike(t *testing.T) {
 		_, err = store.Spend(ctx, childTx, store.GetBlockHeight()+1)
 		require.NoError(t, err)
 
-		// Mark parent conflicting with recursive cascade
 		parentHash := *tx.TxIDChainHash()
-		_, err = utxo.MarkConflictingRecursively(ctx, store, []chainhash.Hash{parentHash})
+		_, markedHashes, err := utxo.MarkConflictingRecursively(ctx, store, []chainhash.Hash{parentHash})
 		require.NoError(t, err)
+		require.Len(t, markedHashes, 2, "parent + child should both be marked")
 
-		// Parent must be conflicting
 		parentMeta, err := store.Get(ctx, tx.TxIDChainHash(), fields.Conflicting)
 		require.NoError(t, err)
 		require.True(t, parentMeta.Conflicting, "parent must be conflicting")
 
-		// Child must also be conflicting via cascade
 		childMeta, err := store.Get(ctx, childTx.TxIDChainHash(), fields.Conflicting)
 		require.NoError(t, err)
 		require.True(t, childMeta.Conflicting,
@@ -95,10 +93,10 @@ func TestSetConflictingCascade_Aerospike(t *testing.T) {
 		_, err = store.Spend(ctx, grandchildTx, store.GetBlockHeight()+1)
 		require.NoError(t, err)
 
-		// Mark parent conflicting — must cascade entire descendant tree
 		parentHash := *tx.TxIDChainHash()
-		_, err = utxo.MarkConflictingRecursively(ctx, store, []chainhash.Hash{parentHash})
+		_, markedHashes, err := utxo.MarkConflictingRecursively(ctx, store, []chainhash.Hash{parentHash})
 		require.NoError(t, err)
+		require.Len(t, markedHashes, 3, "parent + child + grandchild should all be marked")
 
 		parentMeta, err := store.Get(ctx, tx.TxIDChainHash(), fields.Conflicting)
 		require.NoError(t, err)

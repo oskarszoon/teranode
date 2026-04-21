@@ -252,11 +252,12 @@ func TestMarkConflictingRecursively_Success(t *testing.T) {
 		Return(childAffectedSpends, []chainhash.Hash{}, nil)
 
 	// Execute test
-	result, err := MarkConflictingRecursively(ctx, mockStore, []chainhash.Hash{txHash})
+	result, markedHashes, err := MarkConflictingRecursively(ctx, mockStore, []chainhash.Hash{txHash})
 
 	// Assertions
 	require.NoError(t, err)
 	assert.Len(t, result, 2) // Should contain both parent and child spends
+	assert.Len(t, markedHashes, 2) // parent + child
 	mockStore.AssertExpectations(t)
 }
 
@@ -271,10 +272,11 @@ func TestMarkConflictingRecursively_SetConflictingError(t *testing.T) {
 		Return([]*Spend{}, []chainhash.Hash{}, errors.NewProcessingError("set conflicting error"))
 
 	// Execute test
-	result, err := MarkConflictingRecursively(ctx, mockStore, []chainhash.Hash{txHash})
+	result, markedHashes, err := MarkConflictingRecursively(ctx, mockStore, []chainhash.Hash{txHash})
 
 	// Assertions
 	assert.Nil(t, result)
+	assert.Nil(t, markedHashes)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "set conflicting error")
 	mockStore.AssertExpectations(t)
@@ -292,12 +294,13 @@ func TestMarkConflictingRecursively_NoChildren(t *testing.T) {
 		Return(affectedSpends, []chainhash.Hash{}, nil)
 
 	// Execute test
-	result, err := MarkConflictingRecursively(ctx, mockStore, []chainhash.Hash{txHash})
+	result, markedHashes, err := MarkConflictingRecursively(ctx, mockStore, []chainhash.Hash{txHash})
 
 	// Assertions
 	require.NoError(t, err)
 	assert.Len(t, result, 1)
 	assert.Equal(t, txHash, *result[0].TxID)
+	assert.Len(t, markedHashes, 1)
 	mockStore.AssertExpectations(t)
 }
 

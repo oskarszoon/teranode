@@ -119,7 +119,7 @@ func ProcessConflicting(ctx context.Context, s Store, blockHeight uint32, confli
 	losingTxHashes := losingTxHashesMap.Keys()
 
 	// - 1: mark all losingTxHashesPerConflictingTx as conflicting + all its spending transactions recursively
-	affectedParentSpends, err := MarkConflictingRecursively(ctx, s, losingTxHashes)
+	affectedParentSpends, _, err := MarkConflictingRecursively(ctx, s, losingTxHashes)
 	if err != nil {
 		return nil, err
 	}
@@ -185,8 +185,9 @@ func ProcessConflicting(ctx context.Context, s Store, blockHeight uint32, confli
 //
 // Returns:
 //   - A slice of pointers to Spend structs representing the affected parent spends.
+//   - A slice of all transaction hashes that were marked conflicting (initial + cascaded descendants).
 //   - An error if any issues occur during the process.
-func MarkConflictingRecursively(ctx context.Context, s Store, hashes []chainhash.Hash) ([]*Spend, error) {
+func MarkConflictingRecursively(ctx context.Context, s Store, hashes []chainhash.Hash) ([]*Spend, []chainhash.Hash, error) {
 	ctx, _, deferFn := tracing.Tracer("utxo").Start(ctx, "MarkConflictingRecursively")
 
 	defer deferFn()
@@ -202,7 +203,7 @@ func MarkConflictingRecursively(ctx context.Context, s Store, hashes []chainhash
 	for len(toProcess) > 0 {
 		affectedParentSpends, spendingChildTxs, err := s.SetConflicting(ctx, toProcess, true)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
 		allAffectedSpends = append(allAffectedSpends, affectedParentSpends...)
@@ -218,7 +219,12 @@ func MarkConflictingRecursively(ctx context.Context, s Store, hashes []chainhash
 		toProcess = nextBatch
 	}
 
-	return allAffectedSpends, nil
+	allMarked := make([]chainhash.Hash, 0, len(visited))
+	for h := range visited {
+		allMarked = append(allMarked, h)
+	}
+
+	return allAffectedSpends, allMarked, nil
 }
 
 func GetAndLockChildren(ctx context.Context, s Store, hash chainhash.Hash) ([]chainhash.Hash, error) {
