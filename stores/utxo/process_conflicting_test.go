@@ -256,7 +256,7 @@ func TestMarkConflictingRecursively_Success(t *testing.T) {
 
 	// Assertions
 	require.NoError(t, err)
-	assert.Len(t, result, 2) // Should contain both parent and child spends
+	assert.Len(t, result, 2)       // Should contain both parent and child spends
 	assert.Len(t, markedHashes, 2) // parent + child
 	mockStore.AssertExpectations(t)
 }
