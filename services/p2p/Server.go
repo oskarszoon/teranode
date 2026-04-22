@@ -1799,10 +1799,9 @@ func (s *Server) RecordBytesDownloaded(ctx context.Context, req *p2p_api.RecordB
 
 func (s *Server) ResetReputation(ctx context.Context, req *p2p_api.ResetReputationRequest) (*p2p_api.ResetReputationResponse, error) {
 	// NOTE: Full reputation reset via central registry not yet implemented.
-	// For now, log and return success.
 	s.logger.Infof("[ResetReputation] Reset reputation requested for peer=%q (not yet implemented via central registry)", req.PeerId)
 	return &p2p_api.ResetReputationResponse{
-		Ok:         true,
+		Ok:         false,
 		PeersReset: 0,
 	}, nil
 }

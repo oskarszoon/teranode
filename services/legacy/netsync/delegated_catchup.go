@@ -3,6 +3,7 @@ package netsync
 import (
 	"context"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -31,9 +32,11 @@ type DelegatedCatchupProgress struct {
 }
 
 // delegatedCatchupState holds the state for a delegated catchup operation.
-// These fields are only accessed from the blockHandler goroutine (via
-// handleBlockMsg/handleHeadersMsg) except delegatedActive which is atomic.
+// The mu mutex serializes cleanup (in RunDelegatedCatchup's defer) with
+// senders (delegatedCheckComplete, delegatedSignalError) to prevent
+// sends on a nil or closed channel.
 type delegatedCatchupState struct {
+	mu           sync.Mutex
 	active       atomic.Bool
 	targetHeight int32
 	progressCh   chan<- DelegatedCatchupProgress
@@ -46,6 +49,10 @@ type delegatedCatchupState struct {
 // This method blocks until the catchup completes, fails, or the context is cancelled.
 // Progress is reported on progressCh. The caller owns FSM transitions.
 func (sm *SyncManager) RunDelegatedCatchup(ctx context.Context, peer *peerpkg.Peer, targetHeight uint32, progressCh chan<- DelegatedCatchupProgress) error {
+	if peer == nil {
+		return fmt.Errorf("peer cannot be nil")
+	}
+
 	targetHeightInt32, err := safeconversion.Uint32ToInt32(targetHeight)
 	if err != nil {
 		return fmt.Errorf("invalid target height %d: %w", targetHeight, err)
@@ -58,9 +65,15 @@ func (sm *SyncManager) RunDelegatedCatchup(ctx context.Context, peer *peerpkg.Pe
 	sm.delegated.doneCh = make(chan error, 1)
 	sm.delegated.active.Store(true)
 	defer func() {
+		sm.delegated.mu.Lock()
 		sm.delegated.active.Store(false)
 		sm.delegated.progressCh = nil
-		close(sm.delegated.doneCh)
+		ch := sm.delegated.doneCh
+		sm.delegated.doneCh = nil
+		sm.delegated.mu.Unlock()
+		if ch != nil {
+			close(ch)
+		}
 	}()
 
 	// If legacy is already syncing with this peer (startSync kicked in before
@@ -173,11 +186,19 @@ func (sm *SyncManager) RunDelegatedCatchup(ctx context.Context, peer *peerpkg.Pe
 // delegatedSendProgress sends a progress update if a delegated catchup is active.
 // Called from handleBlockMsg after each successful block.
 func (sm *SyncManager) delegatedSendProgress(blockHeight int32) {
-	if !sm.delegated.active.Load() || sm.delegated.progressCh == nil {
+	if !sm.delegated.active.Load() {
 		return
 	}
 
+	sm.delegated.mu.Lock()
+	ch := sm.delegated.progressCh
 	targetHeight := sm.delegated.targetHeight
+	sm.delegated.mu.Unlock()
+
+	if ch == nil {
+		return
+	}
+
 	remaining := targetHeight - blockHeight
 	if remaining < 0 {
 		remaining = 0
@@ -186,7 +207,7 @@ func (sm *SyncManager) delegatedSendProgress(blockHeight int32) {
 	currentHeightUint32, _ := safeconversion.Int32ToUint32(blockHeight)
 	targetHeightUint32, _ := safeconversion.Int32ToUint32(targetHeight)
 
-	sm.delegated.progressCh <- DelegatedCatchupProgress{
+	ch <- DelegatedCatchupProgress{
 		Phase:           DelegatedPhaseBlocks,
 		CurrentHeight:   currentHeightUint32,
 		TargetHeight:    targetHeightUint32,
@@ -201,11 +222,17 @@ func (sm *SyncManager) delegatedCheckComplete(blockHeight int32) bool {
 		return false
 	}
 
-	if blockHeight < sm.delegated.targetHeight {
+	sm.delegated.mu.Lock()
+	targetHeight := sm.delegated.targetHeight
+	progressCh := sm.delegated.progressCh
+	doneCh := sm.delegated.doneCh
+	sm.delegated.mu.Unlock()
+
+	if blockHeight < targetHeight {
 		return false
 	}
 
-	sm.logger.Infof("[delegated_catchup] Reached target height %d, catchup complete", sm.delegated.targetHeight)
+	sm.logger.Infof("[delegated_catchup] Reached target height %d, catchup complete", targetHeight)
 
 	// Clear sync peer - we're done.
 	sp := sm.loadSyncPeer()
@@ -214,16 +241,20 @@ func (sm *SyncManager) delegatedCheckComplete(blockHeight int32) bool {
 		sm.storeSyncPeer(nil, nil)
 	}
 
-	targetHeightUint32, _ := safeconversion.Int32ToUint32(sm.delegated.targetHeight)
+	targetHeightUint32, _ := safeconversion.Int32ToUint32(targetHeight)
 	currentHeightUint32, _ := safeconversion.Int32ToUint32(blockHeight)
 
-	sm.delegated.progressCh <- DelegatedCatchupProgress{
-		Phase:         DelegatedPhaseComplete,
-		CurrentHeight: currentHeightUint32,
-		TargetHeight:  targetHeightUint32,
+	if progressCh != nil {
+		progressCh <- DelegatedCatchupProgress{
+			Phase:         DelegatedPhaseComplete,
+			CurrentHeight: currentHeightUint32,
+			TargetHeight:  targetHeightUint32,
+		}
 	}
 
-	sm.delegated.doneCh <- nil
+	if doneCh != nil {
+		doneCh <- nil
+	}
 	return true
 }
 
@@ -234,27 +265,46 @@ func (sm *SyncManager) delegatedSignalError(err error, category string) {
 		return
 	}
 
-	targetHeightUint32, _ := safeconversion.Int32ToUint32(sm.delegated.targetHeight)
+	sm.delegated.mu.Lock()
+	progressCh := sm.delegated.progressCh
+	doneCh := sm.delegated.doneCh
+	targetHeight := sm.delegated.targetHeight
+	sm.delegated.mu.Unlock()
 
-	sm.delegated.progressCh <- DelegatedCatchupProgress{
-		Phase:         DelegatedPhaseFailed,
-		TargetHeight:  targetHeightUint32,
-		ErrorMessage:  err.Error(),
-		ErrorCategory: category,
+	targetHeightUint32, _ := safeconversion.Int32ToUint32(targetHeight)
+
+	if progressCh != nil {
+		progressCh <- DelegatedCatchupProgress{
+			Phase:         DelegatedPhaseFailed,
+			TargetHeight:  targetHeightUint32,
+			ErrorMessage:  err.Error(),
+			ErrorCategory: category,
+		}
 	}
 
-	sm.delegated.doneCh <- err
+	if doneCh != nil {
+		doneCh <- err
+	}
 }
 
 // delegatedSendHeaderProgress sends a header-download progress update.
 func (sm *SyncManager) delegatedSendHeaderProgress() {
-	if !sm.delegated.active.Load() || sm.delegated.progressCh == nil {
+	if !sm.delegated.active.Load() {
 		return
 	}
 
-	targetHeightUint32, _ := safeconversion.Int32ToUint32(sm.delegated.targetHeight)
+	sm.delegated.mu.Lock()
+	ch := sm.delegated.progressCh
+	targetHeight := sm.delegated.targetHeight
+	sm.delegated.mu.Unlock()
 
-	sm.delegated.progressCh <- DelegatedCatchupProgress{
+	if ch == nil {
+		return
+	}
+
+	targetHeightUint32, _ := safeconversion.Int32ToUint32(targetHeight)
+
+	ch <- DelegatedCatchupProgress{
 		Phase:        DelegatedPhaseHeaders,
 		TargetHeight: targetHeightUint32,
 	}

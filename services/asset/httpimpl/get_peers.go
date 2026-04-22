@@ -116,6 +116,8 @@ func (h *HTTP) GetPeers(c echo.Context) error {
 func (h *HTTP) getPeersFromCentralRegistry(ctx context.Context) ([]*p2p.PeerInfo, error) {
 	blockchainClient := h.repository.GetBlockchainClient()
 	if blockchainClient == nil {
+		// Intentional: returns empty list when blockchain client is not configured
+		// (e.g. legacy-only or partial deployment modes). Caller returns 200 with count=0.
 		return nil, nil
 	}
 
@@ -152,6 +154,7 @@ func (h *HTTP) getPeersFromCentralRegistry(ctx context.Context) ([]*p2p.PeerInfo
 			LastInteractionFailure: cp.LastInteractionFailure,
 			ReputationScore:        cp.ReputationScore,
 			MaliciousCount:         cp.MaliciousCount,
+			AvgResponseTime:        time.Duration(cp.AvgResponseTimeMs) * time.Millisecond,
 		}
 		// For legacy peers, ID is the network address (host:port) — not a valid libp2p peer ID.
 		// Set it as raw bytes so .String() returns the address.

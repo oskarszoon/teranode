@@ -201,12 +201,13 @@ func (r *CentralizedPeerRegistry) UpdateMetrics(
 	r.calculateAndUpdateReputation(info)
 }
 
-// Remove deletes a peer from the registry.
+// Remove deletes a peer and its ban score entry from the registry.
 func (r *CentralizedPeerRegistry) Remove(peerID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	delete(r.peers, peerID)
+	delete(r.banScores, peerID)
 }
 
 // Get returns a copy of the peer info for peerID, or false if not found.
@@ -383,19 +384,25 @@ func (r *CentralizedPeerRegistry) AddBanScore(peerID string, reason string, poin
 		r.banScores[peerID] = entry
 	}
 
-	// Apply decay
-	elapsed := now.Sub(entry.LastDecay)
-	decaySteps := int32(elapsed / r.banConfig.DecayInterval)
-	if decaySteps > 0 {
-		entry.Score -= decaySteps * r.banConfig.DecayAmount
-		if entry.Score < 0 {
-			entry.Score = 0
+	// Apply decay (guard against zero interval to avoid division by zero)
+	if r.banConfig.DecayInterval > 0 {
+		elapsed := now.Sub(entry.LastDecay)
+		decaySteps := int32(elapsed / r.banConfig.DecayInterval)
+		if decaySteps > 0 {
+			entry.Score -= decaySteps * r.banConfig.DecayAmount
+			if entry.Score < 0 {
+				entry.Score = 0
+			}
+			entry.LastDecay = now
 		}
-		entry.LastDecay = now
 	}
 
-	// Add reason to history
+	// Add reason to history (cap at 50 entries to prevent unbounded growth)
+	const maxReasonHistory = 50
 	entry.Reasons = append(entry.Reasons, reason)
+	if len(entry.Reasons) > maxReasonHistory {
+		entry.Reasons = entry.Reasons[len(entry.Reasons)-maxReasonHistory:]
+	}
 
 	// Look up points for this reason, default to provided points
 	if configPoints, found := r.banConfig.ReasonPoints[reason]; found {
@@ -532,6 +539,7 @@ func (r *CentralizedPeerRegistry) ReconsiderBadPeers(cooldown time.Duration) int
 	cutoff := time.Now().Add(-cooldown)
 	for _, info := range r.peers {
 		if info.ReputationScore < 30 && !info.LastInteractionFailure.IsZero() && info.LastInteractionFailure.Before(cutoff) {
+			info.InteractionAttempts = 0
 			info.InteractionSuccesses = 0
 			info.InteractionFailures = 0
 			info.MaliciousCount = 0

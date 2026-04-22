@@ -609,7 +609,9 @@ func (s *Server) addPeer(peerID peer.ID, clientName string, height uint32, block
 	}
 }
 
-// addConnectedPeer adds a peer and marks it as directly connected
+// addConnectedPeer adds a peer to the central registry.
+// Note: the central registry's PeerInfo struct does not have an IsConnected field;
+// connection state is inferred from the registry's LastSeen/LastMessageTime timestamps.
 func (s *Server) addConnectedPeer(peerID peer.ID, clientName string, height uint32, blockHash *chainhash.Hash, dataHubURL string) {
 	if s.centralRegistry != nil {
 		info := p2pPeerToRegistryInfo(peerID, clientName, height, blockHash, dataHubURL, false)
@@ -650,7 +652,11 @@ func (s *Server) getPeer(peerID peer.ID) (*PeerInfo, bool) {
 		return nil, false
 	}
 	info, found, err := s.centralRegistry.GetPeer(s.gCtx, peerID.String())
-	if err != nil || !found {
+	if err != nil {
+		s.logger.Debugf("[getPeer] registry error for peer %s: %v", peerID, err)
+		return nil, false
+	}
+	if !found {
 		return nil, false
 	}
 	// Convert blockchain.PeerInfo to local PeerInfo for compatibility
@@ -1031,8 +1037,14 @@ func p2pPeerToRegistryInfo(peerID peer.ID, clientName string, height uint32, blo
 }
 
 // centralPeerToLocalPeerInfo converts a blockchain.PeerInfo to a local PeerInfo for compatibility.
+// Returns nil if the peer ID cannot be decoded (e.g. legacy wire-protocol addresses).
 func centralPeerToLocalPeerInfo(info *blockchain.PeerInfo) *PeerInfo {
-	peerID, _ := peer.Decode(info.ID)
+	peerID, err := peer.Decode(info.ID)
+	if err != nil {
+		// Legacy wire-protocol peers use network addresses as IDs, not valid libp2p peer IDs.
+		// Use the raw string as a peer.ID so callers can still identify the peer.
+		peerID = peer.ID(info.ID)
+	}
 	return &PeerInfo{
 		ID:                     peerID,
 		ClientName:             info.ClientName,

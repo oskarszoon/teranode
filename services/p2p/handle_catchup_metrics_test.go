@@ -254,7 +254,8 @@ func TestHandleCatchupMetrics_ReportValidBlock(t *testing.T) {
 
 func TestHandleCatchupMetrics_GetPeersForCatchup(t *testing.T) {
 	t.Run("returns peers from registry", func(t *testing.T) {
-		blockHash, _ := chainhash.NewHashFromStr("0000000000000000000000000000000000000000000000000000000000001234")
+		blockHash, err := chainhash.NewHashFromStr("0000000000000000000000000000000000000000000000000000000000001234")
+		require.NoError(t, err)
 		reg := &mockPeerRegistryClient{}
 		reg.On("ListPeers").Return([]*blockchain.PeerInfo{
 			{
@@ -485,14 +486,14 @@ func TestHandleCatchupMetrics_UpdateCatchupError(t *testing.T) {
 }
 
 func TestHandleCatchupMetrics_ResetReputation(t *testing.T) {
-	t.Run("returns OK (stub)", func(t *testing.T) {
+	t.Run("returns not-ok (stub, not yet implemented)", func(t *testing.T) {
 		s := newCatchupTestServer(t, nil)
 
 		resp, err := s.ResetReputation(context.Background(), &p2p_api.ResetReputationRequest{
 			PeerId: "peer-1",
 		})
 		require.NoError(t, err)
-		require.True(t, resp.Ok)
+		require.False(t, resp.Ok)
 		require.Equal(t, int32(0), resp.PeersReset)
 	})
 }

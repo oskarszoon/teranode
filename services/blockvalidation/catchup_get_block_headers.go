@@ -310,11 +310,6 @@ func (u *Server) catchupGetBlockHeaders(ctx context.Context, blockUpTo *model.Bl
 			), nil, err
 		}
 
-		// Check for malicious response in parsed headers (only for legacy path — transport handles internally).
-		if transport == nil {
-			// (validation and parse already checked above in the legacy path)
-		}
-
 		// Check if we got any headers
 		if len(blockHeaders) == 0 {
 			if iteration == 1 {

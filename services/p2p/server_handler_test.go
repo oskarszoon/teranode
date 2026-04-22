@@ -177,6 +177,7 @@ func TestHandlePeerFailureNotification(t *testing.T) {
 
 		// Allow async goroutine to execute
 		time.Sleep(50 * time.Millisecond)
+		reg.AssertExpectations(t)
 	})
 
 	t.Run("non-catchup failure does not trigger sync coordinator", func(t *testing.T) {
@@ -617,7 +618,7 @@ func TestRecordBytesDownloaded(t *testing.T) {
 // TODO: adapt to central registry — ResetReputation is not yet implemented via central registry.
 
 func TestResetReputation(t *testing.T) {
-	t.Run("returns success stub", func(t *testing.T) {
+	t.Run("returns not-ok stub (not yet implemented)", func(t *testing.T) {
 		server := &Server{
 			logger: ulogger.New("test"),
 		}
@@ -628,7 +629,7 @@ func TestResetReputation(t *testing.T) {
 
 		resp, err := server.ResetReputation(context.Background(), req)
 		require.NoError(t, err)
-		assert.True(t, resp.Ok)
+		assert.False(t, resp.Ok)
 		assert.Equal(t, int32(0), resp.PeersReset)
 	})
 }

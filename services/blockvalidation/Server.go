@@ -622,7 +622,7 @@ func (u *Server) Init(ctx context.Context) (err error) {
 			case c := <-u.catchupCh:
 				{
 					// Check if peer is bad or malicious before attempting catchup
-					if u.isPeerBad(c.peerID) || u.isPeerMalicious(ctx, c.peerID) {
+					if u.isPeerBad(ctx, c.peerID) || u.isPeerMalicious(ctx, c.peerID) {
 						u.logger.Warnf("[catchup][%s] peer %s (%s) is marked as bad or malicious, trying alternative peers", c.block.Hash().String(), c.peerID, c.baseURL)
 
 						// Try alternative peers from P2P service instead of just skipping

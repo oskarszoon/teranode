@@ -416,7 +416,7 @@ func TestPeerMetrics_IsPeerBad(t *testing.T) {
 		}, true, nil).Once()
 
 		s := newMetricsTestServer(reg)
-		result := s.isPeerBad("peer-bad")
+		result := s.isPeerBad(context.Background(), "peer-bad")
 		require.True(t, result)
 		reg.AssertExpectations(t)
 	})
@@ -429,7 +429,7 @@ func TestPeerMetrics_IsPeerBad(t *testing.T) {
 		}, true, nil).Once()
 
 		s := newMetricsTestServer(reg)
-		result := s.isPeerBad("peer-borderline")
+		result := s.isPeerBad(context.Background(), "peer-borderline")
 		require.False(t, result)
 		reg.AssertExpectations(t)
 	})
@@ -442,7 +442,7 @@ func TestPeerMetrics_IsPeerBad(t *testing.T) {
 		}, true, nil).Once()
 
 		s := newMetricsTestServer(reg)
-		result := s.isPeerBad("peer-good")
+		result := s.isPeerBad(context.Background(), "peer-good")
 		require.False(t, result)
 		reg.AssertExpectations(t)
 	})
@@ -452,21 +452,21 @@ func TestPeerMetrics_IsPeerBad(t *testing.T) {
 		reg.On("GetPeer", "peer-unknown").Return((*blockchain.PeerInfo)(nil), false, nil).Once()
 
 		s := newMetricsTestServer(reg)
-		result := s.isPeerBad("peer-unknown")
+		result := s.isPeerBad(context.Background(), "peer-unknown")
 		require.False(t, result)
 		reg.AssertExpectations(t)
 	})
 
 	t.Run("nil registry returns false", func(t *testing.T) {
 		s := newMetricsTestServer(nil)
-		result := s.isPeerBad("peer-1")
+		result := s.isPeerBad(context.Background(), "peer-1")
 		require.False(t, result)
 	})
 
 	t.Run("empty peerID returns false", func(t *testing.T) {
 		reg := &mockPeerRegistry{}
 		s := newMetricsTestServer(reg)
-		result := s.isPeerBad("")
+		result := s.isPeerBad(context.Background(), "")
 		require.False(t, result)
 		reg.AssertExpectations(t)
 	})
@@ -476,7 +476,7 @@ func TestPeerMetrics_IsPeerBad(t *testing.T) {
 		reg.On("GetPeer", "peer-err").Return((*blockchain.PeerInfo)(nil), false, errors.New(errors.ERR_SERVICE_ERROR, "db error")).Once()
 
 		s := newMetricsTestServer(reg)
-		result := s.isPeerBad("peer-err")
+		result := s.isPeerBad(context.Background(), "peer-err")
 		require.False(t, result)
 		reg.AssertExpectations(t)
 	})
@@ -489,7 +489,7 @@ func TestPeerMetrics_IsPeerBad(t *testing.T) {
 		}, true, nil).Once()
 
 		s := newMetricsTestServer(reg)
-		result := s.isPeerBad("peer-zero")
+		result := s.isPeerBad(context.Background(), "peer-zero")
 		require.True(t, result)
 		reg.AssertExpectations(t)
 	})

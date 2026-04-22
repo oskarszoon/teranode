@@ -76,16 +76,19 @@ func (u *Server) isPeerMalicious(ctx context.Context, peerID string) bool {
 	return banned
 }
 
+// badReputationThreshold is the score below which a peer is considered unreliable.
+const badReputationThreshold = 20
+
 // isPeerBad checks if a peer has bad reputation in the central registry.
-func (u *Server) isPeerBad(peerID string) bool {
+func (u *Server) isPeerBad(ctx context.Context, peerID string) bool {
 	if peerID == "" || u.centralPeerRegistry == nil {
 		return false
 	}
-	info, found, err := u.centralPeerRegistry.GetPeer(context.Background(), peerID)
+	info, found, err := u.centralPeerRegistry.GetPeer(ctx, peerID)
 	if err != nil || !found {
 		return false
 	}
-	return info.ReputationScore < 20
+	return info.ReputationScore < badReputationThreshold
 }
 
 // reportValidBlockForPeers credits reputation to all peers that contributed to a valid block.

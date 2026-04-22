@@ -137,7 +137,10 @@ func (u *Server) runCentralRegistryPoller(ctx context.Context) {
 				localHeight := u.utxoStore.GetBlockHeight()
 				if localHeight > 0 {
 					// Check if we're still significantly behind any peer
-					peers, _ := u.selectBestPeersFromCentralRegistry(ctx, localHeight+1)
+					peers, peersErr := u.selectBestPeersFromCentralRegistry(ctx, localHeight+1)
+					if peersErr != nil {
+						u.logger.Debugf("[central_registry] Post-catchup peer check failed: %v", peersErr)
+					}
 					if len(peers) > 0 {
 						ticker.Reset(centralRegistryInitialPollInterval)
 						usingFastInterval = true

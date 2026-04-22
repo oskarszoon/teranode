@@ -18,7 +18,12 @@ type PeerForCatchup struct {
 	CatchupAttempts        int64
 	CatchupSuccesses       int64
 	CatchupFailures        int64
-	TransportType          int32 // 0 = HTTP, 1 = TRANSPORT_WIRE_PROTOCOL
+	// TransportType: 0 = HTTP, 1 = TRANSPORT_WIRE_PROTOCOL.
+	// In selectBestPeersForCatchup (P2P path), this defaults to 0 (HTTP) which is
+	// correct — the P2P client only returns HTTP-transport peers. Wire-protocol
+	// peers are handled via selectBestPeersFromCentralRegistry in central_registry_catchup.go
+	// which explicitly sets TransportType from the registry entry.
+	TransportType int32
 }
 
 // selectBestPeersForCatchup queries the P2P service for peers suitable for catchup,

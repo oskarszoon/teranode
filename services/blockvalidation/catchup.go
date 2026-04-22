@@ -310,6 +310,13 @@ func (u *Server) catchup(ctx context.Context, blockUpTo *model.Block, peerID, ba
 
 			catchupCtx.peerID = alt.ID
 			catchupCtx.baseURL = alt.DataHubURL
+			// Update transport for the alternative peer so fetchAndValidateBlocks
+			// uses the correct protocol (HTTP vs wire).
+			if u.centralPeerRegistry != nil {
+				if altPeerInfo, found, getErr := u.centralPeerRegistry.GetPeer(ctx, alt.ID); getErr == nil && found {
+					catchupCtx.transport = u.selectTransport(altPeerInfo)
+				}
+			}
 			if retryErr := u.fetchAndValidateBlocks(ctx, catchupCtx); retryErr != nil {
 				if errors.Is(retryErr, errors.ErrBlockIncomplete) {
 					u.logger.Warnf("[catchup][%s] Alternative peer %s also has incomplete blocks, trying next",
@@ -809,7 +816,9 @@ func (u *Server) verifyCheckpointsAgainstHeaders(catchupCtx *CatchupContext) (in
 	}
 
 	catchupCtx.highestCheckpointHeight = highestVerifiedCheckpoint
-	u.logger.Infof("[catchup][%s] Quick validation enabled up to height %d (%d checkpoints verified)", catchupCtx.blockUpTo.Hash().String(), highestVerifiedCheckpoint, checkpointsChecked)
+	if checkpointsChecked > 0 {
+		u.logger.Infof("[catchup][%s] Quick validation enabled up to height %d (%d checkpoints verified)", catchupCtx.blockUpTo.Hash().String(), highestVerifiedCheckpoint, checkpointsChecked)
+	}
 
 	return checkpointsChecked, nil
 }

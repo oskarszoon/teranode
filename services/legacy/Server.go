@@ -763,14 +763,17 @@ func (s *Server) FetchHeadersFromPeer(ctx context.Context, req *peer_api.FetchHe
 	}
 
 	var stopHash *chainhash.Hash
-	if len(req.StopHash) == 32 {
+	switch len(req.StopHash) {
+	case 0:
+		stopHash = &chainhash.Hash{} // empty = all zeros = up to chain tip
+	case 32:
 		h, err := chainhash.NewHash(req.StopHash)
 		if err != nil {
 			return nil, errors.NewInvalidArgumentError("invalid stop hash: %v", err)
 		}
 		stopHash = h
-	} else {
-		stopHash = &chainhash.Hash{} // all zeros = up to chain tip
+	default:
+		return nil, errors.NewInvalidArgumentError("stop hash must be 0 or 32 bytes, got %d", len(req.StopHash))
 	}
 
 	// Register one-shot response channel before sending the request.

@@ -468,10 +468,16 @@ func TestGRPC_PeerInfoProtoRoundTrip_ZeroTimestamps(t *testing.T) {
 	proto := peerInfoToProto(original)
 	roundTripped := protoToPeerInfo(proto)
 
-	// Zero time -> proto -> back should yield a time very close to zero.
-	// timestamppb.New(time.Time{}) creates a valid proto timestamp for the zero time,
-	// so protoTimeToTime should return it back.
 	require.Equal(t, original.ID, roundTripped.ID)
+
+	// Zero time -> proto -> back should yield a time at or very near the zero value.
+	// timestamppb.New(time.Time{}) creates year 0001 which round-trips consistently.
+	require.True(t, roundTripped.ConnectedAt.IsZero() || roundTripped.ConnectedAt.Equal(time.Time{}))
+	require.True(t, roundTripped.LastSeen.IsZero() || roundTripped.LastSeen.Equal(time.Time{}))
+	require.True(t, roundTripped.LastMessageTime.IsZero() || roundTripped.LastMessageTime.Equal(time.Time{}))
+	require.True(t, roundTripped.LastInteractionAttempt.IsZero() || roundTripped.LastInteractionAttempt.Equal(time.Time{}))
+	require.True(t, roundTripped.LastInteractionSuccess.IsZero() || roundTripped.LastInteractionSuccess.Equal(time.Time{}))
+	require.True(t, roundTripped.LastInteractionFailure.IsZero() || roundTripped.LastInteractionFailure.Equal(time.Time{}))
 }
 
 // ---------------------------------------------------------------------------
