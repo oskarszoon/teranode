@@ -1,5 +1,5 @@
 /*
-Package validator implements Bitcoin SV transaction validation functionality.
+Package validator implements BSV Blockchain transaction validation functionality.
 
 This file contains the core transaction validation logic and implements the standard
 Bitcoin transaction validation rules and policies. The TxValidator component is responsible
@@ -10,7 +10,7 @@ The implementation supports multiple script interpreters through a plugin archit
 allowing different script verification engines to be used based on configuration. Currently
 supported interpreters include:
 - Go-BT: Pure Go implementation from the libsv/go-bt library
-- Go-SDK: Bitcoin SV SDK implementation
+- Go-SDK: BSV SDK implementation
 - Go-BDK: Bitcoin Development Kit implementation
 
 The validation process enforces rules including but not limited to:
@@ -322,7 +322,7 @@ func (tv *TxValidator) ValidateTransactionScripts(tx *bt.Tx, blockHeight uint32,
 }
 
 // sequenceLocks verifies that relative lock-time constraints (BIP68) are satisfied for block validation.
-// This function implements the SequenceLocks check from Bitcoin SV validation.cpp.
+// This function implements the SequenceLocks check from SV Node validation.cpp.
 //
 // BIP68 allows transaction inputs to specify minimum block heights or times before they can be spent
 // using the sequence number field. This enables relative lock-times for smart contracts and
@@ -341,6 +341,27 @@ func (tv *TxValidator) sequenceLocks(tx *bt.Tx, blockHeight uint32, utxoHeights 
 	// BIP68 is only active from CSVHeight onwards.
 	// BSV C++ block validation: if (pindex_->GetHeight() >= consensusParams.CSVHeight)
 	if blockHeight < tv.settings.ChainCfgParams.CSVHeight {
+		return nil
+	}
+
+	// BSV Genesis restored the original Bitcoin semantics for nSequence: it is
+	// used for RBF signalling only, not for relative lock-time enforcement. The
+	// reference implementation drops LOCKTIME_VERIFY_SEQUENCE post-Genesis (see
+	// src/policy/policy.h::StandardNonFinalVerifyFlags and
+	// src/validation.cpp::CheckSequenceLocks), which makes CalculateSequenceLocks
+	// a no-op. Mirror that here so blocks containing non-zero-sequence inputs are
+	// accepted post-Genesis.
+	//
+	// Note on >= vs >: This check uses >= to match BSV's IsGenesisEnabled()
+	// semantics (the activation block itself is considered post-Genesis). That
+	// differs from checkOutputs() below, which uses > because mainnet block
+	// 620538's outputs were created before Genesis rules existed and must not be
+	// retroactively rejected. The two predicates are intentionally different:
+	// checkOutputs gates a backward-incompatible output-shape rule (P2SH/dust)
+	// and exempts the activation block for continuity, whereas sequenceLocks
+	// disables a now-obsolete consensus rule and must match the reference
+	// implementation's boundary exactly.
+	if blockHeight >= tv.settings.ChainCfgParams.GenesisActivationHeight {
 		return nil
 	}
 
@@ -615,7 +636,7 @@ func (tv *TxValidator) checkFees(tx *bt.Tx, blockHeight uint32, utxoHeights []ui
 	txSize := tx.Size()
 	minRequiredFee := uint64(satoshisPerByte * float64(txSize))
 
-	// Ensure minimum 1 satoshi for non-zero sized transactions (matching Bitcoin SV)
+	// Ensure minimum 1 satoshi for non-zero sized transactions (matching SV Node)
 	if minRequiredFee == 0 && txSize > 0 && minFeeRateBSVPerKB > 0 {
 		minRequiredFee = 1
 	}
@@ -658,7 +679,7 @@ func (tv *TxValidator) isDustReturnTx(tx *bt.Tx) bool {
 }
 
 // isConsolidationTx checks if a transaction qualifies as a consolidation transaction
-// following Bitcoin SV rules.
+// following Bitcoin rules.
 //
 // Parameters:
 //   - tx: The transaction to check
@@ -695,7 +716,7 @@ func (tv *TxValidator) isConsolidationTx(tx *bt.Tx, utxoHeights []uint32, curren
 		return false
 	}
 
-	// Rule 2: Script Size Comparison (Bitcoin SV rule)
+	// Rule 2: Script Size Comparison (Bitcoin rule)
 	// Sum of input scriptPubKey sizes >= minConsolidationFactor × sum of output scriptPubKey sizes
 	if !isDustReturn {
 		// Check if transaction is extended (has PreviousTxScript for all inputs)

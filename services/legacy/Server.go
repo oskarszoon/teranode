@@ -1,7 +1,7 @@
-// Package legacy implements a Bitcoin SV legacy protocol server that handles peer-to-peer communication
+// Package legacy implements a BSV Blockchain legacy protocol server that handles peer-to-peer communication
 // and blockchain synchronization using the traditional Bitcoin network protocol.
 //
-// The legacy package provides a bridge between modern Bitcoin SV architecture and the traditional
+// The legacy package provides a bridge between modern BSV Blockchain architecture and the traditional
 // Bitcoin network protocol. It maintains compatibility with legacy Bitcoin nodes while integrating
 // with Teranode's high-performance microservices architecture.
 //
@@ -28,7 +28,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"fmt"
 	"net/http"
 	"sync"
 	"time"
@@ -233,47 +232,6 @@ func (s *Server) Health(ctx context.Context, checkLiveness bool) (int, string, e
 	if s.blockAssemblyClient != nil {
 		checks = append(checks, health.Check{Name: "BlockAssembly", Check: s.blockAssemblyClient.Health})
 	}
-
-	// Add custom check for peer connection
-	checks = append(checks, health.Check{
-		Name: "PeerConnection",
-		Check: func(ctx context.Context, checkLiveness bool) (int, string, error) {
-			peersResp, err := s.GetPeers(ctx, &emptypb.Empty{})
-			if err != nil {
-				return http.StatusServiceUnavailable, "Failed to get peers for health check", err
-			}
-			peers := peersResp.GetPeers()
-			if len(peers) == 0 {
-				return http.StatusServiceUnavailable, "No connected peers", nil
-			}
-			return http.StatusOK, fmt.Sprintf("Connected to %d peers", len(peers)), nil
-		},
-	})
-
-	// Add custom check for recent peer activity
-	checks = append(checks, health.Check{
-		Name: "PeerActivity",
-		Check: func(ctx context.Context, checkLiveness bool) (int, string, error) {
-			peersResp, err := s.GetPeers(ctx, &emptypb.Empty{})
-			if err != nil {
-				return http.StatusServiceUnavailable, "Failed to get peers for activity check", err
-			}
-			peers := peersResp.GetPeers()
-			currentTime := time.Now().Unix()
-			recentActivityThreshold := currentTime - 120 // 2 minutes in seconds
-			hasRecentActivity := false
-			for _, p := range peers {
-				if p.GetLastRecv() >= recentActivityThreshold {
-					hasRecentActivity = true
-					break
-				}
-			}
-			if !hasRecentActivity {
-				return http.StatusServiceUnavailable, "No peer activity in the last 2 minutes", nil
-			}
-			return http.StatusOK, "Recent peer activity detected", nil
-		},
-	})
 
 	return health.CheckAll(ctx, checkLiveness, checks)
 }

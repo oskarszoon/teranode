@@ -3,7 +3,7 @@
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
-// Package legacy implements a Bitcoin SV legacy protocol server that handles peer-to-peer communication
+// Package legacy implements a BSV Blockchain legacy protocol server that handles peer-to-peer communication
 // and blockchain synchronization using the traditional Bitcoin network protocol.
 package legacy
 
@@ -11,7 +11,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"math"
 	"net"
@@ -30,6 +29,7 @@ import (
 	safeconversion "github.com/bsv-blockchain/go-safe-conversion"
 	txmap "github.com/bsv-blockchain/go-tx-map"
 	"github.com/bsv-blockchain/go-wire"
+	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/services/blockassembly"
 	"github.com/bsv-blockchain/teranode/services/blockchain"
 	"github.com/bsv-blockchain/teranode/services/blockchain/blockchain_api"
@@ -84,10 +84,6 @@ var (
 	// userAgentName is the user agent name and is used to help identify
 	// ourselves to other bitcoin peers.
 	userAgentName = "/teranode-legacy-p2p"
-
-	// userAgentVersion is the user agent version and is used to help
-	// identify ourselves to other bitcoin peers.
-	userAgentVersion = fmt.Sprintf("%d.%d.%d", version.AppMajor, version.AppMinor, version.AppPatch)
 )
 
 // addrMe specifies the server address to send peers.
@@ -593,16 +589,16 @@ func (sp *serverPeer) OnVersion(p *peer.Peer, msg *wire.MsgVersion) *wire.MsgRej
 		return nil
 	}
 
-	// Only allow connections from peers running Bitcoin SV
+	// Only allow connections from peers running BSV Blockchain nodes
 	// This prevents connections from BCH/BTC/BTG and other incompatible forks
 	userAgent := msg.UserAgent
 	if !strings.Contains(userAgent, "Bitcoin SV") && !strings.Contains(userAgent, "BSV") {
-		sp.server.logger.Warnf("Rejecting and banning peer %s with non-Bitcoin SV user agent: %s", sp.Peer, userAgent)
+		sp.server.logger.Warnf("Rejecting and banning peer %s with non-BSV user agent: %s", sp.Peer, userAgent)
 
 		// Ban the peer to prevent repeated connection attempts from incompatible clients
 		sp.server.BanPeer(sp)
 
-		reason := "Only Bitcoin SV clients are supported"
+		reason := "Only BSV Blockchain clients are supported"
 
 		return wire.NewMsgReject(msg.Command(), wire.RejectNonstandard, reason)
 	}
@@ -959,6 +955,14 @@ func (sp *serverPeer) OnBlock(_ *peer.Peer, msg *wire.MsgBlock, buf []byte) {
 		err = <-sp.blockProcessed
 		if err != nil {
 			sp.server.logger.Errorf("block processing failed: %v", err)
+
+			// Only disconnect on block validation failures, not on local
+			// infrastructure issues (database, Kafka, etc.) which would
+			// just cause unnecessary sync peer rotation.
+			if !errors.Is(err, errors.ErrServiceError) && !errors.Is(err, errors.ErrStorageError) {
+				sp.DisconnectWithWarning(fmt.Sprintf("block %s processing failed, disconnecting to trigger sync peer rotation", block.Hash()))
+				return
+			}
 		}
 	}
 }
@@ -2298,16 +2302,16 @@ func (s *server) handleQuery(state *peerState, querymsg interface{}) {
 		// TODO: duplicate oneshots?
 		// Limit max number of total peers.
 		if state.Count() >= cfg.MaxPeers {
-			msg.reply <- errors.New("max peers reached")
+			msg.reply <- errors.NewProcessingError("max peers reached")
 			return
 		}
 
 		for _, persistentPeer := range state.persistentPeers.Range() {
 			if persistentPeer.Addr() == msg.addr {
 				if msg.permanent {
-					msg.reply <- errors.New("peer already connected")
+					msg.reply <- errors.NewProcessingError("peer already connected")
 				} else {
-					msg.reply <- errors.New("peer exists as a permanent peer")
+					msg.reply <- errors.NewProcessingError("peer exists as a permanent peer")
 				}
 
 				return
@@ -2340,7 +2344,7 @@ func (s *server) handleQuery(state *peerState, querymsg interface{}) {
 		if found {
 			msg.reply <- nil
 		} else {
-			msg.reply <- errors.New("peer not found")
+			msg.reply <- errors.NewProcessingError("peer not found")
 		}
 	case getOutboundGroup:
 		count, ok := state.outboundGroups.Get(msg.key)
@@ -2388,7 +2392,7 @@ func (s *server) handleQuery(state *peerState, querymsg interface{}) {
 			return
 		}
 
-		msg.reply <- errors.New("peer not found")
+		msg.reply <- errors.NewProcessingError("peer not found")
 	}
 }
 
@@ -2454,7 +2458,7 @@ func newPeerConfig(sp *serverPeer) *peer.Config {
 		HostToNetAddress:   sp.server.addrManager.HostToNetAddress,
 		Proxy:              cfg.Proxy,
 		UserAgentName:      userAgentName,
-		UserAgentVersion:   userAgentVersion,
+		UserAgentVersion:   version.String(),
 		UserAgentComments:  cfg.UserAgentComments,
 		ChainParams:        sp.server.settings.ChainCfgParams,
 		Services:           sp.server.services,
@@ -3161,13 +3165,13 @@ func newServer(ctx context.Context, logger ulogger.Logger, tSettings *settings.S
 		}
 
 		if len(listeners) == 0 {
-			return nil, errors.New("no valid listen address")
+			return nil, errors.NewProcessingError("no valid listen address")
 		}
 	}
 
 	banList, banChan, err := p2p.GetBanList(ctx, logger, tSettings)
 	if err != nil {
-		return nil, errors.New("can't get banList")
+		return nil, errors.NewProcessingError("can't get banList")
 	}
 
 	s := server{
@@ -3307,7 +3311,7 @@ func newServer(ctx context.Context, logger ulogger.Logger, tSettings *settings.S
 				return addrStringToNetAddr(addrString)
 			}
 
-			return nil, errors.New("no valid connect address")
+			return nil, errors.NewProcessingError("no valid connect address")
 		}
 	}
 

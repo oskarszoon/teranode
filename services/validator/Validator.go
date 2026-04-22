@@ -1,7 +1,7 @@
 /*
-Package validator implements Bitcoin SV transaction validation functionality.
+Package validator implements BSV Blockchain transaction validation functionality.
 
-This package provides comprehensive transaction validation for Bitcoin SV nodes,
+This package provides comprehensive transaction validation for BSV Blockchain nodes,
 including script verification, UTXO management, and policy enforcement. It supports
 multiple script interpreters and implements the full Bitcoin transaction validation ruleset.
 */
@@ -38,9 +38,9 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// Constants defining key validation parameters and limits for Bitcoin SV consensus rules.
+// Constants defining key validation parameters and limits for Bitcoin consensus rules.
 // These constants establish the fundamental constraints that govern transaction and block validation,
-// ensuring compliance with Bitcoin SV protocol specifications and network consensus requirements.
+// ensuring compliance with Bitcoin protocol specifications and network consensus requirements.
 const (
 	// MaxBlockSize defines the maximum allowed size of a block in bytes (4GB).
 	// This limit governs the maximum amount of transaction data that can be included in a single block,
@@ -48,7 +48,7 @@ const (
 	// as invalid by the consensus rules, ensuring network stability and preventing resource exhaustion.
 	MaxBlockSize = 4 * 1024 * 1024 * 1024
 
-	// MaxSatoshis defines the maximum number of satoshis that can exist in the Bitcoin SV ecosystem (21M BSV).
+	// MaxSatoshis defines the maximum number of satoshis that can exist in the BSV Blockchain ecosystem (21M BSV).
 	// This represents the absolute monetary supply limit, with each BSV consisting of 100,000,000 satoshis.
 	// Any transaction that would create more satoshis than this limit violates consensus rules and must be
 	// rejected to maintain the integrity of the monetary system and prevent inflation attacks.
@@ -83,10 +83,10 @@ type txmetaBatchItem struct {
 	isDelete  bool
 }
 
-// Validator implements comprehensive Bitcoin SV transaction validation and manages the complete lifecycle
+// Validator implements comprehensive BSV Blockchain transaction validation and manages the complete lifecycle
 // of transactions from initial validation through block assembly integration. This struct serves as the
 // primary validation engine, coordinating between multiple components to ensure transaction validity
-// according to Bitcoin SV consensus rules and policy constraints.
+// according to Bitcoin consensus rules and policy constraints.
 //
 // The Validator orchestrates the validation process by:
 // - Performing structural and semantic transaction validation
@@ -608,14 +608,31 @@ func (v *Validator) validateInternal(ctx context.Context, tx *bt.Tx, blockHeight
 					if errors.Is(utxoMapErr, errors.ErrTxExists) {
 						txMetaData = &meta.Data{}
 						if err = v.utxoStore.GetMeta(decoupledCtx, tx.TxIDChainHash(), txMetaData); err != nil {
-							err = errors.NewProcessingError("[Validate][%s] CreateInUtxoStore failed - tx exists but unable to get meta data", txID, utxoMapErr)
+							err = errors.NewProcessingError("[Validate][%s] CreateInUtxoStore failed - tx exists but unable to get meta data", txID, err)
 							span.RecordError(err)
 
 							return nil, err
 						}
+
+						// Tx already exists — ensure it and all its spending descendants are marked conflicting.
+						// NOTE: cascaded descendants may still be in the subtree processor's in-memory template
+						// until the next reset/reload — this path has no subtreeProcessor handle to evict them.
+						if !txMetaData.Conflicting {
+							if _, _, setErr := utxo.MarkConflictingRecursively(decoupledCtx, v.utxoStore, []chainhash.Hash{*tx.TxIDChainHash()}); setErr != nil {
+								err = errors.NewProcessingError("[Validate][%s] failed to mark existing tx as conflicting", txID, setErr)
+								span.RecordError(err)
+
+								return nil, err
+							}
+						}
+
+						err = errors.NewTxConflictingError("[Validate][%s] tx is conflicting (already exists)", txID, err)
+						span.RecordError(err)
+
+						return txMetaData, err
 					}
 
-					err = errors.NewProcessingError("[Validate][%s] CreateInUtxoStore failed - tx exists but unable to get meta data", txID, utxoMapErr)
+					err = errors.NewProcessingError("[Validate][%s] CreateInUtxoStore failed: %v", txID, utxoMapErr)
 					span.RecordError(err)
 
 					return txMetaData, err
@@ -1154,10 +1171,12 @@ func (v *Validator) EnsureMTPLoaded(ctx context.Context, blockHeight uint32) err
 		return nil
 	}
 
-	// The highest MTP index we ever need is blockHeight:
-	//   - utxoHeights are always < blockHeight (a UTXO must exist before the spending block)
+	// The highest MTP index we guarantee is blockHeight:
 	//   - blockMTPHeight = blockHeight: GetMedianTimePastRange computes stored_mtp(N)
 	//     on the fly for the not-yet-persisted block N from block_time values [N-11, N-1].
+	//   - utxoHeights *may* exceed blockHeight when the chain tip advances during
+	//     validation (unconfirmed parents get blockState.Height+1); validateTransaction
+	//     clamps those lookups to blockMTPHeight.
 	needed := blockHeight
 
 	// Fast path: store already covers the needed height.
@@ -1271,9 +1290,14 @@ func (v *Validator) validateTransaction(ctx context.Context, tx *bt.Tx, blockHei
 		return err
 	}
 
+	storeLen := uint32(len(v.mtpStore))
 	utxoMTPs := make([]uint32, len(utxoHeights))
 	for i, h := range utxoHeights {
-		utxoMTPs[i] = v.mtpStore[h]
+		if h >= storeLen {
+			utxoMTPs[i] = v.mtpStore[blockMTPHeight]
+		} else {
+			utxoMTPs[i] = v.mtpStore[h]
+		}
 	}
 	blockMTP := v.mtpStore[blockMTPHeight]
 

@@ -20,7 +20,7 @@
 
 **Bitcoin Script**: A stack-based, Forth-like scripting language used in Bitcoin transactions to define spending conditions. BSV supports the full original Bitcoin script with restored opcodes and unbounded script sizes.
 
-**Blockchain Service**: Implements a local Bitcoin SV blockchain service, maintaining the blockchain state as understood by the node. The service uses a Finite State Machine (FSM) to manage node states and coordinate operations across all Teranode services.
+**Blockchain Service**: Implements a local BSV Blockchain service, maintaining the blockchain state as understood by the node. The service uses a Finite State Machine (FSM) to manage node states and coordinate operations across all Teranode services.
 
 **BSV**: Bitcoin Satoshi Vision, the blockchain network that Teranode is designed to support.
 

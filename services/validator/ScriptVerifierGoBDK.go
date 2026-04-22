@@ -1,5 +1,5 @@
 /*
-Package validator implements Bitcoin SV transaction validation functionality.
+Package validator implements BSV Blockchain transaction validation functionality.
 
 This file implements the Go-BDK script verification functionality, providing
 script validation using the Bitcoin Development Kit (BDK) implementation.
@@ -25,7 +25,6 @@ import (
 const (
 	errMsgInvalidTx = "ScriptVerifierGoBDK fail to VerifyScript"
 	errMsgPolicy    = "ScriptVerifierGoBDK fail to VerifyScript by policy settings"
-	errMsgConsensus = "ScriptVerifierGoBDK fail to CheckConsensus"
 )
 
 // init registers the Go-BDK script verifier with the verification factory
@@ -171,15 +170,6 @@ func (v *scriptVerifierGoBDK) VerifyScript(tx *bt.Tx, blockHeight uint32, consen
 	intBlockHeight, errConv := safeconversion.Uint32ToInt32(blockHeight)
 	if errConv != nil {
 		return errors.NewInvalidArgumentError("failed conversion for block height heights", errConv)
-	}
-
-	// #nosec G115 -- blockHeight won't overflow
-	if consensus {
-		errConsensus := v.se.CheckConsensus(eTxBytes, intUtxoHeights, intBlockHeight)
-		if errConsensus != nil {
-			consensusErr := errors.NewTxConsensusError(errMsgConsensus, errConsensus)
-			return errors.NewTxInvalidError(errMsgInvalidTx, consensusErr)
-		}
 	}
 
 	// #nosec G115 -- blockHeight won't overflow
