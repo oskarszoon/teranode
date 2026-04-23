@@ -84,6 +84,13 @@ func testSetup(t *testing.T) *testCtx {
 }
 
 func (tc *testCtx) teardown(t *testing.T) {
+	// Shutdown logger first to prevent post-teardown logging from background goroutines
+	// (e.g. centrifuge reconnect loop) racing with test framework cleanup via t.Logf.
+	if tc.logger != nil {
+		if shutdownable, ok := tc.logger.(interface{ Shutdown() }); ok {
+			shutdownable.Shutdown()
+		}
+	}
 	if tc.server != nil {
 		ctx := context.Background()
 		err := tc.server.Stop(ctx)
