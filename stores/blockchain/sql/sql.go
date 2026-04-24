@@ -169,7 +169,7 @@ func New(logger ulogger.Logger, storeURL *url.URL, tSettings *settings.Settings)
 		// The 'seeder' query parameter is used to optimize bulk imports by bypassing index creation.
 		// Creating indexes during data insertion can significantly slow down the process, so we skip
 		// index creation when 'seeder=true' is specified in the query parameters.
-		if err = createPostgresSchema(db, storeURL.Query().Get("seeder") != trueStr); err != nil {
+		if err = createPostgresSchema(logger, db, storeURL.Query().Get("seeder") != trueStr); err != nil {
 			return nil, errors.NewStorageError("failed to create postgres schema", err)
 		}
 
@@ -349,7 +349,8 @@ func (s *SQL) Close() error {
 // These must be unique per schema-creation context and stable across releases.
 const blockchainSchemaLockID int64 = 7_265_726_101 // "tera" + "bc" in ASCII-ish
 
-func createPostgresSchema(db *usql.DB, withIndexes bool) error {
+func createPostgresSchema(logger ulogger.Logger, db *usql.DB, withIndexes bool) error {
+	logger.Infof("[blockchain schema] acquiring advisory lock (id=%d) and checking schema", blockchainSchemaLockID)
 	return usql.WithAdvisoryLock(context.Background(), db, blockchainSchemaLockID, func() error {
 		// Fast path: if the schema is already current, skip the DDL sequence
 		// entirely. All DDL statements below ultimately take at least a SHARE
@@ -368,10 +369,19 @@ func createPostgresSchema(db *usql.DB, withIndexes bool) error {
 		// everything we expect is already in place we return early and no
 		// blocks-table lock is ever requested.
 		current, err := isBlockchainSchemaCurrent(db, withIndexes)
-		if err == nil && current {
+		if err != nil {
+			logger.Warnf("[blockchain schema] current-schema probe failed, will run full DDL: %v", err)
+		} else if current {
+			logger.Infof("[blockchain schema] current (withIndexes=%v), skipping DDL", withIndexes)
 			return nil
+		} else {
+			logger.Infof("[blockchain schema] not current (withIndexes=%v), running DDL sequence", withIndexes)
 		}
-		return createPostgresSchemaUnlocked(db, withIndexes)
+		if err := createPostgresSchemaUnlocked(db, withIndexes); err != nil {
+			return err
+		}
+		logger.Infof("[blockchain schema] DDL sequence complete")
+		return nil
 	})
 }
 
