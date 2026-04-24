@@ -164,6 +164,13 @@ func (s *SQL) StoreBlock(ctx context.Context, block *model.Block, peerID string,
 	// concurrent invalidation between Begin and Set is still safe (the Set is a
 	// no-op under generational tracking).
 	if onMainChain && s.maxBlockID.CompareAndSwap(newBlockID-1, newBlockID) {
+		// Defensive symmetry with slow-path Case 3 at line 218: the CAS above
+		// already advanced maxBlockID from newBlockID-1 to newBlockID, so this
+		// call is a no-op under the max-CAS loop in updateMaxBlockID. Kept
+		// explicit so the intent ("the new tip is maxBlockID") is identical to
+		// the slow path and survives future refactors of the race-detection gate.
+		s.updateMaxBlockID(newBlockID)
+
 		cacheID := chainhash.HashH([]byte("getBestBlockID"))
 		cacheOp := s.responseCache.Begin(cacheID)
 		cacheOp.Set(bestBlockIDResult{id: uint32(newBlockID), hash: block.Hash()}, s.cacheTTL)
