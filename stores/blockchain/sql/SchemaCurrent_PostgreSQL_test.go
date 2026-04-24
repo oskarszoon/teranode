@@ -149,6 +149,30 @@ func TestIsBlockchainSchemaCurrent_WrongPeerIDType(t *testing.T) {
 	assert.False(t, current, "schema should not be current when peer_id is not TEXT")
 }
 
+func TestIsBlockchainSchemaCurrent_MissingPeerIDColumn(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping postgres-backed test in -short mode")
+	}
+
+	dbURL, db := newSchemaTestDB(t)
+
+	tSettings := test.CreateBaseTestSettings(t)
+	s, err := New(ulogger.TestLogger{}, dbURL, tSettings)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+
+	// Drop the peer_id column entirely. Per the function contract, a missing
+	// column must surface as (false, nil), not (false, sql.ErrNoRows). Without
+	// the EXISTS pattern, QueryRow().Scan() on no rows would propagate as an
+	// error and trigger the misleading "probe failed" warning.
+	_, err = db.Exec(`ALTER TABLE blocks DROP COLUMN peer_id`)
+	require.NoError(t, err)
+
+	current, err := isBlockchainSchemaCurrent(db, true)
+	require.NoError(t, err, "missing column must not be reported as a transport error")
+	assert.False(t, current, "schema must not be current when peer_id column is missing")
+}
+
 func TestCreatePostgresSchema_FastPathOnSecondCall(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping postgres-backed test in -short mode")

@@ -436,14 +436,19 @@ func isBlockchainSchemaCurrent(db *usql.DB, withIndexes bool) (bool, error) {
 		return false, nil
 	}
 
-	// peer_id must already be TEXT — otherwise we still need the ALTER COLUMN.
-	var peerIDType string
+	// peer_id must exist and already be TEXT — otherwise we still need the
+	// ALTER COLUMN. Use EXISTS so a missing column returns (false, nil)
+	// rather than sql.ErrNoRows from QueryRow.Scan.
+	var peerIDIsText bool
 	if err := db.QueryRow(
-		`SELECT data_type FROM information_schema.columns WHERE table_name = 'blocks' AND column_name = 'peer_id'`,
-	).Scan(&peerIDType); err != nil {
+		`SELECT EXISTS (
+			SELECT 1 FROM information_schema.columns
+			WHERE table_name = 'blocks' AND column_name = 'peer_id' AND data_type = 'text'
+		)`,
+	).Scan(&peerIDIsText); err != nil {
 		return false, err
 	}
-	if peerIDType != "text" {
+	if !peerIDIsText {
 		return false, nil
 	}
 
