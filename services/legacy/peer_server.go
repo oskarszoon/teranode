@@ -2761,6 +2761,14 @@ func legacyPeerToRegistryInfo(sp *serverPeer) *blockchain.PeerInfo {
 	if h := sp.LastBlock(); h > 0 {
 		height = uint32(h)
 	}
+	// Legacy wire peers don't send node_status, so derive Storage from the SFNodeNetwork
+	// service flag — peers advertising NODE_NETWORK serve full historical blocks. Without
+	// this, the catchup peer selector ranks them after HTTP "full" peers and they
+	// effectively never get picked for catchup.
+	storage := ""
+	if sp.Services()&wire.SFNodeNetwork == wire.SFNodeNetwork {
+		storage = "full"
+	}
 	return &blockchain.PeerInfo{
 		ID:               sp.Addr(),
 		TransportType:    blockchain_api.TransportType_TRANSPORT_WIRE_PROTOCOL,
@@ -2769,6 +2777,7 @@ func legacyPeerToRegistryInfo(sp *serverPeer) *blockchain.PeerInfo {
 		Height:           height,
 		NetworkAddress:   sp.Addr(),
 		BlockHash:        sp.LastAnnouncedBlock(),
+		Storage:          storage,
 	}
 }
 
