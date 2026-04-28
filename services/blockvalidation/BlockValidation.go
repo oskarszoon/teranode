@@ -66,6 +66,12 @@ type ValidateBlockOptions struct {
 	// This enables optimizations like reduced logging and header reuse.
 	IsCatchupMode bool
 
+	// SkipOldBlockIDCheck skips current-chain checks for transaction parent block IDs.
+	// This must only be set for checkpoint-verified catchup blocks where quick
+	// validation may already have partially committed the block before falling
+	// back to normal validation.
+	SkipOldBlockIDCheck bool
+
 	// DisableOptimisticMining overrides the global optimistic mining setting.
 	// This is typically set to true during catchup for better performance.
 	DisableOptimisticMining bool
@@ -1521,11 +1527,10 @@ func (u *BlockValidation) ValidateBlockWithOptions(ctx context.Context, block *m
 				return errors.NewBlockInvalidError("[ValidateBlock][%s] block is not valid", block.String(), err)
 			}
 
-			// Skip checkOldBlockIDs during catchup mode — blocks verified by checkpoint
-			// chain are guaranteed to be on the correct chain. Additionally, quick
-			// validation may have partially committed the block (AddBlock before UTXO
-			// unlock), making the block ID chain temporarily inconsistent.
-			if !opts.IsCatchupMode {
+			// Skip checkOldBlockIDs only for checkpoint-verified catchup blocks.
+			// Normal catchup and fork validation still need this check to reject
+			// spends backed only by UTXOs from a non-current chain.
+			if shouldCheckOldBlockIDs(opts) {
 				if iterationError := u.checkOldBlockIDs(ctx, oldBlockIDsMap, block); iterationError != nil {
 					if errors.Is(iterationError, errors.ErrBlockInvalid) && !opts.IsRevalidation {
 						reason := iterationError.Error()
@@ -1620,6 +1625,10 @@ func (u *BlockValidation) ValidateBlockWithOptions(ctx context.Context, block *m
 
 		return nil
 	})
+}
+
+func shouldCheckOldBlockIDs(opts *ValidateBlockOptions) bool {
+	return opts == nil || !opts.SkipOldBlockIDCheck
 }
 
 func (u *BlockValidation) markBlockAsInvalid(ctx context.Context, block *model.Block, reason string) error {

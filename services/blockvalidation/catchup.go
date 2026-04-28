@@ -1151,11 +1151,13 @@ func (u *Server) validateBlocksOnChannel(validateBlocksChan chan blockForValidat
 			}
 
 			if tryNormalValidation {
-				// Standard validation path for blocks not verified by checkpoints
+				// Standard validation path for blocks that cannot use quick validation
+				// or checkpoint-verified blocks that fell back from quick validation.
 				// Create validation options with cached headers
 				opts := &ValidateBlockOptions{
 					CachedHeaders:           cachedHeaders,
 					IsCatchupMode:           true,
+					SkipOldBlockIDCheck:     shouldSkipOldBlockIDCheckForCatchup(catchupCtx, block),
 					DisableOptimisticMining: true,
 					PeerID:                  peerID,
 				}
@@ -1267,6 +1269,13 @@ func (u *Server) tryQuickValidation(ctx context.Context, block *model.Block, cat
 
 	// Quick validation succeeded, skip normal validation
 	return false, nil
+}
+
+func shouldSkipOldBlockIDCheckForCatchup(catchupCtx *CatchupContext, block *model.Block) bool {
+	if catchupCtx == nil || block == nil {
+		return false
+	}
+	return catchupCtx.useQuickValidation && block.Height <= catchupCtx.highestCheckpointHeight
 }
 
 // getHighestCheckpointHeight returns the height of the highest checkpoint

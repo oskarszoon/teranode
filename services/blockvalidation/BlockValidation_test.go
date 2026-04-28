@@ -2208,6 +2208,44 @@ func TestBlockValidation_InvalidParentBlock(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestShouldCheckOldBlockIDs(t *testing.T) {
+	tests := []struct {
+		name string
+		opts *ValidateBlockOptions
+		want bool
+	}{
+		{
+			name: "default options check old block IDs",
+			opts: nil,
+			want: true,
+		},
+		{
+			name: "normal catchup still checks old block IDs",
+			opts: &ValidateBlockOptions{IsCatchupMode: true},
+			want: true,
+		},
+		{
+			name: "checkpoint verified fallback skips old block IDs",
+			opts: &ValidateBlockOptions{
+				IsCatchupMode:       true,
+				SkipOldBlockIDCheck: true,
+			},
+			want: false,
+		},
+		{
+			name: "non catchup explicit skip skips old block IDs",
+			opts: &ValidateBlockOptions{SkipOldBlockIDCheck: true},
+			want: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, shouldCheckOldBlockIDs(tc.opts))
+		})
+	}
+}
+
 func Test_checkOldBlockIDs(t *testing.T) {
 	initPrometheusMetrics()
 

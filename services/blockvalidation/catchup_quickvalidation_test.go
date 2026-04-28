@@ -7,6 +7,7 @@ import (
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	"github.com/bsv-blockchain/go-chaincfg"
 	"github.com/bsv-blockchain/teranode/errors"
+	"github.com/bsv-blockchain/teranode/model"
 	"github.com/bsv-blockchain/teranode/pkg/fileformat"
 	"github.com/bsv-blockchain/teranode/services/blockvalidation/testhelpers"
 	"github.com/stretchr/testify/assert"
@@ -274,6 +275,55 @@ func TestRecordMaliciousAttempt(t *testing.T) {
 		// Should not panic with empty peer ID
 		suite.Server.recordMaliciousAttempt("", "test_violation")
 	})
+}
+
+func TestShouldSkipOldBlockIDCheckForCatchup(t *testing.T) {
+	tests := []struct {
+		name       string
+		catchupCtx *CatchupContext
+		block      *model.Block
+		want       bool
+	}{
+		{
+			name:       "nil catchup context does not skip",
+			catchupCtx: nil,
+			block:      &model.Block{Height: 100},
+			want:       false,
+		},
+		{
+			name: "quick validation disabled does not skip",
+			catchupCtx: &CatchupContext{
+				useQuickValidation:      false,
+				highestCheckpointHeight: 100,
+			},
+			block: &model.Block{Height: 100},
+			want:  false,
+		},
+		{
+			name: "block above verified checkpoint does not skip",
+			catchupCtx: &CatchupContext{
+				useQuickValidation:      true,
+				highestCheckpointHeight: 100,
+			},
+			block: &model.Block{Height: 101},
+			want:  false,
+		},
+		{
+			name: "checkpoint verified block skips",
+			catchupCtx: &CatchupContext{
+				useQuickValidation:      true,
+				highestCheckpointHeight: 100,
+			},
+			block: &model.Block{Height: 100},
+			want:  true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, shouldSkipOldBlockIDCheckForCatchup(tc.catchupCtx, tc.block))
+		})
+	}
 }
 
 // TestGetLowestCheckpointHeight tests the getLowestCheckpointHeight function
