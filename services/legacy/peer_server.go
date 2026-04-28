@@ -1812,11 +1812,18 @@ func (s *server) handleUpdatePeerHeights(state *peerState, umsg updatePeerHeight
 			sp.UpdateLastAnnouncedBlock(nil)
 
 			// Report height update to central registry (best-effort).
+			// Use sp.LastBlock() (peer's monotonic tracked tip) rather than umsg.newHeight
+			// (our local accepted height) — the registry must reflect the peer's actual
+			// chain tip, not the height we just synced past.
 			if s.centralRegistry != nil {
 				addr := sp.Addr()
-				h := umsg.newHeight
+				peerTip := sp.LastBlock()
+				h := uint32(0)
+				if peerTip > 0 {
+					h = uint32(peerTip)
+				}
 				go func() {
-					if e := s.centralRegistry.UpdatePeerMetrics(s.ctx, addr, uint32(h), 0, 0, true, false, false, 0); e != nil {
+					if e := s.centralRegistry.UpdatePeerMetrics(s.ctx, addr, h, 0, 0, true, false, false, 0); e != nil {
 						s.logger.Warnf("[Legacy] centralRegistry.UpdatePeerMetrics height %s: %v", addr, e)
 					}
 				}()
@@ -3252,16 +3259,15 @@ func newServer(ctx context.Context, logger ulogger.Logger, tSettings *settings.S
 	// successes for legacy peers, driving reputation above the 50.0 baseline.
 	// The callback checks centralRegistry at call time (not capture time) because
 	// SetCentralPeerRegistry is called after newServer returns.
-	s.syncManager.SetOnBlockAccepted(func(peerAddr string, height int32) {
+	s.syncManager.SetOnBlockAccepted(func(peerAddr string, _ int32) {
 		if s.centralRegistry == nil {
 			return
 		}
-		h := uint32(0)
-		if height > 0 {
-			h = uint32(height)
-		}
+		// Record interaction success only — height is updated separately by
+		// UpdatePeerHeights when peers announce blocks. Passing the local accepted
+		// height here would corrupt the peer's tip in the registry.
 		go func() {
-			if e := s.centralRegistry.UpdatePeerMetrics(ctx, peerAddr, h, 0, 0, true, false, false, 0); e != nil {
+			if e := s.centralRegistry.UpdatePeerMetrics(ctx, peerAddr, 0, 0, 0, true, false, false, 0); e != nil {
 				s.logger.Warnf("[Legacy] centralRegistry.UpdatePeerMetrics block success %s: %v", peerAddr, e)
 			}
 		}()
