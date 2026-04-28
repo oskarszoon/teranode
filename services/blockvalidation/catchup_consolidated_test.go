@@ -439,6 +439,35 @@ func TestCatchup_FSMStateManagement(t *testing.T) {
 		// Should not attempt to change state if query fails
 		mockBlockchainClient.AssertNotCalled(t, "Run", mock.Anything, mock.Anything)
 	})
+
+	t.Run("RestoreFSMStateDoesNotUnderflowForLowTargetHeight", func(t *testing.T) {
+		ctx := context.Background()
+		server, mockBlockchainClient, mockUTXOStore, cleanup := setupTestCatchupServer(t)
+		defer cleanup()
+
+		header := testhelpers.CreateTestHeaders(t, 1)[0]
+		catchupCtx := &CatchupContext{
+			blockUpTo: &model.Block{
+				Header: header,
+				Height: 50,
+			},
+		}
+
+		mockBlockchainClient.ExpectedCalls = filterMockCalls(mockBlockchainClient.ExpectedCalls, "Run")
+		mockBlockchainClient.ExpectedCalls = filterMockCalls(mockBlockchainClient.ExpectedCalls, "GetFSMCurrentState")
+
+		catchingState := blockchain.FSMStateCATCHINGBLOCKS
+		mockBlockchainClient.On("GetFSMCurrentState", mock.Anything).
+			Return(&catchingState, nil).Once()
+		mockUTXOStore.On("GetBlockHeight").Return(uint32(50)).Once()
+		mockBlockchainClient.On("Run", mock.Anything, "blockvalidation/Server").
+			Return(nil).Once()
+
+		server.restoreFSMState(ctx, catchupCtx)
+
+		mockBlockchainClient.AssertExpectations(t)
+		mockUTXOStore.AssertExpectations(t)
+	})
 }
 
 // TestCatchup_MetricsAndTracking tests metrics recording during crash recovery

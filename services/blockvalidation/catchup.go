@@ -1087,7 +1087,7 @@ func (u *Server) restoreFSMState(ctx context.Context, catchupCtx *CatchupContext
 	if u.utxoStore != nil && catchupCtx.blockUpTo != nil {
 		localHeight := u.utxoStore.GetBlockHeight()
 		targetHeight := catchupCtx.blockUpTo.Height
-		if targetHeight > 0 && localHeight < targetHeight-100 {
+		if targetHeight > 0 && uint64(localHeight)+100 < uint64(targetHeight) {
 			u.logger.Infof("[catchup][%s] Staying in CATCHINGBLOCKS (local: %d, target: %d)",
 				catchupCtx.blockUpTo.Hash().String(), localHeight, targetHeight)
 			return
