@@ -11,6 +11,8 @@ import (
 	"github.com/looplab/fsm"
 )
 
+const legacyFSMStateLegacySyncing = "LEGACYSYNCING"
+
 // NewFiniteStateMachine creates a new finite state machine for the blockchain service.
 //
 // States: IDLE, RUNNING, CATCHINGBLOCKS
@@ -109,4 +111,11 @@ func CheckFSM(blockchainClient ClientI) func(ctx context.Context, checkLiveness 
 
 		return status, state.String(), nil
 	}
+}
+
+func migratePersistedFSMState(state string) (string, bool) {
+	if state == legacyFSMStateLegacySyncing {
+		return blockchain_api.FSMStateType_CATCHINGBLOCKS.String(), true
+	}
+	return state, false
 }

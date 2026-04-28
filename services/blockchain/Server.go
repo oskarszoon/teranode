@@ -384,6 +384,14 @@ func (b *Blockchain) Init(ctx context.Context) error {
 			b.logger.Errorf("[Blockchain][Init] Error setting FSM state in blockchain store if the state is empty: %v", err)
 		}
 	} else { // if there is a state stored, set the FSM to that state
+		if migratedState, migrated := migratePersistedFSMState(stateStr); migrated {
+			b.logger.Infof("[Blockchain][Init] Migrating persisted FSM state from %s to %s", stateStr, migratedState)
+			stateStr = migratedState
+			err = b.store.SetFSMState(ctx, stateStr)
+			if err != nil {
+				b.logger.Errorf("[Blockchain][Init] Error storing migrated FSM state: %v", err)
+			}
+		}
 		b.logger.Infof("[Blockchain][Init] Blockchain db has previous FSM state: %v, setting FSM's current state to it.", stateStr)
 		b.finiteStateMachine.SetState(stateStr)
 	}

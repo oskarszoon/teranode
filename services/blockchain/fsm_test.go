@@ -134,6 +134,35 @@ func Test_GetSetFSMStateFromStore(t *testing.T) {
 	})
 }
 
+func Test_InitMigratesLegacySyncingFSMState(t *testing.T) {
+	storeURL, err := url.Parse("sqlitememory://")
+	require.NoError(t, err)
+
+	tSettings := &settings.Settings{
+		ChainCfgParams: &chaincfg.MainNetParams,
+	}
+
+	blockchainStore, err := blockchain_store.NewStore(ulogger.TestLogger{}, storeURL, tSettings)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	require.NoError(t, blockchainStore.SetFSMState(ctx, legacyFSMStateLegacySyncing))
+
+	blockchainClient, err := New(ctx, mocklogger.NewTestLogger(), getTestSettings(), blockchainStore, nil)
+	require.NoError(t, err)
+
+	require.NoError(t, blockchainClient.Init(ctx))
+	blockchainClient.SetSubscriptionManagerReadyForTesting(true)
+
+	resp, err := blockchainClient.GetFSMCurrentState(ctx, &emptypb.Empty{})
+	require.NoError(t, err)
+	require.Equal(t, blockchain_api.FSMStateType_CATCHINGBLOCKS, resp.State)
+
+	state, err := blockchainClient.GetStoreFSMState(ctx)
+	require.NoError(t, err)
+	require.Equal(t, blockchain_api.FSMStateType_CATCHINGBLOCKS.String(), state)
+}
+
 // Test_FSMTransitions_CatchingBlocksOnly confirms the simplified FSM has no LEGACYSYNCING
 // state or LEGACYSYNC event — CATCHINGBLOCKS is the single catchup state for all scenarios.
 func Test_FSMTransitions_CatchingBlocksOnly(t *testing.T) {
