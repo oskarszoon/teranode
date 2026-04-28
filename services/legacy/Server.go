@@ -841,48 +841,107 @@ func (s *Server) DelegateCatchup(req *peer_api.DelegateCatchupRequest, stream pe
 		errCh <- s.server.syncManager.RunDelegatedCatchup(stream.Context(), sp.Peer, req.TargetHeight, progressCh)
 	}()
 
-	// Relay progress from the sync manager to the gRPC stream.
+	return relayDelegatedCatchupProgress(stream.Context(), progressCh, errCh, func(msg *peer_api.CatchupProgress) error {
+		if err := stream.Send(msg); err != nil {
+			s.logger.Warnf("[DelegateCatchup] Failed to send progress: %v", err)
+			return err
+		}
+		return nil
+	})
+}
+
+func relayDelegatedCatchupProgress(
+	ctx context.Context,
+	progressCh <-chan netsync.DelegatedCatchupProgress,
+	errCh <-chan error,
+	send func(*peer_api.CatchupProgress) error,
+) error {
+	for {
+		select {
+		case progress, ok := <-progressCh:
+			terminal, err := sendDelegatedCatchupProgress(progress, ok, send)
+			if err != nil {
+				return err
+			}
+			if terminal {
+				return <-errCh
+			}
+		default:
+		}
+
+		select {
+		case progress, ok := <-progressCh:
+			terminal, err := sendDelegatedCatchupProgress(progress, ok, send)
+			if err != nil {
+				return err
+			}
+			if terminal {
+				return <-errCh
+			}
+		case err := <-errCh:
+			if drainErr := drainDelegatedCatchupProgress(progressCh, send); drainErr != nil {
+				return drainErr
+			}
+			return err
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+func sendDelegatedCatchupProgress(
+	progress netsync.DelegatedCatchupProgress,
+	ok bool,
+	send func(*peer_api.CatchupProgress) error,
+) (bool, error) {
+	if !ok {
+		return true, nil
+	}
+
+	if err := send(delegatedCatchupProgressToProto(progress)); err != nil {
+		return false, err
+	}
+
+	return progress.Phase == netsync.DelegatedPhaseComplete || progress.Phase == netsync.DelegatedPhaseFailed, nil
+}
+
+func drainDelegatedCatchupProgress(progressCh <-chan netsync.DelegatedCatchupProgress, send func(*peer_api.CatchupProgress) error) error {
 	for {
 		select {
 		case progress, ok := <-progressCh:
 			if !ok {
-				// Channel closed — catchup is done, wait for result.
-				return <-errCh
+				return nil
 			}
-
-			msg := &peer_api.CatchupProgress{
-				CurrentHeight:   progress.CurrentHeight,
-				TargetHeight:    progress.TargetHeight,
-				BlocksRemaining: progress.BlocksRemaining,
-				ErrorMessage:    progress.ErrorMessage,
-				ErrorCategory:   progress.ErrorCategory,
-			}
-
-			switch progress.Phase {
-			case netsync.DelegatedPhaseHeaders:
-				msg.Phase = peer_api.CatchupProgress_DOWNLOADING_HEADERS
-			case netsync.DelegatedPhaseBlocks:
-				msg.Phase = peer_api.CatchupProgress_DOWNLOADING_BLOCKS
-			case netsync.DelegatedPhaseComplete:
-				msg.Phase = peer_api.CatchupProgress_COMPLETE
-			case netsync.DelegatedPhaseFailed:
-				msg.Phase = peer_api.CatchupProgress_FAILED
-			}
-
-			if err := stream.Send(msg); err != nil {
-				s.logger.Warnf("[DelegateCatchup] Failed to send progress: %v", err)
+			if err := send(delegatedCatchupProgressToProto(progress)); err != nil {
 				return err
 			}
-
-			// Terminal phases — wait for final error.
-			if progress.Phase == netsync.DelegatedPhaseComplete || progress.Phase == netsync.DelegatedPhaseFailed {
-				return <-errCh
-			}
-
-		case <-stream.Context().Done():
-			return stream.Context().Err()
+		default:
+			return nil
 		}
 	}
+}
+
+func delegatedCatchupProgressToProto(progress netsync.DelegatedCatchupProgress) *peer_api.CatchupProgress {
+	msg := &peer_api.CatchupProgress{
+		CurrentHeight:   progress.CurrentHeight,
+		TargetHeight:    progress.TargetHeight,
+		BlocksRemaining: progress.BlocksRemaining,
+		ErrorMessage:    progress.ErrorMessage,
+		ErrorCategory:   progress.ErrorCategory,
+	}
+
+	switch progress.Phase {
+	case netsync.DelegatedPhaseHeaders:
+		msg.Phase = peer_api.CatchupProgress_DOWNLOADING_HEADERS
+	case netsync.DelegatedPhaseBlocks:
+		msg.Phase = peer_api.CatchupProgress_DOWNLOADING_BLOCKS
+	case netsync.DelegatedPhaseComplete:
+		msg.Phase = peer_api.CatchupProgress_COMPLETE
+	case netsync.DelegatedPhaseFailed:
+		msg.Phase = peer_api.CatchupProgress_FAILED
+	}
+
+	return msg
 }
 
 // serializeHeader returns the 80-byte raw serialization of a wire.BlockHeader.
