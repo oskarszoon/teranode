@@ -350,6 +350,76 @@ func TestCentralRegistry_SelectBestPeersFromCentralRegistry(t *testing.T) {
 
 		reg.AssertExpectations(t)
 	})
+
+	t.Run("honors force sync peer", func(t *testing.T) {
+		reg := &mockCentralPeerRegistry{}
+		hash1 := chainhash.HashH([]byte("block1"))
+		hash2 := chainhash.HashH([]byte("block2"))
+		reg.On("ListPeers").Return([]*blockchain.PeerInfo{
+			{
+				ID:              "peer-high-rep",
+				Height:          500,
+				DataHubURL:      "http://high-rep:8090",
+				Storage:         "full",
+				ReputationScore: 99.0,
+				BlockHash:       &hash1,
+			},
+			{
+				ID:              "peer-forced",
+				Height:          500,
+				DataHubURL:      "http://forced:8090",
+				Storage:         "full",
+				ReputationScore: 1.0,
+				BlockHash:       &hash2,
+			},
+		}, nil)
+
+		mockUTXO := &utxo.MockUtxostore{}
+		s := newPollerTestServer(t, reg, mockUTXO)
+		s.settings.P2P.ForceSyncPeer = "peer-forced"
+
+		peers, err := s.selectBestPeersFromCentralRegistry(context.Background(), 100)
+		require.NoError(t, err)
+		require.Len(t, peers, 1)
+		require.Equal(t, "peer-forced", peers[0].ID)
+
+		reg.AssertExpectations(t)
+	})
+
+	t.Run("filters pruned peers when fallback disabled", func(t *testing.T) {
+		reg := &mockCentralPeerRegistry{}
+		hash1 := chainhash.HashH([]byte("block1"))
+		hash2 := chainhash.HashH([]byte("block2"))
+		reg.On("ListPeers").Return([]*blockchain.PeerInfo{
+			{
+				ID:              "pruned-peer",
+				Height:          500,
+				DataHubURL:      "http://pruned:8090",
+				Storage:         "pruned",
+				ReputationScore: 99.0,
+				BlockHash:       &hash1,
+			},
+			{
+				ID:              "full-peer",
+				Height:          500,
+				DataHubURL:      "http://full:8090",
+				Storage:         "full",
+				ReputationScore: 1.0,
+				BlockHash:       &hash2,
+			},
+		}, nil)
+
+		mockUTXO := &utxo.MockUtxostore{}
+		s := newPollerTestServer(t, reg, mockUTXO)
+		s.settings.P2P.AllowPrunedNodeFallback = false
+
+		peers, err := s.selectBestPeersFromCentralRegistry(context.Background(), 100)
+		require.NoError(t, err)
+		require.Len(t, peers, 1)
+		require.Equal(t, "full-peer", peers[0].ID)
+
+		reg.AssertExpectations(t)
+	})
 }
 
 // ---------------------------------------------------------------------------

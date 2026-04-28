@@ -42,8 +42,25 @@ func (u *Server) selectBestPeersFromCentralRegistry(ctx context.Context, targetH
 	}
 	u.logger.Infof("[central_registry] ListPeers(minHeight=%d) returned %d peers", targetHeight, len(peers))
 
+	forceSyncPeer := ""
+	allowPrunedNodeFallback := true
+	if u.settings != nil {
+		forceSyncPeer = u.settings.P2P.ForceSyncPeer
+		allowPrunedNodeFallback = u.settings.P2P.AllowPrunedNodeFallback
+	}
+
 	result := make([]PeerForCatchup, 0, len(peers))
 	for _, p := range peers {
+		if forceSyncPeer != "" && p.ID != forceSyncPeer {
+			u.logger.Debugf("[central_registry] Skipping peer %s (force sync peer is %s)", p.ID, forceSyncPeer)
+			continue
+		}
+
+		if forceSyncPeer == "" && !allowPrunedNodeFallback && p.Storage != "full" {
+			u.logger.Debugf("[central_registry] Skipping peer %s (storage %q not allowed when pruned fallback is disabled)", p.ID, p.Storage)
+			continue
+		}
+
 		// Determine the baseURL based on transport type.
 		// For HTTP peers, use the DataHubURL. For wire-protocol peers, use the NetworkAddress.
 		baseURL := p.DataHubURL
