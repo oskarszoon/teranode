@@ -122,6 +122,27 @@ func TestCentralizedPeerRegistry_UpdateMetrics(t *testing.T) {
 	require.Equal(t, int64(150), got.AvgResponseTimeMs)
 }
 
+func TestCentralizedPeerRegistry_UpdateMetrics_IgnoresUntimedSuccessForAverage(t *testing.T) {
+	r := NewCentralizedPeerRegistry(DefaultBanConfig())
+
+	r.Register(&PeerInfo{ID: "peer-1"})
+
+	r.UpdateMetrics("peer-1", 100, 0, 0, true, false, false, 0)
+
+	got, ok := r.Get("peer-1")
+	require.True(t, ok)
+	require.Equal(t, int64(1), got.InteractionSuccesses)
+	require.Equal(t, int64(0), got.AvgResponseTimeMs)
+
+	r.UpdateMetrics("peer-1", 100, 0, 0, true, false, false, 200)
+	r.UpdateMetrics("peer-1", 100, 0, 0, true, false, false, 0)
+
+	got, ok = r.Get("peer-1")
+	require.True(t, ok)
+	require.Equal(t, int64(3), got.InteractionSuccesses)
+	require.Equal(t, int64(200), got.AvgResponseTimeMs)
+}
+
 func TestCentralizedPeerRegistry_UpdateMetrics_Malicious(t *testing.T) {
 	r := NewCentralizedPeerRegistry(DefaultBanConfig())
 

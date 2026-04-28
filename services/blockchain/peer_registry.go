@@ -186,10 +186,13 @@ func (r *CentralizedPeerRegistry) UpdateMetrics(
 		info.LastInteractionSuccess = now
 
 		// Running weighted average — weight recent observations at 20% to smooth spikes.
-		if info.AvgResponseTimeMs == 0 {
-			info.AvgResponseTimeMs = responseTimeMs
-		} else {
-			info.AvgResponseTimeMs = int64(float64(info.AvgResponseTimeMs)*0.8 + float64(responseTimeMs)*0.2)
+		// A response time of 0 means not applicable, not a zero-duration sample.
+		if responseTimeMs > 0 {
+			if info.AvgResponseTimeMs == 0 {
+				info.AvgResponseTimeMs = responseTimeMs
+			} else {
+				info.AvgResponseTimeMs = int64(float64(info.AvgResponseTimeMs)*0.8 + float64(responseTimeMs)*0.2)
+			}
 		}
 	} else if recordFailure {
 		info.InteractionAttempts++
