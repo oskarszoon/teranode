@@ -80,6 +80,41 @@ or:
 The block hash must match the snapshot. The snapshot network must match the
 configured `.env` network.
 
+### Legacy SV Node Export
+
+If your seed source is an existing SV Node data directory, export it to
+quickstart-compatible seed files with the Teranode image. Stop SV Node
+gracefully before reading its `blocks` and `chainstate` directories:
+
+```bash
+bitcoin-cli stop
+```
+
+From the quickstart repository root, load the pinned Teranode version and write
+the export to a local seed directory:
+
+```bash
+set -a
+. ./.env
+set +a
+
+mkdir -p /path/to/teranode-seed
+
+docker run --rm \
+  --entrypoint /app/teranode-cli \
+  -v /path/to/svnode-data:/svnode:ro \
+  -v /path/to/teranode-seed:/seed \
+  ghcr.io/bsv-blockchain/teranode:"$TERANODE_VERSION" \
+  bitcointoutxoset --bitcoinDir=/svnode --outputDir=/seed
+```
+
+Use the block hash from the generated seed filenames when loading quickstart:
+
+```bash
+./seed.sh <block-hash> /path/to/teranode-seed
+./start.sh
+```
+
 ## Seed from `.env`
 
 You can also configure seed values in `.env`:

@@ -17,8 +17,9 @@ From the quickstart repository root:
 ```
 
 `start.sh` runs `docker compose up -d`, then performs the Teranode FSM startup
-transition. It also prints the local URLs for Grafana, Prometheus, Kafka
-Console, the asset viewer, and RPC.
+transition. It always prints the local URLs for the asset viewer and RPC. When
+the `monitoring` profile is enabled, it also prints Grafana, Prometheus, and
+Kafka Console URLs.
 
 Check service state:
 

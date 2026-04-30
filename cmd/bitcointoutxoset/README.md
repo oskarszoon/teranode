@@ -10,7 +10,7 @@ Invoked via `teranode-cli`:
 teranode-cli bitcointoutxoset --bitcoinDir=<bitcoin-data-path> --outputDir=<output-dir-path> [options]
 ```
 
-The SV Node must be gracefully shut down (`bitcoin-cli stop`) before export. See the [Syncing the Blockchain Guide](../../docs/howto/miners/docker/minersHowToSyncTheNode.md#method-2-seeding-from-legacy-sv-node) for the full export and seeding workflow.
+The SV Node must be gracefully shut down (`bitcoin-cli stop`) before export. See the [Syncing the Blockchain Guide](../../docs/howto/miners/docker/minersHowToSyncTheNode.md#legacy-sv-node-export) for the full export and seeding workflow.
 
 ## Flags
 

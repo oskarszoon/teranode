@@ -70,9 +70,10 @@ from the network.
 ./start.sh
 ```
 
-Quickstart starts the Teranode services, PostgreSQL, Redpanda, Aerospike,
-Prometheus, Grafana, Kafka Console, and the asset cache. It also performs the
-normal FSM startup transition.
+Quickstart starts the Teranode services, PostgreSQL, Redpanda, Aerospike, and
+the asset cache. With the default `monitoring` profile, it also starts
+Prometheus, Grafana, Kafka Console, and the Aerospike exporter, then performs
+the normal FSM startup transition.
 
 ## Verify
 
@@ -87,10 +88,10 @@ Useful local URLs:
 | URL | Purpose |
 | --- | --- |
 | <http://localhost:8090> | Asset viewer |
-| <http://localhost:3005> | Grafana |
-| <http://localhost:9090> | Prometheus |
-| <http://localhost:8080> | Kafka Console |
 | <http://localhost:9292> | RPC endpoint |
+| <http://localhost:3005> | Grafana, when `monitoring` is enabled |
+| <http://localhost:9090> | Prometheus, when `monitoring` is enabled |
+| <http://localhost:8080> | Kafka Console, when `monitoring` is enabled |
 
 RPC credentials are stored in `.env` and used automatically by `./rpc.sh`.
 

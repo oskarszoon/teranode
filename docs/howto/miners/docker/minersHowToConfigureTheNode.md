@@ -74,13 +74,18 @@ containers. The key name in `.env` should match the key Teranode reads from
 Some settings, such as `network`, require a data reset before restart because
 data volumes are network-specific. See [Reset Teranode](./minersHowToResetTeranode.md).
 
+The examples below keep quickstart's default `monitoring` profile. Remove
+`monitoring` from `COMPOSE_PROFILES` only when you intentionally want a lean
+node-only stack without Grafana, Prometheus, the Aerospike exporter, or Kafka
+Console.
+
 ## Listen-Only Mode
 
 Listen-only mode is the simplest and safest default:
 
 ```env
 listen_mode=listen_only
-COMPOSE_PROFILES=legacy,p2p
+COMPOSE_PROFILES=legacy,p2p,monitoring
 asset_httpPublicAddress=
 p2p_advertise_addresses=
 HOST_IP=127.0.0.1
@@ -95,7 +100,7 @@ Full mode is for a node that should participate as a reachable network peer:
 
 ```env
 listen_mode=full
-COMPOSE_PROFILES=legacy,p2p
+COMPOSE_PROFILES=legacy,p2p,monitoring
 asset_httpPublicAddress=https://node.example.com/api/v1
 p2p_advertise_addresses=/dns4/node.example.com/tcp/9905
 ```
@@ -110,7 +115,7 @@ Enable `blockpersister` only when you need raw historical block data for an
 explorer, indexer, research workload, or backup workflow:
 
 ```env
-COMPOSE_PROFILES=legacy,p2p,blockpersister
+COMPOSE_PROFILES=legacy,p2p,monitoring,blockpersister
 ```
 
 Archival mode can require multiple TB of disk on mainnet. It does not disable
@@ -126,9 +131,10 @@ normal UTXO pruning.
 | `8000` | Asset cache | Used by full-mode public asset API |
 | `9905` | P2P | Used by full-mode inbound peer connections |
 
-RPC (`9292`), Grafana (`3005`), Prometheus (`9090`), Kafka Console (`8080`),
-PostgreSQL (`5432`), Redpanda (`9092`), Aerospike (`3000`), and internal gRPC
-ports bind to `127.0.0.1` in quickstart.
+RPC (`9292`), PostgreSQL (`5432`), Redpanda (`9092`), Aerospike (`3000`), and
+internal gRPC ports bind to `127.0.0.1` in quickstart. When `monitoring` is
+enabled, Grafana (`3005`), Prometheus (`9090`), and Kafka Console (`8080`) also
+bind to `127.0.0.1`.
 
 ## Settings Reference
 
