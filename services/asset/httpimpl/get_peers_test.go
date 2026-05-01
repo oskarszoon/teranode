@@ -2,10 +2,35 @@ package httpimpl
 
 import (
 	"encoding/json"
+	"net/http"
 	"testing"
 
+	"github.com/bsv-blockchain/teranode/services/blockchain"
 	"github.com/stretchr/testify/require"
 )
+
+// TestGetPeers_NewPeerRegistryClientFails covers the registry-creation error
+// branch in getPeersFromCentralRegistry. The mock blockchain client is non-nil
+// but the gRPC address is bogus, so blockchain.NewPeerRegistryClient fails and
+// the handler should return 503 with an empty peer list.
+func TestGetPeers_NewPeerRegistryClientFails(t *testing.T) {
+	httpServer, mockRepo, c, rec := GetMockHTTP(t, nil)
+
+	// Non-nil typed client so the nil-check passes; subsequent
+	// NewPeerRegistryClient call will fail because settings has no real
+	// blockchain gRPC address backing it.
+	mockBC := &blockchain.Mock{}
+	mockRepo.On("GetBlockchainClient").Return(mockBC)
+
+	err := httpServer.GetPeers(c)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+
+	var resp PeersResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Equal(t, 0, resp.Count)
+	require.Empty(t, resp.Peers)
+}
 
 // TestPeerInfoResponse_JSON covers the JSON shape the dashboard expects so any
 // future field-rename refactor breaks visibly rather than silently.
