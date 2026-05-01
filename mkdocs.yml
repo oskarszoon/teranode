@@ -56,13 +56,12 @@ edit_uri: edit/main/docs/
 
 nav:
   - Home: index.md
-  - Tutorials:
-      - Fork and Pull Request Guidelines: tutorials/developers/forkAndPullRequestGuidelines.md
-      - Developer Setup: tutorials/developers/developerSetup.md
-      - Miners Getting Started: tutorials/miners/minersGettingStarted.md
   - How-To Guides:
-      - Running Services Locally: howto/locallyRunningServices.md
-      - Debugging Teranode: howto/howToRemoteDebugTeranode.md
+      - Development:
+          - Developer Setup: howto/developerSetup.md
+          - Fork and Pull Request Guidelines: howto/forkAndPullRequestGuidelines.md
+          - Running Services Locally: howto/locallyRunningServices.md
+          - Debugging Teranode: howto/howToRemoteDebugTeranode.md
       - Generating Protobuf: howto/generatingProtobuf.md
       - Adding Protobuf: howto/addingNewProtobufServices.md
       - Configuring gRPC Logging: howto/configuringGrpcLogging.md

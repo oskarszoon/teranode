@@ -17,21 +17,21 @@ hide:
 
 <div class="grid cards" markdown>
 
--   :material-rocket-launch:{ .lg .middle } **Tutorials**
+-   :material-server-network:{ .lg .middle } **Run a Node**
 
     ---
 
-    Step-by-step walkthroughs for developers and miners getting up and running.
+    Docker or Kubernetes — install, configure, and operate a Teranode node as a miner or operator.
 
-    [:octicons-arrow-right-24: Start tutorials](tutorials/developers/developerSetup.md)
+    [:octicons-arrow-right-24: Miner setup](howto/miners/docker/minersHowToInstallation.md)
 
--   :material-tools:{ .lg .middle } **How-To Guides**
+-   :material-code-tags:{ .lg .middle } **Develop**
 
     ---
 
-    Task-oriented recipes for common dev workflows and node operations.
+    Local dev environment, contributing workflow, and task-oriented how-to guides.
 
-    [:octicons-arrow-right-24: Browse how-tos](howto/locallyRunningServices.md)
+    [:octicons-arrow-right-24: Developer setup](howto/developerSetup.md)
 
 -   :material-book-open-variant:{ .lg .middle } **Key Topics**
 
@@ -63,13 +63,13 @@ hide:
 
     [:octicons-arrow-right-24: Architecture](topics/architecture/teranode-microservices-overview.md)
 
--   :material-server-network:{ .lg .middle } **Run a Node**
+-   :material-source-fork:{ .lg .middle } **Contribute**
 
     ---
 
-    Docker Compose or Kubernetes — installation, configuration, and operations for miners.
+    Fork the repo, follow the PR process, and submit changes to Teranode.
 
-    [:octicons-arrow-right-24: Miner setup](howto/miners/docker/minersHowToInstallation.md)
+    [:octicons-arrow-right-24: Fork & PR guide](howto/forkAndPullRequestGuidelines.md)
 
 -   :material-cog-outline:{ .lg .middle } **Configuration**
 

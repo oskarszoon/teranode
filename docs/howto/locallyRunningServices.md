@@ -28,7 +28,7 @@ Execute all services in a single terminal window with the command below. Replace
 SETTINGS_CONTEXT=dev.[YOUR_CONTEXT] go run .
 ```
 
-> **📝 Note:** Confirm that settings for your context are correctly established as outlined in the [Installation Guide](../tutorials/developers/developerSetup.md).
+> **📝 Note:** Confirm that settings for your context are correctly established as outlined in the [Installation Guide](./developerSetup.md).
 >
 > **⚠️ Warning:** When restarting services, it's recommended to clean the data directory first:
 >
