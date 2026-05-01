@@ -67,7 +67,14 @@ func (h *HTTP) GetPeers(c echo.Context) error {
 		})
 	}
 
-	// Convert native PeerInfo to JSON response
+	return c.JSON(http.StatusOK, peersToResponse(peers))
+}
+
+// getPeersFromCentralRegistry queries the blockchain service's PeerRegistryService directly.
+// Used as a fallback when P2P is not running (e.g., legacy-only mode).
+// peersToResponse converts native p2p.PeerInfo values into the dashboard JSON
+// response shape. Pure function; extracted from GetPeers for unit testing.
+func peersToResponse(peers []*p2p.PeerInfo) PeersResponse {
 	peerResponses := make([]PeerInfoResponse, 0, len(peers))
 	for _, peerPtr := range peers {
 		peer := (*p2p.PeerInfo)(peerPtr) // Explicit type assertion to satisfy import checker
@@ -106,16 +113,12 @@ func (h *HTTP) GetPeers(c echo.Context) error {
 		})
 	}
 
-	response := PeersResponse{
+	return PeersResponse{
 		Peers: peerResponses,
 		Count: len(peerResponses),
 	}
-
-	return c.JSON(http.StatusOK, response)
 }
 
-// getPeersFromCentralRegistry queries the blockchain service's PeerRegistryService directly.
-// Used as a fallback when P2P is not running (e.g., legacy-only mode).
 func (h *HTTP) getPeersFromCentralRegistry(ctx context.Context) ([]*p2p.PeerInfo, error) {
 	blockchainClient := h.repository.GetBlockchainClient()
 	if blockchainClient == nil {
