@@ -9,7 +9,8 @@ the URL to `path?v=<hash>`. Hash is stable across builds when content is
 unchanged, so unchanged files keep their cache; changed files invalidate
 immediately on next deploy.
 
-External URLs (http/https) are left untouched.
+External URLs (http/https) are left untouched. Existing query strings on
+local URLs are preserved (`v=` is appended alongside whatever was there).
 """
 
 from __future__ import annotations
@@ -32,10 +33,12 @@ def _is_external(src: str) -> bool:
 def _versioned(src: str, docs_dir: Path) -> str:
     if _is_external(src):
         return src
-    base, _, _ = src.partition("?")
+    base, sep, query = src.partition("?")
     digest = _hash(docs_dir / base)
     if digest is None:
         return src
+    if query:
+        return f"{base}?{query}&v={digest}"
     return f"{base}?v={digest}"
 
 
@@ -48,10 +51,12 @@ def on_config(config: dict[str, Any]) -> dict[str, Any]:
     for entry in config.get("extra_javascript", []):
         if isinstance(entry, str):
             rewritten_js.append(_versioned(entry, docs_dir))
-        else:
+        elif hasattr(entry, "path"):
             entry.path = _versioned(entry.path, docs_dir)
             rewritten_js.append(entry)
-    if rewritten_js:
-        config["extra_javascript"] = rewritten_js
+        else:
+            # Unknown shape — leave it alone rather than crash the build.
+            rewritten_js.append(entry)
+    config["extra_javascript"] = rewritten_js
 
     return config
