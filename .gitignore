@@ -60,6 +60,7 @@ kustomization.yaml.bak
 # Local Claude configuration (user-specific)
 CLAUDE.local.md
 .claude/settings.local.json
+.claude/scheduled_tasks.lock
 
 *.log
 
@@ -108,7 +109,7 @@ teranode_peers.json
 *.key
 logs/
 teranode.logrotate
-teranode
+/teranode
 
 settings_local.conf
 lint_output.txt
