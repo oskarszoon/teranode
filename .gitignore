@@ -1,6 +1,10 @@
 # Local profiling artifacts
 /stores/txmetacache/testdata/pprof/
 
+# Python bytecode (mkdocs hooks)
+__pycache__/
+*.pyc
+
 
 .history/**
 *.tar.gz
