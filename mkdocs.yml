@@ -2,6 +2,13 @@ site_name: Teranode
 site_description: Horizontally scalable BSV blockchain node
 site_url: https://bsv-blockchain.github.io/teranode/
 
+# Files inside docs/ that should not be copied into the built site.
+# `hooks/` holds the cache-bust build hook (Python, executed at build time
+# via the top-level `hooks:` key) — its source and __pycache__ should not
+# ship to GitHub Pages.
+exclude_docs: |
+  hooks/
+
 theme:
   name: material
   logo: assets/bsv-logo.png
@@ -258,7 +265,7 @@ extra:
   generator: false
 
 hooks:
-  - hooks/cache_bust.py
+  - docs/hooks/cache_bust.py
 
 plugins:
   - search
