@@ -4,7 +4,9 @@ import (
 	"context"
 	"testing"
 
+	chainhashPkg "github.com/bsv-blockchain/go-bt/v2/chainhash"
 	"github.com/bsv-blockchain/teranode/errors"
+	modelPkg "github.com/bsv-blockchain/teranode/model"
 	"github.com/bsv-blockchain/teranode/services/p2p"
 	"github.com/bsv-blockchain/teranode/ulogger"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -218,4 +220,87 @@ func TestSelectBestPeersForCatchup_LogsSuccessRate(t *testing.T) {
 	peers, err := s.selectBestPeersForCatchup(context.Background(), 100)
 	require.NoError(t, err)
 	require.Len(t, peers, 2)
+}
+
+// --- tryAlternativePeersForCatchup tests ---
+//
+// We cover the paths that DO NOT actually invoke u.catchup (it requires a fully
+// configured Server with utxoStore, FSM, etc). The reachable branches are:
+//   - selectBestPeersForCatchup returns no peers       -> return false
+//   - all returned peers match excludePeerID           -> return false
+//   - all returned peers are flagged malicious          -> return false
+
+func TestTryAlternativePeers_NoPeersAvailable(t *testing.T) {
+	client := &mockP2PClientForSelection{peers: []*p2p.PeerInfo{}}
+	s := newSelectionTestServer(client)
+
+	hash := newTestBlockHash()
+	block := newSyntheticBlock(t, 100, hash)
+
+	got := s.tryAlternativePeersForCatchup(context.Background(), block, "any-peer")
+	require.False(t, got)
+}
+
+func TestTryAlternativePeers_AllPeersExcluded(t *testing.T) {
+	pid := mustPeerID(t)
+	client := &mockP2PClientForSelection{
+		peers: []*p2p.PeerInfo{
+			{ID: pid, Height: 200, DataHubURL: "http://x"},
+		},
+	}
+	s := newSelectionTestServer(client)
+
+	hash := newTestBlockHash()
+	block := newSyntheticBlock(t, 100, hash)
+
+	// Exclude the only peer -> loop skips it -> return false.
+	got := s.tryAlternativePeersForCatchup(context.Background(), block, pid.String())
+	require.False(t, got)
+}
+
+func TestTryAlternativePeers_AllPeersMalicious(t *testing.T) {
+	pid := mustPeerID(t)
+	client := &mockP2PClientForSelection{
+		peers: []*p2p.PeerInfo{
+			{ID: pid, Height: 200, DataHubURL: "http://x"},
+		},
+	}
+
+	reg := &mockPeerRegistry{}
+	reg.On("IsPeerBanned", pid.String()).Return(true, nil)
+
+	s := newSelectionTestServer(client)
+	s.centralPeerRegistry = reg
+
+	hash := newTestBlockHash()
+	block := newSyntheticBlock(t, 100, hash)
+
+	got := s.tryAlternativePeersForCatchup(context.Background(), block, "different-peer")
+	require.False(t, got)
+
+	reg.AssertExpectations(t)
+}
+
+func TestTryAlternativePeers_SelectionError(t *testing.T) {
+	// selectBestPeersForCatchup returns (nil, err) -- function logs and proceeds
+	// with empty list, returning false.
+	client := &mockP2PClientForSelection{err: errors.NewServiceError("kaboom")}
+	s := newSelectionTestServer(client)
+
+	hash := newTestBlockHash()
+	block := newSyntheticBlock(t, 100, hash)
+
+	got := s.tryAlternativePeersForCatchup(context.Background(), block, "any")
+	require.False(t, got)
+}
+
+// helpers
+func newTestBlockHash() *chainhashPkg.Hash {
+	h := chainhashPkg.HashH([]byte("test-block"))
+	return &h
+}
+
+func newSyntheticBlock(t *testing.T, height uint32, hash *chainhashPkg.Hash) *modelPkg.Block {
+	t.Helper()
+	return modelPkg.NewSyntheticBlock(height, hash)
 }
