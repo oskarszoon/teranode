@@ -1,112 +1,143 @@
 package subtreeprocessor
 
 import (
+	"context"
+	"net/url"
 	"testing"
 	"time"
 
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	subtreepkg "github.com/bsv-blockchain/go-subtree"
+	blob_memory "github.com/bsv-blockchain/teranode/stores/blob/memory"
+	"github.com/bsv-blockchain/teranode/stores/utxo/sql"
+	"github.com/bsv-blockchain/teranode/ulogger"
+	"github.com/bsv-blockchain/teranode/util/test"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// TestDequeue_NoParentConflictingCheck_BUG demonstrates the production bug
-// observed on teranode-mainnet-eu-1 (v0.15.0-beta-3): a child transaction whose
-// parent is already marked Conflicting=true in the UTXO store still lands in the
-// block-assembly subtree. The resulting mining candidate fails ValidateBlock with
-// "parent transaction X of tx Y has no block IDs" and the block is rejected with
-// "bad-txns-inputs-missingorspent" by SVNode.
+// TestDequeueDuringBlockMovement_RejectsChildOfConflictingParent demonstrates
+// the production bug observed on teranode-mainnet-eu-1 (v0.15.0-beta-3): a
+// child transaction whose parent is already marked Conflicting=true in the
+// UTXO store still lands in the block-assembly subtree. The mining candidate
+// then fails ValidateBlock with "parent transaction X of tx Y has no block
+// IDs" and is rejected with bad-txns-inputs-missingorspent.
 //
 // Race in production:
 //
 //	T0  parent P added to UTXO store via validator.
-//	T1  ProcessConflicting (during moveForwardBlock with ConflictingNodes) flags
-//	    P.Conflicting=true. Cascade walks P.outputs -> recorded spenders, finds
-//	    none for child C: C's Spend has not been committed yet (C is mid-flight
-//	    in the BA queue). Cascade misses C; C.Conflicting stays false in store.
-//	T2  Event loop returns to default case, drains queue. Phase 2 filter
-//	    (SubtreeProcessor.go:861-886) only checks removeMap and currentTxMap
-//	    dedup. No Conflicting check on self or any parent in TxInpoints.
-//	T3  C lands in subtree. Mining candidate built and submitted. REJECTED.
+//	T1  ProcessConflicting (during moveForwardBlock with ConflictingNodes)
+//	    flags P.Conflicting=true. Cascade walks P.outputs -> recorded
+//	    spenders, finds none for child C: C's Spend has not been committed
+//	    yet (C is mid-flight in the BA queue). Cascade misses C.
+//	T2  Event loop falls into dequeueDuringBlockMovement to drain whatever
+//	    accumulated during the moveForwardBlock case. The drain filter only
+//	    checked self-hash against transactionMap and losingTxHashesMap. No
+//	    parent-inpoints check. C admitted into subtree.
+//	T3  C lands in subtree. Mining candidate built. Block REJECTED.
 //
-// Even the alternative drain path used during block movement,
-// dequeueDuringBlockMovement at SubtreeProcessor.go:3715, only filters by
-// `losingTxHashesMap.Exists(node.Hash)` — its own hash, never parents. And the
-// losing map itself is built in ProcessConflicting (process_conflicting.go:109)
-// from GetCounterConflicting hashes only; the cascaded descendants returned by
-// MarkConflictingRecursively (line 122) are discarded. So even when the cascade
-// does discover a descendant, that hash never reaches the dequeue filter.
-//
-// This test proves the queue-drain side of the gap: the subtree-processor
-// dequeue path has no mechanism to reject a child whose parent the system
-// considers conflicting — because there is no map/store lookup at all on the
-// parent inpoints during dequeue.
-//
-// Fix shape (per design discussion):
-//   - Introduce conflictingMap on SubtreeProcessor (separate from removeMap).
-//   - ProcessConflicting / MarkConflictingRecursively populate it recursively
-//     with all known-conflicting hashes (the cascaded descendants currently
-//     thrown away at process_conflicting.go:122 must be captured into it).
-//   - Phase 2 dequeue filter (SubtreeProcessor.go:861-886) and
-//     dequeueDuringBlockMovement (3731) reject any node whose Hash is in the
-//     map OR whose TxInpoints.ParentTxHashes contains a hash in the map.
-//   - When rejected at dequeue, the rejected child Hash is itself added to the
-//     map so any later-arriving descendants are also caught.
-//
-// Status: this test FAILS under current code (child is admitted) and is
-// expected to PASS once the conflictingMap fix is in place.
-func TestDequeue_NoParentConflictingCheck_BUG(t *testing.T) {
-	stp := setupTestSubtreeProcessor(t)
+// Fix: processConflictingTransactions now returns a transient set of every
+// hash flagged Conflicting=true by the BFS cascade (immediate losers + every
+// descendant returned by MarkConflictingRecursively). That set is threaded
+// through RemainderTransactionParams.ConflictingHashes into
+// dequeueDuringBlockMovement, which rejects any node whose own hash is in
+// the set OR whose TxInpoints.ParentTxHashes contains a hash in the set.
+// On parent match the node's hash is also added to the set so any
+// later-in-batch descendants are caught. The set is scoped to this single
+// drain — the default-case dequeue path is left untouched.
+func TestDequeueDuringBlockMovement_RejectsChildOfConflictingParent(t *testing.T) {
+	stp := newTestProcessorNoStart(t)
 
-	// We do not need the parent to actually be in the UTXO store to prove the
-	// bug. Production has the parent marked Conflicting=true in the store, but
-	// the dequeue path never reads the store for parent inpoints, so the test
-	// is just as faithful with a synthetic parent hash. (Avoiding real
-	// SetConflicting also avoids sqlitememory single-writer lock contention
-	// during this test.)
 	parentHash := chainhash.HashH([]byte("conflicting-parent"))
 	childHash := chainhash.HashH([]byte("child-of-conflicting-parent"))
-
-	// Populate the SubtreeProcessor's conflictingMap to reflect what
-	// processConflictingTransactions / BlockAssembler.markAsConflicting would
-	// have published when the parent was flagged Conflicting=true in the
-	// store. The dequeue path must consult this and reject the child.
-	stp.MarkConflicting([]chainhash.Hash{parentHash})
+	otherHash := chainhash.HashH([]byte("unrelated-tx"))
 
 	childNode := subtreepkg.Node{Hash: childHash, Fee: 1, SizeInBytes: 250}
 	childInpoints := &subtreepkg.TxInpoints{
 		ParentTxHashes: []chainhash.Hash{parentHash},
 		Idxs:           [][]uint32{{0}},
 	}
-
-	stp.AddBatch([]subtreepkg.Node{childNode}, []*subtreepkg.TxInpoints{childInpoints})
-
-	require.Eventually(t, func() bool { return stp.QueueLength() == 0 },
-		2*time.Second, 5*time.Millisecond, "queue did not drain")
-
-	// Allow the goroutine one more iteration to complete the insert path.
-	time.Sleep(50 * time.Millisecond)
-
-	found := false
-	for _, h := range stp.GetTransactionHashes() {
-		if h.Equal(childHash) {
-			found = true
-			break
-		}
+	otherNode := subtreepkg.Node{Hash: otherHash, Fee: 2, SizeInBytes: 220}
+	otherInpoints := &subtreepkg.TxInpoints{
+		ParentTxHashes: []chainhash.Hash{chainhash.HashH([]byte("unrelated-parent"))},
+		Idxs:           [][]uint32{{0}},
 	}
 
-	assert.False(t, found,
-		"BUG: child of conflicting parent admitted to subtree.\n"+
-			"  parent: %s (treated as Conflicting=true)\n"+
-			"  child:  %s (admitted into BA subtree)\n"+
-			"Cause: SubtreeProcessor.go:861-886 (Phase 2 dequeue filter) and\n"+
-			"SubtreeProcessor.go:3731 (dequeueDuringBlockMovement) consult only\n"+
-			"removeMap, currentTxMap dedup, and losingTxHashesMap by self-hash.\n"+
-			"Neither path checks TxInpoints.ParentTxHashes against any\n"+
-			"conflicting-state source. Cascade hashes from\n"+
-			"MarkConflictingRecursively are also discarded at\n"+
-			"process_conflicting.go:122, so they never reach the filter.\n"+
-			"Fix: add conflictingMap, populated recursively, consulted in\n"+
-			"Phase 2 filter for both self-hash and parent-inpoints.",
-		parentHash.String(), childHash.String())
+	stp.queue.enqueueBatch(
+		[]subtreepkg.Node{childNode, otherNode},
+		[]*subtreepkg.TxInpoints{childInpoints, otherInpoints},
+	)
+
+	// dequeueDuringBlockMovement holds back batches enqueued at-or-after
+	// (now - DoubleSpendWindow). Default window is 0, so it holds batches
+	// with time == now. A short sleep moves batch.time strictly into the
+	// past so the drain releases it.
+	time.Sleep(5 * time.Millisecond)
+
+	conflictingHashes := map[chainhash.Hash]struct{}{
+		parentHash: {},
+	}
+
+	require.NoError(t, stp.dequeueDuringBlockMovement(nil, nil, conflictingHashes, true))
+
+	hashes := collectSubtreeHashes(stp)
+
+	assert.NotContains(t, hashes, childHash,
+		"child of conflicting parent must be rejected by the dequeue filter")
+	assert.Contains(t, hashes, otherHash,
+		"unrelated tx must still pass through the filter")
+
+	// Cascade through the set: rejected child hash should now be in
+	// conflictingHashes so any later-in-batch descendant of the child is
+	// also rejected without a store round-trip.
+	_, marked := conflictingHashes[childHash]
+	assert.True(t, marked, "rejected child must be added to the transient set "+
+		"so its own descendants are caught later in the same drain")
+}
+
+// newTestProcessorNoStart builds a SubtreeProcessor without starting the
+// event-loop goroutine. This lets the test drive dequeueDuringBlockMovement
+// directly with a known queue state and a known conflictingHashes set, with
+// no race against the default-case dequeue.
+func newTestProcessorNoStart(t *testing.T) *SubtreeProcessor {
+	t.Helper()
+
+	utxoStoreURL, err := url.Parse("sqlitememory:///test")
+	require.NoError(t, err)
+
+	utxoStore, err := sql.New(context.Background(), ulogger.TestLogger{}, test.CreateBaseTestSettings(t), utxoStoreURL)
+	require.NoError(t, err)
+
+	settings := test.CreateBaseTestSettings(t)
+	settings.BlockAssembly.InitialMerkleItemsPerSubtree = 32
+
+	newSubtreeChan := make(chan NewSubtreeRequest, 10)
+	go func() {
+		for req := range newSubtreeChan {
+			if req.ErrChan != nil {
+				req.ErrChan <- nil
+			}
+		}
+	}()
+	t.Cleanup(func() { close(newSubtreeChan) })
+
+	stp, err := NewSubtreeProcessor(t.Context(), ulogger.TestLogger{}, settings, blob_memory.New(), nil, utxoStore, newSubtreeChan)
+	require.NoError(t, err)
+
+	return stp
+}
+
+func collectSubtreeHashes(stp *SubtreeProcessor) []chainhash.Hash {
+	out := make([]chainhash.Hash, 0)
+	for _, st := range stp.chainedSubtrees {
+		for _, n := range st.Nodes {
+			out = append(out, n.Hash)
+		}
+	}
+	if cs := stp.currentSubtree.Load(); cs != nil {
+		for _, n := range cs.Nodes {
+			out = append(out, n.Hash)
+		}
+	}
+	return out
 }

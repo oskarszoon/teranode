@@ -214,23 +214,6 @@ type Interface interface {
 	//   - int: Number of transactions in the removal map
 	GetRemoveMapLength() int
 
-	// GetConflictingMap returns the map of transactions known to be conflicting.
-	// The dequeue paths consult this map to reject children of conflicting
-	// parents whose own conflicting flag has not yet been cascaded by the
-	// store-side traversal of recorded spenders.
-	//
-	// Returns:
-	//   - txmap.TxMap: Map of conflicting transaction hashes
-	GetConflictingMap() txmap.TxMap
-
-	// MarkConflicting records the supplied hashes in the processor's
-	// conflictingMap so that the queue→subtree dequeue path rejects any node
-	// whose own hash or whose TxInpoints reference any hash in the map.
-	// Callers must include the cascaded descendants (e.g. the second return
-	// value of utxo.MarkConflictingRecursively) — not just the seed hashes —
-	// otherwise the race window stays open.
-	MarkConflicting(hashes []chainhash.Hash)
-
 	// GetChainedSubtrees returns subtrees that are chained together.
 	// These represent transaction dependencies and processing order.
 	//

@@ -151,6 +151,12 @@ type RemainderTransactionParams struct {
 	CurrentSubtree    *subtreepkg.Subtree
 	TransactionMap    *SplitSwissMap
 	LosingTxHashesMap txmap.TxMap
+	// ConflictingHashes is the transient set of every tx hash flagged
+	// Conflicting=true by the cascade that triggered this drain (immediate
+	// losers + every descendant returned by MarkConflictingRecursively).
+	// Scoped to a single drain — the dequeue filter checks self-hash and
+	// every TxInpoints.ParentTxHashes entry, then the set is discarded.
+	ConflictingHashes map[chainhash.Hash]struct{}
 	CurrentTxMap      TxInpointsMap
 	SkipDequeue       bool
 	SkipNotification  bool
@@ -260,22 +266,6 @@ type SubtreeProcessor struct {
 
 	// removeMap tracks transactions marked for removal
 	removeMap txmap.TxMap
-
-	// conflictingMap tracks transactions known to be conflicting (and any of
-	// their queue-resident descendants we discover at dequeue time). The
-	// dequeue paths consult this map to reject children whose parents are
-	// flagged conflicting in the UTXO store but whose own conflicting flag
-	// has not been cascaded yet — typically because the child's spend
-	// has not been recorded when SetConflicting walked the parent's outputs.
-	//
-	// Populated by:
-	//   - processConflictingTransactions (cascade hashes from
-	//     ProcessConflicting / MarkConflictingRecursively)
-	//   - BlockAssembler.markAsConflicting (reload-time input revalidation)
-	//   - dequeue filter itself, when a child is rejected because of a
-	//     conflicting parent: the child's hash is added so any later-arriving
-	//     descendants are also caught.
-	conflictingMap txmap.TxMap
 
 	// blockchainClient provides access to blockchain data
 	blockchainClient blockchain.ClientI
@@ -452,7 +442,6 @@ func NewSubtreeProcessor(_ context.Context, logger ulogger.Logger, tSettings *se
 		currentTxMap:                 NewSplitTxInpointsMap(splitMapBuckets),
 		deletedTxs:                   txmap.NewSyncedMap[chainhash.Hash, subtreepkg.TxInpoints](),
 		removeMap:                    txmap.NewSplitSwissMap(256, 16),
-		conflictingMap:               txmap.NewSplitSwissMap(256, 16),
 		blockchainClient:             blockchainClient,
 		subtreeStore:                 subtreeStore,
 		utxoStore:                    utxoStore,
@@ -843,8 +832,6 @@ func (stp *SubtreeProcessor) Start(ctx context.Context) {
 					// Cache these — they are read on every single iteration
 					removeMap := stp.removeMap
 					mapLength := removeMap.Length()
-					conflictingMap := stp.conflictingMap
-					conflictingMapLength := conflictingMap.Length()
 					currentTxMap := stp.currentTxMap
 					currentItemsPerFile := int(stp.currentItemsPerFile.Load())
 					addedCount := uint64(0)
@@ -892,35 +879,6 @@ func (stp *SubtreeProcessor) Start(ctx context.Context) {
 									_ = removeMap.Delete(hash)
 									b.nodes[i].Hash = zeroHash // Mark as rejected
 									continue
-								}
-
-								// Conflicting filter: reject the tx if either it
-								// is itself flagged conflicting, or any of its
-								// parents in TxInpoints is flagged conflicting.
-								// Cascading: when a child is rejected because of
-								// a conflicting parent, add the child's own hash
-								// to the map so that any later-arriving
-								// descendants (whose spend was not yet recorded
-								// when the cascade ran) are also caught here.
-								if conflictingMapLength > 0 {
-									if conflictingMap.Exists(hash) {
-										b.nodes[i].Hash = zeroHash
-										continue
-									}
-									if inpoints != nil {
-										conflictingParent := false
-										for _, parent := range inpoints.ParentTxHashes {
-											if conflictingMap.Exists(parent) {
-												conflictingParent = true
-												break
-											}
-										}
-										if conflictingParent {
-											_ = conflictingMap.Put(hash, 1)
-											b.nodes[i].Hash = zeroHash
-											continue
-										}
-									}
 								}
 
 								// Check for duplicates and insert into txMap
@@ -1214,10 +1172,6 @@ func (stp *SubtreeProcessor) reset(blockHeader *model.BlockHeader, moveBackBlock
 	// never dequeued would otherwise accumulate indefinitely across resets
 	stp.removeMap = txmap.NewSplitSwissMap(256, 16)
 
-	// clear conflicting map for the same reason: after reset, the unmined-tx reload
-	// path re-validates from the store and any new conflicts will be re-marked.
-	stp.conflictingMap = txmap.NewSplitSwissMap(256, 16)
-
 	// reset tx count
 	stp.setTxCountFromSubtrees()
 
@@ -1326,17 +1280,15 @@ func (stp *SubtreeProcessor) reset(blockHeader *model.BlockHeader, moveBackBlock
 					block.Height = blockHeaderMeta.Height
 				}
 
-				losingTxHashesMap, allMarkedConflicting, err := utxostore.ProcessConflicting(ctx, stp.utxoStore, block.Height, conflictingNodes, processedConflictingHashesMap)
+				// The Reset path replays moveForwardBlocks and discards the entire
+				// queue at the end (see the validUntilMillis drain after
+				// postProcess). Any in-flight tx whose parent gets cascaded here
+				// is dropped by that drain regardless of cascade discovery, so
+				// the per-block transient set is not needed here.
+				losingTxHashesMap, _, err := utxostore.ProcessConflicting(ctx, stp.utxoStore, block.Height, conflictingNodes, processedConflictingHashesMap)
 				if err != nil {
 					return errors.NewProcessingError("[moveForwardBlock][%s] error processing conflicting transactions in Reset()", block.String(), err)
 				}
-
-				// Record every cascaded hash so the queue→subtree dequeue path
-				// can reject children of any of these txs that arrive later or
-				// are already in flight. Without this, a child whose spend
-				// hasn't been recorded would slip past the cascade (which only
-				// walks recorded spenders) and land in the next mining candidate.
-				stp.recordConflictingHashes(allMarkedConflicting)
 
 				if losingTxHashesMap.Length() > 0 {
 					// mark all the losing txs in the subtrees in the blocks they were mined into as conflicting
@@ -1505,38 +1457,6 @@ func (stp *SubtreeProcessor) GetCurrentTxMap() TxInpointsMap {
 //   - *txmap.SwissMap: Map of transactions to be removed
 func (stp *SubtreeProcessor) GetRemoveMap() txmap.TxMap {
 	return stp.removeMap
-}
-
-// GetConflictingMap returns the map of transactions known to be conflicting.
-// The dequeue path consults this map to reject children of conflicting parents
-// even when the parent's output→spender link has not been recorded yet.
-//
-// Returns:
-//   - txmap.TxMap: Map of conflicting transaction hashes
-func (stp *SubtreeProcessor) GetConflictingMap() txmap.TxMap {
-	return stp.conflictingMap
-}
-
-// MarkConflicting records a set of transaction hashes as conflicting in the
-// processor's conflictingMap. Callers (e.g. BlockAssembler.markAsConflicting,
-// processConflictingTransactions) should pass every hash that the UTXO store
-// has flagged Conflicting=true — both the immediate losers and every cascaded
-// descendant returned by MarkConflictingRecursively. The dequeue path will
-// then reject any node whose hash is in the map or whose TxInpoints reference
-// any hash in the map.
-func (stp *SubtreeProcessor) MarkConflicting(hashes []chainhash.Hash) {
-	stp.recordConflictingHashes(hashes)
-}
-
-// recordConflictingHashes pushes every hash into the conflictingMap. Safe for
-// concurrent callers; underlying map is sharded.
-func (stp *SubtreeProcessor) recordConflictingHashes(hashes []chainhash.Hash) {
-	if len(hashes) == 0 || stp.conflictingMap == nil {
-		return
-	}
-	for _, h := range hashes {
-		_ = stp.conflictingMap.Put(h, 1)
-	}
 }
 
 // GetRemoveMapLength returns the length of the remove map.
@@ -2732,7 +2652,7 @@ func (stp *SubtreeProcessor) reorgBlocks(ctx context.Context, moveBackBlocks []*
 	}
 
 	// dequeueDuringBlockMovement all transactions that are in the queue
-	if err = stp.dequeueDuringBlockMovement(nil, nil, true); err != nil {
+	if err = stp.dequeueDuringBlockMovement(nil, nil, nil, true); err != nil {
 		return errors.NewProcessingError("[reorgBlocks] error dequeueing transactions during block movement", err)
 	}
 
@@ -3348,10 +3268,19 @@ func (stp *SubtreeProcessor) createTransactionMapIfNeeded(ctx context.Context, b
 	return transactionMap, conflictingNodes, nil
 }
 
-// processConflictingTransactions handles conflicting transactions and returns losing transaction hashes
+// processConflictingTransactions handles conflicting transactions and returns
+// losing transaction hashes plus the transient conflicting-hash set populated
+// from the BFS cascade. Callers feed the set into the immediately-following
+// dequeueDuringBlockMovement so any queue-resident children of cascaded
+// parents are rejected before the default-case dequeue picks them up. The
+// set is scoped to this single block-movement event and not persisted on the
+// processor.
 func (stp *SubtreeProcessor) processConflictingTransactions(ctx context.Context, block *model.Block,
-	conflictingNodes []chainhash.Hash, processedConflictingHashesMap map[chainhash.Hash]bool) (txmap.TxMap, error) {
-	var losingTxHashesMap txmap.TxMap
+	conflictingNodes []chainhash.Hash, processedConflictingHashesMap map[chainhash.Hash]bool) (txmap.TxMap, map[chainhash.Hash]struct{}, error) {
+	var (
+		losingTxHashesMap txmap.TxMap
+		conflictingSet    map[chainhash.Hash]struct{}
+	)
 
 	// process conflicting txs
 	if len(conflictingNodes) > 0 {
@@ -3367,14 +3296,14 @@ func (stp *SubtreeProcessor) processConflictingTransactions(ctx context.Context,
 		// we can then process the conflicting transactions
 		_, err := stp.waitForBlockBeingMined(ctx, block.Header.Hash())
 		if err != nil {
-			return nil, errors.NewProcessingError("[moveForwardBlock][%s] error waiting for block to be mined", block.String(), err)
+			return nil, nil, errors.NewProcessingError("[moveForwardBlock][%s] error waiting for block to be mined", block.String(), err)
 		}
 
 		if block.Height == 0 {
 			// get the block height from the blockchain client
 			_, blockHeaderMeta, err := stp.blockchainClient.GetBlockHeader(ctx, block.Header.Hash())
 			if err != nil {
-				return nil, errors.NewProcessingError("[moveForwardBlock][%s] error getting block header for genesis block", block.String(), err)
+				return nil, nil, errors.NewProcessingError("[moveForwardBlock][%s] error getting block header for genesis block", block.String(), err)
 			}
 
 			block.Height = blockHeaderMeta.Height
@@ -3382,22 +3311,25 @@ func (stp *SubtreeProcessor) processConflictingTransactions(ctx context.Context,
 
 		var allMarkedConflicting []chainhash.Hash
 		if losingTxHashesMap, allMarkedConflicting, err = utxostore.ProcessConflicting(ctx, stp.utxoStore, block.Height, conflictingNodes, processedConflictingHashesMap); err != nil {
-			return nil, errors.NewProcessingError("[moveForwardBlock][%s] error processing conflicting transactions", block.String(), err)
+			return nil, nil, errors.NewProcessingError("[moveForwardBlock][%s] error processing conflicting transactions", block.String(), err)
 		}
 
-		// Record every cascaded hash so the queue→subtree dequeue path can
-		// reject in-flight children whose spend has not been recorded yet.
-		stp.recordConflictingHashes(allMarkedConflicting)
+		if len(allMarkedConflicting) > 0 {
+			conflictingSet = make(map[chainhash.Hash]struct{}, len(allMarkedConflicting))
+			for _, h := range allMarkedConflicting {
+				conflictingSet[h] = struct{}{}
+			}
+		}
 
 		if losingTxHashesMap.Length() > 0 {
 			// mark all the losing txs in the subtrees in the blocks they were mined into as conflicting
 			if err = stp.markConflictingTxsInSubtrees(ctx, losingTxHashesMap); err != nil {
-				return nil, errors.NewProcessingError("[moveForwardBlock][%s] error marking conflicting transactions", block.String(), err)
+				return nil, nil, errors.NewProcessingError("[moveForwardBlock][%s] error marking conflicting transactions", block.String(), err)
 			}
 		}
 	}
 
-	return losingTxHashesMap, nil
+	return losingTxHashesMap, conflictingSet, nil
 }
 
 // resetSubtreeState resets the current subtree state and returns the old state
@@ -3478,7 +3410,7 @@ func (stp *SubtreeProcessor) processRemainderTransactionsAndDequeue(ctx context.
 		stp.logger.Debugf("[moveForwardBlock][%s] processing queue while moveForwardBlock: %d", params.Block.String(), stp.queue.length())
 
 		if !params.SkipDequeue {
-			if err := stp.dequeueDuringBlockMovement(params.TransactionMap, params.LosingTxHashesMap, params.SkipNotification); err != nil {
+			if err := stp.dequeueDuringBlockMovement(params.TransactionMap, params.LosingTxHashesMap, params.ConflictingHashes, params.SkipNotification); err != nil {
 				return errors.NewProcessingError("[moveForwardBlock][%s] error moving up block deQueue", params.Block.String(), err)
 			}
 		}
@@ -3665,7 +3597,8 @@ func (stp *SubtreeProcessor) moveForwardBlock(ctx context.Context, block *model.
 	}
 
 	// Process conflicting transactions
-	losingTxHashesMap, err = stp.processConflictingTransactions(ctx, block, conflictingNodes, processedConflictingHashesMap)
+	var conflictingHashes map[chainhash.Hash]struct{}
+	losingTxHashesMap, conflictingHashes, err = stp.processConflictingTransactions(ctx, block, conflictingNodes, processedConflictingHashesMap)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -3685,6 +3618,7 @@ func (stp *SubtreeProcessor) moveForwardBlock(ctx context.Context, block *model.
 		CurrentSubtree:    originalCurrentSubtree,
 		TransactionMap:    transactionMap,
 		LosingTxHashesMap: losingTxHashesMap,
+		ConflictingHashes: conflictingHashes,
 		CurrentTxMap:      originalCurrentTxMap,
 		SkipDequeue:       skipDequeue,
 		SkipNotification:  skipNotification,
@@ -3804,16 +3738,23 @@ func (stp *SubtreeProcessor) WaitForPendingBlocks(ctx context.Context) error {
 // Parameters:
 //   - transactionMap: Map of transactions that were in the block and need to be removed
 //   - losingTxHashesMap: Map of transactions that were conflicting and need to be removed
+//   - conflictingHashes: transient set of every tx hash flagged Conflicting=true
+//     by the cascade that triggered this drain (immediate losers + every
+//     descendant returned by MarkConflictingRecursively). May be nil/empty.
+//     A queued tx is rejected if its own hash is in the set OR any hash in
+//     its TxInpoints.ParentTxHashes is in the set; on rejection by parent
+//     match the tx's own hash is added to the set so any later-in-batch
+//     descendants are also caught. The set is scoped to this single drain
+//     and discarded by the caller.
 //   - skipNotification: Whether to skip notification of new subtrees
 //
 // Returns:
 //   - error: Any error encountered during processing
-func (stp *SubtreeProcessor) dequeueDuringBlockMovement(transactionMap *SplitSwissMap, losingTxHashesMap txmap.TxMap, skipNotification bool) (err error) {
+func (stp *SubtreeProcessor) dequeueDuringBlockMovement(transactionMap *SplitSwissMap, losingTxHashesMap txmap.TxMap, conflictingHashes map[chainhash.Hash]struct{}, skipNotification bool) (err error) {
 	queueLength := stp.queue.length()
 	if queueLength > 0 {
 		nrBatchesProcessed := int64(0)
 		validFromMillis := time.Now().Add(-1 * stp.settings.BlockAssembly.DoubleSpendWindow).UnixMilli()
-		conflictingMap := stp.conflictingMap
 
 		for {
 			batch, found := stp.queue.dequeueBatch(validFromMillis)
@@ -3832,25 +3773,20 @@ func (stp *SubtreeProcessor) dequeueDuringBlockMovement(transactionMap *SplitSwi
 					continue
 				}
 
-				// Conflicting filter: reject the tx if it is itself flagged
-				// conflicting, or any of its parents in TxInpoints is flagged
-				// conflicting. When rejected because of a parent, mark the
-				// child too — this catches later-arriving descendants whose
-				// spend was not yet recorded when the cascade ran.
-				if conflictingMap != nil && conflictingMap.Length() > 0 {
-					if conflictingMap.Exists(node.Hash) {
+				if len(conflictingHashes) > 0 {
+					if _, ok := conflictingHashes[node.Hash]; ok {
 						continue
 					}
 					if txInpoints != nil {
-						conflictingParent := false
+						matched := false
 						for _, parent := range txInpoints.ParentTxHashes {
-							if conflictingMap.Exists(parent) {
-								conflictingParent = true
+							if _, ok := conflictingHashes[parent]; ok {
+								matched = true
 								break
 							}
 						}
-						if conflictingParent {
-							_ = conflictingMap.Put(node.Hash, 1)
+						if matched {
+							conflictingHashes[node.Hash] = struct{}{}
 							continue
 						}
 					}

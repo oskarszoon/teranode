@@ -45,7 +45,6 @@ func TestMarkAsConflicting_EvictsCascadedDescendants(t *testing.T) {
 		Return([]*utxoStore.Spend{{TxID: &grandchildHash, Vout: 0}}, []chainhash.Hash{}, nil)
 
 	mockStp := &subtreeprocessor.MockSubtreeProcessor{}
-	mockStp.On("MarkConflicting", []chainhash.Hash{parentHash, childHash, grandchildHash}).Once()
 	mockStp.On("Remove", mock.Anything, parentHash).Return(nil).Once()
 	mockStp.On("Remove", mock.Anything, childHash).Return(nil).Once()
 	mockStp.On("Remove", mock.Anything, grandchildHash).Return(nil).Once()
