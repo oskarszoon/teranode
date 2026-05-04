@@ -3733,6 +3733,25 @@ func (stp *SubtreeProcessor) WaitForPendingBlocks(ctx context.Context) error {
 	return err
 }
 
+// DrainQueue is the public entry point for BlockAssembler to flush in-flight
+// children of conflicting parents from the input queue before the event-loop
+// goroutine starts (BA.Start path) or before the existing post-postProcess
+// drain runs (Reset path's postProcess closure).
+//
+// Internally calls dequeueDuringBlockMovement with the supplied transient
+// drop set as the filter. Non-conflicting txs in the queue are added to the
+// current subtree as part of the same drain — same routing as default-case
+// dequeue would have used. skipNotification=true so this is safe to invoke
+// before subtree-announcement listeners are wired up.
+func (stp *SubtreeProcessor) DrainQueue(dropHashes map[chainhash.Hash]struct{}) {
+	if len(dropHashes) == 0 {
+		return
+	}
+	if err := stp.dequeueDuringBlockMovement(nil, nil, dropHashes, true); err != nil {
+		stp.logger.Errorf("[SubtreeProcessor][DrainQueue] error: %v", err)
+	}
+}
+
 // dequeueDuringBlockMovement processes the transaction queue during block movement.
 //
 // Parameters:
