@@ -4,11 +4,9 @@ go 1.26.0
 
 replace github.com/in-toto/in-toto-golang => github.com/in-toto/in-toto-golang v0.9.0
 
-replace github.com/aerospike/aerospike-client-go/v8 => github.com/aerospike/aerospike-client-go/v8 v8.2.0
-
 require (
 	github.com/IBM/sarama v1.45.1
-	github.com/aerospike/aerospike-client-go/v8 v8.4.2
+	github.com/aerospike/aerospike-client-go/v8 v8.7.0
 	github.com/aws/aws-sdk-go-v2 v1.41.1
 	github.com/aws/aws-sdk-go-v2/config v1.32.8
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.96.0
@@ -463,5 +461,5 @@ require (
 	github.com/labstack/echo/v4 v4.13.3
 	github.com/labstack/gommon v0.4.2
 	github.com/spf13/cobra v1.10.1 // indirect
-	github.com/yuin/gopher-lua v1.1.1 // indirect
+	github.com/yuin/gopher-lua v1.1.2 // indirect
 )
