@@ -110,4 +110,3 @@ func TestDequeue_NoParentConflictingCheck_BUG(t *testing.T) {
 			"Phase 2 filter for both self-hash and parent-inpoints.",
 		parentHash.String(), childHash.String())
 }
-
