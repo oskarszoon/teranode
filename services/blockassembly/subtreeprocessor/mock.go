@@ -52,6 +52,15 @@ func (m *MockSubtreeProcessor) GetRemoveMapLength() int {
 	return args.Int(0)
 }
 
+func (m *MockSubtreeProcessor) GetConflictingMap() txmap.TxMap {
+	args := m.Called()
+	return args.Get(0).(txmap.TxMap)
+}
+
+func (m *MockSubtreeProcessor) MarkConflicting(hashes []chainhash.Hash) {
+	m.Called(hashes)
+}
+
 func (m *MockSubtreeProcessor) GetCurrentRunningState() State {
 	args := m.Called()
 	return args.Get(0).(State)

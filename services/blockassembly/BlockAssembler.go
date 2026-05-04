@@ -2420,6 +2420,13 @@ func (b *BlockAssembler) markAsConflicting(ctx context.Context, txHash chainhash
 		return
 	}
 
+	// Record every cascaded hash in the subtree processor's conflicting map so
+	// the queue→subtree dequeue path rejects in-flight children whose spend
+	// link to the parent has not yet been recorded in the UTXO store. Without
+	// this, the cascade alone (which walks recorded spenders only) misses
+	// queue-resident descendants and they land in the next mining candidate.
+	b.subtreeProcessor.MarkConflicting(cascadedHashes)
+
 	for _, h := range cascadedHashes {
 		if removeErr := b.subtreeProcessor.Remove(ctx, h); removeErr != nil {
 			b.logger.Warnf("[validateUnminedTxInputs][%s] failed to evict cascaded tx from subtree processor: %v", h.String(), removeErr)
