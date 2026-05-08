@@ -1,13 +1,188 @@
 package p2p
 
 import (
+	"context"
 	"net"
 	"testing"
 
+	"github.com/bsv-blockchain/teranode/services/blockchain"
+	"github.com/bsv-blockchain/teranode/settings"
 	"github.com/bsv-blockchain/teranode/ulogger"
+	"github.com/libp2p/go-libp2p/core/crypto"
+	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func newServerWithLocalRegistry(t *testing.T) (*Server, *blockchain.CentralizedPeerRegistry) {
+	t.Helper()
+
+	reg := blockchain.NewCentralizedPeerRegistry(blockchain.DefaultBanConfig())
+	return &Server{
+		peerRegistry: blockchain.NewLocalPeerRegistryClient(reg),
+		logger:       ulogger.TestLogger{},
+		gCtx:         context.Background(),
+		settings: &settings.Settings{
+			P2P: settings.P2PSettings{
+				AllowPrunedNodeFallback: true,
+			},
+		},
+	}, reg
+}
+
+func mustNewPeerID(t *testing.T) peer.ID {
+	t.Helper()
+	priv, _, err := crypto.GenerateKeyPair(crypto.Ed25519, 0)
+	require.NoError(t, err)
+	pid, err := peer.IDFromPrivateKey(priv)
+	require.NoError(t, err)
+	return pid
+}
+
+func TestServerHelpers_AddPeer_Registers(t *testing.T) {
+	s, reg := newServerWithLocalRegistry(t)
+	pid := mustNewPeerID(t)
+
+	s.addPeer(pid, "client/1.0", 100, nil, "http://peer.example")
+
+	got, ok := reg.Get(pid.String())
+	require.True(t, ok)
+	require.Equal(t, "client/1.0", got.ClientName)
+	require.Equal(t, uint32(100), got.Height)
+	require.False(t, got.IsConnected, "addPeer leaves IsConnected=false")
+}
+
+func TestServerHelpers_AddConnectedPeer_FlipsConnected(t *testing.T) {
+	s, reg := newServerWithLocalRegistry(t)
+	pid := mustNewPeerID(t)
+
+	s.addConnectedPeer(pid, "", 50, nil, "")
+
+	got, ok := reg.Get(pid.String())
+	require.True(t, ok)
+	require.True(t, got.IsConnected, "addConnectedPeer must flip the flag")
+}
+
+func TestServerHelpers_RemovePeer_DropsEntry(t *testing.T) {
+	s, reg := newServerWithLocalRegistry(t)
+	pid := mustNewPeerID(t)
+	s.addConnectedPeer(pid, "", 1, nil, "")
+	require.Equal(t, 1, reg.Count())
+
+	s.removePeer(pid)
+
+	require.Equal(t, 0, reg.Count())
+}
+
+func TestServerHelpers_GetPeer_FoundAndNotFound(t *testing.T) {
+	s, _ := newServerWithLocalRegistry(t)
+	pid := mustNewPeerID(t)
+
+	_, found := s.getPeer(pid)
+	require.False(t, found)
+
+	s.addPeer(pid, "", 1, nil, "")
+	got, found := s.getPeer(pid)
+	require.True(t, found)
+	require.Equal(t, pid.String(), got.ID)
+}
+
+func TestServerHelpers_UpdateStorage_PersistsMode(t *testing.T) {
+	s, reg := newServerWithLocalRegistry(t)
+	pid := mustNewPeerID(t)
+	s.addPeer(pid, "", 1, nil, "")
+
+	s.updateStorage(pid, "pruned")
+	got, _ := reg.Get(pid.String())
+	require.Equal(t, "pruned", got.Storage)
+
+	// Empty mode must be a no-op (existing setting preserved).
+	s.updateStorage(pid, "")
+	got, _ = reg.Get(pid.String())
+	require.Equal(t, "pruned", got.Storage)
+}
+
+func TestServerHelpers_InjectPeerForTesting_MarksFull(t *testing.T) {
+	s, reg := newServerWithLocalRegistry(t)
+	pid := mustNewPeerID(t)
+
+	s.InjectPeerForTesting(pid, "test-client", "http://peer.example", 99, nil)
+
+	got, ok := reg.Get(pid.String())
+	require.True(t, ok)
+	require.Equal(t, "full", got.Storage, "InjectPeerForTesting always sets storage=full")
+	require.Equal(t, uint32(99), got.Height)
+}
+
+func TestServerHelpers_GetSyncPeer_NoCoordinator(t *testing.T) {
+	s, _ := newServerWithLocalRegistry(t)
+	require.Empty(t, s.getSyncPeer())
+}
+
+func TestServerHelpers_GetPeerIDFromDataHubURL(t *testing.T) {
+	s, _ := newServerWithLocalRegistry(t)
+	pid := mustNewPeerID(t)
+
+	require.Empty(t, s.getPeerIDFromDataHubURL("http://anywhere"))
+
+	s.addPeer(pid, "", 1, nil, "http://datahub.example/api/v1")
+
+	require.Equal(t, pid.String(), s.getPeerIDFromDataHubURL("http://datahub.example/api/v1"))
+	require.Empty(t, s.getPeerIDFromDataHubURL("http://other.example"))
+}
+
+func TestServerHelpers_ShouldSkipBannedPeer_FlagsBanned(t *testing.T) {
+	s, reg := newServerWithLocalRegistry(t)
+	pid := mustNewPeerID(t)
+
+	require.False(t, s.shouldSkipBannedPeer(pid.String(), "test"), "no ban → don't skip")
+
+	reg.AddBanScore(pid.String(), "spam", 0)
+	reg.AddBanScore(pid.String(), "spam", 0)
+	require.True(t, s.shouldSkipBannedPeer(pid.String(), "test"), "score-banned peer is skipped")
+}
+
+func TestServerHelpers_ShouldSkipUnhealthyPeer(t *testing.T) {
+	s, reg := newServerWithLocalRegistry(t)
+	pid := mustNewPeerID(t)
+
+	// Unknown peer ID (not in registry) — must not skip; that's a relay path.
+	require.False(t, s.shouldSkipUnhealthyPeer(pid.String(), "test"))
+
+	// Register and drive reputation below threshold.
+	reg.Register(&blockchain.PeerInfo{ID: pid.String()})
+	reg.UpdateMetrics(pid.String(), 0, 0, 0, false, false, true, 0)
+	require.True(t, s.shouldSkipUnhealthyPeer(pid.String(), "test"))
+
+	// Non-decodable IDs (hostname-like) are not skipped.
+	require.False(t, s.shouldSkipUnhealthyPeer("not-an-id", "test"))
+}
+
+func TestServerHelpers_AddProtocolViolation_AccumulatesScore(t *testing.T) {
+	s, reg := newServerWithLocalRegistry(t)
+	s.banList = noopBanList{}
+	pid := mustNewPeerID(t)
+
+	for i := 0; i < 6; i++ {
+		s.addProtocolViolation(pid.String())
+	}
+
+	// onPeerBanned removes the peer entry once the threshold is crossed, so
+	// check the ban via the registry's IsBannedPeer rather than reading IsBanned
+	// off PeerInfo (which is gone).
+	require.True(t, reg.IsBannedPeer(pid.String()),
+		"protocol_violation = 20; 6 hits = 120 should ban")
+}
+
+func TestServerHelpers_ApplyBanScore_NilRegistryNoPanic(t *testing.T) {
+	s := &Server{logger: ulogger.TestLogger{}, gCtx: context.Background()}
+	require.NotPanics(t, func() { s.applyBanScore("anything", "spam") })
+}
+
+func TestServerHelpers_OnPeerBanned_InvalidIDReturnsCleanly(t *testing.T) {
+	s, _ := newServerWithLocalRegistry(t)
+	require.NotPanics(t, func() { s.onPeerBanned("not-a-peer-id", "spam") })
+}
 
 func TestIsUnsafeIP(t *testing.T) {
 	tests := []struct {
