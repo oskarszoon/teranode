@@ -231,6 +231,89 @@ func TestIsPeerUnhealthy_UnknownPeer(t *testing.T) {
 	require.True(t, resp.IsUnhealthy)
 }
 
+func TestRecordCatchupSuccess_InvalidPeerID(t *testing.T) {
+	s, _, _ := freshTestServer(t)
+	_, err := s.RecordCatchupSuccess(context.Background(), &p2p_api.RecordCatchupSuccessRequest{PeerId: "not-a-peer"})
+	require.Error(t, err)
+}
+
+func TestRecordCatchupFailure_InvalidPeerID(t *testing.T) {
+	s, _, _ := freshTestServer(t)
+	_, err := s.RecordCatchupFailure(context.Background(), &p2p_api.RecordCatchupFailureRequest{PeerId: "not-a-peer"})
+	require.Error(t, err)
+}
+
+func TestRecordCatchupMalicious_InvalidPeerID(t *testing.T) {
+	s, _, _ := freshTestServer(t)
+	_, err := s.RecordCatchupMalicious(context.Background(), &p2p_api.RecordCatchupMaliciousRequest{PeerId: "not-a-peer"})
+	require.Error(t, err)
+}
+
+func TestUpdateCatchupError_InvalidPeerID(t *testing.T) {
+	s, _, _ := freshTestServer(t)
+	_, err := s.UpdateCatchupError(context.Background(), &p2p_api.UpdateCatchupErrorRequest{PeerId: "not-a-peer"})
+	require.Error(t, err)
+}
+
+func TestReportValidSubtree_InvalidPeerID(t *testing.T) {
+	s, _, _ := freshTestServer(t)
+	_, err := s.ReportValidSubtree(context.Background(), &p2p_api.ReportValidSubtreeRequest{
+		PeerId: "not-a-peer", SubtreeHash: "abc",
+	})
+	require.Error(t, err)
+}
+
+func TestReportValidBlock_InvalidPeerID(t *testing.T) {
+	s, _, _ := freshTestServer(t)
+	_, err := s.ReportValidBlock(context.Background(), &p2p_api.ReportValidBlockRequest{
+		PeerId: "not-a-peer", BlockHash: "abc",
+	})
+	require.Error(t, err)
+}
+
+func TestReportValidBlock_RejectsEmpty(t *testing.T) {
+	s, _, _ := freshTestServer(t)
+
+	_, err := s.ReportValidBlock(context.Background(), &p2p_api.ReportValidBlockRequest{})
+	require.Error(t, err)
+
+	_, err = s.ReportValidBlock(context.Background(), &p2p_api.ReportValidBlockRequest{PeerId: "x"})
+	require.Error(t, err)
+}
+
+func TestIsPeerUnhealthy_InvalidPeerID(t *testing.T) {
+	s, _, _ := freshTestServer(t)
+	resp, err := s.IsPeerUnhealthy(context.Background(), &p2p_api.IsPeerUnhealthyRequest{PeerId: "not-a-peer"})
+	require.NoError(t, err)
+	require.True(t, resp.IsUnhealthy)
+}
+
+func TestIsPeerUnhealthy_LowSuccessRate(t *testing.T) {
+	s, reg, pid := freshTestServer(t)
+	reg.Register(&blockchain.PeerInfo{ID: pid.String()})
+	// Give 12 interactions: 4 success, 8 failure. Handler uses
+	// `successes < total/2` (integer div), so 4 < 12/2 = 6 → unhealthy.
+	for i := 0; i < 4; i++ {
+		reg.UpdateMetrics(pid.String(), 0, 0, 0, true, false, false, 100)
+	}
+	for i := 0; i < 8; i++ {
+		reg.UpdateMetrics(pid.String(), 0, 0, 0, false, true, false, 0)
+	}
+
+	resp, err := s.IsPeerUnhealthy(context.Background(), &p2p_api.IsPeerUnhealthyRequest{PeerId: pid.String()})
+	require.NoError(t, err)
+	require.True(t, resp.IsUnhealthy)
+	require.Contains(t, resp.Reason, "low")
+}
+
+func TestIsPeerUnhealthy_EmptyID(t *testing.T) {
+	s, _, _ := freshTestServer(t)
+	resp, err := s.IsPeerUnhealthy(context.Background(), &p2p_api.IsPeerUnhealthyRequest{PeerId: ""})
+	require.NoError(t, err)
+	require.True(t, resp.IsUnhealthy)
+	require.Contains(t, resp.Reason, "empty")
+}
+
 func TestIsPeerUnhealthy_HealthyPeer(t *testing.T) {
 	s, reg, pid := freshTestServer(t)
 	reg.Register(&blockchain.PeerInfo{ID: pid.String()})

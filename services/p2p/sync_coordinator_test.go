@@ -306,3 +306,85 @@ func TestSyncCoordinator_EvaluateSyncPeer_MissingPeerClears(t *testing.T) {
 	sc.evaluateSyncPeer()
 	require.Empty(t, sc.GetCurrentSyncPeer())
 }
+
+func TestSyncCoordinator_SelectAndActivateNewPeer_NoEligibleEntersBackoff(t *testing.T) {
+	sc, _ := newTestSyncCoordinator(t)
+
+	sc.selectAndActivateNewPeer(50, "")
+
+	sc.mu.RLock()
+	require.True(t, sc.allPeersAttempted, "no peers above local height should enter backoff")
+	sc.mu.RUnlock()
+}
+
+func TestSyncCoordinator_SelectAndActivateNewPeer_ActivatesEligible(t *testing.T) {
+	sc, reg := newTestSyncCoordinator(t)
+
+	reg.Register(&blockchain.PeerInfo{ID: "good", DataHubURL: "http://g", Height: 100, Storage: "full"})
+	for i := 0; i < 5; i++ {
+		reg.UpdateMetrics("good", 0, 0, 0, true, false, false, 100)
+	}
+
+	// activateSyncPeer fires sendSyncMessage which fails (no block hash) but
+	// the coordinator still records the peer as the current sync target.
+	sc.selectAndActivateNewPeer(50, "")
+
+	require.Equal(t, "good", sc.GetCurrentSyncPeer())
+}
+
+func TestSyncCoordinator_ActivateSyncPeer_StoresIDEvenIfSendFails(t *testing.T) {
+	sc, _ := newTestSyncCoordinator(t)
+
+	sc.activateSyncPeer("doomed-peer")
+
+	require.Equal(t, "doomed-peer", sc.GetCurrentSyncPeer())
+	sc.mu.RLock()
+	require.False(t, sc.syncStartTime.IsZero())
+	sc.mu.RUnlock()
+}
+
+func TestSyncCoordinator_SendSyncTriggerToKafka_NilProducerNoOp(t *testing.T) {
+	sc, _ := newTestSyncCoordinator(t)
+	require.NotPanics(t, func() { sc.sendSyncTriggerToKafka("p", "abc") })
+}
+
+func TestSyncCoordinator_SendSyncTriggerToKafka_EmptyHashNoOp(t *testing.T) {
+	sc, _ := newTestSyncCoordinator(t)
+	require.NotPanics(t, func() { sc.sendSyncTriggerToKafka("p", "") })
+}
+
+func TestSyncCoordinator_StartStop_ExitsCleanly(t *testing.T) {
+	sc, _ := newTestSyncCoordinator(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sc.Start(ctx)
+
+	// Allow the goroutines to spin up briefly so they reach their select.
+	time.Sleep(20 * time.Millisecond)
+
+	doneCh := make(chan struct{})
+	go func() {
+		sc.Stop()
+		close(doneCh)
+	}()
+
+	select {
+	case <-doneCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop did not return — coordinator goroutines leaked")
+	}
+}
+
+func TestSyncCoordinator_CheckAndClearExpiredBackoff_NotInBackoff(t *testing.T) {
+	sc, _ := newTestSyncCoordinator(t)
+	require.False(t, sc.checkAndClearExpiredBackoff())
+}
+
+func TestSyncCoordinator_CheckAndClearExpiredBackoff_StillInWindow(t *testing.T) {
+	sc, _ := newTestSyncCoordinator(t)
+	sc.enterBackoffMode()
+	require.True(t, sc.checkAndClearExpiredBackoff(),
+		"freshly entered backoff must still be in its window")
+}
