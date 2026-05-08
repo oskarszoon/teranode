@@ -2865,3 +2865,435 @@ var BlockchainAPI_ServiceDesc = grpc.ServiceDesc{
 	},
 	Metadata: "services/blockchain/blockchain_api/blockchain_api.proto",
 }
+
+const (
+	PeerRegistryService_RegisterPeer_FullMethodName      = "/blockchain_api.PeerRegistryService/RegisterPeer"
+	PeerRegistryService_UpdatePeerMetrics_FullMethodName = "/blockchain_api.PeerRegistryService/UpdatePeerMetrics"
+	PeerRegistryService_RemovePeer_FullMethodName        = "/blockchain_api.PeerRegistryService/RemovePeer"
+	PeerRegistryService_ListPeers_FullMethodName         = "/blockchain_api.PeerRegistryService/ListPeers"
+	PeerRegistryService_GetPeer_FullMethodName           = "/blockchain_api.PeerRegistryService/GetPeer"
+	PeerRegistryService_AddBanScore_FullMethodName       = "/blockchain_api.PeerRegistryService/AddBanScore"
+	PeerRegistryService_IsPeerBanned_FullMethodName      = "/blockchain_api.PeerRegistryService/IsPeerBanned"
+	PeerRegistryService_ListBannedPeers_FullMethodName   = "/blockchain_api.PeerRegistryService/ListBannedPeers"
+	PeerRegistryService_ClearBannedPeers_FullMethodName  = "/blockchain_api.PeerRegistryService/ClearBannedPeers"
+)
+
+// PeerRegistryServiceClient is the client API for PeerRegistryService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// PeerRegistryService manages a centralized registry of all known peers,
+// accessible to both P2P and Legacy services. The blockchain service hosts
+// this registry as it is always running and owns the chain state.
+type PeerRegistryServiceClient interface {
+	// RegisterPeer adds or updates a peer in the centralized registry.
+	RegisterPeer(ctx context.Context, in *RegisterPeerRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// UpdatePeerMetrics updates runtime metrics for a registered peer.
+	UpdatePeerMetrics(ctx context.Context, in *UpdatePeerMetricsRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// RemovePeer removes a peer from the registry (e.g. on disconnect).
+	RemovePeer(ctx context.Context, in *RemovePeerRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// ListPeers returns all peers matching the given filters, sorted by reputation descending.
+	ListPeers(ctx context.Context, in *ListPeersRequest, opts ...grpc.CallOption) (*ListPeersResponse, error)
+	// GetPeer retrieves a single peer by ID.
+	GetPeer(ctx context.Context, in *GetPeerRequest, opts ...grpc.CallOption) (*GetPeerResponse, error)
+	// AddBanScore adds penalty points for a peer and returns the new score and ban status.
+	AddBanScore(ctx context.Context, in *AddBanScoreRequest, opts ...grpc.CallOption) (*AddBanScoreResponse, error)
+	// IsPeerBanned checks if a peer is currently banned.
+	IsPeerBanned(ctx context.Context, in *IsPeerBannedRequest, opts ...grpc.CallOption) (*IsPeerBannedResponse, error)
+	// ListBannedPeers returns all currently banned peer IDs.
+	ListBannedPeers(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*ListBannedPeersResponse, error)
+	// ClearBannedPeers removes all bans.
+	ClearBannedPeers(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*emptypb.Empty, error)
+}
+
+type peerRegistryServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewPeerRegistryServiceClient(cc grpc.ClientConnInterface) PeerRegistryServiceClient {
+	return &peerRegistryServiceClient{cc}
+}
+
+func (c *peerRegistryServiceClient) RegisterPeer(ctx context.Context, in *RegisterPeerRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, PeerRegistryService_RegisterPeer_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *peerRegistryServiceClient) UpdatePeerMetrics(ctx context.Context, in *UpdatePeerMetricsRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, PeerRegistryService_UpdatePeerMetrics_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *peerRegistryServiceClient) RemovePeer(ctx context.Context, in *RemovePeerRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, PeerRegistryService_RemovePeer_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *peerRegistryServiceClient) ListPeers(ctx context.Context, in *ListPeersRequest, opts ...grpc.CallOption) (*ListPeersResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListPeersResponse)
+	err := c.cc.Invoke(ctx, PeerRegistryService_ListPeers_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *peerRegistryServiceClient) GetPeer(ctx context.Context, in *GetPeerRequest, opts ...grpc.CallOption) (*GetPeerResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetPeerResponse)
+	err := c.cc.Invoke(ctx, PeerRegistryService_GetPeer_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *peerRegistryServiceClient) AddBanScore(ctx context.Context, in *AddBanScoreRequest, opts ...grpc.CallOption) (*AddBanScoreResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AddBanScoreResponse)
+	err := c.cc.Invoke(ctx, PeerRegistryService_AddBanScore_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *peerRegistryServiceClient) IsPeerBanned(ctx context.Context, in *IsPeerBannedRequest, opts ...grpc.CallOption) (*IsPeerBannedResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(IsPeerBannedResponse)
+	err := c.cc.Invoke(ctx, PeerRegistryService_IsPeerBanned_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *peerRegistryServiceClient) ListBannedPeers(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*ListBannedPeersResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListBannedPeersResponse)
+	err := c.cc.Invoke(ctx, PeerRegistryService_ListBannedPeers_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *peerRegistryServiceClient) ClearBannedPeers(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, PeerRegistryService_ClearBannedPeers_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// PeerRegistryServiceServer is the server API for PeerRegistryService service.
+// All implementations must embed UnimplementedPeerRegistryServiceServer
+// for forward compatibility.
+//
+// PeerRegistryService manages a centralized registry of all known peers,
+// accessible to both P2P and Legacy services. The blockchain service hosts
+// this registry as it is always running and owns the chain state.
+type PeerRegistryServiceServer interface {
+	// RegisterPeer adds or updates a peer in the centralized registry.
+	RegisterPeer(context.Context, *RegisterPeerRequest) (*emptypb.Empty, error)
+	// UpdatePeerMetrics updates runtime metrics for a registered peer.
+	UpdatePeerMetrics(context.Context, *UpdatePeerMetricsRequest) (*emptypb.Empty, error)
+	// RemovePeer removes a peer from the registry (e.g. on disconnect).
+	RemovePeer(context.Context, *RemovePeerRequest) (*emptypb.Empty, error)
+	// ListPeers returns all peers matching the given filters, sorted by reputation descending.
+	ListPeers(context.Context, *ListPeersRequest) (*ListPeersResponse, error)
+	// GetPeer retrieves a single peer by ID.
+	GetPeer(context.Context, *GetPeerRequest) (*GetPeerResponse, error)
+	// AddBanScore adds penalty points for a peer and returns the new score and ban status.
+	AddBanScore(context.Context, *AddBanScoreRequest) (*AddBanScoreResponse, error)
+	// IsPeerBanned checks if a peer is currently banned.
+	IsPeerBanned(context.Context, *IsPeerBannedRequest) (*IsPeerBannedResponse, error)
+	// ListBannedPeers returns all currently banned peer IDs.
+	ListBannedPeers(context.Context, *emptypb.Empty) (*ListBannedPeersResponse, error)
+	// ClearBannedPeers removes all bans.
+	ClearBannedPeers(context.Context, *emptypb.Empty) (*emptypb.Empty, error)
+	mustEmbedUnimplementedPeerRegistryServiceServer()
+}
+
+// UnimplementedPeerRegistryServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedPeerRegistryServiceServer struct{}
+
+func (UnimplementedPeerRegistryServiceServer) RegisterPeer(context.Context, *RegisterPeerRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method RegisterPeer not implemented")
+}
+func (UnimplementedPeerRegistryServiceServer) UpdatePeerMetrics(context.Context, *UpdatePeerMetricsRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdatePeerMetrics not implemented")
+}
+func (UnimplementedPeerRegistryServiceServer) RemovePeer(context.Context, *RemovePeerRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method RemovePeer not implemented")
+}
+func (UnimplementedPeerRegistryServiceServer) ListPeers(context.Context, *ListPeersRequest) (*ListPeersResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListPeers not implemented")
+}
+func (UnimplementedPeerRegistryServiceServer) GetPeer(context.Context, *GetPeerRequest) (*GetPeerResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetPeer not implemented")
+}
+func (UnimplementedPeerRegistryServiceServer) AddBanScore(context.Context, *AddBanScoreRequest) (*AddBanScoreResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AddBanScore not implemented")
+}
+func (UnimplementedPeerRegistryServiceServer) IsPeerBanned(context.Context, *IsPeerBannedRequest) (*IsPeerBannedResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method IsPeerBanned not implemented")
+}
+func (UnimplementedPeerRegistryServiceServer) ListBannedPeers(context.Context, *emptypb.Empty) (*ListBannedPeersResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListBannedPeers not implemented")
+}
+func (UnimplementedPeerRegistryServiceServer) ClearBannedPeers(context.Context, *emptypb.Empty) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method ClearBannedPeers not implemented")
+}
+func (UnimplementedPeerRegistryServiceServer) mustEmbedUnimplementedPeerRegistryServiceServer() {}
+func (UnimplementedPeerRegistryServiceServer) testEmbeddedByValue()                             {}
+
+// UnsafePeerRegistryServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to PeerRegistryServiceServer will
+// result in compilation errors.
+type UnsafePeerRegistryServiceServer interface {
+	mustEmbedUnimplementedPeerRegistryServiceServer()
+}
+
+func RegisterPeerRegistryServiceServer(s grpc.ServiceRegistrar, srv PeerRegistryServiceServer) {
+	// If the following call panics, it indicates UnimplementedPeerRegistryServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&PeerRegistryService_ServiceDesc, srv)
+}
+
+func _PeerRegistryService_RegisterPeer_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RegisterPeerRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PeerRegistryServiceServer).RegisterPeer(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PeerRegistryService_RegisterPeer_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PeerRegistryServiceServer).RegisterPeer(ctx, req.(*RegisterPeerRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PeerRegistryService_UpdatePeerMetrics_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdatePeerMetricsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PeerRegistryServiceServer).UpdatePeerMetrics(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PeerRegistryService_UpdatePeerMetrics_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PeerRegistryServiceServer).UpdatePeerMetrics(ctx, req.(*UpdatePeerMetricsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PeerRegistryService_RemovePeer_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RemovePeerRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PeerRegistryServiceServer).RemovePeer(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PeerRegistryService_RemovePeer_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PeerRegistryServiceServer).RemovePeer(ctx, req.(*RemovePeerRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PeerRegistryService_ListPeers_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListPeersRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PeerRegistryServiceServer).ListPeers(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PeerRegistryService_ListPeers_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PeerRegistryServiceServer).ListPeers(ctx, req.(*ListPeersRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PeerRegistryService_GetPeer_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetPeerRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PeerRegistryServiceServer).GetPeer(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PeerRegistryService_GetPeer_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PeerRegistryServiceServer).GetPeer(ctx, req.(*GetPeerRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PeerRegistryService_AddBanScore_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AddBanScoreRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PeerRegistryServiceServer).AddBanScore(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PeerRegistryService_AddBanScore_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PeerRegistryServiceServer).AddBanScore(ctx, req.(*AddBanScoreRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PeerRegistryService_IsPeerBanned_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(IsPeerBannedRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PeerRegistryServiceServer).IsPeerBanned(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PeerRegistryService_IsPeerBanned_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PeerRegistryServiceServer).IsPeerBanned(ctx, req.(*IsPeerBannedRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PeerRegistryService_ListBannedPeers_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(emptypb.Empty)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PeerRegistryServiceServer).ListBannedPeers(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PeerRegistryService_ListBannedPeers_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PeerRegistryServiceServer).ListBannedPeers(ctx, req.(*emptypb.Empty))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PeerRegistryService_ClearBannedPeers_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(emptypb.Empty)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PeerRegistryServiceServer).ClearBannedPeers(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PeerRegistryService_ClearBannedPeers_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PeerRegistryServiceServer).ClearBannedPeers(ctx, req.(*emptypb.Empty))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// PeerRegistryService_ServiceDesc is the grpc.ServiceDesc for PeerRegistryService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var PeerRegistryService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "blockchain_api.PeerRegistryService",
+	HandlerType: (*PeerRegistryServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "RegisterPeer",
+			Handler:    _PeerRegistryService_RegisterPeer_Handler,
+		},
+		{
+			MethodName: "UpdatePeerMetrics",
+			Handler:    _PeerRegistryService_UpdatePeerMetrics_Handler,
+		},
+		{
+			MethodName: "RemovePeer",
+			Handler:    _PeerRegistryService_RemovePeer_Handler,
+		},
+		{
+			MethodName: "ListPeers",
+			Handler:    _PeerRegistryService_ListPeers_Handler,
+		},
+		{
+			MethodName: "GetPeer",
+			Handler:    _PeerRegistryService_GetPeer_Handler,
+		},
+		{
+			MethodName: "AddBanScore",
+			Handler:    _PeerRegistryService_AddBanScore_Handler,
+		},
+		{
+			MethodName: "IsPeerBanned",
+			Handler:    _PeerRegistryService_IsPeerBanned_Handler,
+		},
+		{
+			MethodName: "ListBannedPeers",
+			Handler:    _PeerRegistryService_ListBannedPeers_Handler,
+		},
+		{
+			MethodName: "ClearBannedPeers",
+			Handler:    _PeerRegistryService_ClearBannedPeers_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "services/blockchain/blockchain_api/blockchain_api.proto",
+}
