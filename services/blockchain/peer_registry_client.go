@@ -322,3 +322,111 @@ func NewPeerRegistryClientFromConn(conn *grpc.ClientConn) PeerRegistryClientI {
 		ownsConn: false,
 	}
 }
+
+// NewLocalPeerRegistryClient returns a PeerRegistryClientI backed by an
+// in-process *CentralizedPeerRegistry. Methods bypass gRPC entirely and call
+// the registry directly. Intended for unit tests in dependent packages and
+// as a fallback when running blockchain in-process is acceptable.
+func NewLocalPeerRegistryClient(reg *CentralizedPeerRegistry) PeerRegistryClientI {
+	return &localPeerRegistryClient{reg: reg}
+}
+
+type localPeerRegistryClient struct {
+	reg *CentralizedPeerRegistry
+}
+
+func (l *localPeerRegistryClient) RegisterPeer(_ context.Context, info *PeerInfo) error {
+	l.reg.Register(info)
+	return nil
+}
+
+func (l *localPeerRegistryClient) UpdatePeerMetrics(_ context.Context, peerID string, height uint32, bytesSentDelta, bytesRecvDelta uint64, recordSuccess, recordFailure, recordMalicious bool, responseTimeMs int64) error {
+	l.reg.UpdateMetrics(peerID, height, bytesSentDelta, bytesRecvDelta, recordSuccess, recordFailure, recordMalicious, responseTimeMs)
+	return nil
+}
+
+func (l *localPeerRegistryClient) RemovePeer(_ context.Context, peerID string) error {
+	l.reg.Remove(peerID)
+	return nil
+}
+
+func (l *localPeerRegistryClient) GetPeer(_ context.Context, peerID string) (*PeerInfo, bool, error) {
+	info, ok := l.reg.Get(peerID)
+	return info, ok, nil
+}
+
+func (l *localPeerRegistryClient) ListPeers(_ context.Context, transportFilter *blockchain_api.TransportType, minReputation float64, minHeight uint32, excludeBanned, sortByStorage bool) ([]*PeerInfo, error) {
+	return l.reg.List(transportFilter, minReputation, minHeight, excludeBanned, sortByStorage), nil
+}
+
+func (l *localPeerRegistryClient) AddBanScore(_ context.Context, peerID, reason string, points int32) (int32, bool, error) {
+	score, banned := l.reg.AddBanScore(peerID, reason, points)
+	return score, banned, nil
+}
+
+func (l *localPeerRegistryClient) IsPeerBanned(_ context.Context, peerID string) (bool, error) {
+	return l.reg.IsBannedPeer(peerID), nil
+}
+
+func (l *localPeerRegistryClient) ListBannedPeers(_ context.Context) ([]string, error) {
+	return l.reg.ListBannedPeers(), nil
+}
+
+func (l *localPeerRegistryClient) ClearBannedPeers(_ context.Context) error {
+	l.reg.ClearBannedPeers()
+	return nil
+}
+
+func (l *localPeerRegistryClient) UpdateConnectionState(_ context.Context, peerID string, connected bool) error {
+	l.reg.UpdateConnectionState(peerID, connected)
+	return nil
+}
+
+func (l *localPeerRegistryClient) UpdateLastMessageTime(_ context.Context, peerID string) error {
+	l.reg.UpdateLastMessageTime(peerID)
+	return nil
+}
+
+func (l *localPeerRegistryClient) UpdateStorage(_ context.Context, peerID, storage string) error {
+	l.reg.UpdateStorage(peerID, storage)
+	return nil
+}
+
+func (l *localPeerRegistryClient) RecordSyncAttempt(_ context.Context, peerID string) error {
+	l.reg.RecordSyncAttempt(peerID)
+	return nil
+}
+
+func (l *localPeerRegistryClient) ClearAllSyncAttempts(_ context.Context) (int32, error) {
+	return int32(l.reg.ClearAllSyncAttempts()), nil
+}
+
+func (l *localPeerRegistryClient) RecordBlockReceived(_ context.Context, peerID string, responseTimeMs int64) error {
+	l.reg.RecordBlockReceived(peerID, responseTimeMs)
+	return nil
+}
+
+func (l *localPeerRegistryClient) RecordSubtreeReceived(_ context.Context, peerID string, responseTimeMs int64) error {
+	l.reg.RecordSubtreeReceived(peerID, responseTimeMs)
+	return nil
+}
+
+func (l *localPeerRegistryClient) RecordTransactionReceived(_ context.Context, peerID string) error {
+	l.reg.RecordTransactionReceived(peerID)
+	return nil
+}
+
+func (l *localPeerRegistryClient) RecordCatchupError(_ context.Context, peerID, errMsg string) error {
+	l.reg.RecordCatchupError(peerID, errMsg)
+	return nil
+}
+
+func (l *localPeerRegistryClient) ResetReputation(_ context.Context, peerID string) (int32, error) {
+	return int32(l.reg.ResetReputation(peerID)), nil
+}
+
+func (l *localPeerRegistryClient) ReconsiderBadPeers(_ context.Context, cooldown time.Duration) (int32, error) {
+	return int32(l.reg.ReconsiderBadPeers(cooldown)), nil
+}
+
+func (l *localPeerRegistryClient) Close() error { return nil }

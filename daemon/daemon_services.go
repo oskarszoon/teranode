@@ -277,6 +277,12 @@ func (d *Daemon) startP2PService(ctx context.Context, appSettings *settings.Sett
 	if err != nil {
 		return err
 	}
+	peerRegistryClient, err := d.daemonStores.GetPeerRegistryClient(
+		ctx, createLogger(loggerBlockchainClient), appSettings, serviceNameP2P,
+	)
+	if err != nil {
+		return err
+	}
 	blockAssemblyClient, err := blockassembly.NewClient(ctx, createLogger(loggerBlockAssembly), appSettings)
 	if err != nil {
 		return err
@@ -329,7 +335,7 @@ func (d *Daemon) startP2PService(ctx context.Context, appSettings *settings.Sett
 	var p2pService *p2p.Server
 
 	p2pService, err = p2p.NewServer(
-		ctx, p2pLogger, appSettings, blockchainClient,
+		ctx, p2pLogger, appSettings, blockchainClient, peerRegistryClient,
 		blockAssemblyClient,
 		rejectedTxKafkaConsumerClient,
 		invalidBlocksKafkaConsumerClient,

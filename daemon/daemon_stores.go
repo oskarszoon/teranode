@@ -126,6 +126,16 @@ func (d *Stores) GetBlockchainClient(ctx context.Context, logger ulogger.Logger,
 	return blockchain.NewClient(ctx, logger, appSettings, source)
 }
 
+// GetPeerRegistryClient returns a fresh client to the centralized peer registry
+// hosted by the blockchain service. Mirrors the GetBlockchainClient pattern: every
+// call creates a new connection so the source label is preserved per-caller.
+// The source parameter is currently informational; it may be threaded through to
+// the underlying gRPC dial in a follow-up.
+func (d *Stores) GetPeerRegistryClient(ctx context.Context, _ ulogger.Logger, appSettings *settings.Settings,
+	_ string) (blockchain.PeerRegistryClientI, error) {
+	return blockchain.NewPeerRegistryClient(ctx, appSettings.BlockChain.GRPCAddress, appSettings)
+}
+
 // GetBlockAssemblyClient creates and returns a new block assembly client instance.
 func (d *Stores) GetBlockAssemblyClient(ctx context.Context, logger ulogger.Logger,
 	appSettings *settings.Settings) (blockassembly.ClientI, error) {
