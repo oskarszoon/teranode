@@ -224,3 +224,85 @@ func TestSyncCoordinator_SelectNewSyncPeer_PrefersFullNode(t *testing.T) {
 
 	require.Equal(t, "full", sc.selectNewSyncPeer())
 }
+
+func TestSyncCoordinator_FilterEligiblePeers_DropsLowAndOldPeer(t *testing.T) {
+	sc, _ := newTestSyncCoordinator(t)
+
+	peers := []*blockchain.PeerInfo{
+		{ID: "old", DataHubURL: "x", Height: 100, ReputationScore: 80},
+		{ID: "low", DataHubURL: "x", Height: 10, ReputationScore: 80},
+		{ID: "good", DataHubURL: "x", Height: 100, ReputationScore: 80},
+	}
+
+	got := sc.filterEligiblePeers(peers, "old", 50)
+
+	require.Len(t, got, 1)
+	require.Equal(t, "good", got[0].ID)
+}
+
+func TestSyncCoordinator_LogPeerList_NoPanicOnEmptyAndPopulated(t *testing.T) {
+	sc, _ := newTestSyncCoordinator(t)
+	require.NotPanics(t, func() { sc.logPeerList(nil) })
+	require.NotPanics(t, func() {
+		sc.logPeerList([]*blockchain.PeerInfo{{ID: "p", DataHubURL: "x", Height: 1}})
+	})
+}
+
+func TestSyncCoordinator_LogCandidateList_NoPanic(t *testing.T) {
+	sc, _ := newTestSyncCoordinator(t)
+	require.NotPanics(t, func() {
+		sc.logCandidateList([]*blockchain.PeerInfo{
+			{ID: "fresh", DataHubURL: "x", Height: 1},
+			{ID: "tried", DataHubURL: "x", Height: 1, LastSyncAttempt: time.Now().Add(-1 * time.Minute)},
+		})
+	})
+}
+
+func TestSyncCoordinator_SendSyncMessage_PeerNotFoundErrors(t *testing.T) {
+	sc, _ := newTestSyncCoordinator(t)
+	err := sc.sendSyncMessage("not-in-registry")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "not found")
+}
+
+func TestSyncCoordinator_SendSyncMessage_NoBlockHashErrors(t *testing.T) {
+	sc, reg := newTestSyncCoordinator(t)
+	reg.Register(&blockchain.PeerInfo{ID: "p", DataHubURL: "x", Height: 100})
+
+	err := sc.sendSyncMessage("p")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no block hash")
+}
+
+func TestSyncCoordinator_EvaluateSyncPeer_NoSyncPeerReturns(t *testing.T) {
+	sc, _ := newTestSyncCoordinator(t)
+	require.NotPanics(t, func() { sc.evaluateSyncPeer() })
+}
+
+func TestSyncCoordinator_EvaluateSyncPeer_LowRepClearsSyncPeer(t *testing.T) {
+	sc, reg := newTestSyncCoordinator(t)
+	reg.Register(&blockchain.PeerInfo{ID: "p", DataHubURL: "http://p"})
+	// Drive reputation below 20 via malicious mark.
+	reg.UpdateMetrics("p", 0, 0, 0, false, false, true, 0)
+
+	sc.mu.Lock()
+	sc.currentSyncPeer = "p"
+	sc.syncStartTime = time.Now()
+	sc.mu.Unlock()
+
+	sc.evaluateSyncPeer()
+
+	require.Empty(t, sc.GetCurrentSyncPeer(), "low-rep sync peer must be cleared")
+}
+
+func TestSyncCoordinator_EvaluateSyncPeer_MissingPeerClears(t *testing.T) {
+	sc, _ := newTestSyncCoordinator(t)
+
+	sc.mu.Lock()
+	sc.currentSyncPeer = "phantom"
+	sc.syncStartTime = time.Now()
+	sc.mu.Unlock()
+
+	sc.evaluateSyncPeer()
+	require.Empty(t, sc.GetCurrentSyncPeer())
+}

@@ -98,6 +98,13 @@ type CentralizedPeerRegistry struct {
 	peers     map[string]*PeerInfo
 	banScores map[string]*banEntry
 	banConfig BanConfig
+
+	// Background-goroutine lifecycle. stopCh is closed once by Close() to signal
+	// the ban-decay loop (and any future loops) to exit; wg waits for those
+	// loops to finish so Close() can give callers a synchronous shutdown.
+	stopCh   chan struct{}
+	stopOnce sync.Once
+	wg       sync.WaitGroup
 }
 
 // NewCentralizedPeerRegistry creates an empty peer registry with the given ban configuration.
@@ -106,6 +113,7 @@ func NewCentralizedPeerRegistry(banCfg BanConfig) *CentralizedPeerRegistry {
 		peers:     make(map[string]*PeerInfo),
 		banScores: make(map[string]*banEntry),
 		banConfig: banCfg,
+		stopCh:    make(chan struct{}),
 	}
 }
 
@@ -553,16 +561,31 @@ func (r *CentralizedPeerRegistry) ClearBannedPeers() {
 	}
 }
 
+// Close signals every background goroutine started by the registry (currently
+// just the ban-decay loop in StartBanDecay) to exit and waits for them. Safe
+// to call multiple times. Pairs with the service's Stop() so a clean shutdown
+// blocks until decay traffic has actually drained, instead of relying on the
+// service-manager's context cancellation racing with Stop's return.
+func (r *CentralizedPeerRegistry) Close() {
+	r.stopOnce.Do(func() { close(r.stopCh) })
+	r.wg.Wait()
+}
+
 // StartBanDecay starts a background goroutine that decays ban scores periodically
-// and removes zero-score entries. Call this once during service startup.
+// and removes zero-score entries. Call this once during service startup. The
+// goroutine exits on the first of: ctx cancellation OR the registry's Close().
 func (r *CentralizedPeerRegistry) StartBanDecay(ctx context.Context) {
+	r.wg.Add(1)
 	go func() {
+		defer r.wg.Done()
 		ticker := time.NewTicker(r.banConfig.DecayInterval)
 		defer ticker.Stop()
 
 		for {
 			select {
 			case <-ctx.Done():
+				return
+			case <-r.stopCh:
 				return
 			case <-ticker.C:
 				r.decayBanScores()

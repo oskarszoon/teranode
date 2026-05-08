@@ -792,6 +792,11 @@ func (b *Blockchain) sendInitialNotification(sub subscriber) {
 // Returns:
 // - Error if shutdown encounters issues, nil on successful shutdown
 func (b *Blockchain) Stop(_ context.Context) error {
+	// Drain background goroutines (ban decay loop) before saving so we can't
+	// race a decay write against the final Save snapshot. Close is idempotent
+	// and safe to call even if StartBanDecay never ran.
+	b.peerRegistry.Close()
+
 	if path := b.settings.BlockChain.PeerRegistryPath; path != "" {
 		if err := b.peerRegistry.Save(path); err != nil {
 			// A failed save on shutdown means peer state since the last

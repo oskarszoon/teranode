@@ -379,6 +379,37 @@ func TestBanDecayBanScores_BannedEntryNotCleaned(t *testing.T) {
 	require.True(t, entry.Banned)
 }
 
+func TestBanClose_StopsDecayGoroutineWithoutContextCancel(t *testing.T) {
+	cfg := shortBanConfig()
+	cfg.DecayInterval = time.Millisecond
+	cfg.DecayAmount = 50
+	r := NewCentralizedPeerRegistry(cfg)
+
+	r.AddBanScore("p", "test", 80)
+	r.StartBanDecay(context.Background())
+
+	// Close must drive the goroutine to exit even though the supplied ctx is
+	// never cancelled (this is the shutdown-race fix from the review feedback).
+	doneCh := make(chan struct{})
+	go func() {
+		r.Close()
+		close(doneCh)
+	}()
+
+	select {
+	case <-doneCh:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not return within 1s — goroutine likely leaked")
+	}
+}
+
+func TestBanClose_IsIdempotent(t *testing.T) {
+	r := NewCentralizedPeerRegistry(DefaultBanConfig())
+	r.StartBanDecay(context.Background())
+	r.Close()
+	require.NotPanics(t, func() { r.Close() }, "second Close must not panic")
+}
+
 func TestBanStartBanDecay_ContextCancellation(t *testing.T) {
 	cfg := shortBanConfig()
 	cfg.DecayInterval = time.Millisecond

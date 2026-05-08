@@ -184,6 +184,55 @@ func TestServerHelpers_OnPeerBanned_InvalidIDReturnsCleanly(t *testing.T) {
 	require.NotPanics(t, func() { s.onPeerBanned("not-a-peer-id", "spam") })
 }
 
+func TestServer_UpdateBytesReceived_SenderDelta(t *testing.T) {
+	s, reg := newServerWithLocalRegistry(t)
+	pid := mustNewPeerID(t)
+	reg.Register(&blockchain.PeerInfo{ID: pid.String()})
+
+	s.updateBytesReceived(pid.String(), "", 1024)
+	s.updateBytesReceived(pid.String(), "", 256)
+
+	got, _ := reg.Get(pid.String())
+	require.Equal(t, uint64(1280), got.BytesReceived, "delta path must accumulate without read-modify-write")
+}
+
+func TestServer_UpdateBytesReceived_GossipUpdatesBoth(t *testing.T) {
+	s, reg := newServerWithLocalRegistry(t)
+	sender := mustNewPeerID(t)
+	originator := mustNewPeerID(t)
+	reg.Register(&blockchain.PeerInfo{ID: sender.String()})
+	reg.Register(&blockchain.PeerInfo{ID: originator.String()})
+
+	s.updateBytesReceived(sender.String(), originator.String(), 500)
+
+	gotSender, _ := reg.Get(sender.String())
+	gotOriginator, _ := reg.Get(originator.String())
+	require.Equal(t, uint64(500), gotSender.BytesReceived)
+	require.Equal(t, uint64(500), gotOriginator.BytesReceived)
+}
+
+func TestServer_UpdateBytesReceived_SameSenderAndOriginatorOnlyOnce(t *testing.T) {
+	s, reg := newServerWithLocalRegistry(t)
+	pid := mustNewPeerID(t)
+	reg.Register(&blockchain.PeerInfo{ID: pid.String()})
+
+	// When the originator equals the sender we should NOT double-count.
+	s.updateBytesReceived(pid.String(), pid.String(), 100)
+
+	got, _ := reg.Get(pid.String())
+	require.Equal(t, uint64(100), got.BytesReceived)
+}
+
+func TestServer_UpdateBytesReceived_BadIDIsLoggedNotPanicked(t *testing.T) {
+	s, _ := newServerWithLocalRegistry(t)
+	require.NotPanics(t, func() { s.updateBytesReceived("not-a-peer-id", "", 10) })
+}
+
+func TestServer_UpdateBytesReceived_NilRegistryNoOp(t *testing.T) {
+	s := &Server{logger: ulogger.TestLogger{}, gCtx: context.Background()}
+	require.NotPanics(t, func() { s.updateBytesReceived("any", "", 10) })
+}
+
 func TestIsUnsafeIP(t *testing.T) {
 	tests := []struct {
 		name     string

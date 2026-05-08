@@ -306,6 +306,52 @@ func TestPersistence_BannedPeersExemptFromTTL(t *testing.T) {
 	require.True(t, ok, "banned peer must not be evicted by TTL on Load")
 }
 
+func TestPersistence_CorruptFileGetsRenamedAndRegistryStartsEmpty(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "corrupt.json")
+
+	require.NoError(t, os.WriteFile(path, []byte("not valid json {{{"), 0o600))
+
+	r := NewCentralizedPeerRegistry(DefaultBanConfig())
+	require.NoError(t, r.Load(path, 24*time.Hour))
+	require.Equal(t, 0, r.Count())
+
+	// loadPeerRegistry must rename the bad file so operators can recover it.
+	_, err := os.Stat(path + ".corrupted")
+	require.NoError(t, err)
+}
+
+func TestPersistence_LoadAnchorsLastDecayWhenMissing(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "no-decay.json")
+
+	envelope := persistedRegistry{
+		Version: persistedRegistryVersion,
+		BanScores: map[string]persistedBanEntry{
+			"p": {
+				Score:    50,
+				Banned:   false,
+				BanUntil: time.Time{},
+				// LastDecay deliberately zero — older serialised state may
+				// lack it; Load anchors it to "now" so the next AddBanScore
+				// doesn't retroactively decay across the restart gap.
+			},
+		},
+	}
+	data, err := json.Marshal(&envelope)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, data, 0o600))
+
+	r := NewCentralizedPeerRegistry(DefaultBanConfig())
+	require.NoError(t, r.Load(path, 24*time.Hour))
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	entry, ok := r.banScores["p"]
+	require.True(t, ok)
+	require.False(t, entry.LastDecay.IsZero(), "Load must anchor LastDecay")
+}
+
 func TestPersistence_ExpiredBanDroppedOnLoad(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "expired-ban.json")
