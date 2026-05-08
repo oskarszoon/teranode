@@ -2867,15 +2867,26 @@ var BlockchainAPI_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	PeerRegistryService_RegisterPeer_FullMethodName      = "/blockchain_api.PeerRegistryService/RegisterPeer"
-	PeerRegistryService_UpdatePeerMetrics_FullMethodName = "/blockchain_api.PeerRegistryService/UpdatePeerMetrics"
-	PeerRegistryService_RemovePeer_FullMethodName        = "/blockchain_api.PeerRegistryService/RemovePeer"
-	PeerRegistryService_ListPeers_FullMethodName         = "/blockchain_api.PeerRegistryService/ListPeers"
-	PeerRegistryService_GetPeer_FullMethodName           = "/blockchain_api.PeerRegistryService/GetPeer"
-	PeerRegistryService_AddBanScore_FullMethodName       = "/blockchain_api.PeerRegistryService/AddBanScore"
-	PeerRegistryService_IsPeerBanned_FullMethodName      = "/blockchain_api.PeerRegistryService/IsPeerBanned"
-	PeerRegistryService_ListBannedPeers_FullMethodName   = "/blockchain_api.PeerRegistryService/ListBannedPeers"
-	PeerRegistryService_ClearBannedPeers_FullMethodName  = "/blockchain_api.PeerRegistryService/ClearBannedPeers"
+	PeerRegistryService_RegisterPeer_FullMethodName              = "/blockchain_api.PeerRegistryService/RegisterPeer"
+	PeerRegistryService_UpdatePeerMetrics_FullMethodName         = "/blockchain_api.PeerRegistryService/UpdatePeerMetrics"
+	PeerRegistryService_RemovePeer_FullMethodName                = "/blockchain_api.PeerRegistryService/RemovePeer"
+	PeerRegistryService_ListPeers_FullMethodName                 = "/blockchain_api.PeerRegistryService/ListPeers"
+	PeerRegistryService_GetPeer_FullMethodName                   = "/blockchain_api.PeerRegistryService/GetPeer"
+	PeerRegistryService_AddBanScore_FullMethodName               = "/blockchain_api.PeerRegistryService/AddBanScore"
+	PeerRegistryService_IsPeerBanned_FullMethodName              = "/blockchain_api.PeerRegistryService/IsPeerBanned"
+	PeerRegistryService_ListBannedPeers_FullMethodName           = "/blockchain_api.PeerRegistryService/ListBannedPeers"
+	PeerRegistryService_ClearBannedPeers_FullMethodName          = "/blockchain_api.PeerRegistryService/ClearBannedPeers"
+	PeerRegistryService_UpdateConnectionState_FullMethodName     = "/blockchain_api.PeerRegistryService/UpdateConnectionState"
+	PeerRegistryService_UpdateLastMessageTime_FullMethodName     = "/blockchain_api.PeerRegistryService/UpdateLastMessageTime"
+	PeerRegistryService_UpdateStorage_FullMethodName             = "/blockchain_api.PeerRegistryService/UpdateStorage"
+	PeerRegistryService_RecordSyncAttempt_FullMethodName         = "/blockchain_api.PeerRegistryService/RecordSyncAttempt"
+	PeerRegistryService_ClearAllSyncAttempts_FullMethodName      = "/blockchain_api.PeerRegistryService/ClearAllSyncAttempts"
+	PeerRegistryService_RecordBlockReceived_FullMethodName       = "/blockchain_api.PeerRegistryService/RecordBlockReceived"
+	PeerRegistryService_RecordSubtreeReceived_FullMethodName     = "/blockchain_api.PeerRegistryService/RecordSubtreeReceived"
+	PeerRegistryService_RecordTransactionReceived_FullMethodName = "/blockchain_api.PeerRegistryService/RecordTransactionReceived"
+	PeerRegistryService_RecordCatchupError_FullMethodName        = "/blockchain_api.PeerRegistryService/RecordCatchupError"
+	PeerRegistryService_ResetReputation_FullMethodName           = "/blockchain_api.PeerRegistryService/ResetReputation"
+	PeerRegistryService_ReconsiderBadPeers_FullMethodName        = "/blockchain_api.PeerRegistryService/ReconsiderBadPeers"
 )
 
 // PeerRegistryServiceClient is the client API for PeerRegistryService service.
@@ -2904,6 +2915,31 @@ type PeerRegistryServiceClient interface {
 	ListBannedPeers(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*ListBannedPeersResponse, error)
 	// ClearBannedPeers removes all bans.
 	ClearBannedPeers(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// UpdateConnectionState flips a peer's IsConnected flag (libp2p connect/disconnect).
+	UpdateConnectionState(ctx context.Context, in *UpdateConnectionStateRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// UpdateLastMessageTime sets the peer's last message time to now.
+	UpdateLastMessageTime(ctx context.Context, in *UpdateLastMessageTimeRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// UpdateStorage sets the peer's storage mode (full, pruned, etc.).
+	UpdateStorage(ctx context.Context, in *UpdateStorageRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// RecordSyncAttempt records a sync attempt against the peer for backoff tracking.
+	RecordSyncAttempt(ctx context.Context, in *RecordSyncAttemptRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// ClearAllSyncAttempts resets sync attempt counters for all peers and returns the cleared count.
+	ClearAllSyncAttempts(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*ClearAllSyncAttemptsResponse, error)
+	// RecordBlockReceived increments the peer's BlocksReceived counter, sets LastBlockTime,
+	// and records a successful interaction with the given response time.
+	RecordBlockReceived(ctx context.Context, in *RecordReceivedRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// RecordSubtreeReceived increments the peer's SubtreesReceived counter and records a successful interaction.
+	RecordSubtreeReceived(ctx context.Context, in *RecordReceivedRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// RecordTransactionReceived increments the peer's TransactionsReceived counter.
+	RecordTransactionReceived(ctx context.Context, in *RecordReceivedRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// RecordCatchupError stores the peer's most recent catchup error for diagnostics.
+	RecordCatchupError(ctx context.Context, in *RecordCatchupErrorRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// ResetReputation resets reputation for the given peer (or all peers when peer_id is empty)
+	// to the recovery baseline and returns the count of peers reset.
+	ResetReputation(ctx context.Context, in *ResetReputationRequest, opts ...grpc.CallOption) (*ResetReputationResponse, error)
+	// ReconsiderBadPeers resets reputation for peers whose last failure is older than the cooldown
+	// and returns the count of peers reconsidered.
+	ReconsiderBadPeers(ctx context.Context, in *ReconsiderBadPeersRequest, opts ...grpc.CallOption) (*ReconsiderBadPeersResponse, error)
 }
 
 type peerRegistryServiceClient struct {
@@ -3004,6 +3040,116 @@ func (c *peerRegistryServiceClient) ClearBannedPeers(ctx context.Context, in *em
 	return out, nil
 }
 
+func (c *peerRegistryServiceClient) UpdateConnectionState(ctx context.Context, in *UpdateConnectionStateRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, PeerRegistryService_UpdateConnectionState_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *peerRegistryServiceClient) UpdateLastMessageTime(ctx context.Context, in *UpdateLastMessageTimeRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, PeerRegistryService_UpdateLastMessageTime_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *peerRegistryServiceClient) UpdateStorage(ctx context.Context, in *UpdateStorageRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, PeerRegistryService_UpdateStorage_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *peerRegistryServiceClient) RecordSyncAttempt(ctx context.Context, in *RecordSyncAttemptRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, PeerRegistryService_RecordSyncAttempt_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *peerRegistryServiceClient) ClearAllSyncAttempts(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*ClearAllSyncAttemptsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ClearAllSyncAttemptsResponse)
+	err := c.cc.Invoke(ctx, PeerRegistryService_ClearAllSyncAttempts_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *peerRegistryServiceClient) RecordBlockReceived(ctx context.Context, in *RecordReceivedRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, PeerRegistryService_RecordBlockReceived_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *peerRegistryServiceClient) RecordSubtreeReceived(ctx context.Context, in *RecordReceivedRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, PeerRegistryService_RecordSubtreeReceived_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *peerRegistryServiceClient) RecordTransactionReceived(ctx context.Context, in *RecordReceivedRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, PeerRegistryService_RecordTransactionReceived_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *peerRegistryServiceClient) RecordCatchupError(ctx context.Context, in *RecordCatchupErrorRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, PeerRegistryService_RecordCatchupError_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *peerRegistryServiceClient) ResetReputation(ctx context.Context, in *ResetReputationRequest, opts ...grpc.CallOption) (*ResetReputationResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ResetReputationResponse)
+	err := c.cc.Invoke(ctx, PeerRegistryService_ResetReputation_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *peerRegistryServiceClient) ReconsiderBadPeers(ctx context.Context, in *ReconsiderBadPeersRequest, opts ...grpc.CallOption) (*ReconsiderBadPeersResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReconsiderBadPeersResponse)
+	err := c.cc.Invoke(ctx, PeerRegistryService_ReconsiderBadPeers_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // PeerRegistryServiceServer is the server API for PeerRegistryService service.
 // All implementations must embed UnimplementedPeerRegistryServiceServer
 // for forward compatibility.
@@ -3030,6 +3176,31 @@ type PeerRegistryServiceServer interface {
 	ListBannedPeers(context.Context, *emptypb.Empty) (*ListBannedPeersResponse, error)
 	// ClearBannedPeers removes all bans.
 	ClearBannedPeers(context.Context, *emptypb.Empty) (*emptypb.Empty, error)
+	// UpdateConnectionState flips a peer's IsConnected flag (libp2p connect/disconnect).
+	UpdateConnectionState(context.Context, *UpdateConnectionStateRequest) (*emptypb.Empty, error)
+	// UpdateLastMessageTime sets the peer's last message time to now.
+	UpdateLastMessageTime(context.Context, *UpdateLastMessageTimeRequest) (*emptypb.Empty, error)
+	// UpdateStorage sets the peer's storage mode (full, pruned, etc.).
+	UpdateStorage(context.Context, *UpdateStorageRequest) (*emptypb.Empty, error)
+	// RecordSyncAttempt records a sync attempt against the peer for backoff tracking.
+	RecordSyncAttempt(context.Context, *RecordSyncAttemptRequest) (*emptypb.Empty, error)
+	// ClearAllSyncAttempts resets sync attempt counters for all peers and returns the cleared count.
+	ClearAllSyncAttempts(context.Context, *emptypb.Empty) (*ClearAllSyncAttemptsResponse, error)
+	// RecordBlockReceived increments the peer's BlocksReceived counter, sets LastBlockTime,
+	// and records a successful interaction with the given response time.
+	RecordBlockReceived(context.Context, *RecordReceivedRequest) (*emptypb.Empty, error)
+	// RecordSubtreeReceived increments the peer's SubtreesReceived counter and records a successful interaction.
+	RecordSubtreeReceived(context.Context, *RecordReceivedRequest) (*emptypb.Empty, error)
+	// RecordTransactionReceived increments the peer's TransactionsReceived counter.
+	RecordTransactionReceived(context.Context, *RecordReceivedRequest) (*emptypb.Empty, error)
+	// RecordCatchupError stores the peer's most recent catchup error for diagnostics.
+	RecordCatchupError(context.Context, *RecordCatchupErrorRequest) (*emptypb.Empty, error)
+	// ResetReputation resets reputation for the given peer (or all peers when peer_id is empty)
+	// to the recovery baseline and returns the count of peers reset.
+	ResetReputation(context.Context, *ResetReputationRequest) (*ResetReputationResponse, error)
+	// ReconsiderBadPeers resets reputation for peers whose last failure is older than the cooldown
+	// and returns the count of peers reconsidered.
+	ReconsiderBadPeers(context.Context, *ReconsiderBadPeersRequest) (*ReconsiderBadPeersResponse, error)
 	mustEmbedUnimplementedPeerRegistryServiceServer()
 }
 
@@ -3066,6 +3237,39 @@ func (UnimplementedPeerRegistryServiceServer) ListBannedPeers(context.Context, *
 }
 func (UnimplementedPeerRegistryServiceServer) ClearBannedPeers(context.Context, *emptypb.Empty) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method ClearBannedPeers not implemented")
+}
+func (UnimplementedPeerRegistryServiceServer) UpdateConnectionState(context.Context, *UpdateConnectionStateRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdateConnectionState not implemented")
+}
+func (UnimplementedPeerRegistryServiceServer) UpdateLastMessageTime(context.Context, *UpdateLastMessageTimeRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdateLastMessageTime not implemented")
+}
+func (UnimplementedPeerRegistryServiceServer) UpdateStorage(context.Context, *UpdateStorageRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdateStorage not implemented")
+}
+func (UnimplementedPeerRegistryServiceServer) RecordSyncAttempt(context.Context, *RecordSyncAttemptRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method RecordSyncAttempt not implemented")
+}
+func (UnimplementedPeerRegistryServiceServer) ClearAllSyncAttempts(context.Context, *emptypb.Empty) (*ClearAllSyncAttemptsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ClearAllSyncAttempts not implemented")
+}
+func (UnimplementedPeerRegistryServiceServer) RecordBlockReceived(context.Context, *RecordReceivedRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method RecordBlockReceived not implemented")
+}
+func (UnimplementedPeerRegistryServiceServer) RecordSubtreeReceived(context.Context, *RecordReceivedRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method RecordSubtreeReceived not implemented")
+}
+func (UnimplementedPeerRegistryServiceServer) RecordTransactionReceived(context.Context, *RecordReceivedRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method RecordTransactionReceived not implemented")
+}
+func (UnimplementedPeerRegistryServiceServer) RecordCatchupError(context.Context, *RecordCatchupErrorRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method RecordCatchupError not implemented")
+}
+func (UnimplementedPeerRegistryServiceServer) ResetReputation(context.Context, *ResetReputationRequest) (*ResetReputationResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ResetReputation not implemented")
+}
+func (UnimplementedPeerRegistryServiceServer) ReconsiderBadPeers(context.Context, *ReconsiderBadPeersRequest) (*ReconsiderBadPeersResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReconsiderBadPeers not implemented")
 }
 func (UnimplementedPeerRegistryServiceServer) mustEmbedUnimplementedPeerRegistryServiceServer() {}
 func (UnimplementedPeerRegistryServiceServer) testEmbeddedByValue()                             {}
@@ -3250,6 +3454,204 @@ func _PeerRegistryService_ClearBannedPeers_Handler(srv interface{}, ctx context.
 	return interceptor(ctx, in, info, handler)
 }
 
+func _PeerRegistryService_UpdateConnectionState_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateConnectionStateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PeerRegistryServiceServer).UpdateConnectionState(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PeerRegistryService_UpdateConnectionState_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PeerRegistryServiceServer).UpdateConnectionState(ctx, req.(*UpdateConnectionStateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PeerRegistryService_UpdateLastMessageTime_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateLastMessageTimeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PeerRegistryServiceServer).UpdateLastMessageTime(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PeerRegistryService_UpdateLastMessageTime_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PeerRegistryServiceServer).UpdateLastMessageTime(ctx, req.(*UpdateLastMessageTimeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PeerRegistryService_UpdateStorage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateStorageRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PeerRegistryServiceServer).UpdateStorage(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PeerRegistryService_UpdateStorage_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PeerRegistryServiceServer).UpdateStorage(ctx, req.(*UpdateStorageRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PeerRegistryService_RecordSyncAttempt_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RecordSyncAttemptRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PeerRegistryServiceServer).RecordSyncAttempt(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PeerRegistryService_RecordSyncAttempt_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PeerRegistryServiceServer).RecordSyncAttempt(ctx, req.(*RecordSyncAttemptRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PeerRegistryService_ClearAllSyncAttempts_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(emptypb.Empty)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PeerRegistryServiceServer).ClearAllSyncAttempts(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PeerRegistryService_ClearAllSyncAttempts_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PeerRegistryServiceServer).ClearAllSyncAttempts(ctx, req.(*emptypb.Empty))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PeerRegistryService_RecordBlockReceived_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RecordReceivedRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PeerRegistryServiceServer).RecordBlockReceived(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PeerRegistryService_RecordBlockReceived_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PeerRegistryServiceServer).RecordBlockReceived(ctx, req.(*RecordReceivedRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PeerRegistryService_RecordSubtreeReceived_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RecordReceivedRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PeerRegistryServiceServer).RecordSubtreeReceived(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PeerRegistryService_RecordSubtreeReceived_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PeerRegistryServiceServer).RecordSubtreeReceived(ctx, req.(*RecordReceivedRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PeerRegistryService_RecordTransactionReceived_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RecordReceivedRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PeerRegistryServiceServer).RecordTransactionReceived(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PeerRegistryService_RecordTransactionReceived_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PeerRegistryServiceServer).RecordTransactionReceived(ctx, req.(*RecordReceivedRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PeerRegistryService_RecordCatchupError_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RecordCatchupErrorRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PeerRegistryServiceServer).RecordCatchupError(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PeerRegistryService_RecordCatchupError_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PeerRegistryServiceServer).RecordCatchupError(ctx, req.(*RecordCatchupErrorRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PeerRegistryService_ResetReputation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ResetReputationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PeerRegistryServiceServer).ResetReputation(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PeerRegistryService_ResetReputation_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PeerRegistryServiceServer).ResetReputation(ctx, req.(*ResetReputationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PeerRegistryService_ReconsiderBadPeers_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReconsiderBadPeersRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PeerRegistryServiceServer).ReconsiderBadPeers(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PeerRegistryService_ReconsiderBadPeers_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PeerRegistryServiceServer).ReconsiderBadPeers(ctx, req.(*ReconsiderBadPeersRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // PeerRegistryService_ServiceDesc is the grpc.ServiceDesc for PeerRegistryService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -3292,6 +3694,50 @@ var PeerRegistryService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ClearBannedPeers",
 			Handler:    _PeerRegistryService_ClearBannedPeers_Handler,
+		},
+		{
+			MethodName: "UpdateConnectionState",
+			Handler:    _PeerRegistryService_UpdateConnectionState_Handler,
+		},
+		{
+			MethodName: "UpdateLastMessageTime",
+			Handler:    _PeerRegistryService_UpdateLastMessageTime_Handler,
+		},
+		{
+			MethodName: "UpdateStorage",
+			Handler:    _PeerRegistryService_UpdateStorage_Handler,
+		},
+		{
+			MethodName: "RecordSyncAttempt",
+			Handler:    _PeerRegistryService_RecordSyncAttempt_Handler,
+		},
+		{
+			MethodName: "ClearAllSyncAttempts",
+			Handler:    _PeerRegistryService_ClearAllSyncAttempts_Handler,
+		},
+		{
+			MethodName: "RecordBlockReceived",
+			Handler:    _PeerRegistryService_RecordBlockReceived_Handler,
+		},
+		{
+			MethodName: "RecordSubtreeReceived",
+			Handler:    _PeerRegistryService_RecordSubtreeReceived_Handler,
+		},
+		{
+			MethodName: "RecordTransactionReceived",
+			Handler:    _PeerRegistryService_RecordTransactionReceived_Handler,
+		},
+		{
+			MethodName: "RecordCatchupError",
+			Handler:    _PeerRegistryService_RecordCatchupError_Handler,
+		},
+		{
+			MethodName: "ResetReputation",
+			Handler:    _PeerRegistryService_ResetReputation_Handler,
+		},
+		{
+			MethodName: "ReconsiderBadPeers",
+			Handler:    _PeerRegistryService_ReconsiderBadPeers_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

@@ -72,21 +72,21 @@ func TestCentralizedPeerRegistry_ListFilters(t *testing.T) {
 	r.AddBanScore("banned-peer", "spam", 100)
 
 	// No filters — returns all.
-	all := r.List(nil, 0, 0, false)
+	all := r.List(nil, 0, 0, false, false)
 	require.Len(t, all, 3)
 
 	// Filter by transport.
 	httpFilter := blockchain_api.TransportType_TRANSPORT_HTTP
-	httpOnly := r.List(&httpFilter, 0, 0, false)
+	httpOnly := r.List(&httpFilter, 0, 0, false, false)
 	require.Len(t, httpOnly, 1)
 	require.Equal(t, "http-peer", httpOnly[0].ID)
 
 	// Exclude banned.
-	noBanned := r.List(nil, 0, 0, true)
+	noBanned := r.List(nil, 0, 0, true, false)
 	require.Len(t, noBanned, 2)
 
 	// Min height.
-	highOnly := r.List(nil, 0, 100, false)
+	highOnly := r.List(nil, 0, 100, false, false)
 	require.Len(t, highOnly, 2) // http-peer (100) and banned-peer (200)
 }
 
@@ -100,7 +100,7 @@ func TestCentralizedPeerRegistry_ListSortedByReputation(t *testing.T) {
 	// Record a success for "high" to push it above 50.
 	r.UpdateMetrics("high", 0, 0, 0, true, false, false, 100)
 
-	peers := r.List(nil, 0, 0, false)
+	peers := r.List(nil, 0, 0, false, false)
 	require.Len(t, peers, 2)
 	// Higher reputation should come first.
 	require.Equal(t, "high", peers[0].ID)
@@ -224,4 +224,179 @@ func TestCentralizedPeerRegistry_Persistence_TTLCleanup(t *testing.T) {
 	require.True(t, ok)
 	_, ok = r2.Get("stale")
 	require.False(t, ok)
+}
+
+// ---------------------------------------------------------------------------
+// P2P-domain method coverage
+// ---------------------------------------------------------------------------
+
+func TestCentralizedPeerRegistry_UpdateConnectionState(t *testing.T) {
+	r := NewCentralizedPeerRegistry(DefaultBanConfig())
+
+	r.Register(&PeerInfo{ID: "p", IsConnected: false})
+	r.UpdateConnectionState("p", true)
+
+	got, _ := r.Get("p")
+	require.True(t, got.IsConnected)
+
+	r.UpdateConnectionState("p", false)
+	got, _ = r.Get("p")
+	require.False(t, got.IsConnected)
+
+	// Unknown peer — no panic, no insert.
+	r.UpdateConnectionState("ghost", true)
+	require.Equal(t, 1, r.Count())
+}
+
+func TestCentralizedPeerRegistry_RegisterPreservesIsConnectedOnUpdate(t *testing.T) {
+	r := NewCentralizedPeerRegistry(DefaultBanConfig())
+
+	r.Register(&PeerInfo{ID: "p"})
+	r.UpdateConnectionState("p", true)
+
+	// A subsequent Register call (without IsConnected set) must not flip the flag.
+	r.Register(&PeerInfo{ID: "p", Height: 100})
+	got, _ := r.Get("p")
+	require.True(t, got.IsConnected, "Register update path must not overwrite IsConnected")
+	require.Equal(t, uint32(100), got.Height)
+}
+
+func TestCentralizedPeerRegistry_UpdateLastMessageTimeAndStorage(t *testing.T) {
+	r := NewCentralizedPeerRegistry(DefaultBanConfig())
+
+	r.Register(&PeerInfo{ID: "p"})
+	first, _ := r.Get("p")
+
+	time.Sleep(2 * time.Millisecond)
+	r.UpdateLastMessageTime("p")
+	r.UpdateStorage("p", "full")
+
+	second, _ := r.Get("p")
+	require.True(t, second.LastMessageTime.After(first.LastMessageTime))
+	require.Equal(t, "full", second.Storage)
+}
+
+func TestCentralizedPeerRegistry_RecordSyncAttemptAndClear(t *testing.T) {
+	r := NewCentralizedPeerRegistry(DefaultBanConfig())
+
+	r.Register(&PeerInfo{ID: "a"})
+	r.Register(&PeerInfo{ID: "b"})
+
+	r.RecordSyncAttempt("a")
+	r.RecordSyncAttempt("a")
+	r.RecordSyncAttempt("b")
+
+	a, _ := r.Get("a")
+	require.Equal(t, int32(2), a.SyncAttemptCount)
+	require.False(t, a.LastSyncAttempt.IsZero())
+
+	cleared := r.ClearAllSyncAttempts()
+	require.Equal(t, 2, cleared)
+
+	a, _ = r.Get("a")
+	require.True(t, a.LastSyncAttempt.IsZero())
+	// Counter is intentionally NOT reset by ClearAll — only the timestamp.
+}
+
+func TestCentralizedPeerRegistry_RecordBlockSubtreeTransaction(t *testing.T) {
+	r := NewCentralizedPeerRegistry(DefaultBanConfig())
+
+	r.Register(&PeerInfo{ID: "p"})
+
+	r.RecordBlockReceived("p", 150)
+	r.RecordSubtreeReceived("p", 0)
+	r.RecordTransactionReceived("p")
+
+	got, _ := r.Get("p")
+	require.Equal(t, int64(1), got.BlocksReceived)
+	require.Equal(t, int64(1), got.SubtreesReceived)
+	require.Equal(t, int64(1), got.TransactionsReceived)
+	require.Equal(t, int64(3), got.InteractionSuccesses)
+	require.Equal(t, int64(150), got.AvgResponseTimeMs)
+	require.False(t, got.LastBlockTime.IsZero())
+}
+
+func TestCentralizedPeerRegistry_RecordCatchupError(t *testing.T) {
+	r := NewCentralizedPeerRegistry(DefaultBanConfig())
+
+	r.Register(&PeerInfo{ID: "p"})
+	r.RecordCatchupError("p", "block 0xdead missing")
+
+	got, _ := r.Get("p")
+	require.Equal(t, "block 0xdead missing", got.LastCatchupError)
+	require.False(t, got.LastCatchupErrorTime.IsZero())
+}
+
+func TestCentralizedPeerRegistry_ResetReputation(t *testing.T) {
+	r := NewCentralizedPeerRegistry(DefaultBanConfig())
+
+	r.Register(&PeerInfo{ID: "a"})
+	r.UpdateMetrics("a", 0, 0, 0, false, false, true, 0)
+	r.RecordSyncAttempt("a")
+
+	require.Equal(t, 1, r.ResetReputation("a"))
+	got, _ := r.Get("a")
+	require.Equal(t, 50.0, got.ReputationScore)
+	require.Equal(t, int64(0), got.MaliciousCount)
+	require.Equal(t, int32(0), got.SyncAttemptCount)
+
+	// Reset all.
+	r.Register(&PeerInfo{ID: "b"})
+	r.UpdateMetrics("b", 0, 0, 0, false, false, true, 0)
+	require.Equal(t, 2, r.ResetReputation(""))
+}
+
+func TestCentralizedPeerRegistry_Cleanup_TTL(t *testing.T) {
+	r := NewCentralizedPeerRegistry(DefaultBanConfig())
+
+	r.Register(&PeerInfo{ID: "fresh"})
+	r.Register(&PeerInfo{ID: "stale"})
+
+	// Backdate stale beyond TTL.
+	r.mu.Lock()
+	r.peers["stale"].LastMessageTime = time.Now().Add(-2 * time.Hour)
+	r.mu.Unlock()
+
+	expired, lru := r.Cleanup(0, 1*time.Hour)
+	require.Equal(t, 1, expired)
+	require.Equal(t, 0, lru)
+	require.Equal(t, 1, r.Count())
+}
+
+func TestCentralizedPeerRegistry_Cleanup_LRUExemptsConnectedAndBanned(t *testing.T) {
+	r := NewCentralizedPeerRegistry(DefaultBanConfig())
+
+	r.Register(&PeerInfo{ID: "connected"})
+	r.UpdateConnectionState("connected", true)
+
+	r.Register(&PeerInfo{ID: "banned"})
+	r.AddBanScore("banned", "spam", 200)
+
+	for _, id := range []string{"a", "b", "c", "d"} {
+		r.Register(&PeerInfo{ID: id})
+	}
+
+	// maxSize=2 and 2 exempt → all 4 non-exempt evicted.
+	expired, lru := r.Cleanup(2, 24*time.Hour)
+	require.Equal(t, 0, expired)
+	require.Equal(t, 4, lru)
+	require.Equal(t, 2, r.Count())
+}
+
+func TestCentralizedPeerRegistry_List_SortByStorage(t *testing.T) {
+	r := NewCentralizedPeerRegistry(DefaultBanConfig())
+
+	r.Register(&PeerInfo{ID: "pruned-high", Storage: "pruned"})
+	r.Register(&PeerInfo{ID: "full-low", Storage: "full"})
+	r.Register(&PeerInfo{ID: "unknown", Storage: ""})
+
+	// Boost reputation of pruned-high to confirm storage takes precedence.
+	r.UpdateMetrics("pruned-high", 0, 0, 0, true, false, false, 100)
+	r.UpdateMetrics("pruned-high", 0, 0, 0, true, false, false, 100)
+
+	peers := r.List(nil, 0, 0, false, true)
+	require.Len(t, peers, 3)
+	require.Equal(t, "full-low", peers[0].ID, "full storage must rank above pruned regardless of reputation")
+	require.Equal(t, "pruned-high", peers[1].ID)
+	require.Equal(t, "unknown", peers[2].ID)
 }

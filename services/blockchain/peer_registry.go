@@ -38,6 +38,21 @@ type PeerInfo struct {
 	LastInteractionFailure time.Time
 	LastSeen               time.Time
 	BlockHash              *chainhash.Hash
+
+	// P2P-domain fields. Migrated from services/p2p so the blockchain registry is
+	// the single source of truth for peer state across libp2p connections.
+	IsConnected          bool
+	LastBlockTime        time.Time
+	BlocksReceived       int64
+	SubtreesReceived     int64
+	TransactionsReceived int64
+	CatchupBlocks        int64
+	LastSyncAttempt      time.Time
+	SyncAttemptCount     int32
+	LastReputationReset  time.Time
+	ReputationResetCount int32
+	LastCatchupError     string
+	LastCatchupErrorTime time.Time
 }
 
 // banEntry tracks ban scoring state for a single peer.
@@ -233,12 +248,15 @@ func (r *CentralizedPeerRegistry) Get(peerID string) (*PeerInfo, bool) {
 }
 
 // List returns copies of peers that pass all active filters, sorted by reputation
-// descending. Passing nil for transportFilter disables that filter.
+// descending. Passing nil for transportFilter disables that filter. When
+// sortByStorage is true, "full" peers sort ahead of "pruned" peers ahead of
+// unknown — applied as the primary key, with reputation as the secondary key.
 func (r *CentralizedPeerRegistry) List(
 	transportFilter *blockchain_api.TransportType,
 	minReputation float64,
 	minHeight uint32,
 	excludeBanned bool,
+	sortByStorage bool,
 ) []*PeerInfo {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -268,6 +286,12 @@ func (r *CentralizedPeerRegistry) List(
 	}
 
 	sort.Slice(result, func(i, j int) bool {
+		if sortByStorage {
+			si, sj := storagePreference(result[i].Storage), storagePreference(result[j].Storage)
+			if si != sj {
+				return si > sj
+			}
+		}
 		if result[i].ReputationScore != result[j].ReputationScore {
 			return result[i].ReputationScore > result[j].ReputationScore
 		}
@@ -276,6 +300,19 @@ func (r *CentralizedPeerRegistry) List(
 	})
 
 	return result
+}
+
+// storagePreference returns a relative ordering for storage modes used by
+// catchup peer selection: full > pruned > unknown.
+func storagePreference(mode string) int {
+	switch mode {
+	case "full":
+		return 3
+	case "pruned":
+		return 2
+	default:
+		return 1
+	}
 }
 
 // Count returns the number of peers currently in the registry.
@@ -532,23 +569,282 @@ func (r *CentralizedPeerRegistry) decayBanScores() {
 // Additional Peer Methods
 // ---------------------------------------------------------------------------
 
-// ReconsiderBadPeers resets reputation for peers whose last failure is older than cooldown.
-// Returns the number of peers reconsidered.
+// ReconsiderBadPeers resets reputation for peers that have been bad for a while.
+// Returns the number of peers that had their reputation recovered. Mirrors the
+// semantics of the original P2P registry: only peers with reputation < 20 are
+// candidates, the configured cooldown applies after the most recent failure,
+// and previously-reset peers must wait an exponentially longer cooldown
+// (3× per prior reset) before being eligible again.
 func (r *CentralizedPeerRegistry) ReconsiderBadPeers(cooldown time.Duration) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	count := 0
-	cutoff := time.Now().Add(-cooldown)
+	peersRecovered := 0
+	now := time.Now()
+
 	for _, info := range r.peers {
-		if info.ReputationScore < 30 && !info.LastInteractionFailure.IsZero() && info.LastInteractionFailure.Before(cutoff) {
-			info.InteractionAttempts = 0
-			info.InteractionSuccesses = 0
-			info.InteractionFailures = 0
-			info.MaliciousCount = 0
-			info.ReputationScore = 50.0
-			count++
+		if info.ReputationScore >= 20 {
+			continue
+		}
+		if info.LastInteractionFailure.IsZero() || now.Sub(info.LastInteractionFailure) < cooldown {
+			continue
+		}
+
+		if !info.LastReputationReset.IsZero() {
+			requiredCooldown := cooldown
+			for i := 0; i < int(info.ReputationResetCount); i++ {
+				requiredCooldown *= 3
+			}
+			if now.Sub(info.LastReputationReset) < requiredCooldown {
+				continue
+			}
+		}
+
+		info.ReputationScore = 30
+		info.MaliciousCount = 0
+		info.LastReputationReset = now
+		info.ReputationResetCount++
+
+		peersRecovered++
+	}
+
+	return peersRecovered
+}
+
+// ResetReputation resets reputation metrics for a specific peer or all peers.
+// When peerID is empty, every peer is reset. Returns the number of peers reset.
+func (r *CentralizedPeerRegistry) ResetReputation(peerID string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	resetOne := func(info *PeerInfo) {
+		info.InteractionAttempts = 0
+		info.InteractionSuccesses = 0
+		info.InteractionFailures = 0
+		info.LastInteractionAttempt = time.Time{}
+		info.LastInteractionSuccess = time.Time{}
+		info.LastInteractionFailure = time.Time{}
+
+		info.ReputationScore = 50.0
+		info.MaliciousCount = 0
+		info.AvgResponseTimeMs = 0
+
+		info.LastCatchupError = ""
+		info.LastCatchupErrorTime = time.Time{}
+
+		info.LastReputationReset = time.Time{}
+		info.ReputationResetCount = 0
+
+		info.LastSyncAttempt = time.Time{}
+		info.SyncAttemptCount = 0
+	}
+
+	if peerID == "" {
+		for _, info := range r.peers {
+			resetOne(info)
+		}
+		return len(r.peers)
+	}
+
+	info, ok := r.peers[peerID]
+	if !ok {
+		return 0
+	}
+	resetOne(info)
+	return 1
+}
+
+// UpdateConnectionState flips the IsConnected flag for an existing peer entry.
+// No-op when the peer is unknown.
+func (r *CentralizedPeerRegistry) UpdateConnectionState(peerID string, connected bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if info, ok := r.peers[peerID]; ok {
+		info.IsConnected = connected
+	}
+}
+
+// UpdateLastMessageTime sets the peer's last-message timestamp to now.
+func (r *CentralizedPeerRegistry) UpdateLastMessageTime(peerID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if info, ok := r.peers[peerID]; ok {
+		info.LastMessageTime = time.Now()
+	}
+}
+
+// UpdateStorage records the peer's storage mode (e.g. "full", "pruned").
+func (r *CentralizedPeerRegistry) UpdateStorage(peerID string, storage string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if info, ok := r.peers[peerID]; ok {
+		info.Storage = storage
+	}
+}
+
+// RecordSyncAttempt notes that we attempted to sync with the peer for backoff tracking.
+func (r *CentralizedPeerRegistry) RecordSyncAttempt(peerID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if info, ok := r.peers[peerID]; ok {
+		info.LastSyncAttempt = time.Now()
+		info.SyncAttemptCount++
+	}
+}
+
+// ClearAllSyncAttempts resets sync-attempt tracking on every peer that has any
+// and returns the number cleared. Used when every peer has been tried and we
+// want to retry from scratch.
+func (r *CentralizedPeerRegistry) ClearAllSyncAttempts() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	cleared := 0
+	for _, info := range r.peers {
+		if !info.LastSyncAttempt.IsZero() {
+			info.LastSyncAttempt = time.Time{}
+			cleared++
 		}
 	}
-	return count
+	return cleared
+}
+
+// recordReceivedSuccessLocked is the shared body of RecordBlockReceived /
+// RecordSubtreeReceived: increment the supplied counter, mark a successful
+// interaction, blend the response time into the rolling average, recompute
+// reputation. Caller must hold the write lock.
+func (r *CentralizedPeerRegistry) recordReceivedSuccessLocked(info *PeerInfo, counter *int64, responseTimeMs int64) {
+	*counter++
+	info.InteractionSuccesses++
+	info.LastInteractionSuccess = time.Now()
+	info.LastSeen = info.LastInteractionSuccess
+
+	if responseTimeMs > 0 {
+		if info.AvgResponseTimeMs == 0 {
+			info.AvgResponseTimeMs = responseTimeMs
+		} else {
+			info.AvgResponseTimeMs = int64(float64(info.AvgResponseTimeMs)*0.8 + float64(responseTimeMs)*0.2)
+		}
+	}
+
+	r.calculateAndUpdateReputation(info)
+}
+
+// RecordBlockReceived increments BlocksReceived, sets LastBlockTime, blends the
+// response time into the running average, and updates reputation.
+func (r *CentralizedPeerRegistry) RecordBlockReceived(peerID string, responseTimeMs int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if info, ok := r.peers[peerID]; ok {
+		info.LastBlockTime = time.Now()
+		r.recordReceivedSuccessLocked(info, &info.BlocksReceived, responseTimeMs)
+	}
+}
+
+// RecordSubtreeReceived increments SubtreesReceived and records a successful interaction.
+func (r *CentralizedPeerRegistry) RecordSubtreeReceived(peerID string, responseTimeMs int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if info, ok := r.peers[peerID]; ok {
+		r.recordReceivedSuccessLocked(info, &info.SubtreesReceived, responseTimeMs)
+	}
+}
+
+// RecordTransactionReceived increments TransactionsReceived and records a successful interaction.
+// Transactions are broadcast so we do not track per-tx response time.
+func (r *CentralizedPeerRegistry) RecordTransactionReceived(peerID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if info, ok := r.peers[peerID]; ok {
+		info.TransactionsReceived++
+		info.InteractionSuccesses++
+		info.LastInteractionSuccess = time.Now()
+		info.LastSeen = info.LastInteractionSuccess
+		r.calculateAndUpdateReputation(info)
+	}
+}
+
+// RecordCatchupError stores the most recent catchup error reported against the peer.
+func (r *CentralizedPeerRegistry) RecordCatchupError(peerID string, errMsg string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if info, ok := r.peers[peerID]; ok {
+		info.LastCatchupError = errMsg
+		info.LastCatchupErrorTime = time.Now()
+	}
+}
+
+// Cleanup evicts stale peers to bound memory and lookup cost. Phase 1 (TTL)
+// drops peers whose LastMessageTime is older than ttl. Phase 2 (LRU) then drops
+// oldest-first until the non-exempt portion of the registry fits under maxSize.
+// Connected peers and banned peers are exempt from both phases. A maxSize of 0
+// disables the LRU phase. Returns (expired, lru) counts.
+func (r *CentralizedPeerRegistry) Cleanup(maxSize int, ttl time.Duration) (int, int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	now := time.Now()
+	expired := 0
+
+	for id, info := range r.peers {
+		if isCleanupExempt(info) {
+			continue
+		}
+		if !info.LastMessageTime.IsZero() && now.Sub(info.LastMessageTime) <= ttl {
+			continue
+		}
+		delete(r.peers, id)
+		expired++
+	}
+
+	if maxSize <= 0 {
+		return expired, 0
+	}
+
+	type candidate struct {
+		id   string
+		last time.Time
+	}
+	candidates := make([]candidate, 0, len(r.peers))
+	exemptCount := 0
+	for id, info := range r.peers {
+		if isCleanupExempt(info) {
+			exemptCount++
+			continue
+		}
+		candidates = append(candidates, candidate{id: id, last: info.LastMessageTime})
+	}
+
+	target := maxSize - exemptCount
+	if target < 0 {
+		target = 0
+	}
+	toEvict := len(candidates) - target
+	if toEvict <= 0 {
+		return expired, 0
+	}
+
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].last.Before(candidates[j].last)
+	})
+
+	for i := 0; i < toEvict; i++ {
+		delete(r.peers, candidates[i].id)
+	}
+
+	return expired, toEvict
+}
+
+// isCleanupExempt reports whether a peer must be retained regardless of TTL or
+// size pressure. Caller must hold the registry lock.
+func isCleanupExempt(info *PeerInfo) bool {
+	return info.IsConnected || info.IsBanned
 }

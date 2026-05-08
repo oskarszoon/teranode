@@ -2,6 +2,7 @@ package blockchain
 
 import (
 	"context"
+	"time"
 
 	"github.com/bsv-blockchain/teranode/services/blockchain/blockchain_api"
 	"github.com/bsv-blockchain/teranode/settings"
@@ -27,7 +28,9 @@ type PeerRegistryClientI interface {
 	GetPeer(ctx context.Context, peerID string) (*PeerInfo, bool, error)
 
 	// ListPeers returns peers matching the given filters, sorted by reputation.
-	ListPeers(ctx context.Context, transportFilter *blockchain_api.TransportType, minReputation float64, minHeight uint32, excludeBanned bool) ([]*PeerInfo, error)
+	// When sortByStorage is true, peers are sorted primarily by storage mode
+	// (full > pruned > unknown) before reputation.
+	ListPeers(ctx context.Context, transportFilter *blockchain_api.TransportType, minReputation float64, minHeight uint32, excludeBanned, sortByStorage bool) ([]*PeerInfo, error)
 
 	// AddBanScore adds penalty points to a peer and returns updated score and ban status.
 	AddBanScore(ctx context.Context, peerID string, reason string, points int32) (int32, bool, error)
@@ -40,6 +43,42 @@ type PeerRegistryClientI interface {
 
 	// ClearBannedPeers removes all bans.
 	ClearBannedPeers(ctx context.Context) error
+
+	// UpdateConnectionState flips the IsConnected flag on a peer entry.
+	UpdateConnectionState(ctx context.Context, peerID string, connected bool) error
+
+	// UpdateLastMessageTime sets the peer's last message time to now.
+	UpdateLastMessageTime(ctx context.Context, peerID string) error
+
+	// UpdateStorage sets the peer's storage mode (full, pruned, etc.).
+	UpdateStorage(ctx context.Context, peerID, storage string) error
+
+	// RecordSyncAttempt records a sync attempt against the peer for backoff tracking.
+	RecordSyncAttempt(ctx context.Context, peerID string) error
+
+	// ClearAllSyncAttempts resets sync attempt counters for all peers and returns the cleared count.
+	ClearAllSyncAttempts(ctx context.Context) (int32, error)
+
+	// RecordBlockReceived increments BlocksReceived, sets LastBlockTime, and
+	// records a successful interaction with the given response time.
+	RecordBlockReceived(ctx context.Context, peerID string, responseTimeMs int64) error
+
+	// RecordSubtreeReceived increments SubtreesReceived and records a successful interaction.
+	RecordSubtreeReceived(ctx context.Context, peerID string, responseTimeMs int64) error
+
+	// RecordTransactionReceived increments TransactionsReceived.
+	RecordTransactionReceived(ctx context.Context, peerID string) error
+
+	// RecordCatchupError stores the peer's most recent catchup error.
+	RecordCatchupError(ctx context.Context, peerID, errMsg string) error
+
+	// ResetReputation resets reputation for a peer (or all peers when peerID is empty).
+	// Returns the count of peers reset.
+	ResetReputation(ctx context.Context, peerID string) (int32, error)
+
+	// ReconsiderBadPeers resets reputation for peers whose last failure is older than cooldown.
+	// Returns the count of peers reconsidered.
+	ReconsiderBadPeers(ctx context.Context, cooldown time.Duration) (int32, error)
 
 	// Close releases any resources held by the client.
 	// For clients created with NewPeerRegistryClientFromConn, Close is a no-op
@@ -111,11 +150,12 @@ func (c *PeerRegistryClient) GetPeer(ctx context.Context, peerID string) (*PeerI
 }
 
 // ListPeers implements PeerRegistryClientI.
-func (c *PeerRegistryClient) ListPeers(ctx context.Context, transportFilter *blockchain_api.TransportType, minReputation float64, minHeight uint32, excludeBanned bool) ([]*PeerInfo, error) {
+func (c *PeerRegistryClient) ListPeers(ctx context.Context, transportFilter *blockchain_api.TransportType, minReputation float64, minHeight uint32, excludeBanned, sortByStorage bool) ([]*PeerInfo, error) {
 	req := &blockchain_api.ListPeersRequest{
 		MinReputation: minReputation,
 		MinHeight:     minHeight,
 		ExcludeBanned: excludeBanned,
+		SortByStorage: sortByStorage,
 	}
 	if transportFilter != nil {
 		req.FilterTransport = true
@@ -169,6 +209,98 @@ func (c *PeerRegistryClient) ListBannedPeers(ctx context.Context) ([]string, err
 func (c *PeerRegistryClient) ClearBannedPeers(ctx context.Context) error {
 	_, err := c.client.ClearBannedPeers(ctx, &emptypb.Empty{})
 	return err
+}
+
+// UpdateConnectionState implements PeerRegistryClientI.
+func (c *PeerRegistryClient) UpdateConnectionState(ctx context.Context, peerID string, connected bool) error {
+	_, err := c.client.UpdateConnectionState(ctx, &blockchain_api.UpdateConnectionStateRequest{
+		PeerId:    peerID,
+		Connected: connected,
+	})
+	return err
+}
+
+// UpdateLastMessageTime implements PeerRegistryClientI.
+func (c *PeerRegistryClient) UpdateLastMessageTime(ctx context.Context, peerID string) error {
+	_, err := c.client.UpdateLastMessageTime(ctx, &blockchain_api.UpdateLastMessageTimeRequest{PeerId: peerID})
+	return err
+}
+
+// UpdateStorage implements PeerRegistryClientI.
+func (c *PeerRegistryClient) UpdateStorage(ctx context.Context, peerID, storage string) error {
+	_, err := c.client.UpdateStorage(ctx, &blockchain_api.UpdateStorageRequest{
+		PeerId:  peerID,
+		Storage: storage,
+	})
+	return err
+}
+
+// RecordSyncAttempt implements PeerRegistryClientI.
+func (c *PeerRegistryClient) RecordSyncAttempt(ctx context.Context, peerID string) error {
+	_, err := c.client.RecordSyncAttempt(ctx, &blockchain_api.RecordSyncAttemptRequest{PeerId: peerID})
+	return err
+}
+
+// ClearAllSyncAttempts implements PeerRegistryClientI.
+func (c *PeerRegistryClient) ClearAllSyncAttempts(ctx context.Context) (int32, error) {
+	resp, err := c.client.ClearAllSyncAttempts(ctx, &emptypb.Empty{})
+	if err != nil {
+		return 0, err
+	}
+	return resp.Cleared, nil
+}
+
+// RecordBlockReceived implements PeerRegistryClientI.
+func (c *PeerRegistryClient) RecordBlockReceived(ctx context.Context, peerID string, responseTimeMs int64) error {
+	_, err := c.client.RecordBlockReceived(ctx, &blockchain_api.RecordReceivedRequest{
+		PeerId:         peerID,
+		ResponseTimeMs: responseTimeMs,
+	})
+	return err
+}
+
+// RecordSubtreeReceived implements PeerRegistryClientI.
+func (c *PeerRegistryClient) RecordSubtreeReceived(ctx context.Context, peerID string, responseTimeMs int64) error {
+	_, err := c.client.RecordSubtreeReceived(ctx, &blockchain_api.RecordReceivedRequest{
+		PeerId:         peerID,
+		ResponseTimeMs: responseTimeMs,
+	})
+	return err
+}
+
+// RecordTransactionReceived implements PeerRegistryClientI.
+func (c *PeerRegistryClient) RecordTransactionReceived(ctx context.Context, peerID string) error {
+	_, err := c.client.RecordTransactionReceived(ctx, &blockchain_api.RecordReceivedRequest{PeerId: peerID})
+	return err
+}
+
+// RecordCatchupError implements PeerRegistryClientI.
+func (c *PeerRegistryClient) RecordCatchupError(ctx context.Context, peerID, errMsg string) error {
+	_, err := c.client.RecordCatchupError(ctx, &blockchain_api.RecordCatchupErrorRequest{
+		PeerId:       peerID,
+		ErrorMessage: errMsg,
+	})
+	return err
+}
+
+// ResetReputation implements PeerRegistryClientI.
+func (c *PeerRegistryClient) ResetReputation(ctx context.Context, peerID string) (int32, error) {
+	resp, err := c.client.ResetReputation(ctx, &blockchain_api.ResetReputationRequest{PeerId: peerID})
+	if err != nil {
+		return 0, err
+	}
+	return resp.Reset_, nil
+}
+
+// ReconsiderBadPeers implements PeerRegistryClientI.
+func (c *PeerRegistryClient) ReconsiderBadPeers(ctx context.Context, cooldown time.Duration) (int32, error) {
+	resp, err := c.client.ReconsiderBadPeers(ctx, &blockchain_api.ReconsiderBadPeersRequest{
+		CooldownSeconds: int64(cooldown / time.Second),
+	})
+	if err != nil {
+		return 0, err
+	}
+	return resp.Reconsidered, nil
 }
 
 // Close releases the underlying gRPC connection if this client owns it.

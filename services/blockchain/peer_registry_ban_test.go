@@ -216,11 +216,11 @@ func TestBanReconsiderBadPeers_ResetsOldFailures(t *testing.T) {
 	r := NewCentralizedPeerRegistry(DefaultBanConfig())
 
 	r.Register(&PeerInfo{ID: "old-bad"})
-	// Drive reputation below 30 by recording multiple failures and a malicious event.
+	// Drive reputation below the 20 threshold by recording a malicious event.
 	r.UpdateMetrics("old-bad", 0, 0, 0, false, false, true, 0)
 
 	got, _ := r.Get("old-bad")
-	require.Less(t, got.ReputationScore, 30.0)
+	require.Less(t, got.ReputationScore, 20.0)
 
 	// Backdate the last failure so it falls before the cooldown.
 	r.mu.Lock()
@@ -231,9 +231,36 @@ func TestBanReconsiderBadPeers_ResetsOldFailures(t *testing.T) {
 	require.Equal(t, 1, count)
 
 	got, _ = r.Get("old-bad")
-	require.Equal(t, 50.0, got.ReputationScore)
-	require.Equal(t, int64(0), got.InteractionFailures)
+	// Recovery sets reputation to 30 (below neutral 50, above threshold 20),
+	// clears MaliciousCount, and stamps LastReputationReset.
+	require.Equal(t, 30.0, got.ReputationScore)
 	require.Equal(t, int64(0), got.MaliciousCount)
+	require.False(t, got.LastReputationReset.IsZero())
+	require.Equal(t, int32(1), got.ReputationResetCount)
+}
+
+func TestBanReconsiderBadPeers_ExponentialCooldownBlocksRepeatedReset(t *testing.T) {
+	r := NewCentralizedPeerRegistry(DefaultBanConfig())
+
+	r.Register(&PeerInfo{ID: "repeat-bad"})
+	r.UpdateMetrics("repeat-bad", 0, 0, 0, false, false, true, 0)
+
+	r.mu.Lock()
+	r.peers["repeat-bad"].LastInteractionFailure = time.Now().Add(-2 * time.Hour)
+	r.mu.Unlock()
+
+	// First reset succeeds.
+	require.Equal(t, 1, r.ReconsiderBadPeers(1*time.Hour))
+
+	// Drive reputation back below 20 and backdate the failure again.
+	r.mu.Lock()
+	r.peers["repeat-bad"].ReputationScore = 5
+	r.peers["repeat-bad"].LastInteractionFailure = time.Now().Add(-2 * time.Hour)
+	r.mu.Unlock()
+
+	// Second attempt within the same cooldown window is blocked because
+	// LastReputationReset is recent and the required cooldown is now 3× the base.
+	require.Equal(t, 0, r.ReconsiderBadPeers(1*time.Hour))
 }
 
 func TestBanReconsiderBadPeers_IgnoresRecentFailures(t *testing.T) {

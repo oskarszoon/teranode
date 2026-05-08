@@ -250,7 +250,7 @@ func TestRegistryClient_ListPeers_NoFilter(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	peers, err := client.ListPeers(ctx, nil, 0, 0, false)
+	peers, err := client.ListPeers(ctx, nil, 0, 0, false, false)
 	require.NoError(t, err)
 	require.Len(t, peers, 2)
 }
@@ -278,7 +278,7 @@ func TestRegistryClient_ListPeers_TransportFilter(t *testing.T) {
 	require.NoError(t, err)
 
 	filter := blockchain_api.TransportType_TRANSPORT_HTTP
-	peers, err := client.ListPeers(ctx, &filter, 0, 0, false)
+	peers, err := client.ListPeers(ctx, &filter, 0, 0, false, false)
 	require.NoError(t, err)
 	require.Len(t, peers, 1)
 	require.Equal(t, "http-only", peers[0].ID)
@@ -295,7 +295,7 @@ func TestRegistryClient_ListPeers_MinHeight(t *testing.T) {
 	err = client.RegisterPeer(ctx, &PeerInfo{ID: "high", Height: 500})
 	require.NoError(t, err)
 
-	peers, err := client.ListPeers(ctx, nil, 0, 100, false)
+	peers, err := client.ListPeers(ctx, nil, 0, 100, false, false)
 	require.NoError(t, err)
 	require.Len(t, peers, 1)
 	require.Equal(t, "high", peers[0].ID)
@@ -316,7 +316,7 @@ func TestRegistryClient_ListPeers_ExcludeBanned(t *testing.T) {
 	_, _, err = client.AddBanScore(ctx, "bad-peer", "test", 100)
 	require.NoError(t, err)
 
-	peers, err := client.ListPeers(ctx, nil, 0, 0, true)
+	peers, err := client.ListPeers(ctx, nil, 0, 0, true, false)
 	require.NoError(t, err)
 	require.Len(t, peers, 1)
 	require.Equal(t, "good-peer", peers[0].ID)
@@ -479,7 +479,7 @@ func TestRegistryClient_FullLifecycle(t *testing.T) {
 	require.False(t, banned)
 
 	// 5. ListPeers should include this peer.
-	peers, err := client.ListPeers(ctx, nil, 0, 0, false)
+	peers, err := client.ListPeers(ctx, nil, 0, 0, false, false)
 	require.NoError(t, err)
 	require.Len(t, peers, 1)
 
@@ -536,7 +536,7 @@ func TestRegistryClient_ListPeers_EmptyRegistry(t *testing.T) {
 
 	ctx := context.Background()
 
-	peers, err := client.ListPeers(ctx, nil, 0, 0, false)
+	peers, err := client.ListPeers(ctx, nil, 0, 0, false, false)
 	require.NoError(t, err)
 	require.Empty(t, peers)
 }
@@ -604,7 +604,7 @@ func TestRegistryClient_ListPeers_MinReputation(t *testing.T) {
 	require.NoError(t, err)
 
 	// Filter for reputation >= 40 — should exclude the malicious peer.
-	peers, err := client.ListPeers(ctx, nil, 40.0, 0, false)
+	peers, err := client.ListPeers(ctx, nil, 40.0, 0, false, false)
 	require.NoError(t, err)
 	require.Len(t, peers, 1)
 	require.Equal(t, "normal-peer", peers[0].ID)

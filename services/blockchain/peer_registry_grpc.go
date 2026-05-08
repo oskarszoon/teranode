@@ -53,7 +53,7 @@ func (b *Blockchain) ListPeers(_ context.Context, req *blockchain_api.ListPeersR
 		tf = &t
 	}
 
-	infos := b.peerRegistry.List(tf, req.MinReputation, req.MinHeight, req.ExcludeBanned)
+	infos := b.peerRegistry.List(tf, req.MinReputation, req.MinHeight, req.ExcludeBanned, req.SortByStorage)
 
 	peers := make([]*blockchain_api.PeerRegistryInfo, 0, len(infos))
 	for _, info := range infos {
@@ -94,6 +94,73 @@ func (b *Blockchain) ClearBannedPeers(_ context.Context, _ *emptypb.Empty) (*emp
 	return &emptypb.Empty{}, nil
 }
 
+// UpdateConnectionState flips the IsConnected flag on a peer entry.
+func (b *Blockchain) UpdateConnectionState(_ context.Context, req *blockchain_api.UpdateConnectionStateRequest) (*emptypb.Empty, error) {
+	b.peerRegistry.UpdateConnectionState(req.PeerId, req.Connected)
+	return &emptypb.Empty{}, nil
+}
+
+// UpdateLastMessageTime sets a peer's LastMessageTime to now.
+func (b *Blockchain) UpdateLastMessageTime(_ context.Context, req *blockchain_api.UpdateLastMessageTimeRequest) (*emptypb.Empty, error) {
+	b.peerRegistry.UpdateLastMessageTime(req.PeerId)
+	return &emptypb.Empty{}, nil
+}
+
+// UpdateStorage sets the peer's storage mode.
+func (b *Blockchain) UpdateStorage(_ context.Context, req *blockchain_api.UpdateStorageRequest) (*emptypb.Empty, error) {
+	b.peerRegistry.UpdateStorage(req.PeerId, req.Storage)
+	return &emptypb.Empty{}, nil
+}
+
+// RecordSyncAttempt records a sync attempt against a peer.
+func (b *Blockchain) RecordSyncAttempt(_ context.Context, req *blockchain_api.RecordSyncAttemptRequest) (*emptypb.Empty, error) {
+	b.peerRegistry.RecordSyncAttempt(req.PeerId)
+	return &emptypb.Empty{}, nil
+}
+
+// ClearAllSyncAttempts resets sync attempt counters across the registry.
+func (b *Blockchain) ClearAllSyncAttempts(_ context.Context, _ *emptypb.Empty) (*blockchain_api.ClearAllSyncAttemptsResponse, error) {
+	cleared := b.peerRegistry.ClearAllSyncAttempts()
+	return &blockchain_api.ClearAllSyncAttemptsResponse{Cleared: int32(cleared)}, nil
+}
+
+// RecordBlockReceived increments the BlocksReceived counter and records a successful interaction.
+func (b *Blockchain) RecordBlockReceived(_ context.Context, req *blockchain_api.RecordReceivedRequest) (*emptypb.Empty, error) {
+	b.peerRegistry.RecordBlockReceived(req.PeerId, req.ResponseTimeMs)
+	return &emptypb.Empty{}, nil
+}
+
+// RecordSubtreeReceived increments the SubtreesReceived counter and records a successful interaction.
+func (b *Blockchain) RecordSubtreeReceived(_ context.Context, req *blockchain_api.RecordReceivedRequest) (*emptypb.Empty, error) {
+	b.peerRegistry.RecordSubtreeReceived(req.PeerId, req.ResponseTimeMs)
+	return &emptypb.Empty{}, nil
+}
+
+// RecordTransactionReceived increments the TransactionsReceived counter.
+func (b *Blockchain) RecordTransactionReceived(_ context.Context, req *blockchain_api.RecordReceivedRequest) (*emptypb.Empty, error) {
+	b.peerRegistry.RecordTransactionReceived(req.PeerId)
+	return &emptypb.Empty{}, nil
+}
+
+// RecordCatchupError stores the peer's most recent catchup error.
+func (b *Blockchain) RecordCatchupError(_ context.Context, req *blockchain_api.RecordCatchupErrorRequest) (*emptypb.Empty, error) {
+	b.peerRegistry.RecordCatchupError(req.PeerId, req.ErrorMessage)
+	return &emptypb.Empty{}, nil
+}
+
+// ResetReputation resets reputation for a peer (or all peers when peer_id is empty).
+func (b *Blockchain) ResetReputation(_ context.Context, req *blockchain_api.ResetReputationRequest) (*blockchain_api.ResetReputationResponse, error) {
+	reset := b.peerRegistry.ResetReputation(req.PeerId)
+	return &blockchain_api.ResetReputationResponse{Reset_: int32(reset)}, nil
+}
+
+// ReconsiderBadPeers resets reputation for peers whose last failure is older than cooldown_seconds.
+func (b *Blockchain) ReconsiderBadPeers(_ context.Context, req *blockchain_api.ReconsiderBadPeersRequest) (*blockchain_api.ReconsiderBadPeersResponse, error) {
+	cooldown := time.Duration(req.CooldownSeconds) * time.Second
+	count := b.peerRegistry.ReconsiderBadPeers(cooldown)
+	return &blockchain_api.ReconsiderBadPeersResponse{Reconsidered: int32(count)}, nil
+}
+
 // peerInfoToProto converts the domain PeerInfo type to its protobuf representation.
 func peerInfoToProto(info *PeerInfo) *blockchain_api.PeerRegistryInfo {
 	return &blockchain_api.PeerRegistryInfo{
@@ -121,6 +188,18 @@ func peerInfoToProto(info *PeerInfo) *blockchain_api.PeerRegistryInfo {
 		LastInteractionFailure: timestamppb.New(info.LastInteractionFailure),
 		LastSeen:               timestamppb.New(info.LastSeen),
 		BlockHash:              blockHashToBytes(info.BlockHash),
+		IsConnected:            info.IsConnected,
+		LastBlockTime:          timestamppb.New(info.LastBlockTime),
+		BlocksReceived:         info.BlocksReceived,
+		SubtreesReceived:       info.SubtreesReceived,
+		TransactionsReceived:   info.TransactionsReceived,
+		CatchupBlocks:          info.CatchupBlocks,
+		LastSyncAttempt:        timestamppb.New(info.LastSyncAttempt),
+		SyncAttemptCount:       info.SyncAttemptCount,
+		LastReputationReset:    timestamppb.New(info.LastReputationReset),
+		ReputationResetCount:   info.ReputationResetCount,
+		LastCatchupError:       info.LastCatchupError,
+		LastCatchupErrorTime:   timestamppb.New(info.LastCatchupErrorTime),
 	}
 }
 
@@ -151,6 +230,18 @@ func protoToPeerInfo(p *blockchain_api.PeerRegistryInfo) *PeerInfo {
 		LastInteractionFailure: protoTimeToTime(p.LastInteractionFailure),
 		LastSeen:               protoTimeToTime(p.LastSeen),
 		BlockHash:              bytesToBlockHash(p.BlockHash),
+		IsConnected:            p.IsConnected,
+		LastBlockTime:          protoTimeToTime(p.LastBlockTime),
+		BlocksReceived:         p.BlocksReceived,
+		SubtreesReceived:       p.SubtreesReceived,
+		TransactionsReceived:   p.TransactionsReceived,
+		CatchupBlocks:          p.CatchupBlocks,
+		LastSyncAttempt:        protoTimeToTime(p.LastSyncAttempt),
+		SyncAttemptCount:       p.SyncAttemptCount,
+		LastReputationReset:    protoTimeToTime(p.LastReputationReset),
+		ReputationResetCount:   p.ReputationResetCount,
+		LastCatchupError:       p.LastCatchupError,
+		LastCatchupErrorTime:   protoTimeToTime(p.LastCatchupErrorTime),
 	}
 }
 
