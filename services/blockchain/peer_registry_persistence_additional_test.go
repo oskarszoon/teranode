@@ -219,19 +219,20 @@ func TestSavePeerRegistry_AtomicRename(t *testing.T) {
 		{ID: "a", Height: 1},
 		{ID: "b", Height: 2},
 	}
-	require.NoError(t, savePeerRegistry(path, peers))
+	require.NoError(t, savePeerRegistry(path, peers, nil))
 
 	// The temp file should not exist after a successful save.
 	_, err := os.Stat(path + ".tmp")
 	require.True(t, os.IsNotExist(err))
 
-	// The final file should contain valid JSON.
+	// The final file should contain valid JSON in the persisted-envelope shape.
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
 
-	var loaded []*PeerInfo
+	var loaded persistedRegistry
 	require.NoError(t, json.Unmarshal(data, &loaded))
-	require.Len(t, loaded, 2)
+	require.Len(t, loaded.Peers, 2)
+	require.Equal(t, persistedRegistryVersion, loaded.Version)
 }
 
 // TestLoadPeerRegistry_AllExpired verifies that if every peer is past the TTL
@@ -241,15 +242,96 @@ func TestLoadPeerRegistry_AllExpired(t *testing.T) {
 	path := filepath.Join(dir, "expired.json")
 
 	stale := time.Now().Add(-72 * time.Hour)
-	peers := []*PeerInfo{
-		{ID: "old-1", LastSeen: stale},
-		{ID: "old-2", LastSeen: stale},
+	envelope := persistedRegistry{
+		Version: persistedRegistryVersion,
+		Peers: []*PeerInfo{
+			{ID: "old-1", LastSeen: stale},
+			{ID: "old-2", LastSeen: stale},
+		},
 	}
-	data, err := json.Marshal(peers)
+	data, err := json.Marshal(&envelope)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(path, data, 0o600))
 
-	loaded, err := loadPeerRegistry(path, 24*time.Hour)
+	loaded, _, err := loadPeerRegistry(path, 24*time.Hour)
 	require.NoError(t, err)
 	require.Empty(t, loaded)
+}
+
+// TestPersistence_BansSurviveRestart verifies the major review-feedback fix:
+// banScores are written and restored across Save/Load, so an in-flight ban
+// keeps enforcing after a process restart.
+func TestPersistence_BansSurviveRestart(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ban-state.json")
+
+	r := NewCentralizedPeerRegistry(DefaultBanConfig())
+	r.Register(&PeerInfo{ID: "p"})
+	// spam = 50, threshold = 100. Two strikes => banned.
+	r.AddBanScore("p", "spam", 0)
+	r.AddBanScore("p", "spam", 0)
+	require.True(t, r.IsBannedPeer("p"))
+
+	require.NoError(t, r.Save(path))
+
+	r2 := NewCentralizedPeerRegistry(DefaultBanConfig())
+	require.NoError(t, r2.Load(path, 24*time.Hour))
+
+	require.True(t, r2.IsBannedPeer("p"), "ban must persist across Save/Load")
+	require.Equal(t, []string{"p"}, r2.ListBannedPeers())
+}
+
+func TestPersistence_BannedPeersExemptFromTTL(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ban-ttl.json")
+
+	r := NewCentralizedPeerRegistry(DefaultBanConfig())
+	r.Register(&PeerInfo{ID: "p"})
+	r.AddBanScore("p", "spam", 0)
+	r.AddBanScore("p", "spam", 0)
+
+	// Backdate LastSeen so it falls outside TTL — without the ban exemption it
+	// would be evicted on Load and the ban entry would be orphaned.
+	r.mu.Lock()
+	r.peers["p"].LastSeen = time.Now().Add(-48 * time.Hour)
+	r.mu.Unlock()
+
+	require.NoError(t, r.Save(path))
+
+	r2 := NewCentralizedPeerRegistry(DefaultBanConfig())
+	require.NoError(t, r2.Load(path, 24*time.Hour))
+
+	require.True(t, r2.IsBannedPeer("p"))
+	_, ok := r2.Get("p")
+	require.True(t, ok, "banned peer must not be evicted by TTL on Load")
+}
+
+func TestPersistence_ExpiredBanDroppedOnLoad(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "expired-ban.json")
+
+	envelope := persistedRegistry{
+		Version: persistedRegistryVersion,
+		BanScores: map[string]persistedBanEntry{
+			"already-expired": {
+				Score:    150,
+				Banned:   true,
+				BanUntil: time.Now().Add(-1 * time.Hour),
+			},
+			"still-banned": {
+				Score:    150,
+				Banned:   true,
+				BanUntil: time.Now().Add(1 * time.Hour),
+			},
+		},
+	}
+	data, err := json.Marshal(&envelope)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, data, 0o600))
+
+	r := NewCentralizedPeerRegistry(DefaultBanConfig())
+	require.NoError(t, r.Load(path, 24*time.Hour))
+
+	require.False(t, r.IsBannedPeer("already-expired"))
+	require.True(t, r.IsBannedPeer("still-banned"))
 }

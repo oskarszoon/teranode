@@ -206,10 +206,16 @@ func peerInfoToProto(info *PeerInfo) *blockchain_api.PeerRegistryInfo {
 }
 
 // protoToPeerInfo converts a protobuf PeerRegistryInfo to the domain PeerInfo type.
+// TransportTypeSet is set to true unconditionally: the wire format always
+// carries a transport_type value, so a deserialised PeerInfo has been
+// "explicitly set" by virtue of crossing the registry boundary at all. This
+// matches the semantics callers want — a peer registered via gRPC keeps its
+// transport type sticky across subsequent updates that omit the field.
 func protoToPeerInfo(p *blockchain_api.PeerRegistryInfo) *PeerInfo {
 	return &PeerInfo{
 		ID:                     p.PeerId,
 		TransportType:          p.TransportType,
+		TransportTypeSet:       true,
 		ClientName:             p.ClientName,
 		Height:                 p.Height,
 		DataHubURL:             p.DataHubUrl,
