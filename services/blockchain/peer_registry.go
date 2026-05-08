@@ -219,13 +219,15 @@ func (r *CentralizedPeerRegistry) UpdateMetrics(
 	r.calculateAndUpdateReputation(info)
 }
 
-// Remove deletes a peer and its ban score entry from the registry.
+// Remove deletes a peer entry from the registry. The peer's ban-score entry is
+// intentionally preserved — bans must outlive peer disconnects, otherwise an
+// offending peer could clear its own ban simply by reconnecting. ClearBannedPeers
+// is the explicit knob for wiping ban state.
 func (r *CentralizedPeerRegistry) Remove(peerID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	delete(r.peers, peerID)
-	delete(r.banScores, peerID)
 }
 
 // Get returns a copy of the peer info for peerID, or false if not found.
