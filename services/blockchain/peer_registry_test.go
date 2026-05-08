@@ -383,6 +383,50 @@ func TestCentralizedPeerRegistry_Cleanup_LRUExemptsConnectedAndBanned(t *testing
 	require.Equal(t, 2, r.Count())
 }
 
+func TestCentralizedPeerRegistry_List_ExcludeBannedAppliesExpiry(t *testing.T) {
+	cfg := DefaultBanConfig()
+	cfg.Duration = time.Millisecond
+	r := NewCentralizedPeerRegistry(cfg)
+
+	r.Register(&PeerInfo{ID: "p"})
+	// spam = 50 in DefaultBanConfig; threshold = 100. Two strikes triggers a
+	// ban that will expire almost immediately given the millisecond duration.
+	r.AddBanScore("p", "spam", 0)
+	r.AddBanScore("p", "spam", 0)
+
+	got, _ := r.Get("p")
+	require.True(t, got.IsBanned, "expected ban-on-threshold sync to PeerInfo")
+
+	time.Sleep(5 * time.Millisecond)
+
+	// List(excludeBanned=true) must run expiry inline so the now-expired peer
+	// appears in the result and its PeerInfo flags are reset.
+	peers := r.List(nil, 0, 0, true, false)
+	require.Len(t, peers, 1)
+	require.False(t, peers[0].IsBanned)
+	require.Equal(t, int32(0), peers[0].BanScore)
+
+	got, _ = r.Get("p")
+	require.False(t, got.IsBanned)
+}
+
+func TestCentralizedPeerRegistry_RemovePreservesBanScore(t *testing.T) {
+	r := NewCentralizedPeerRegistry(DefaultBanConfig())
+
+	r.Register(&PeerInfo{ID: "p"})
+	// spam = 50 in DefaultBanConfig; threshold = 100. Two strikes triggers a ban.
+	r.AddBanScore("p", "spam", 0)
+	r.AddBanScore("p", "spam", 0)
+	require.True(t, r.IsBannedPeer("p"))
+
+	// Remove should drop the peer entry but preserve the ban score, otherwise
+	// a peer could clear its own ban by reconnecting.
+	r.Remove("p")
+
+	require.True(t, r.IsBannedPeer("p"), "ban must outlive Remove")
+	require.Equal(t, []string{"p"}, r.ListBannedPeers())
+}
+
 func TestCentralizedPeerRegistry_List_SortByStorage(t *testing.T) {
 	r := NewCentralizedPeerRegistry(DefaultBanConfig())
 

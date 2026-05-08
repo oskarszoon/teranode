@@ -794,7 +794,12 @@ func (b *Blockchain) sendInitialNotification(sub subscriber) {
 func (b *Blockchain) Stop(_ context.Context) error {
 	if path := b.settings.BlockChain.PeerRegistryPath; path != "" {
 		if err := b.peerRegistry.Save(path); err != nil {
-			b.logger.Warnf("[Blockchain] failed to save peer registry on shutdown: %v", err)
+			// A failed save on shutdown means peer state since the last
+			// periodic write is gone — banned peers may reconnect after
+			// restart. Log at error level and surface to the caller so the
+			// service-manager exit code reflects the partial shutdown.
+			b.logger.Errorf("[Blockchain] failed to save peer registry on shutdown: %v", err)
+			return errors.NewProcessingError("[Blockchain][Stop] save peer registry", err)
 		}
 	}
 	return nil

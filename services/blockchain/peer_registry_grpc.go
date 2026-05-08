@@ -2,6 +2,8 @@ package blockchain
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"time"
 
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
@@ -262,13 +264,18 @@ func blockHashToBytes(h *chainhash.Hash) []byte {
 	return append([]byte(nil), h[:]...)
 }
 
-// bytesToBlockHash converts a byte slice to *chainhash.Hash, returning nil if the slice is empty or invalid.
+// bytesToBlockHash converts a byte slice to *chainhash.Hash. Returns nil for an
+// empty slice (intentional, e.g. peers that have not advertised a tip yet) and
+// nil with a stderr warning for a non-empty but invalid slice — that path
+// usually means a corrupted persisted registry, which the operator should know
+// about even though the rest of the entry is salvageable.
 func bytesToBlockHash(b []byte) *chainhash.Hash {
 	if len(b) == 0 {
 		return nil
 	}
 	h, err := chainhash.NewHash(b)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "peer registry: invalid block hash bytes (len=%d): %v\n", len(b), err)
 		return nil
 	}
 	return h

@@ -122,17 +122,17 @@ type Server struct {
 	blockTopicName                    string
 	subtreeTopicName                  string
 	rejectedTxTopicName               string
-	invalidBlocksTopicName            string           // Kafka topic for invalid blocks
-	invalidSubtreeTopicName           string           // Kafka topic for invalid subtrees
-	nodeStatusTopicName               string           // pubsub topic for node status messages
-	topicPrefix                       string           // Chain identifier prefix for topic validation
-	blockPeerMap                      sync.Map         // Map to track which peer sent each block (hash -> peerMapEntry)
-	subtreePeerMap                    sync.Map         // Map to track which peer sent each subtree (hash -> peerMapEntry)
-	startTime                         time.Time        // Server start time for uptime calculation
+	invalidBlocksTopicName            string                         // Kafka topic for invalid blocks
+	invalidSubtreeTopicName           string                         // Kafka topic for invalid subtrees
+	nodeStatusTopicName               string                         // pubsub topic for node status messages
+	topicPrefix                       string                         // Chain identifier prefix for topic validation
+	blockPeerMap                      sync.Map                       // Map to track which peer sent each block (hash -> peerMapEntry)
+	subtreePeerMap                    sync.Map                       // Map to track which peer sent each subtree (hash -> peerMapEntry)
+	startTime                         time.Time                      // Server start time for uptime calculation
 	peerRegistry                      blockchain.PeerRegistryClientI // gRPC client for the centralized peer registry hosted by the blockchain service
-	peerSelector                      *PeerSelector    // Stateless peer selection logic
-	syncCoordinator                   *SyncCoordinator // Orchestrates sync operations
-	syncConnectionTimes               sync.Map         // Map to track when we first connected to each sync peer (peerID -> timestamp)
+	peerSelector                      *PeerSelector                  // Stateless peer selection logic
+	syncCoordinator                   *SyncCoordinator               // Orchestrates sync operations
+	syncConnectionTimes               sync.Map                       // Map to track when we first connected to each sync peer (peerID -> timestamp)
 
 	// Cleanup configuration
 	peerMapCleanupTicker *time.Ticker  // Ticker for periodic cleanup of peer maps

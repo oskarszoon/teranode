@@ -253,6 +253,11 @@ func (r *CentralizedPeerRegistry) Get(peerID string) (*PeerInfo, bool) {
 // descending. Passing nil for transportFilter disables that filter. When
 // sortByStorage is true, "full" peers sort ahead of "pruned" peers ahead of
 // unknown — applied as the primary key, with reputation as the secondary key.
+//
+// When excludeBanned is true, List acquires the write lock so it can run ban
+// expiry inline (auto-unban + sync to PeerInfo). Without that pass, a list
+// filtered for excludeBanned could include peers whose ban window has ended
+// but whose entry.Banned flag had not yet been refreshed by IsBannedPeer.
 func (r *CentralizedPeerRegistry) List(
 	transportFilter *blockchain_api.TransportType,
 	minReputation float64,
@@ -260,8 +265,14 @@ func (r *CentralizedPeerRegistry) List(
 	excludeBanned bool,
 	sortByStorage bool,
 ) []*PeerInfo {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	if excludeBanned {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		r.expireBansLocked()
+	} else {
+		r.mu.RLock()
+		defer r.mu.RUnlock()
+	}
 
 	result := make([]*PeerInfo, 0, len(r.peers))
 
@@ -333,6 +344,25 @@ func (r *CentralizedPeerRegistry) isPeerBannedLocked(peerID string) bool {
 		return false
 	}
 	return time.Now().Before(entry.BanUntil)
+}
+
+// expireBansLocked sweeps banScores for entries whose BanUntil has passed,
+// clears their Banned flag and score, and syncs the result onto PeerInfo so
+// downstream readers see consistent state. Must be called with the write lock.
+func (r *CentralizedPeerRegistry) expireBansLocked() {
+	now := time.Now()
+	for peerID, entry := range r.banScores {
+		if !entry.Banned || now.Before(entry.BanUntil) {
+			continue
+		}
+		entry.Banned = false
+		entry.Score = 0
+		entry.Reasons = nil
+		if peer, exists := r.peers[peerID]; exists {
+			peer.IsBanned = false
+			peer.BanScore = 0
+		}
+	}
 }
 
 // calculateAndUpdateReputation recalculates and stores the reputation score for
@@ -439,8 +469,10 @@ func (r *CentralizedPeerRegistry) AddBanScore(peerID string, reason string, poin
 		}
 	}
 
-	// Add reason to history (cap at 50 entries to prevent unbounded growth)
-	const maxReasonHistory = 50
+	// Cap reason history to a small window — operators only need recent context
+	// for diagnosing a ban; the full history isn't useful and would scale to
+	// noticeable memory at fleet scale (peers × maxReasonHistory × ~20 bytes).
+	const maxReasonHistory = 20
 	entry.Reasons = append(entry.Reasons, reason)
 	if len(entry.Reasons) > maxReasonHistory {
 		entry.Reasons = entry.Reasons[len(entry.Reasons)-maxReasonHistory:]

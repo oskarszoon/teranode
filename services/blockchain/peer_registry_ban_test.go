@@ -113,6 +113,19 @@ func TestBanAddBanScore_ConfigReasonLookup(t *testing.T) {
 	require.Equal(t, int32(42), score)
 }
 
+func TestBanAddBanScore_ReasonHistoryCappedAt20(t *testing.T) {
+	r := NewCentralizedPeerRegistry(DefaultBanConfig())
+
+	// 25 separate reason additions; only the last 20 should remain.
+	for i := 0; i < 25; i++ {
+		r.AddBanScore("peer-1", "test", 1)
+	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	require.Len(t, r.banScores["peer-1"].Reasons, 20)
+}
+
 // ---------------------------------------------------------------------------
 // IsBannedPeer
 // ---------------------------------------------------------------------------
