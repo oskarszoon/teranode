@@ -1788,6 +1788,83 @@ func TestReadMTPsLocked_ClampsOutOfRangeUTXOs(t *testing.T) {
 	require.Equal(t, uint32(1_700_000_020), blockMTP)
 }
 
+// TestValidateTransaction_BIP68PathReadsMTPStore drives validateTransaction
+// through the SkipPolicyChecks BIP68 branch with a populated mtpStore. The
+// goal is coverage on the MTP-reading code path (`readMTPsLocked` call,
+// error wiring, ValidateBIP68 invocation) — the actual BIP68 lock-time
+// arithmetic is exercised by the dedicated TxValidator_bip68 tests.
+func TestValidateTransaction_BIP68PathReadsMTPStore(t *testing.T) {
+	initPrometheusMetrics()
+
+	// Mainnet sets CSVHeight = 419328; choose a height comfortably above so
+	// the BIP68 gate at the top of validateTransaction lets us through.
+	const blockHeight = uint32(500_000)
+
+	tx, err := bt.NewTxFromString("010000000000000000ef01f80f63b70d76242a60f6a222e536f1383b6ac11ff69bb0b026871dfe8255ae5e010000006a47304402204dcc5d16184a0f5b73a56a9984de0156e60f486af4b9feb304c1e7a0bebeba50022029d2c4f7614438a3bb33b90ea6251aa760a2e6645068338faab2e65f7a54ca700121033ce8391ba0f2ffa4b39947920a28958b14569c382dab826e3e86253d6f2d6be6ffffffff906ca312000000001976a9143a570d7cd342bb8cf54193d2919d12f1b85f03cc88ac022000fc09000000001976a914dc1b13bfce97785162b14dc583947bc2e379eaa288ac501ea708000000001976a9144e70c86128dc5d236d7d79bd9e011e25ce9295aa88ac00000000")
+	require.NoError(t, err)
+	require.True(t, tx.IsExtended())
+
+	tSettings := test.CreateBaseTestSettings(t)
+	tSettings.ChainCfgParams, _ = chaincfg.GetChainParams("mainnet")
+
+	// blockchainClient just needs to be non-nil for the gate at the top of
+	// validateTransaction; mtpStore is pre-populated so readMTPsLocked finds
+	// the values it needs without a fetch.
+	mtpStore := make([]uint32, blockHeight+1)
+	for i := range mtpStore {
+		mtpStore[i] = uint32(1_700_000_000 + i)
+	}
+
+	v := &Validator{
+		logger:           ulogger.TestLogger{},
+		settings:         tSettings,
+		txValidator:      NewTxValidator(ulogger.TestLogger{}, tSettings),
+		blockchainClient: &blockchain.Mock{},
+		stats:            gocore.NewStat("validator_test"),
+		mtpStore:         mtpStore,
+	}
+
+	ctx, _, endSpan := tracing.Tracer("validator").Start(context.Background(), "Test")
+	defer endSpan()
+
+	// utxoHeight at blockHeight-1 is well within the populated range so the
+	// per-input MTP lookup uses mtpStore[h] (the in-range branch).
+	err = v.validateTransaction(ctx, tx, blockHeight, []uint32{blockHeight - 1}, &Options{SkipPolicyChecks: true})
+	require.NoError(t, err)
+}
+
+// TestValidateTransaction_BIP68GuardFiresOnUnpopulatedStore drives
+// validateTransaction with SkipPolicyChecks=true and an empty mtpStore. The
+// readMTPsLocked guard must fire and surface a processing error to the
+// caller via span.RecordError + return.
+func TestValidateTransaction_BIP68GuardFiresOnUnpopulatedStore(t *testing.T) {
+	initPrometheusMetrics()
+
+	const blockHeight = uint32(500_000)
+
+	tx, err := bt.NewTxFromString("010000000000000000ef01f80f63b70d76242a60f6a222e536f1383b6ac11ff69bb0b026871dfe8255ae5e010000006a47304402204dcc5d16184a0f5b73a56a9984de0156e60f486af4b9feb304c1e7a0bebeba50022029d2c4f7614438a3bb33b90ea6251aa760a2e6645068338faab2e65f7a54ca700121033ce8391ba0f2ffa4b39947920a28958b14569c382dab826e3e86253d6f2d6be6ffffffff906ca312000000001976a9143a570d7cd342bb8cf54193d2919d12f1b85f03cc88ac022000fc09000000001976a914dc1b13bfce97785162b14dc583947bc2e379eaa288ac501ea708000000001976a9144e70c86128dc5d236d7d79bd9e011e25ce9295aa88ac00000000")
+	require.NoError(t, err)
+
+	tSettings := test.CreateBaseTestSettings(t)
+	tSettings.ChainCfgParams, _ = chaincfg.GetChainParams("mainnet")
+
+	v := &Validator{
+		logger:           ulogger.TestLogger{},
+		settings:         tSettings,
+		txValidator:      NewTxValidator(ulogger.TestLogger{}, tSettings),
+		blockchainClient: &blockchain.Mock{},
+		stats:            gocore.NewStat("validator_test"),
+		// mtpStore intentionally empty
+	}
+
+	ctx, _, endSpan := tracing.Tracer("validator").Start(context.Background(), "Test")
+	defer endSpan()
+
+	err = v.validateTransaction(ctx, tx, blockHeight, []uint32{blockHeight - 1}, &Options{SkipPolicyChecks: true})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "MTP store not loaded up to height")
+}
+
 // TestReadMTPsLocked_GuardFiresOnUnpopulatedStore verifies the guard returns a
 // processing error when EnsureMTPLoaded has not populated the store up to the
 // requested blockMTPHeight (in normal operation this cannot happen because
