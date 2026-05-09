@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -22,6 +24,7 @@ import (
 	"github.com/bsv-blockchain/teranode/model"
 	"github.com/bsv-blockchain/teranode/pkg/fileformat"
 	"github.com/bsv-blockchain/teranode/services/blockchain/blockchain_api"
+	"github.com/bsv-blockchain/teranode/settings"
 	"github.com/bsv-blockchain/teranode/stores/blob"
 	blob_memory "github.com/bsv-blockchain/teranode/stores/blob/memory"
 	blockchain_store "github.com/bsv-blockchain/teranode/stores/blockchain"
@@ -1040,6 +1043,57 @@ func Test_GetBlockLocator(t *testing.T) {
 		require.NotNil(t, response)
 		assert.NotNil(t, response.Locator)
 	})
+}
+
+func TestBlockchain_SavePeerRegistryPeriodically(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "peers.json")
+
+	b := &Blockchain{
+		logger:       ulogger.TestLogger{},
+		peerRegistry: NewCentralizedPeerRegistry(DefaultBanConfig()),
+	}
+	b.peerRegistry.Register(&PeerInfo{ID: "p"})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	doneCh := make(chan struct{})
+	go func() {
+		b.savePeerRegistryPeriodically(ctx, path, 5*time.Millisecond)
+		close(doneCh)
+	}()
+
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(path)
+		return err == nil
+	}, 200*time.Millisecond, 5*time.Millisecond, "expected periodic save to write the file")
+
+	cancel()
+	select {
+	case <-doneCh:
+	case <-time.After(time.Second):
+		t.Fatal("savePeerRegistryPeriodically did not return on ctx cancel")
+	}
+}
+
+func TestBlockchain_Stop_SavesAndClosesRegistry(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "peers.json")
+
+	b := &Blockchain{
+		logger: ulogger.TestLogger{},
+		settings: &settings.Settings{
+			BlockChain: settings.BlockChainSettings{PeerRegistryPath: path},
+		},
+		peerRegistry: NewCentralizedPeerRegistry(DefaultBanConfig()),
+	}
+	b.peerRegistry.Register(&PeerInfo{ID: "p"})
+
+	require.NoError(t, b.Stop(context.Background()))
+
+	_, err := os.Stat(path)
+	require.NoError(t, err, "Stop must persist the registry when path is configured")
 }
 
 func TestBlockchainStart(t *testing.T) {

@@ -614,6 +614,149 @@ func TestRegistryClient_ListPeers_MinReputation(t *testing.T) {
 // Timeout context
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Extended RPCs added in the move from p2p (UpdateConnectionState,
+// UpdateLastMessageTime, UpdateStorage, RecordSyncAttempt, ClearAllSyncAttempts,
+// RecordBlockReceived, RecordSubtreeReceived, RecordTransactionReceived,
+// RecordCatchupError, ResetReputation, ReconsiderBadPeers).
+// ---------------------------------------------------------------------------
+
+func TestRegistryClient_UpdateConnectionState(t *testing.T) {
+	client, cleanup := setupRegistryGRPC(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	require.NoError(t, client.RegisterPeer(ctx, &PeerInfo{ID: "p"}))
+
+	require.NoError(t, client.UpdateConnectionState(ctx, "p", true))
+	got, _, err := client.GetPeer(ctx, "p")
+	require.NoError(t, err)
+	require.True(t, got.IsConnected)
+
+	require.NoError(t, client.UpdateConnectionState(ctx, "p", false))
+	got, _, err = client.GetPeer(ctx, "p")
+	require.NoError(t, err)
+	require.False(t, got.IsConnected)
+}
+
+func TestRegistryClient_UpdateLastMessageTime(t *testing.T) {
+	client, cleanup := setupRegistryGRPC(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	require.NoError(t, client.RegisterPeer(ctx, &PeerInfo{ID: "p"}))
+
+	first, _, err := client.GetPeer(ctx, "p")
+	require.NoError(t, err)
+
+	time.Sleep(2 * time.Millisecond)
+	require.NoError(t, client.UpdateLastMessageTime(ctx, "p"))
+
+	second, _, err := client.GetPeer(ctx, "p")
+	require.NoError(t, err)
+	require.True(t, second.LastMessageTime.After(first.LastMessageTime))
+}
+
+func TestRegistryClient_UpdateStorage(t *testing.T) {
+	client, cleanup := setupRegistryGRPC(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	require.NoError(t, client.RegisterPeer(ctx, &PeerInfo{ID: "p"}))
+
+	require.NoError(t, client.UpdateStorage(ctx, "p", "full"))
+	got, _, err := client.GetPeer(ctx, "p")
+	require.NoError(t, err)
+	require.Equal(t, "full", got.Storage)
+}
+
+func TestRegistryClient_RecordSyncAttemptAndClearAll(t *testing.T) {
+	client, cleanup := setupRegistryGRPC(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	require.NoError(t, client.RegisterPeer(ctx, &PeerInfo{ID: "p"}))
+
+	require.NoError(t, client.RecordSyncAttempt(ctx, "p"))
+	require.NoError(t, client.RecordSyncAttempt(ctx, "p"))
+
+	got, _, err := client.GetPeer(ctx, "p")
+	require.NoError(t, err)
+	require.Equal(t, int32(2), got.SyncAttemptCount)
+	require.False(t, got.LastSyncAttempt.IsZero())
+
+	cleared, err := client.ClearAllSyncAttempts(ctx)
+	require.NoError(t, err)
+	require.Equal(t, int32(1), cleared)
+}
+
+func TestRegistryClient_RecordBlockSubtreeTransaction(t *testing.T) {
+	client, cleanup := setupRegistryGRPC(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	require.NoError(t, client.RegisterPeer(ctx, &PeerInfo{ID: "p"}))
+
+	require.NoError(t, client.RecordBlockReceived(ctx, "p", 250))
+	require.NoError(t, client.RecordSubtreeReceived(ctx, "p", 0))
+	require.NoError(t, client.RecordTransactionReceived(ctx, "p"))
+
+	got, _, err := client.GetPeer(ctx, "p")
+	require.NoError(t, err)
+	require.Equal(t, int64(1), got.BlocksReceived)
+	require.Equal(t, int64(1), got.SubtreesReceived)
+	require.Equal(t, int64(1), got.TransactionsReceived)
+	require.Equal(t, int64(3), got.InteractionSuccesses)
+	require.Equal(t, int64(250), got.AvgResponseTimeMs)
+}
+
+func TestRegistryClient_RecordCatchupError(t *testing.T) {
+	client, cleanup := setupRegistryGRPC(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	require.NoError(t, client.RegisterPeer(ctx, &PeerInfo{ID: "p"}))
+
+	require.NoError(t, client.RecordCatchupError(ctx, "p", "block 0xdead missing"))
+
+	got, _, err := client.GetPeer(ctx, "p")
+	require.NoError(t, err)
+	require.Equal(t, "block 0xdead missing", got.LastCatchupError)
+	require.False(t, got.LastCatchupErrorTime.IsZero())
+}
+
+func TestRegistryClient_ResetReputationSingleAndAll(t *testing.T) {
+	client, cleanup := setupRegistryGRPC(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	require.NoError(t, client.RegisterPeer(ctx, &PeerInfo{ID: "a"}))
+	require.NoError(t, client.RegisterPeer(ctx, &PeerInfo{ID: "b"}))
+	require.NoError(t, client.UpdatePeerMetrics(ctx, "a", 0, 0, 0, false, false, true, 0))
+
+	count, err := client.ResetReputation(ctx, "a")
+	require.NoError(t, err)
+	require.Equal(t, int32(1), count)
+
+	count, err = client.ResetReputation(ctx, "")
+	require.NoError(t, err)
+	require.Equal(t, int32(2), count)
+}
+
+func TestRegistryClient_ReconsiderBadPeers(t *testing.T) {
+	client, cleanup := setupRegistryGRPC(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	require.NoError(t, client.RegisterPeer(ctx, &PeerInfo{ID: "p"}))
+	require.NoError(t, client.UpdatePeerMetrics(ctx, "p", 0, 0, 0, false, false, true, 0))
+
+	// Peer reputation just dropped — recent failure, so the cooldown blocks recovery.
+	count, err := client.ReconsiderBadPeers(ctx, time.Hour)
+	require.NoError(t, err)
+	require.Equal(t, int32(0), count)
+}
+
 func TestRegistryClient_ContextTimeout(t *testing.T) {
 	client, cleanup := setupRegistryGRPC(t)
 	defer cleanup()
