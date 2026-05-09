@@ -1593,10 +1593,13 @@ func TestEnsureMTPLoaded_ConcurrentCallsNeitherHangsNorRaces(t *testing.T) {
 
 	// slowBlockchainClient introduces a brief pause so that both goroutines are
 	// likely inside EnsureMTPLoaded concurrently when the race would occur.
+	// Once() asserts that exactly one fetch is issued: the second concurrent
+	// caller must fast-path out under the mutex without re-fetching, which is
+	// the production failure mode this test guards against.
 	mockClient := &blockchain.Mock{}
 	mockClient.On("GetMedianTimePastRange", mock.Anything, uint32(0), blockHeight).
 		After(5*time.Millisecond).
-		Return(mtpValues, nil)
+		Return(mtpValues, nil).Once()
 
 	tSettings := test.CreateBaseTestSettings(t)
 
@@ -1632,6 +1635,10 @@ func TestEnsureMTPLoaded_ConcurrentCallsNeitherHangsNorRaces(t *testing.T) {
 	// Spot-check a few values to confirm correct data (not a corrupted merge).
 	require.Equal(t, uint32(1_700_000_000), v.mtpStore[0])
 	require.Equal(t, uint32(1_700_000_000+blockHeight), v.mtpStore[blockHeight])
+
+	// Asserts exactly-one fetch (Once() above). Without the mutex both callers
+	// would each issue a 1.45 M-entry fetch — the production CPU peg.
+	mockClient.AssertExpectations(t)
 }
 
 // TestEnsureMTPLoaded_CrossBlockReadersAndWritersDoNotRace verifies that
@@ -1720,14 +1727,23 @@ func TestEnsureMTPLoaded_CrossBlockReadersAndWritersDoNotRace(t *testing.T) {
 
 	// Concurrently extend the store to a later block height. Without the
 	// reader-side RLock this append/patch races with the readers.
+	var extendErr error
+
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		require.NoError(t, v.EnsureMTPLoaded(ctx, extendedHeight))
+		// require.* uses runtime.Goexit which only stops the goroutine it runs
+		// in; capture and assert from the main test goroutine after wg.Wait.
+		extendErr = v.EnsureMTPLoaded(ctx, extendedHeight)
 	}()
 
 	wg.Wait()
 	close(stop)
 
+	require.NoError(t, extendErr)
 	require.GreaterOrEqual(t, len(v.mtpStore), int(extendedHeight+1))
+
+	// Asserts the initial-load + extension pair both fired exactly once
+	// (each .Once() above) — defends against accidental over-fetch.
+	mockClient.AssertExpectations(t)
 }

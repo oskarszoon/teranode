@@ -1315,23 +1315,39 @@ func (v *Validator) validateTransaction(ctx context.Context, tx *bt.Tx, blockHei
 	//   ARE in the DB, and EnsureMTPLoaded stores the result at mtpStore[blockHeight].
 	blockMTPHeight := blockHeight
 
-	// Hold the read lock for the duration of the MTP lookups. This serialises against
-	// EnsureMTPLoaded writers (append + in-place overlap patch), which may run concurrently
-	// when blocks N and N+1 are validated in parallel. RLock is uncontended in the
-	// steady-state path where EnsureMTPLoaded has already populated the range.
+	// Hold the read lock only for the MTP lookups themselves, not for the subsequent
+	// ValidateBIP68 call which works on the copied utxoMTPs / blockMTP values. This
+	// serialises against EnsureMTPLoaded writers (append + in-place overlap patch) for
+	// the cross-block case (block N+1 extending mtpStore while block N's per-tx
+	// goroutines read it) without holding the lock through ECDSA / sequence-lock
+	// arithmetic. RLock is uncontended in the steady-state path where EnsureMTPLoaded
+	// has already populated the range.
+	utxoMTPs, blockMTP, err := v.readMTPsLocked(blockMTPHeight, utxoHeights)
+	if err != nil {
+		span.RecordError(err)
+		return err
+	}
+
+	return v.txValidator.ValidateBIP68(tx, blockHeight, utxoHeights, utxoMTPs, blockMTP)
+}
+
+// readMTPsLocked returns the per-input MTP values and the block MTP for use by
+// validateTransaction. It takes the mtpStore read lock for the duration of the
+// reads only and releases it before returning. The caller is free to use the
+// returned slice / value without further synchronisation.
+func (v *Validator) readMTPsLocked(blockMTPHeight uint32, utxoHeights []uint32) ([]uint32, uint32, error) {
 	v.mtpMu.RLock()
 	defer v.mtpMu.RUnlock()
 
 	// Guard against a missing EnsureMTPLoaded call. In normal operation this cannot
 	// happen because Server.go calls EnsureMTPLoaded before spawning goroutines.
 	if uint32(len(v.mtpStore)) <= blockMTPHeight {
-		err := errors.NewProcessingError("[Validator][validateTransaction] MTP store not loaded up to height %d (store length %d); EnsureMTPLoaded must be called before block validation", blockMTPHeight, len(v.mtpStore))
-		span.RecordError(err)
-		return err
+		return nil, 0, errors.NewProcessingError("[Validator][validateTransaction] MTP store not loaded up to height %d (store length %d); EnsureMTPLoaded must be called before block validation", blockMTPHeight, len(v.mtpStore))
 	}
 
 	storeLen := uint32(len(v.mtpStore))
 	utxoMTPs := make([]uint32, len(utxoHeights))
+
 	for i, h := range utxoHeights {
 		if h >= storeLen {
 			utxoMTPs[i] = v.mtpStore[blockMTPHeight]
@@ -1339,9 +1355,8 @@ func (v *Validator) validateTransaction(ctx context.Context, tx *bt.Tx, blockHei
 			utxoMTPs[i] = v.mtpStore[h]
 		}
 	}
-	blockMTP := v.mtpStore[blockMTPHeight]
 
-	return v.txValidator.ValidateBIP68(tx, blockHeight, utxoHeights, utxoMTPs, blockMTP)
+	return utxoMTPs, v.mtpStore[blockMTPHeight], nil
 }
 
 // validateTransactionScripts performs script validation for a transaction
