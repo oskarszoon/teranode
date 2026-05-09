@@ -384,8 +384,10 @@ func TestCentralizedPeerRegistry_Cleanup_TTL(t *testing.T) {
 	r.Register(&PeerInfo{ID: "fresh"})
 	r.Register(&PeerInfo{ID: "stale"})
 
-	// Backdate stale beyond TTL.
+	// Backdate stale beyond TTL on both freshness fields (Cleanup looks at
+	// LastSeen first, with LastMessageTime as fallback).
 	r.mu.Lock()
+	r.peers["stale"].LastSeen = time.Now().Add(-2 * time.Hour)
 	r.peers["stale"].LastMessageTime = time.Now().Add(-2 * time.Hour)
 	r.mu.Unlock()
 
@@ -522,8 +524,9 @@ func TestCentralizedPeerRegistry_Cleanup_ExpiredBanIsNotExempt(t *testing.T) {
 	r.AddBanScore("p", "spam", 0)
 	require.True(t, r.IsBannedPeer("p"))
 
-	// Backdate LastMessageTime so TTL cleanup would normally kick in.
+	// Backdate both freshness fields so TTL cleanup would normally kick in.
 	r.mu.Lock()
+	r.peers["p"].LastSeen = time.Now().Add(-2 * time.Hour)
 	r.peers["p"].LastMessageTime = time.Now().Add(-2 * time.Hour)
 	r.mu.Unlock()
 
@@ -535,12 +538,48 @@ func TestCentralizedPeerRegistry_Cleanup_ExpiredBanIsNotExempt(t *testing.T) {
 	require.Equal(t, 0, r.Count())
 }
 
+func TestCentralizedPeerRegistry_Cleanup_LastSeenKeepsActivePeerAlive(t *testing.T) {
+	r := NewCentralizedPeerRegistry(DefaultBanConfig())
+
+	// Active peer: LastMessageTime stale (no recent gossip) but LastSeen
+	// fresh (recent UpdateMetrics / RecordBlockReceived would do this).
+	r.Register(&PeerInfo{ID: "active"})
+	r.mu.Lock()
+	r.peers["active"].LastMessageTime = time.Now().Add(-3 * time.Hour)
+	r.peers["active"].LastSeen = time.Now()
+	r.mu.Unlock()
+
+	expired, _ := r.Cleanup(0, time.Hour)
+	require.Equal(t, 0, expired, "active peer with fresh LastSeen must not be evicted")
+	_, ok := r.Get("active")
+	require.True(t, ok)
+}
+
+func TestCentralizedPeerRegistry_Cleanup_FallsBackToLastMessageTime(t *testing.T) {
+	r := NewCentralizedPeerRegistry(DefaultBanConfig())
+
+	// Pre-LastSeen-aware persisted record: LastSeen zero, LastMessageTime
+	// recent. Cleanup must fall back to LastMessageTime so older state isn't
+	// silently treated as stale.
+	r.Register(&PeerInfo{ID: "old-record"})
+	r.mu.Lock()
+	r.peers["old-record"].LastSeen = time.Time{}
+	r.peers["old-record"].LastMessageTime = time.Now()
+	r.mu.Unlock()
+
+	expired, _ := r.Cleanup(0, time.Hour)
+	require.Equal(t, 0, expired, "fallback to LastMessageTime must keep recent older record")
+}
+
 func TestCentralizedPeerRegistry_StartCleanup_RunsAndStops(t *testing.T) {
 	r := NewCentralizedPeerRegistry(DefaultBanConfig())
 
-	// Register a peer with a stale LastMessageTime so the loop will evict it.
+	// Register a peer with stale activity so the loop will evict it.
+	// Cleanup now uses LastSeen as the canonical recency signal, so backdate
+	// both fields to keep the test resilient against future tweaks.
 	r.Register(&PeerInfo{ID: "stale"})
 	r.mu.Lock()
+	r.peers["stale"].LastSeen = time.Now().Add(-2 * time.Hour)
 	r.peers["stale"].LastMessageTime = time.Now().Add(-2 * time.Hour)
 	r.mu.Unlock()
 

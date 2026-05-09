@@ -940,10 +940,15 @@ func (r *CentralizedPeerRegistry) RecordCatchupError(peerID string, errMsg strin
 }
 
 // Cleanup evicts stale peers to bound memory and lookup cost. Phase 1 (TTL)
-// drops peers whose LastMessageTime is older than ttl. Phase 2 (LRU) then drops
-// oldest-first until the non-exempt portion of the registry fits under maxSize.
-// Connected peers and banned peers are exempt from both phases. A maxSize of 0
-// disables the LRU phase. Returns (expired, lru) counts.
+// drops peers whose recency timestamp is older than ttl. Phase 2 (LRU) then
+// drops oldest-first until the non-exempt portion of the registry fits under
+// maxSize. Connected peers and banned peers are exempt from both phases.
+// A maxSize of 0 disables the LRU phase. Returns (expired, lru) counts.
+//
+// Recency is taken from peerActivity(info), which uses LastSeen as the canonical
+// freshness signal (every successful interaction refreshes it) and falls back
+// to LastMessageTime for entries that pre-date that convention or were
+// restored from older persisted state.
 func (r *CentralizedPeerRegistry) Cleanup(maxSize int, ttl time.Duration) (int, int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -959,7 +964,7 @@ func (r *CentralizedPeerRegistry) Cleanup(maxSize int, ttl time.Duration) (int, 
 		if isCleanupExempt(info) {
 			continue
 		}
-		if !info.LastMessageTime.IsZero() && now.Sub(info.LastMessageTime) <= ttl {
+		if last := peerActivity(info); !last.IsZero() && now.Sub(last) <= ttl {
 			continue
 		}
 		delete(r.peers, id)
@@ -981,7 +986,7 @@ func (r *CentralizedPeerRegistry) Cleanup(maxSize int, ttl time.Duration) (int, 
 			exemptCount++
 			continue
 		}
-		candidates = append(candidates, candidate{id: id, last: info.LastMessageTime})
+		candidates = append(candidates, candidate{id: id, last: peerActivity(info)})
 	}
 
 	target := maxSize - exemptCount
@@ -1008,4 +1013,19 @@ func (r *CentralizedPeerRegistry) Cleanup(maxSize int, ttl time.Duration) (int, 
 // size pressure. Caller must hold the registry lock.
 func isCleanupExempt(info *PeerInfo) bool {
 	return info.IsConnected || info.IsBanned
+}
+
+// peerActivity returns the canonical freshness timestamp used by Cleanup.
+//
+// Prefers LastSeen because every successful interaction path
+// (UpdateMetrics, RecordBlockReceived, RecordSubtreeReceived,
+// RecordTransactionReceived, Register) refreshes it. Falls back to
+// LastMessageTime for older persisted records that pre-date that
+// convention. Persistence Load also uses LastSeen as its TTL signal,
+// so this aligns the two paths on a single freshness definition.
+func peerActivity(info *PeerInfo) time.Time {
+	if !info.LastSeen.IsZero() {
+		return info.LastSeen
+	}
+	return info.LastMessageTime
 }
