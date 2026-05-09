@@ -1747,3 +1747,60 @@ func TestEnsureMTPLoaded_CrossBlockReadersAndWritersDoNotRace(t *testing.T) {
 	// (each .Once() above) — defends against accidental over-fetch.
 	mockClient.AssertExpectations(t)
 }
+
+// TestReadMTPsLocked_HappyPath verifies the reader helper returns the per-input
+// MTP values and the block MTP correctly when mtpStore is fully populated.
+func TestReadMTPsLocked_HappyPath(t *testing.T) {
+	v := &Validator{
+		logger: ulogger.TestLogger{},
+		mtpStore: []uint32{
+			1_700_000_000, // height 0
+			1_700_000_010, // height 1
+			1_700_000_020, // height 2
+			1_700_000_030, // height 3
+			1_700_000_040, // height 4
+		},
+	}
+
+	utxoMTPs, blockMTP, err := v.readMTPsLocked(4, []uint32{0, 2, 3})
+	require.NoError(t, err)
+	require.Equal(t, []uint32{1_700_000_000, 1_700_000_020, 1_700_000_030}, utxoMTPs)
+	require.Equal(t, uint32(1_700_000_040), blockMTP)
+}
+
+// TestReadMTPsLocked_ClampsOutOfRangeUTXOs verifies that utxoHeights at or above
+// the store length fall back to the blockMTP value (matches the production
+// behaviour for unconfirmed parents whose effective height is blockState.Height+1
+// and may exceed blockMTPHeight).
+func TestReadMTPsLocked_ClampsOutOfRangeUTXOs(t *testing.T) {
+	v := &Validator{
+		logger: ulogger.TestLogger{},
+		mtpStore: []uint32{
+			1_700_000_000,
+			1_700_000_010,
+			1_700_000_020,
+		},
+	}
+
+	utxoMTPs, blockMTP, err := v.readMTPsLocked(2, []uint32{0, 99, 1})
+	require.NoError(t, err)
+	require.Equal(t, []uint32{1_700_000_000, 1_700_000_020, 1_700_000_010}, utxoMTPs)
+	require.Equal(t, uint32(1_700_000_020), blockMTP)
+}
+
+// TestReadMTPsLocked_GuardFiresOnUnpopulatedStore verifies the guard returns a
+// processing error when EnsureMTPLoaded has not populated the store up to the
+// requested blockMTPHeight (in normal operation this cannot happen because
+// Server.go calls EnsureMTPLoaded before per-tx goroutines start).
+func TestReadMTPsLocked_GuardFiresOnUnpopulatedStore(t *testing.T) {
+	v := &Validator{
+		logger:   ulogger.TestLogger{},
+		mtpStore: []uint32{1_700_000_000, 1_700_000_010}, // length 2, asking for height 5
+	}
+
+	utxoMTPs, blockMTP, err := v.readMTPsLocked(5, []uint32{0})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "MTP store not loaded up to height 5")
+	require.Nil(t, utxoMTPs)
+	require.Equal(t, uint32(0), blockMTP)
+}
