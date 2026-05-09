@@ -555,6 +555,25 @@ func TestCentralizedPeerRegistry_Cleanup_LastSeenKeepsActivePeerAlive(t *testing
 	require.True(t, ok)
 }
 
+func TestCentralizedPeerRegistry_Cleanup_StaleLastSeenFreshLastMessageTime(t *testing.T) {
+	// UpdateLastMessageTime refreshes only LastMessageTime. A peer that had a
+	// non-zero LastSeen (from an earlier interaction) and then received fresh
+	// last-message updates must still be considered active by Cleanup.
+	r := NewCentralizedPeerRegistry(DefaultBanConfig())
+
+	r.Register(&PeerInfo{ID: "p"})
+	r.mu.Lock()
+	r.peers["p"].LastSeen = time.Now().Add(-3 * time.Hour)
+	r.peers["p"].LastMessageTime = time.Now()
+	r.mu.Unlock()
+
+	expired, _ := r.Cleanup(0, time.Hour)
+	require.Equal(t, 0, expired,
+		"newest activity timestamp wins; stale LastSeen must not evict a peer with fresh LastMessageTime")
+	_, ok := r.Get("p")
+	require.True(t, ok)
+}
+
 func TestCentralizedPeerRegistry_Cleanup_FallsBackToLastMessageTime(t *testing.T) {
 	r := NewCentralizedPeerRegistry(DefaultBanConfig())
 

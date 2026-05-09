@@ -1015,16 +1015,19 @@ func isCleanupExempt(info *PeerInfo) bool {
 	return info.IsConnected || info.IsBanned
 }
 
-// peerActivity returns the canonical freshness timestamp used by Cleanup.
+// peerActivity returns the canonical freshness timestamp used by Cleanup —
+// the newer of LastSeen and LastMessageTime.
 //
-// Prefers LastSeen because every successful interaction path
-// (UpdateMetrics, RecordBlockReceived, RecordSubtreeReceived,
-// RecordTransactionReceived, Register) refreshes it. Falls back to
-// LastMessageTime for older persisted records that pre-date that
-// convention. Persistence Load also uses LastSeen as its TTL signal,
-// so this aligns the two paths on a single freshness definition.
+// Most successful-interaction paths refresh LastSeen (UpdateMetrics,
+// RecordBlockReceived/Subtree/Transaction, Register), but the explicit
+// UpdateLastMessageTime RPC bumps only LastMessageTime. Picking the newer
+// of the two means recent activity through either field counts as recent,
+// and older persisted records that only have LastMessageTime still get a
+// sensible recency value. Persistence Load uses LastSeen as its TTL signal,
+// which is consistent because Load also restores LastMessageTime so both
+// fields are present.
 func peerActivity(info *PeerInfo) time.Time {
-	if !info.LastSeen.IsZero() {
+	if info.LastSeen.After(info.LastMessageTime) {
 		return info.LastSeen
 	}
 	return info.LastMessageTime
