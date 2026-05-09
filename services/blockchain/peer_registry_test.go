@@ -1,6 +1,7 @@
 package blockchain
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -456,6 +457,120 @@ func TestCentralizedPeerRegistry_RemovePreservesBanScore(t *testing.T) {
 
 	require.True(t, r.IsBannedPeer("p"), "ban must outlive Remove")
 	require.Equal(t, []string{"p"}, r.ListBannedPeers())
+}
+
+func TestCentralizedPeerRegistry_Get_NormalisesExpiredBan(t *testing.T) {
+	cfg := DefaultBanConfig()
+	cfg.Duration = time.Millisecond
+	r := NewCentralizedPeerRegistry(cfg)
+
+	r.Register(&PeerInfo{ID: "p"})
+	// Two strikes ban: 50 + 50 = 100 = threshold.
+	r.AddBanScore("p", "spam", 0)
+	r.AddBanScore("p", "spam", 0)
+	got, _ := r.Get("p")
+	require.True(t, got.IsBanned)
+
+	time.Sleep(5 * time.Millisecond)
+
+	// Get must run expireBansLocked so the snapshot it returns reflects
+	// the elapsed ban window.
+	got, _ = r.Get("p")
+	require.False(t, got.IsBanned)
+	require.Equal(t, int32(0), got.BanScore)
+}
+
+func TestCentralizedPeerRegistry_List_NormalisesExpiredBan(t *testing.T) {
+	cfg := DefaultBanConfig()
+	cfg.Duration = time.Millisecond
+	r := NewCentralizedPeerRegistry(cfg)
+
+	r.Register(&PeerInfo{ID: "p"})
+	r.AddBanScore("p", "spam", 0)
+	r.AddBanScore("p", "spam", 0)
+
+	time.Sleep(5 * time.Millisecond)
+
+	// excludeBanned=false used to skip expiry; the snapshot would still
+	// carry IsBanned=true after the window elapsed.
+	peers := r.List(nil, 0, 0, false, false)
+	require.Len(t, peers, 1)
+	require.False(t, peers[0].IsBanned)
+}
+
+func TestCentralizedPeerRegistry_ListBannedPeers_NormalisesExpiredBan(t *testing.T) {
+	cfg := DefaultBanConfig()
+	cfg.Duration = time.Millisecond
+	r := NewCentralizedPeerRegistry(cfg)
+
+	r.Register(&PeerInfo{ID: "p"})
+	r.AddBanScore("p", "spam", 0)
+	r.AddBanScore("p", "spam", 0)
+	require.Equal(t, []string{"p"}, r.ListBannedPeers())
+
+	time.Sleep(5 * time.Millisecond)
+	require.Empty(t, r.ListBannedPeers(), "expired ban must be normalised before listing")
+}
+
+func TestCentralizedPeerRegistry_Cleanup_ExpiredBanIsNotExempt(t *testing.T) {
+	cfg := DefaultBanConfig()
+	cfg.Duration = time.Millisecond
+	r := NewCentralizedPeerRegistry(cfg)
+
+	r.Register(&PeerInfo{ID: "p"})
+	r.AddBanScore("p", "spam", 0)
+	r.AddBanScore("p", "spam", 0)
+	require.True(t, r.IsBannedPeer("p"))
+
+	// Backdate LastMessageTime so TTL cleanup would normally kick in.
+	r.mu.Lock()
+	r.peers["p"].LastMessageTime = time.Now().Add(-2 * time.Hour)
+	r.mu.Unlock()
+
+	time.Sleep(5 * time.Millisecond)
+
+	// Without expiry-on-cleanup, IsBanned would keep this peer exempt forever.
+	expired, _ := r.Cleanup(0, time.Hour)
+	require.Equal(t, 1, expired, "expired-ban peer must be evictable on cleanup")
+	require.Equal(t, 0, r.Count())
+}
+
+func TestCentralizedPeerRegistry_StartCleanup_RunsAndStops(t *testing.T) {
+	r := NewCentralizedPeerRegistry(DefaultBanConfig())
+
+	// Register a peer with a stale LastMessageTime so the loop will evict it.
+	r.Register(&PeerInfo{ID: "stale"})
+	r.mu.Lock()
+	r.peers["stale"].LastMessageTime = time.Now().Add(-2 * time.Hour)
+	r.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r.StartCleanup(ctx, 5*time.Millisecond, time.Hour, 0)
+
+	require.Eventually(t, func() bool {
+		return r.Count() == 0
+	}, time.Second, 5*time.Millisecond, "cleanup loop must evict the stale peer")
+
+	doneCh := make(chan struct{})
+	go func() {
+		r.Close()
+		close(doneCh)
+	}()
+
+	select {
+	case <-doneCh:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not return — cleanup goroutine leaked")
+	}
+}
+
+func TestCentralizedPeerRegistry_StartCleanup_ZeroIntervalIsNoOp(t *testing.T) {
+	r := NewCentralizedPeerRegistry(DefaultBanConfig())
+	require.NotPanics(t, func() {
+		r.StartCleanup(context.Background(), 0, time.Hour, 0)
+	})
+	r.Close()
 }
 
 func TestCentralizedPeerRegistry_List_SortByStorage(t *testing.T) {

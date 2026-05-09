@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -381,6 +382,48 @@ func TestPersistence_ConcurrentSavesUseUniqueTmpFiles(t *testing.T) {
 	}
 
 	// No leftover tmp files: only the final file (and possibly nothing else).
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	for _, e := range entries {
+		require.NotContains(t, e.Name(), ".tmp", "stale tmp file: %s", e.Name())
+	}
+}
+
+func TestPersistence_ConcurrentSavesSerialize(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "serialized.json")
+
+	r := NewCentralizedPeerRegistry(DefaultBanConfig())
+	r.Register(&PeerInfo{ID: "p1"})
+
+	// Two concurrent saves: each holds the in-memory snapshot during marshal,
+	// the saveMu serializes the rename so they cannot trample one another.
+	const writers = 32
+	errCh := make(chan error, writers)
+	var wg sync.WaitGroup
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errCh <- r.Save(path)
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		require.NoError(t, err)
+	}
+
+	// Final file is valid JSON in the new envelope shape.
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	var env persistedRegistry
+	require.NoError(t, json.Unmarshal(data, &env))
+	require.Equal(t, persistedRegistryVersion, env.Version)
+	require.Len(t, env.Peers, 1)
+
+	// No leftover .tmp files.
 	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
 	for _, e := range entries {

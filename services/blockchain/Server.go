@@ -424,8 +424,21 @@ func (b *Blockchain) Start(ctx context.Context, readyCh chan<- struct{}) error {
 
 	b.startKafka()
 
+	// Settings here still live under tSettings.P2P.* — the centralized
+	// registry inherits the existing operator-facing knobs unchanged. Moving
+	// them under tSettings.BlockChain.* is a follow-up rename.
+	registryTTL := b.settings.P2P.PeerRegistryTTL
+	if registryTTL <= 0 {
+		registryTTL = 24 * time.Hour
+	}
+	cleanupInterval := b.settings.P2P.PeerRegistryCleanupInterval
+	maxSize := b.settings.P2P.PeerRegistryMaxSize
+
 	if path := b.settings.BlockChain.PeerRegistryPath; path != "" {
-		if err := b.peerRegistry.Load(path, 24*time.Hour); err != nil {
+		// Use the configured TTL on Load so persisted reputation history
+		// survives exactly as long as operators have asked for, instead of
+		// the hardcoded 24h that ignored their config.
+		if err := b.peerRegistry.Load(path, registryTTL); err != nil {
 			b.logger.Warnf("[Blockchain] failed to load peer registry from %s: %v", path, err)
 		} else {
 			b.logger.Infof("[Blockchain] loaded %d peers from %s", b.peerRegistry.Count(), path)
@@ -439,6 +452,11 @@ func (b *Blockchain) Start(ctx context.Context, readyCh chan<- struct{}) error {
 
 	// Start ban score decay goroutine for the centralized peer registry.
 	b.peerRegistry.StartBanDecay(ctx)
+
+	// Start TTL+LRU cleanup so the registry can't grow unboundedly under
+	// peer churn. The driver loop is owned by the registry; we just feed it
+	// the operator-configured cadence and bounds. A zero interval disables.
+	b.peerRegistry.StartCleanup(ctx, cleanupInterval, registryTTL, maxSize)
 
 	go b.startSubscriptions()
 

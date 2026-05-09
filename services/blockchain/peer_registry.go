@@ -135,6 +135,14 @@ type CentralizedPeerRegistry struct {
 	banScores map[string]*banEntry
 	banConfig BanConfig
 
+	// saveMu serializes Save() so concurrent callers (periodic ticker +
+	// shutdown) cannot persist an older snapshot over a newer one. Without
+	// it, two saves can each take their own consistent state-snapshot, then
+	// race the rename: whichever rename wins is unrelated to which snapshot
+	// is fresher. saveMu is taken outside r.mu to keep the read-snapshot
+	// portion fast; Save never holds both at once.
+	saveMu sync.Mutex
+
 	// Background-goroutine lifecycle. stopCh is closed once by Close() to signal
 	// the ban-decay loop (and any future loops) to exit; wg waits for those
 	// loops to finish so Close() can give callers a synchronous shutdown.
@@ -278,10 +286,15 @@ func (r *CentralizedPeerRegistry) Remove(peerID string) {
 }
 
 // Get returns a copy of the peer info for peerID, or false if not found.
-// Returning a copy prevents callers from modifying registry state without locking.
+// Returning a copy prevents callers from modifying registry state without
+// locking. Acquires the write lock so it can normalise expired ban state
+// before producing the snapshot — otherwise a peer whose ban window has
+// elapsed could still report IsBanned=true to dashboards / RPC clients.
 func (r *CentralizedPeerRegistry) Get(peerID string) (*PeerInfo, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.expireBansLocked()
 
 	info, exists := r.peers[peerID]
 	if !exists {
@@ -301,10 +314,10 @@ func (r *CentralizedPeerRegistry) Get(peerID string) (*PeerInfo, bool) {
 // sortByStorage is true, "full" peers sort ahead of "pruned" peers ahead of
 // unknown — applied as the primary key, with reputation as the secondary key.
 //
-// When excludeBanned is true, List acquires the write lock so it can run ban
-// expiry inline (auto-unban + sync to PeerInfo). Without that pass, a list
-// filtered for excludeBanned could include peers whose ban window has ended
-// but whose entry.Banned flag had not yet been refreshed by IsBannedPeer.
+// List always acquires the write lock so it can normalise expired ban state
+// inline. Even when the caller doesn't ask for excludeBanned, the snapshots
+// returned to dashboards / RPC clients must not show IsBanned=true for peers
+// whose ban window has already passed.
 func (r *CentralizedPeerRegistry) List(
 	transportFilter *blockchain_api.TransportType,
 	minReputation float64,
@@ -312,14 +325,9 @@ func (r *CentralizedPeerRegistry) List(
 	excludeBanned bool,
 	sortByStorage bool,
 ) []*PeerInfo {
-	if excludeBanned {
-		r.mu.Lock()
-		defer r.mu.Unlock()
-		r.expireBansLocked()
-	} else {
-		r.mu.RLock()
-		defer r.mu.RUnlock()
-	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.expireBansLocked()
 
 	result := make([]*PeerInfo, 0, len(r.peers))
 
@@ -591,10 +599,12 @@ func (r *CentralizedPeerRegistry) IsBannedPeer(peerID string) bool {
 	return true
 }
 
-// ListBannedPeers returns all currently banned peer IDs.
+// ListBannedPeers returns all currently banned peer IDs. Expired bans are
+// normalised first so callers don't see entries whose window has elapsed.
 func (r *CentralizedPeerRegistry) ListBannedPeers() []string {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.expireBansLocked()
 
 	now := time.Now()
 	var result []string
@@ -646,6 +656,39 @@ func (r *CentralizedPeerRegistry) StartBanDecay(ctx context.Context) {
 				return
 			case <-ticker.C:
 				r.decayBanScores()
+			}
+		}
+	}()
+}
+
+// StartCleanup starts a background goroutine that periodically runs
+// Cleanup(maxSize, ttl) so the in-memory registry cannot grow unboundedly
+// under churn. Connected and banned peers are exempt; expired bans are
+// normalised before each pass so a stale IsBanned flag can't keep an idle
+// peer alive forever. The goroutine exits on the first of: ctx cancellation
+// OR Close().
+//
+// A zero or negative interval disables the loop (caller's choice — useful
+// when the operator only wants TTL-on-load semantics).
+func (r *CentralizedPeerRegistry) StartCleanup(ctx context.Context, interval, ttl time.Duration, maxSize int) {
+	if interval <= 0 {
+		return
+	}
+
+	r.wg.Add(1)
+	go func() {
+		defer r.wg.Done()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-r.stopCh:
+				return
+			case <-ticker.C:
+				r.Cleanup(maxSize, ttl)
 			}
 		}
 	}()
@@ -904,6 +947,10 @@ func (r *CentralizedPeerRegistry) RecordCatchupError(peerID string, errMsg strin
 func (r *CentralizedPeerRegistry) Cleanup(maxSize int, ttl time.Duration) (int, int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	// Normalise expired bans first so isCleanupExempt() doesn't keep an idle
+	// peer alive on the strength of a stale IsBanned flag.
+	r.expireBansLocked()
 
 	now := time.Now()
 	expired := 0

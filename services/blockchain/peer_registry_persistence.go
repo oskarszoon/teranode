@@ -117,8 +117,13 @@ func loadPeerRegistry(path string, ttl time.Duration) ([]*PeerInfo, map[string]p
 	return live, envelope.BanScores, nil
 }
 
-// Save persists the current registry state to path. Safe to call concurrently.
+// Save persists the current registry state to path. Safe to call concurrently
+// — saveMu serializes the snapshot+write+rename so a slow earlier save can't
+// rename its older snapshot over a newer one.
 func (r *CentralizedPeerRegistry) Save(path string) error {
+	r.saveMu.Lock()
+	defer r.saveMu.Unlock()
+
 	r.mu.RLock()
 	peers := make([]*PeerInfo, 0, len(r.peers))
 	for _, p := range r.peers {
