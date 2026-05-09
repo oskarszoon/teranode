@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/bsv-blockchain/teranode/errors"
@@ -47,9 +48,24 @@ func savePeerRegistry(path string, peers []*PeerInfo, banScores map[string]persi
 		return errors.NewProcessingError("marshal peer registry", err)
 	}
 
-	tmp := path + ".tmp"
-	if err = os.WriteFile(tmp, data, 0o600); err != nil {
+	// Use a unique temp file per call so concurrent saves (periodic ticker +
+	// shutdown) don't clobber each other. os.CreateTemp gives us O_EXCL +
+	// 0600 perms in one shot.
+	dir := filepath.Dir(path)
+	tmpFile, err := os.CreateTemp(dir, filepath.Base(path)+".tmp.*")
+	if err != nil {
+		return errors.NewProcessingError("create peer registry tmp file", err)
+	}
+	tmp := tmpFile.Name()
+
+	if _, err = tmpFile.Write(data); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmp)
 		return errors.NewProcessingError("write peer registry tmp file", err)
+	}
+	if err = tmpFile.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return errors.NewProcessingError("close peer registry tmp file", err)
 	}
 
 	if err = os.Rename(tmp, path); err != nil {
@@ -165,6 +181,23 @@ func (r *CentralizedPeerRegistry) Load(path string, ttl time.Duration) error {
 			BanUntil:  b.BanUntil,
 			LastDecay: lastDecay,
 			Reasons:   append([]string(nil), b.Reasons...),
+		}
+	}
+
+	// Reconcile PeerInfo.IsBanned / BanScore with the surviving banScores
+	// map. A peer can carry IsBanned=true on disk while its corresponding
+	// ban entry has just expired (and therefore got dropped above);
+	// without this sync, selection and cleanup paths would treat the peer
+	// as banned even though IsBannedPeer() returns false.
+	for id, p := range r.peers {
+		entry, ok := r.banScores[id]
+		switch {
+		case !ok:
+			p.IsBanned = false
+			p.BanScore = 0
+		default:
+			p.IsBanned = entry.Banned
+			p.BanScore = entry.Score
 		}
 	}
 

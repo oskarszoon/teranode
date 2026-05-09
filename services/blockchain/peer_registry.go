@@ -3,12 +3,48 @@ package blockchain
 import (
 	"context"
 	"sort"
+	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	"github.com/bsv-blockchain/teranode/services/blockchain/blockchain_api"
 )
+
+// maxPeerNameLength caps untrusted peer-supplied client names to prevent
+// resource exhaustion and oversized log lines.
+const maxPeerNameLength = 128
+
+// sanitizeClientName scrubs an untrusted peer-supplied client name string.
+// Control characters and high-Unicode are dropped; XSS-flavoured ASCII
+// (`<>&"'\`) is dropped; the result is trimmed and capped to maxPeerNameLength.
+// An empty input returns an empty string.
+func sanitizeClientName(name string) string {
+	if name == "" {
+		return ""
+	}
+	if len(name) > maxPeerNameLength {
+		name = name[:maxPeerNameLength]
+	}
+
+	var cleaned strings.Builder
+	cleaned.Grow(len(name))
+
+	for _, r := range name {
+		switch {
+		case (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9'),
+			r == ' ' || r == '-' || r == '_' || r == '.' || r == '/':
+			cleaned.WriteRune(r)
+		case unicode.IsPrint(r) && r < 128:
+			if r != '<' && r != '>' && r != '&' && r != '\'' && r != '"' && r != '\\' {
+				cleaned.WriteRune(r)
+			}
+		}
+	}
+
+	return strings.TrimSpace(cleaned.String())
+}
 
 // PeerInfo holds transport-agnostic information about a peer known to the node.
 // It is used across all transport types (HTTP DataHub, wire protocol, etc.).
@@ -133,6 +169,9 @@ func (r *CentralizedPeerRegistry) Register(info *PeerInfo) {
 			hashCopy := *info.BlockHash
 			entry.BlockHash = &hashCopy
 		}
+		// Strip dangerous characters out of the peer-supplied client name so
+		// it can't break logs / dashboards / JSON consumers.
+		entry.ClientName = sanitizeClientName(entry.ClientName)
 		entry.ConnectedAt = now
 		entry.LastSeen = now
 		entry.LastMessageTime = now
@@ -143,7 +182,7 @@ func (r *CentralizedPeerRegistry) Register(info *PeerInfo) {
 
 	// Update only fields that carry meaningful new data.
 	if info.ClientName != "" {
-		existing.ClientName = info.ClientName
+		existing.ClientName = sanitizeClientName(info.ClientName)
 	}
 	if info.Height > 0 {
 		existing.Height = info.Height
@@ -462,6 +501,24 @@ func (r *CentralizedPeerRegistry) AddBanScore(peerID string, reason string, poin
 	if !ok {
 		entry = &banEntry{LastDecay: now}
 		r.banScores[peerID] = entry
+	}
+
+	// Expire a stale ban before scoring. If a previous ban window has already
+	// elapsed but no IsBannedPeer() / decay sweep has run yet, treat the peer
+	// as un-banned for this call: clear Banned/Score/Reasons so the new
+	// violation accumulates fresh and can re-arm the ban via the threshold
+	// check below. Without this, AddBanScore would return Banned=true while
+	// counting nothing, and the next IsBannedPeer call would wipe the score
+	// entirely.
+	if entry.Banned && now.After(entry.BanUntil) {
+		entry.Banned = false
+		entry.Score = 0
+		entry.Reasons = nil
+		entry.LastDecay = now
+		if peer, exists := r.peers[peerID]; exists {
+			peer.IsBanned = false
+			peer.BanScore = 0
+		}
 	}
 
 	// Apply decay (guard against zero interval to avoid division by zero)

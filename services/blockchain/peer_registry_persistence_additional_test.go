@@ -49,6 +49,14 @@ func TestCentralizedPeerRegistry_Persistence_AllFields(t *testing.T) {
 	p.AvgResponseTimeMs = 250
 	p.IsBanned = true
 	p.BanScore = 80
+	// Pair the IsBanned flag with a real ban entry so Load's reconciliation
+	// step keeps it set; otherwise IsBanned would be cleared because no
+	// matching banScores entry exists.
+	r.banScores["full-peer"] = &banEntry{
+		Score:    80,
+		Banned:   true,
+		BanUntil: time.Now().Add(24 * time.Hour),
+	}
 	// Set time fields to known values.
 	fixedTime := time.Date(2025, 6, 15, 12, 0, 0, 0, time.UTC)
 	p.ConnectedAt = fixedTime
@@ -206,7 +214,7 @@ func TestCentralizedPeerRegistry_Persistence_SaveToReadOnlyDir(t *testing.T) {
 
 	err := r.Save(path)
 	require.Error(t, err)
-	require.ErrorContains(t, err, "write peer registry tmp file")
+	require.ErrorContains(t, err, "create peer registry tmp file")
 }
 
 // TestSavePeerRegistry_AtomicRename verifies that the final file contains valid
@@ -350,6 +358,70 @@ func TestPersistence_LoadAnchorsLastDecayWhenMissing(t *testing.T) {
 	entry, ok := r.banScores["p"]
 	require.True(t, ok)
 	require.False(t, entry.LastDecay.IsZero(), "Load must anchor LastDecay")
+}
+
+func TestPersistence_ConcurrentSavesUseUniqueTmpFiles(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "concurrent.json")
+
+	r := NewCentralizedPeerRegistry(DefaultBanConfig())
+	for i := 0; i < 10; i++ {
+		r.Register(&PeerInfo{ID: filepath.Base(filepath.Join("peer", string(rune('a'+i))))})
+	}
+
+	const writers = 8
+	errs := make(chan error, writers)
+	for i := 0; i < writers; i++ {
+		go func() {
+			errs <- r.Save(path)
+		}()
+	}
+	for i := 0; i < writers; i++ {
+		require.NoError(t, <-errs)
+	}
+
+	// No leftover tmp files: only the final file (and possibly nothing else).
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	for _, e := range entries {
+		require.NotContains(t, e.Name(), ".tmp", "stale tmp file: %s", e.Name())
+	}
+}
+
+func TestPersistence_LoadClearsBanFlagOnExpiredEntry(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "expired-on-disk.json")
+
+	envelope := persistedRegistry{
+		Version: persistedRegistryVersion,
+		Peers: []*PeerInfo{
+			{
+				ID:       "p",
+				IsBanned: true, // peer struct still flagged
+				BanScore: 200,
+				LastSeen: time.Now(),
+			},
+		},
+		BanScores: map[string]persistedBanEntry{
+			"p": {
+				Score:    200,
+				Banned:   true,
+				BanUntil: time.Now().Add(-1 * time.Hour), // already expired
+			},
+		},
+	}
+	data, err := json.Marshal(&envelope)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, data, 0o600))
+
+	r := NewCentralizedPeerRegistry(DefaultBanConfig())
+	require.NoError(t, r.Load(path, 24*time.Hour))
+
+	got, ok := r.Get("p")
+	require.True(t, ok)
+	require.False(t, got.IsBanned, "PeerInfo must be reconciled when ban entry expired")
+	require.Equal(t, int32(0), got.BanScore)
+	require.False(t, r.IsBannedPeer("p"))
 }
 
 func TestPersistence_ExpiredBanDroppedOnLoad(t *testing.T) {

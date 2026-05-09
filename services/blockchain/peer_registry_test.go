@@ -3,6 +3,7 @@ package blockchain
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -246,6 +247,36 @@ func TestCentralizedPeerRegistry_UpdateConnectionState(t *testing.T) {
 	// Unknown peer — no panic, no insert.
 	r.UpdateConnectionState("ghost", true)
 	require.Equal(t, 1, r.Count())
+}
+
+func TestCentralizedPeerRegistry_RegisterSanitizesClientName(t *testing.T) {
+	r := NewCentralizedPeerRegistry(DefaultBanConfig())
+
+	dirty := "<script>alert('xss')</script>" + string([]byte{0, 1, 2}) + "node/1.0"
+	r.Register(&PeerInfo{ID: "peer-1", ClientName: dirty})
+
+	got, _ := r.Get("peer-1")
+	require.NotContains(t, got.ClientName, "<")
+	require.NotContains(t, got.ClientName, ">")
+	require.NotContains(t, got.ClientName, "'")
+	require.NotContains(t, got.ClientName, "\x00")
+	require.Contains(t, got.ClientName, "node/1.0", "safe segment must survive")
+
+	// Update path also sanitizes.
+	r.Register(&PeerInfo{ID: "peer-1", ClientName: "good name<bad>"})
+	got, _ = r.Get("peer-1")
+	require.NotContains(t, got.ClientName, "<")
+	require.NotContains(t, got.ClientName, ">")
+}
+
+func TestCentralizedPeerRegistry_RegisterCapsLongClientName(t *testing.T) {
+	r := NewCentralizedPeerRegistry(DefaultBanConfig())
+
+	long := strings.Repeat("a", 500)
+	r.Register(&PeerInfo{ID: "p", ClientName: long})
+
+	got, _ := r.Get("p")
+	require.LessOrEqual(t, len(got.ClientName), 128, "names capped at 128")
 }
 
 func TestCentralizedPeerRegistry_RegisterPreservesIsConnectedOnUpdate(t *testing.T) {

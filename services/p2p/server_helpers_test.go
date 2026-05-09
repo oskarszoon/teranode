@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"testing"
+	"time"
 
 	"github.com/bsv-blockchain/teranode/services/blockchain"
 	"github.com/bsv-blockchain/teranode/settings"
@@ -182,6 +183,21 @@ func TestServerHelpers_ApplyBanScore_NilRegistryNoPanic(t *testing.T) {
 func TestServerHelpers_OnPeerBanned_InvalidIDReturnsCleanly(t *testing.T) {
 	s, _ := newServerWithLocalRegistry(t)
 	require.NotPanics(t, func() { s.onPeerBanned("not-a-peer-id", "spam") })
+}
+
+func TestServerHelpers_OnPeerBanned_NoP2PClientStillRemovesPeer(t *testing.T) {
+	// onPeerBanned now reads s.settings.P2P.BanDuration; with a custom value
+	// set, the helper must still finish the libp2p-side cleanup without
+	// panicking when P2PClient is nil (matches the ban-list-only deployment).
+	s, reg := newServerWithLocalRegistry(t)
+	s.settings.P2P.BanDuration = 7 * time.Minute
+	pid := mustNewPeerID(t)
+	reg.Register(&blockchain.PeerInfo{ID: pid.String()})
+
+	require.NotPanics(t, func() { s.onPeerBanned(pid.String(), "spam") })
+
+	_, ok := reg.Get(pid.String())
+	require.False(t, ok, "removePeer must run even with no P2PClient")
 }
 
 func TestServer_UpdateBytesReceived_SenderDelta(t *testing.T) {

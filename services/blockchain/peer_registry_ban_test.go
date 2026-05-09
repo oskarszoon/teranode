@@ -379,6 +379,32 @@ func TestBanDecayBanScores_BannedEntryNotCleaned(t *testing.T) {
 	require.True(t, entry.Banned)
 }
 
+func TestBanAddBanScore_ExpiresStaleBanBeforeScoring(t *testing.T) {
+	cfg := DefaultBanConfig()
+	cfg.Duration = 5 * time.Millisecond
+	r := NewCentralizedPeerRegistry(cfg)
+
+	r.Register(&PeerInfo{ID: "p"})
+	// Two strikes ban (50 + 50 = 100 = threshold).
+	r.AddBanScore("p", "spam", 0)
+	r.AddBanScore("p", "spam", 0)
+	require.True(t, r.IsBannedPeer("p"))
+
+	// Walk past the ban window.
+	time.Sleep(20 * time.Millisecond)
+
+	// Without an intervening IsBannedPeer call, the entry still has Banned=true
+	// and Score>=Threshold. Adding a fresh score with the stale-expiry guard
+	// must reset Banned/Score first, then re-arm the ban after the new strike.
+	score, banned := r.AddBanScore("p", "spam", 0)
+	require.Equal(t, int32(50), score, "stale ban must be expired before counting the new strike")
+	require.False(t, banned, "single fresh strike below threshold must not re-ban")
+
+	got, _ := r.Get("p")
+	require.False(t, got.IsBanned)
+	require.Equal(t, int32(50), got.BanScore)
+}
+
 func TestBanClose_StopsDecayGoroutineWithoutContextCancel(t *testing.T) {
 	cfg := shortBanConfig()
 	cfg.DecayInterval = time.Millisecond

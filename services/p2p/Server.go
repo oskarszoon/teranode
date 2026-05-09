@@ -1834,7 +1834,13 @@ func (s *Server) applyBanScore(peerID, reason string) {
 // call) by adding the peer's IP to the local banList and disconnecting it.
 // Replaces the old BanEventHandler indirection.
 func (s *Server) onPeerBanned(peerID, reason string) {
-	const banDuration = 24 * time.Hour
+	// Honor the configured ban duration so the address-level ban list and the
+	// centralized peer registry agree on how long the ban lasts. Fall back to
+	// 24h if the setting is unset/zero.
+	banDuration := 24 * time.Hour
+	if s.settings != nil && s.settings.P2P.BanDuration > 0 {
+		banDuration = s.settings.P2P.BanDuration
+	}
 	until := time.Now().Add(banDuration)
 	s.logger.Infof("[onPeerBanned] Peer %s banned until %s for reason: %s", peerID, until.Format(time.RFC3339), reason)
 
