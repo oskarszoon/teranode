@@ -1,0 +1,17 @@
+{
+  "tx_id": "7bc9a3408dd0c87b835c887a0bce22c20788fc3c4b953929d4367656d80acab5",
+  "block_height": 1451505,
+  "network": "testnet",
+  "tx_hex_file": "stuck-tx-7bc9a340.hex",
+  "comment": "Testnet block 1,451,505. Single input spends a 218-sat output whose locking script is 490,001 bytes of repeated 0x6e 0xad (OP_2DROP OP_CHECKSIGVERIFY pairs, ~245,000 forced ECDSA verifications) ending with 0xac (OP_CHECKSIG). NOTE: WhatsOnChain truncates this script to 50,000 bytes in its API/UI; the real prev_locking_script_hex_file was extracted from the raw parent tx supplied by an operator with access to the production utxo external store.",
+  "inputs": [
+    {
+      "index": 0,
+      "prev_tx_id": "cf0b9d6e950ee1bd86b4cafc3125c143c8167e03bcd32b415cd385e284c10c83",
+      "prev_vout": 0,
+      "prev_satoshis": 218,
+      "prev_block_height": 1451473,
+      "prev_locking_script_hex_file": "stuck-tx-7bc9a340-prev-locking-script-0.hex"
+    }
+  ]
+}
