@@ -2657,7 +2657,7 @@ func (b *Blockchain) guardRunBelowHighestCheckpoint(ctx context.Context) error {
 		return nil
 	}
 
-	highest := highestCheckpointHeight(b.settings.ChainCfgParams.Checkpoints)
+	highest := HighestCheckpointHeight(b.settings.ChainCfgParams.Checkpoints)
 	if highest == 0 {
 		return nil
 	}
@@ -2680,9 +2680,11 @@ func (b *Blockchain) guardRunBelowHighestCheckpoint(ctx context.Context) error {
 	return nil
 }
 
-// highestCheckpointHeight returns the largest Height in the supplied
-// checkpoint list, or 0 if the list is empty.
-func highestCheckpointHeight(checkpoints []chaincfg.Checkpoint) uint32 {
+// HighestCheckpointHeight returns the largest Height in the supplied
+// checkpoint list, or 0 if the list is empty. Exported so callers in
+// other packages (e.g. blockvalidation) can share the same definition
+// rather than maintaining a parallel copy.
+func HighestCheckpointHeight(checkpoints []chaincfg.Checkpoint) uint32 {
 	var highest uint32
 	for _, cp := range checkpoints {
 		if cp.Height < 0 {

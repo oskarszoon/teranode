@@ -44,7 +44,7 @@ func TestHighestCheckpointHeight(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.want, highestCheckpointHeight(tt.in))
+			require.Equal(t, tt.want, HighestCheckpointHeight(tt.in))
 		})
 	}
 }
@@ -86,7 +86,7 @@ func newTestBlockchainForGate(t *testing.T, params *chaincfg.Params, store *fsmG
 // (`bad-txns-vout-p2sh BAN THRESHOLD EXCEEDED`).
 func TestGuardRunBelowHighestCheckpoint(t *testing.T) {
 	ctx := context.Background()
-	highest := highestCheckpointHeight(chaincfg.MainNetParams.Checkpoints)
+	highest := HighestCheckpointHeight(chaincfg.MainNetParams.Checkpoints)
 	require.Greater(t, highest, uint32(0), "mainnet must have at least one checkpoint")
 
 	tests := []struct {
