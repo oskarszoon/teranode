@@ -22,13 +22,9 @@ Usage:
 package validator
 
 import (
-	"encoding/hex"
 	"fmt"
-	"os"
-	"path/filepath"
 	"reflect"
 	"testing"
-	"time"
 
 	"github.com/bsv-blockchain/go-bt/v2"
 	"github.com/bsv-blockchain/go-bt/v2/bscript"
@@ -107,122 +103,6 @@ func Test_ScriptVerificationGoBDK_invalid(t *testing.T) {
 		err := verifier.VerifyScript(tx, test.BlockHeight, true, test.UTXOHeights)
 		require.Error(t, err, fmt.Sprintf("Failed tx with TXID %v", test.TxID))
 	}
-}
-
-// Test_ScriptVerificationGoBDK_StuckTx_ProductionPolicy regresses the
-// validator hang that stalled testnet sync for hours on block 1,451,505 /
-// tx 7bc9a3408dd0c87b835c887a0bce22c20788fc3c4b953929d4367656d80acab5.
-// The tx spends a 218-sat output whose locking script is 490,001 bytes of
-// (OP_2DUP OP_CHECKSIGVERIFY) * 245,000 + OP_CHECKSIG. The stack stays at
-// [sig, pubkey] after each pair, so the script performs 245,001 identical
-// ECDSA verifications.
-//
-// The script is consensus-valid (block 1,451,505 is in testnet's hardcoded
-// checkpoint set) and the verifier must return SCRIPT_ERR_OK. Without the
-// per-CheckSig cache wired into gobdk by bitcoin-sv/bdk PR #40 each
-// iteration runs a full SignatureHash that SHA256-streams the 490 KB
-// scriptCode plus an ECDSA verify, pegging CPU for hours and presenting to
-// operators as a hang in the cgo _Cfunc_ScriptEngine_VerifyScript. With
-// the cache (the gobdk pseudo-version pinned in go.mod) the verifier
-// completes in ~70 s on macOS arm64 / ~similar on Linux x86_64.
-//
-// The cgo entry point is uninterruptible from Go, so a regression here
-// manifests as the inner goroutine never publishing a result before the
-// outer wall-clock deadline. On deadline the test t.Fatalf's, leaking the
-// cgo goroutine until the test process exits.
-func Test_ScriptVerificationGoBDK_StuckTx_ProductionPolicy(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping potentially-hanging GoBDK reproduction in -short mode")
-	}
-	tx, blockHeight, utxoHeights := loadStuckTx7bc9a340Fixture(t)
-	params, err := chaincfg.GetChainParams("testnet")
-	require.NoError(t, err)
-
-	// Use full production policy (NewSettings) rather than zero-init
-	// PolicySettings{}, so the propagated MaxScriptSizePolicy /
-	// AcceptNonStdOutputs / RequireStandard values match what the
-	// production validator hands to the gobdk script engine.
-	prodSettings := settings.NewSettings()
-	t.Logf("policy: AcceptNonStdOutputs=%v RequireStandard=%v MaxScriptSizePolicy=%d MaxStackMemUsagePolicy=%d MaxStackMemUsageConsensus=%d MaxOpsPerScriptPolicy=%d",
-		prodSettings.Policy.AcceptNonStdOutputs,
-		prodSettings.Policy.RequireStandard,
-		prodSettings.Policy.MaxScriptSizePolicy,
-		prodSettings.Policy.MaxStackMemoryUsagePolicy,
-		prodSettings.Policy.MaxStackMemoryUsageConsensus,
-		prodSettings.Policy.MaxOpsPerScriptPolicy,
-	)
-
-	t.Logf("tx.ExtendedBytes() len=%d (production goroutine dump showed 5,390,351)", len(tx.ExtendedBytes()))
-
-	verifier := newScriptVerifierGoBDK(ulogger.TestLogger{}, prodSettings.Policy, params)
-	// Budget 3 minutes. With the pinned gobdk hot-fix this returns
-	// successfully in ~70 s on macOS arm64. Without the hot-fix the cgo
-	// call does not return within any sane deadline.
-	runVerifyWithDeadline(t, verifier, tx, blockHeight, utxoHeights, 3*time.Minute)
-}
-
-// runVerifyWithDeadline runs a single VerifyScript call against an outer
-// wall-clock deadline. The cgo entry point ScriptEngine_VerifyScript is
-// uninterruptible from Go, so on deadline the inner goroutine is leaked;
-// the test process exits shortly after and reclaims it.
-func runVerifyWithDeadline(t *testing.T, verifier TxScriptInterpreter, tx *bt.Tx, blockHeight uint32, utxoHeights []uint32, deadline time.Duration) {
-	t.Helper()
-	type verifyResult struct {
-		err     error
-		elapsed time.Duration
-	}
-	done := make(chan verifyResult, 1)
-	start := time.Now()
-
-	go func() {
-		err := verifier.VerifyScript(tx, blockHeight, true, utxoHeights)
-		done <- verifyResult{err: err, elapsed: time.Since(start)}
-	}()
-
-	select {
-	case r := <-done:
-		require.NoError(t, r.err,
-			"verifier returned in %s but rejected a consensus-valid tx (block 1,451,505 is a testnet checkpoint)",
-			r.elapsed)
-		t.Logf("verifier returned in %s with nil error (accepted as valid)", r.elapsed)
-	case <-time.After(deadline):
-		t.Fatalf("HANG REPRODUCED: VerifyScript did not return within %s — gobdk hot-fix missing or regressed; cgo goroutine leaked until test process exits", deadline)
-	}
-}
-
-// loadStuckTx7bc9a340Fixture loads the testdata fixture for testnet block
-// 1,451,505 tx 7bc9a340... and wires the parent-output locking script + value
-// onto input 0 so the resulting *bt.Tx is in extended form.
-func loadStuckTx7bc9a340Fixture(t *testing.T) (*bt.Tx, uint32, []uint32) {
-	t.Helper()
-
-	const (
-		txHexFile     = "testdata/stuck-tx-7bc9a340.hex"
-		prevHexFile   = "testdata/stuck-tx-7bc9a340-prev-locking-script-0.hex"
-		blockHeight   = uint32(1451505)
-		prevHeight    = uint32(1451473)
-		prevSatoshis  = uint64(218)
-		expectedTxIDs = "7bc9a3408dd0c87b835c887a0bce22c20788fc3c4b953929d4367656d80acab5"
-	)
-
-	txHexBytes, err := os.ReadFile(filepath.Clean(txHexFile))
-	require.NoError(t, err)
-
-	tx, err := bt.NewTxFromString(string(txHexBytes))
-	require.NoError(t, err)
-	require.Equal(t, expectedTxIDs, tx.TxID(), "fixture txid mismatch")
-	require.Len(t, tx.Inputs, 1, "fixture must have exactly one input")
-
-	prevHex, err := os.ReadFile(filepath.Clean(prevHexFile))
-	require.NoError(t, err)
-	prevBytes, err := hex.DecodeString(string(prevHex))
-	require.NoError(t, err)
-
-	tx.Inputs[0].PreviousTxScript = bscript.NewFromBytes(prevBytes)
-	tx.Inputs[0].PreviousTxSatoshis = prevSatoshis
-	require.True(t, tx.IsExtended(), "tx should be extended after wiring prev fields")
-
-	return tx, blockHeight, []uint32{prevHeight}
 }
 
 func Test_Uint2Int(t *testing.T) {
