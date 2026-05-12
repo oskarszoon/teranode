@@ -1362,10 +1362,10 @@ func (b *BlockAssembler) handleReorg(ctx context.Context, header *model.BlockHea
 	// Conflicting=false, so block assembly keeps proposing them and SVNode
 	// rejects the candidate with bad-txns-inputs-missingorspent.
 	//
-	// validateUnminedTxInputs (BlockAssembler.go:2459) Case 2 detects this:
-	// for each unmined tx, check parent.ConflictingChildren for a counter-
-	// conflicting tx confirmed on the current chain. When found, mark the
-	// unmined tx as conflicting and cascade to its descendants.
+	// validateUnminedTxInputs Case 2 detects this: for each unmined tx,
+	// check parent.ConflictingChildren for a counter-conflicting tx confirmed
+	// on the current chain. When found, mark the unmined tx as conflicting and
+	// cascade to its descendants.
 	hasMovedBackConflicts := false
 	if !reorgFailed && err == nil {
 		hasMovedBackConflicts = b.hasConflictingNodesInBlocks(ctx, moveBackBlocks)
