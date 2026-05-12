@@ -491,3 +491,303 @@ func TestUnmarkConflictingRecursively_BFSCascade(t *testing.T) {
 		"cleared set must be BFS order: input first, then each descendant level")
 	mockStore.AssertExpectations(t)
 }
+
+// TestReverseProcessConflicting_DemotedMetaNilSkipsTx pins the
+// nil-or-missing-tx short-circuit. The reverse must not error on a
+// demoted hash whose meta returns nil (legitimate for already-pruned
+// records mid-reorg) — it skips and continues with the next demoted hash.
+func TestReverseProcessConflicting_DemotedMetaNilSkipsTx(t *testing.T) {
+	ctx := context.Background()
+	mockStore := &MockUtxostore{}
+
+	missingHash := createTestHash("reverse-demoted-missing")
+
+	mockStore.On("Get", mock.Anything, &missingHash, mock.Anything).
+		Return((*meta.Data)(nil), nil).Once()
+
+	cascade, touched, err := ReverseProcessConflicting(ctx, mockStore, 1,
+		[]chainhash.Hash{missingHash})
+
+	require.NoError(t, err)
+	assert.Nil(t, cascade)
+	assert.Nil(t, touched)
+	mockStore.AssertExpectations(t)
+}
+
+// TestReverseProcessConflicting_SelectCountersErrorPropagates covers the
+// error wrap when parent.ConflictingChildren lookup fails — a store
+// outage during reverse selection must abort the reverse cleanly so the
+// reorg surfaces the failure instead of marking the demoted tx without
+// promoting any counter.
+func TestReverseProcessConflicting_SelectCountersErrorPropagates(t *testing.T) {
+	ctx := context.Background()
+	mockStore := &MockUtxostore{}
+
+	parentHash := createTestHash("reverse-sel-err-parent")
+	demotedHash := createTestHash("reverse-sel-err-demoted")
+	demotedTx := createSpendableTestTransaction(parentHash, 0)
+
+	mockStore.On("Get", mock.Anything, &demotedHash, mock.Anything).
+		Return(&meta.Data{Tx: demotedTx, Conflicting: false}, nil).Once()
+	mockStore.On("Get", mock.Anything, &parentHash, mock.Anything).
+		Return((*meta.Data)(nil), errors.NewProcessingError("parent lookup failed")).Once()
+
+	_, _, err := ReverseProcessConflicting(ctx, mockStore, 1, []chainhash.Hash{demotedHash})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "error getting parent meta")
+	mockStore.AssertExpectations(t)
+}
+
+// TestReverseProcessConflicting_MarkConflictingErrorPropagates verifies
+// that an underlying SetConflicting failure during the demoted-side BFS
+// cascade aborts the reverse with a wrapped error — we cannot continue
+// to Unspend / Spend the counter if the demoted tx isn't actually flagged.
+func TestReverseProcessConflicting_MarkConflictingErrorPropagates(t *testing.T) {
+	ctx := context.Background()
+	mockStore := &MockUtxostore{}
+
+	parentHash := createTestHash("reverse-mark-err-parent")
+	demotedHash := createTestHash("reverse-mark-err-demoted")
+	demotedTx := createSpendableTestTransaction(parentHash, 0)
+
+	mockStore.On("Get", mock.Anything, &demotedHash, mock.Anything).
+		Return(&meta.Data{Tx: demotedTx, Conflicting: false}, nil).Once()
+	mockStore.On("Get", mock.Anything, &parentHash, mock.Anything).
+		Return(&meta.Data{ConflictingChildren: []chainhash.Hash{}}, nil).Once()
+	mockStore.On("SetConflicting", mock.Anything, []chainhash.Hash{demotedHash}, true).
+		Return([]*Spend{}, []chainhash.Hash{}, errors.NewProcessingError("setConflicting failed")).Once()
+
+	_, _, err := ReverseProcessConflicting(ctx, mockStore, 1, []chainhash.Hash{demotedHash})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "error marking demoted tx + descendants conflicting")
+	mockStore.AssertExpectations(t)
+}
+
+// TestReverseProcessConflicting_UnspendErrorPropagates covers the Unspend
+// failure right after MarkConflictingRecursively — at this point the
+// demoted tx is flagged but parent.SpendingDatas[vout] hasn't been
+// cleared, so we must surface the error rather than leave the UTXO state
+// half-reversed (flagged demoted + still recorded as spender).
+func TestReverseProcessConflicting_UnspendErrorPropagates(t *testing.T) {
+	ctx := context.Background()
+	mockStore := &MockUtxostore{}
+
+	parentHash := createTestHash("reverse-unspend-err-parent")
+	demotedHash := createTestHash("reverse-unspend-err-demoted")
+	demotedTx := createSpendableTestTransaction(parentHash, 0)
+
+	mockStore.On("Get", mock.Anything, &demotedHash, mock.Anything).
+		Return(&meta.Data{Tx: demotedTx, Conflicting: false}, nil).Once()
+	mockStore.On("Get", mock.Anything, &parentHash, mock.Anything).
+		Return(&meta.Data{ConflictingChildren: []chainhash.Hash{}}, nil).Once()
+	mockStore.On("SetConflicting", mock.Anything, []chainhash.Hash{demotedHash}, true).
+		Return([]*Spend{}, []chainhash.Hash{}, nil).Once()
+	mockStore.On("Unspend", mock.Anything, mock.AnythingOfType("[]*utxo.Spend"), mock.Anything).
+		Return(errors.NewProcessingError("unspend failed")).Once()
+
+	_, _, err := ReverseProcessConflicting(ctx, mockStore, 1, []chainhash.Hash{demotedHash})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "error unspending demoted tx inputs")
+	mockStore.AssertExpectations(t)
+}
+
+// TestReverseProcessConflicting_CounterMetaNilSkipsCounter — when
+// selectCountersForDemotedTx returns a counter hash but a subsequent
+// fields.Tx Get yields nil meta (e.g. counter was pruned between calls),
+// the reverse must continue: demoted stays flagged, Unspend already
+// happened, and we just skip the Spend + Unmark for this counter.
+func TestReverseProcessConflicting_CounterMetaNilSkipsCounter(t *testing.T) {
+	ctx := context.Background()
+	mockStore := &MockUtxostore{}
+
+	parentHash := createTestHash("reverse-counter-nil-parent")
+	demotedHash := createTestHash("reverse-counter-nil-demoted")
+	counterHash := createTestHash("reverse-counter-nil-counter")
+
+	demotedTx := createSpendableTestTransaction(parentHash, 0)
+	counterTx := createSpendableTestTransaction(parentHash, 0)
+
+	mockStore.On("Get", mock.Anything, &demotedHash, mock.Anything).
+		Return(&meta.Data{Tx: demotedTx, Conflicting: false}, nil).Once()
+	mockStore.On("Get", mock.Anything, &parentHash, mock.Anything).
+		Return(&meta.Data{ConflictingChildren: []chainhash.Hash{counterHash}}, nil).Once()
+	// First counter Get (from selectCountersForDemotedTx) — returns full meta.
+	mockStore.On("Get", mock.Anything, &counterHash, mock.Anything).
+		Return(&meta.Data{Tx: counterTx, Conflicting: true, CreatedAt: 1}, nil).Once()
+
+	mockStore.On("SetConflicting", mock.Anything, []chainhash.Hash{demotedHash}, true).
+		Return([]*Spend{}, []chainhash.Hash{}, nil).Once()
+	mockStore.On("Unspend", mock.Anything, mock.AnythingOfType("[]*utxo.Spend"), mock.Anything).
+		Return(nil).Once()
+
+	// Second counter Get (from the post-Unspend Spend prep loop) — nil meta.
+	mockStore.On("Get", mock.Anything, &counterHash, mock.Anything).
+		Return((*meta.Data)(nil), nil).Once()
+
+	cascade, touched, err := ReverseProcessConflicting(ctx, mockStore, 1,
+		[]chainhash.Hash{demotedHash})
+	require.NoError(t, err)
+
+	assert.Contains(t, cascade, demotedHash, "demoted must still flag even if counter promotion skipped")
+	assert.Contains(t, touched, demotedHash)
+	assert.NotContains(t, touched, counterHash, "skipped counter must not appear in touched set")
+	mockStore.AssertExpectations(t)
+}
+
+// TestReverseProcessConflicting_CounterSpendErrorPropagates covers the
+// Spend failure on the counter promotion step. Once we've unspent the
+// demoted tx, the parent.SpendingDatas[vout] is empty — failing to
+// re-spend with the counter would leave that slot orphaned, so the
+// caller must see the error and surface it on the moveBackBlock path.
+func TestReverseProcessConflicting_CounterSpendErrorPropagates(t *testing.T) {
+	ctx := context.Background()
+	mockStore := &MockUtxostore{}
+
+	parentHash := createTestHash("reverse-counter-spend-err-parent")
+	demotedHash := createTestHash("reverse-counter-spend-err-demoted")
+	counterHash := createTestHash("reverse-counter-spend-err-counter")
+
+	demotedTx := createSpendableTestTransaction(parentHash, 0)
+	counterTx := createSpendableTestTransaction(parentHash, 0)
+
+	mockStore.On("Get", mock.Anything, &demotedHash, mock.Anything).
+		Return(&meta.Data{Tx: demotedTx, Conflicting: false}, nil).Once()
+	mockStore.On("Get", mock.Anything, &parentHash, mock.Anything).
+		Return(&meta.Data{ConflictingChildren: []chainhash.Hash{counterHash}}, nil).Once()
+	mockStore.On("Get", mock.Anything, &counterHash, mock.Anything).
+		Return(&meta.Data{Tx: counterTx, Conflicting: true, CreatedAt: 1}, nil).Once()
+
+	mockStore.On("SetConflicting", mock.Anything, []chainhash.Hash{demotedHash}, true).
+		Return([]*Spend{}, []chainhash.Hash{}, nil).Once()
+	mockStore.On("Unspend", mock.Anything, mock.AnythingOfType("[]*utxo.Spend"), mock.Anything).
+		Return(nil).Once()
+
+	mockStore.On("Get", mock.Anything, &counterHash, mock.Anything).
+		Return(&meta.Data{Tx: counterTx}, nil).Once()
+	mockStore.On("Spend", mock.Anything, counterTx, mock.Anything, mock.Anything).
+		Return([]*Spend{}, errors.NewProcessingError("spend failed")).Once()
+
+	_, _, err := ReverseProcessConflicting(ctx, mockStore, 1, []chainhash.Hash{demotedHash})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "error spending counter")
+	mockStore.AssertExpectations(t)
+}
+
+// TestReverseProcessConflicting_CounterUnmarkErrorPropagates exercises
+// the Unmark cascade failure path. With Spend done, the UTXO is now
+// owned by counter — but failing to flip counter Conflicting=false
+// leaves it inconsistent (it's the spender but is flagged conflicting,
+// so anything reading it via GetSpend will refuse to spend its outputs).
+func TestReverseProcessConflicting_CounterUnmarkErrorPropagates(t *testing.T) {
+	ctx := context.Background()
+	mockStore := &MockUtxostore{}
+
+	parentHash := createTestHash("reverse-counter-unmark-err-parent")
+	demotedHash := createTestHash("reverse-counter-unmark-err-demoted")
+	counterHash := createTestHash("reverse-counter-unmark-err-counter")
+
+	demotedTx := createSpendableTestTransaction(parentHash, 0)
+	counterTx := createSpendableTestTransaction(parentHash, 0)
+
+	mockStore.On("Get", mock.Anything, &demotedHash, mock.Anything).
+		Return(&meta.Data{Tx: demotedTx, Conflicting: false}, nil).Once()
+	mockStore.On("Get", mock.Anything, &parentHash, mock.Anything).
+		Return(&meta.Data{ConflictingChildren: []chainhash.Hash{counterHash}}, nil).Once()
+	mockStore.On("Get", mock.Anything, &counterHash, mock.Anything).
+		Return(&meta.Data{Tx: counterTx, Conflicting: true, CreatedAt: 1}, nil).Once()
+
+	mockStore.On("SetConflicting", mock.Anything, []chainhash.Hash{demotedHash}, true).
+		Return([]*Spend{}, []chainhash.Hash{}, nil).Once()
+	mockStore.On("Unspend", mock.Anything, mock.AnythingOfType("[]*utxo.Spend"), mock.Anything).
+		Return(nil).Once()
+	mockStore.On("Get", mock.Anything, &counterHash, mock.Anything).
+		Return(&meta.Data{Tx: counterTx}, nil).Once()
+	mockStore.On("Spend", mock.Anything, counterTx, mock.Anything, mock.Anything).
+		Return([]*Spend{}, nil).Once()
+	mockStore.On("SetConflicting", mock.Anything, []chainhash.Hash{counterHash}, false).
+		Return([]*Spend{}, []chainhash.Hash{}, errors.NewProcessingError("unmark failed")).Once()
+
+	_, _, err := ReverseProcessConflicting(ctx, mockStore, 1, []chainhash.Hash{demotedHash})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "error un-marking counter")
+	mockStore.AssertExpectations(t)
+}
+
+// TestSelectCountersForDemotedTx_ParentMetaNilSkips — when a parent has
+// no recorded meta (legitimately if the parent is missing from the
+// store mid-reorg), the helper skips that input rather than erroring.
+// Other inputs of the same demoted tx still get processed.
+func TestSelectCountersForDemotedTx_ParentMetaNilSkips(t *testing.T) {
+	ctx := context.Background()
+	mockStore := &MockUtxostore{}
+
+	parentHash := createTestHash("select-counter-parent-nil")
+
+	demotedTx := createSpendableTestTransaction(parentHash, 0)
+
+	mockStore.On("Get", mock.Anything, &parentHash, mock.Anything).
+		Return((*meta.Data)(nil), nil).Once()
+
+	got, err := selectCountersForDemotedTx(ctx, mockStore, demotedTx, map[chainhash.Hash]struct{}{})
+	require.NoError(t, err)
+	assert.Empty(t, got, "nil parent meta must not contribute counters but must not error")
+	mockStore.AssertExpectations(t)
+}
+
+// TestSelectCountersForDemotedTx_CandidateGetErrorPropagates — a Get
+// failure on a candidate counter meta must surface, not silently skip,
+// or we risk picking a wrong counter (or none) and leaving SpendingDatas
+// pointing at a stale value.
+func TestSelectCountersForDemotedTx_CandidateGetErrorPropagates(t *testing.T) {
+	ctx := context.Background()
+	mockStore := &MockUtxostore{}
+
+	parentHash := createTestHash("select-counter-candidate-err-parent")
+	candidateHash := createTestHash("select-counter-candidate-err-candidate")
+
+	demotedTx := createSpendableTestTransaction(parentHash, 0)
+
+	mockStore.On("Get", mock.Anything, &parentHash, mock.Anything).
+		Return(&meta.Data{ConflictingChildren: []chainhash.Hash{candidateHash}}, nil).Once()
+	mockStore.On("Get", mock.Anything, &candidateHash, mock.Anything).
+		Return((*meta.Data)(nil), errors.NewProcessingError("candidate lookup failed")).Once()
+
+	_, err := selectCountersForDemotedTx(ctx, mockStore, demotedTx, map[chainhash.Hash]struct{}{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "error getting candidate counter")
+	mockStore.AssertExpectations(t)
+}
+
+// TestSelectCountersForDemotedTx_CandidateMetaNilSkipsCandidate — if a
+// candidate's meta returns nil (pruned mid-reorg), the helper skips it
+// and continues to other candidates. Distinct from the error case above
+// because nil != error: pruned-but-known is legitimate, store-down isn't.
+func TestSelectCountersForDemotedTx_CandidateMetaNilSkipsCandidate(t *testing.T) {
+	ctx := context.Background()
+	mockStore := &MockUtxostore{}
+
+	parentHash := createTestHash("select-counter-candidate-nil-parent")
+	prunedHash := createTestHash("select-counter-candidate-nil-pruned")
+	liveHash := createTestHash("select-counter-candidate-nil-live")
+
+	demotedTx := createSpendableTestTransaction(parentHash, 0)
+	liveTx := createSpendableTestTransaction(parentHash, 0)
+
+	mockStore.On("Get", mock.Anything, &parentHash, mock.Anything).
+		Return(&meta.Data{ConflictingChildren: []chainhash.Hash{prunedHash, liveHash}}, nil).Once()
+	mockStore.On("Get", mock.Anything, &prunedHash, mock.Anything).
+		Return((*meta.Data)(nil), nil).Once()
+	mockStore.On("Get", mock.Anything, &liveHash, mock.Anything).
+		Return(&meta.Data{Tx: liveTx, Conflicting: true, CreatedAt: 100}, nil).Once()
+
+	got, err := selectCountersForDemotedTx(ctx, mockStore, demotedTx, map[chainhash.Hash]struct{}{})
+	require.NoError(t, err)
+	require.Equal(t, []chainhash.Hash{liveHash}, got,
+		"pruned candidate must be skipped, live one promoted")
+	mockStore.AssertExpectations(t)
+}
