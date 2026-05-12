@@ -1,8 +1,6 @@
 package subtreeprocessor
 
 import (
-	"errors"
-	"io"
 	"net/url"
 	"testing"
 
@@ -256,16 +254,3 @@ func mustSerialize(t *testing.T, s *subtreepkg.Subtree) []byte {
 
 	return b
 }
-
-// closingReader exists so the helper can be exercised against a custom
-// reader that simulates a read mid-way error path. Not currently wired into
-// the tests above — kept here so future regression tests can plug into
-// stp.subtreeStore without needing a new blob backend.
-type closingReader struct {
-	io.Reader
-	closeErr error
-}
-
-func (c *closingReader) Close() error { return c.closeErr }
-
-var _ = errors.New // keep errors import alive when extending the file
