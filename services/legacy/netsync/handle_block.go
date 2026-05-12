@@ -640,6 +640,17 @@ func (sm *SyncManager) createUtxos(ctx context.Context, txMap *txmap.SyncedMap[c
 		return errors.NewProcessingError("failed to convert block height to uint32", err)
 	}
 
+	// Track txs that already exist in the store so we can merge our blockID into their
+	// BlockIDs after the Create pass. The quickValidation fast path skips the async
+	// setTxMinedStatus step entirely (AddBlock with MinedSet=true), so any tx that
+	// pre-existed without our blockID (propagation, prior crashed attempt, or the
+	// pre-fast-path subtreeValidation route) would otherwise stay with empty/wrong
+	// BlockIDs and fail descendant blocks with "has no block IDs".
+	var (
+		existingTxsMu    sync.Mutex
+		existingTxHashes []*chainhash.Hash
+	)
+
 	// create all the utxos first
 	for _, txHash := range txMap.Keys() {
 		txHash := txHash
@@ -656,10 +667,12 @@ func (sm *SyncManager) createUtxos(ctx context.Context, txMap *txmap.SyncedMap[c
 				SubtreeIdx:  0, // legacy path produces a single subtree at index 0
 			})); err != nil {
 				if errors.Is(err, errors.ErrTxExists) {
-					sm.logger.Debugf("failed to create utxo for tx %s: %s", txHash.String(), err)
-				} else {
-					return err
+					existingTxsMu.Lock()
+					existingTxHashes = append(existingTxHashes, &txHash)
+					existingTxsMu.Unlock()
+					return nil
 				}
+				return err
 			}
 
 			return nil
@@ -669,6 +682,21 @@ func (sm *SyncManager) createUtxos(ctx context.Context, txMap *txmap.SyncedMap[c
 	// wait for all utxos to be created
 	if err = g.Wait(); err != nil {
 		return errors.NewProcessingError("failed to create utxos", err)
+	}
+
+	// Merge our blockID into any tx that already existed. Without this, those txs
+	// keep their stale (or empty) BlockIDs and the next block's validOrderAndBlessed
+	// check fails in model/Block.go getParentTxMetaBlockIDs.
+	if len(existingTxHashes) > 0 {
+		sm.logger.Debugf("[createUtxos] merging blockID %d into %d pre-existing tx(s)", blockID, len(existingTxHashes))
+		if _, err = sm.utxoStore.SetMinedMulti(ctx, existingTxHashes, utxo.MinedBlockInfo{
+			BlockID:        blockID,
+			BlockHeight:    blockHeightUint32,
+			SubtreeIdx:     0,
+			OnLongestChain: true,
+		}); err != nil {
+			return errors.NewProcessingError("failed to merge blockID into %d pre-existing txs", len(existingTxHashes), err)
+		}
 	}
 
 	return nil
