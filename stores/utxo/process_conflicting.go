@@ -329,13 +329,31 @@ func ReverseProcessConflicting(ctx context.Context, s Store, blockHeight uint32,
 }
 
 // selectCountersForDemotedTx walks the inputs of a demoted tx and returns the
-// set of counter txs (other spenders of the same (parent, vout)) that are
-// currently Conflicting=true and not themselves being demoted. These are the
-// original mempool spenders that the previous ProcessConflicting call demoted
-// and that we want to restore as the canonical spenders.
+// set of counter txs to restore as canonical spenders.
 //
-// The same counter may legitimately spend multiple of the demoted tx's
+// For each (parent, vout) the demoted tx spends, candidates are entries in
+// parent.ConflictingChildren that:
+//
+//  1. are not themselves being demoted in this call,
+//  2. are currently Conflicting=true (the previous ProcessConflicting demoted
+//     them), and
+//  3. actually spend the same (parent, vout) — guards against sibling-output
+//     spenders that wouldn't conflict with this demoted tx.
+//
+// When more than one candidate matches per input, the function picks the one
+// with the lowest CreatedAt (first-seen mempool spender, set once at insert
+// in both backends — Aerospike at stores/utxo/aerospike/create.go:706, SQL
+// via the inserted_at column populated by getUnbatched / batchDecorateChunk).
+// Tiebreak on equal CreatedAt is lexicographic hash compare so the choice is
+// deterministic across nodes and across runs.
+//
+// The same counter may legitimately spend several of the demoted tx's
 // inputs; the function deduplicates so we only Spend()/Unmark() it once.
+//
+// Returns nil with no error when no candidate passes the filters for any
+// input — caller demotes D + descendants but leaves SpendingDatas[vout]
+// untouched for that input. ReverseProcessConflicting's caller can rely on
+// the returned list being the exact set to feed Spend/UnmarkConflicting.
 func selectCountersForDemotedTx(ctx context.Context, s Store, demotedTx *bt.Tx, demotedSet map[chainhash.Hash]struct{}) ([]chainhash.Hash, error) {
 	seen := make(map[chainhash.Hash]struct{})
 
@@ -354,6 +372,11 @@ func selectCountersForDemotedTx(ctx context.Context, s Store, demotedTx *bt.Tx, 
 			continue
 		}
 
+		var (
+			best          *chainhash.Hash
+			bestCreatedAt int64
+		)
+
 		for j := range parentMeta.ConflictingChildren {
 			candidate := parentMeta.ConflictingChildren[j]
 
@@ -365,7 +388,7 @@ func selectCountersForDemotedTx(ctx context.Context, s Store, demotedTx *bt.Tx, 
 				continue
 			}
 
-			candidateMeta, err := s.Get(ctx, &candidate, fields.Tx, fields.Conflicting)
+			candidateMeta, err := s.Get(ctx, &candidate, fields.Tx, fields.Conflicting, fields.CreatedAt)
 			if err != nil {
 				return nil, errors.NewProcessingError("[selectCountersForDemotedTx][%s] error getting candidate counter", candidate.String(), err)
 			}
@@ -382,12 +405,52 @@ func selectCountersForDemotedTx(ctx context.Context, s Store, demotedTx *bt.Tx, 
 				continue
 			}
 
-			seen[candidate] = struct{}{}
-			result = append(result, candidate)
+			// First-seen wins. Pin the candidate by value because parentMeta is
+			// rewritten under us via deeper Get calls.
+			candidateCopy := candidate
+
+			if best == nil || isOlderCounter(candidateMeta.CreatedAt, candidateCopy, bestCreatedAt, *best) {
+				best = &candidateCopy
+				bestCreatedAt = candidateMeta.CreatedAt
+			}
+		}
+
+		if best != nil {
+			seen[*best] = struct{}{}
+			result = append(result, *best)
 		}
 	}
 
 	return result, nil
+}
+
+// isOlderCounter returns true when (aCreatedAt, aHash) sorts strictly before
+// (bCreatedAt, bHash). CreatedAt comes first, hash bytes are the tiebreak.
+// A candidate whose CreatedAt is zero (missing on legacy records) is treated
+// as newer than any candidate with a real timestamp — we never prefer the
+// unknown-vintage record over one with a known first-seen time.
+func isOlderCounter(aCreatedAt int64, aHash chainhash.Hash, bCreatedAt int64, bHash chainhash.Hash) bool {
+	switch {
+	case aCreatedAt == 0 && bCreatedAt == 0:
+		// fall through to hash compare
+	case aCreatedAt == 0:
+		return false
+	case bCreatedAt == 0:
+		return true
+	case aCreatedAt < bCreatedAt:
+		return true
+	case aCreatedAt > bCreatedAt:
+		return false
+	}
+
+	// equal CreatedAt — lex compare the hash bytes for determinism.
+	for i := range aHash {
+		if aHash[i] != bHash[i] {
+			return aHash[i] < bHash[i]
+		}
+	}
+
+	return false
 }
 
 func candidateSpendsOutput(tx *bt.Tx, parentHash *chainhash.Hash, vout uint32) bool {

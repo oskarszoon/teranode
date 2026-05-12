@@ -1275,30 +1275,48 @@ func (stp *SubtreeProcessor) reset(blockHeader *model.BlockHeader, moveBackBlock
 			}
 
 			if len(conflictingNodes) > 0 {
-				if block.Height == 0 {
-					// get the block height from the blockchain client
-					_, blockHeaderMeta, err := stp.blockchainClient.GetBlockHeader(ctx, block.Hash())
-					if err != nil {
-						return errors.NewProcessingError("[moveForwardBlock][%s] error getting block header meta", block.String(), err)
+				// Skip hashes already handled by an earlier moveBack pass
+				// that ran ReverseProcessConflicting. See the symmetric
+				// filter in processConflictingTransactions for the full
+				// rationale — re-running ProcessConflicting on the same
+				// hashes double-applies the UTXO swap.
+				filteredConflictingNodes := conflictingNodes[:0:0]
+				for _, h := range conflictingNodes {
+					if !processedConflictingHashesMap[h] {
+						filteredConflictingNodes = append(filteredConflictingNodes, h)
+					}
+				}
+
+				if len(filteredConflictingNodes) == 0 {
+					stp.logger.Debugf("[moveForwardBlock][%s] reset path: skipping ProcessConflicting — all %d conflicting nodes already handled by earlier moveBack reverse", block.String(), len(conflictingNodes))
+				} else {
+					conflictingNodes = filteredConflictingNodes
+
+					if block.Height == 0 {
+						// get the block height from the blockchain client
+						_, blockHeaderMeta, err := stp.blockchainClient.GetBlockHeader(ctx, block.Hash())
+						if err != nil {
+							return errors.NewProcessingError("[moveForwardBlock][%s] error getting block header meta", block.String(), err)
+						}
+
+						block.Height = blockHeaderMeta.Height
 					}
 
-					block.Height = blockHeaderMeta.Height
-				}
+					// The Reset path replays moveForwardBlocks and discards the entire
+					// queue at the end (see the validUntilMillis drain after
+					// postProcess). Any in-flight tx whose parent gets cascaded here
+					// is dropped by that drain regardless of cascade discovery, so
+					// the per-block transient set is not needed here.
+					losingTxHashesMap, _, err := utxostore.ProcessConflicting(ctx, stp.utxoStore, block.Height, conflictingNodes, processedConflictingHashesMap)
+					if err != nil {
+						return errors.NewProcessingError("[moveForwardBlock][%s] error processing conflicting transactions in Reset()", block.String(), err)
+					}
 
-				// The Reset path replays moveForwardBlocks and discards the entire
-				// queue at the end (see the validUntilMillis drain after
-				// postProcess). Any in-flight tx whose parent gets cascaded here
-				// is dropped by that drain regardless of cascade discovery, so
-				// the per-block transient set is not needed here.
-				losingTxHashesMap, _, err := utxostore.ProcessConflicting(ctx, stp.utxoStore, block.Height, conflictingNodes, processedConflictingHashesMap)
-				if err != nil {
-					return errors.NewProcessingError("[moveForwardBlock][%s] error processing conflicting transactions in Reset()", block.String(), err)
-				}
-
-				if losingTxHashesMap.Length() > 0 {
-					// mark all the losing txs in the subtrees in the blocks they were mined into as conflicting
-					if err = stp.markConflictingTxsInSubtrees(ctx, losingTxHashesMap); err != nil {
-						return errors.NewProcessingError("[moveForwardBlock][%s] error marking conflicting transactions", block.String(), err)
+					if losingTxHashesMap.Length() > 0 {
+						// mark all the losing txs in the subtrees in the blocks they were mined into as conflicting
+						if err = stp.markConflictingTxsInSubtrees(ctx, losingTxHashesMap); err != nil {
+							return errors.NewProcessingError("[moveForwardBlock][%s] error marking conflicting transactions", block.String(), err)
+						}
 					}
 				}
 			}
@@ -2717,11 +2735,23 @@ func (stp *SubtreeProcessor) reorgBlocks(ctx context.Context, moveBackBlocks []*
 			// UTXO-level side effects — call ReverseProcessConflicting so
 			// the UTXO state matches what it would have been had the now-
 			// orphaned block never been part of the chain.
-			if _, reverseErr := utxostore.ReverseProcessConflicting(ctx, stp.utxoStore, block.Height, conflictingHashes); reverseErr != nil {
+			//
+			// Touched hashes are added to processedConflictingHashesMap so
+			// the subsequent moveForwardBlock pass can recognise both
+			// sides of the swap (demoted hashes AND restored counters) and
+			// skip re-running ProcessConflicting on them — the swap they
+			// would have applied has already been applied (in the inverse
+			// direction) and re-running corrupts the UTXO records.
+			touched, reverseErr := utxostore.ReverseProcessConflicting(ctx, stp.utxoStore, block.Height, conflictingHashes)
+			if reverseErr != nil {
 				return errors.NewProcessingError("[reorgBlocks][%s] error reversing conflict resolution from moved-back block", block.String(), reverseErr)
 			}
 
 			for _, hash := range conflictingHashes {
+				processedConflictingHashesMap[hash] = true
+			}
+
+			for _, hash := range touched {
 				processedConflictingHashesMap[hash] = true
 			}
 		}
@@ -3310,6 +3340,24 @@ func (stp *SubtreeProcessor) processConflictingTransactions(ctx context.Context,
 
 	// process conflicting txs
 	if len(conflictingNodes) > 0 {
+		// Skip hashes already handled by a moveBack pass that ran
+		// ReverseProcessConflicting earlier in this reorg. Their UTXO swap
+		// is already in the desired direction; re-running ProcessConflicting
+		// on them would double-spend the parent UTXOs and fail.
+		filteredConflictingNodes := conflictingNodes[:0:0]
+		for _, h := range conflictingNodes {
+			if !processedConflictingHashesMap[h] {
+				filteredConflictingNodes = append(filteredConflictingNodes, h)
+			}
+		}
+
+		if len(filteredConflictingNodes) == 0 {
+			stp.logger.Debugf("[moveForwardBlock][%s] skipping ProcessConflicting — all %d conflicting nodes already handled by earlier moveBack reverse", block.String(), len(conflictingNodes))
+			return nil, nil, nil
+		}
+
+		conflictingNodes = filteredConflictingNodes
+
 		ctx, _, deferFn := tracing.Tracer("subtreeprocessor").Start(ctx, "processConflictingTransactions",
 			tracing.WithParentStat(stp.stats),
 			tracing.WithLogMessage(stp.logger, "[moveForwardBlock][%s] processing %d conflicting transactions", block.String(), len(conflictingNodes)),

@@ -319,6 +319,153 @@ func TestReverseProcessConflicting_PropagatesGetError(t *testing.T) {
 	mockStore.AssertExpectations(t)
 }
 
+// TestReverseProcessConflicting_PicksOldestCounterByCreatedAt covers the
+// multi-counter case the v2 strategy mis-handled: when more than one entry
+// in parent.ConflictingChildren is Conflicting=true and spends the same
+// (parent, vout), the heuristic picks the one with the lowest CreatedAt
+// (first-seen mempool spender — the original canonical spender that an
+// earlier ProcessConflicting demoted). Other candidates are left untouched.
+func TestReverseProcessConflicting_PicksOldestCounterByCreatedAt(t *testing.T) {
+	ctx := context.Background()
+	mockStore := &MockUtxostore{}
+
+	parentHash := createTestHash("reverse-parent-multi-counter")
+	demotedHash := createTestHash("reverse-demoted-multi-counter")
+	oldestHash := createTestHash("reverse-counter-oldest")
+	youngerHash := createTestHash("reverse-counter-younger")
+
+	const vout = uint32(0)
+
+	demotedTx := createSpendableTestTransaction(parentHash, vout)
+	oldestTx := createSpendableTestTransaction(parentHash, vout)
+	youngerTx := createSpendableTestTransaction(parentHash, vout)
+
+	mockStore.On("Get", mock.Anything, &demotedHash, mock.Anything).
+		Return(&meta.Data{Tx: demotedTx, Conflicting: false}, nil).Once()
+
+	mockStore.On("Get", mock.Anything, &parentHash, mock.Anything).
+		Return(&meta.Data{
+			ConflictingChildren: []chainhash.Hash{demotedHash, oldestHash, youngerHash},
+		}, nil).Once()
+
+	// CreatedAt: oldest=1000, younger=5000. Oldest wins.
+	mockStore.On("Get", mock.Anything, &oldestHash, mock.Anything).
+		Return(&meta.Data{Tx: oldestTx, Conflicting: true, CreatedAt: 1000}, nil).Once()
+	mockStore.On("Get", mock.Anything, &youngerHash, mock.Anything).
+		Return(&meta.Data{Tx: youngerTx, Conflicting: true, CreatedAt: 5000}, nil).Once()
+
+	demotedSpends := []*Spend{{TxID: &demotedHash, Vout: 0}}
+	mockStore.On("SetConflicting", mock.Anything, []chainhash.Hash{demotedHash}, true).
+		Return(demotedSpends, []chainhash.Hash{}, nil).Once()
+	mockStore.On("Unspend", mock.Anything, mock.AnythingOfType("[]*utxo.Spend"), mock.Anything).
+		Return(nil).Once()
+
+	// Only the oldest counter gets the Spend + Unmark sequence.
+	mockStore.On("Get", mock.Anything, &oldestHash, mock.Anything).
+		Return(&meta.Data{Tx: oldestTx}, nil).Once()
+	mockStore.On("Spend", mock.Anything, oldestTx, mock.Anything, mock.Anything).
+		Return([]*Spend{}, nil).Once()
+	mockStore.On("SetConflicting", mock.Anything, []chainhash.Hash{oldestHash}, false).
+		Return([]*Spend{}, []chainhash.Hash{}, nil).Once()
+
+	touched, err := ReverseProcessConflicting(ctx, mockStore, 100,
+		[]chainhash.Hash{demotedHash})
+
+	require.NoError(t, err)
+	require.Contains(t, touched, demotedHash)
+	require.Contains(t, touched, oldestHash)
+	require.NotContains(t, touched, youngerHash,
+		"younger counter must remain Conflicting=true, untouched by reverse")
+	mockStore.AssertExpectations(t)
+}
+
+// TestReverseProcessConflicting_TiebreakOnEqualCreatedAtByHash asserts the
+// hash-lex tiebreak when two candidates share a CreatedAt value (same
+// millisecond, two nodes racing into the mempool). Determinism matters
+// because two replicas seeing the same UTXO state must converge.
+func TestReverseProcessConflicting_TiebreakOnEqualCreatedAtByHash(t *testing.T) {
+	ctx := context.Background()
+	mockStore := &MockUtxostore{}
+
+	parentHash := createTestHash("reverse-parent-tiebreak")
+	demotedHash := createTestHash("reverse-demoted-tiebreak")
+	// Lexicographically smaller hash should win on equal CreatedAt.
+	lowerHashCounter := chainhash.Hash{0x00, 0x01}
+	higherHashCounter := chainhash.Hash{0xff, 0xfe}
+
+	const vout = uint32(0)
+	const sameTime = int64(7777)
+
+	demotedTx := createSpendableTestTransaction(parentHash, vout)
+	lowerCounterTx := createSpendableTestTransaction(parentHash, vout)
+	higherCounterTx := createSpendableTestTransaction(parentHash, vout)
+
+	mockStore.On("Get", mock.Anything, &demotedHash, mock.Anything).
+		Return(&meta.Data{Tx: demotedTx, Conflicting: false}, nil).Once()
+
+	mockStore.On("Get", mock.Anything, &parentHash, mock.Anything).
+		Return(&meta.Data{
+			ConflictingChildren: []chainhash.Hash{demotedHash, lowerHashCounter, higherHashCounter},
+		}, nil).Once()
+
+	mockStore.On("Get", mock.Anything, &lowerHashCounter, mock.Anything).
+		Return(&meta.Data{Tx: lowerCounterTx, Conflicting: true, CreatedAt: sameTime}, nil).Once()
+	mockStore.On("Get", mock.Anything, &higherHashCounter, mock.Anything).
+		Return(&meta.Data{Tx: higherCounterTx, Conflicting: true, CreatedAt: sameTime}, nil).Once()
+
+	demotedSpends := []*Spend{{TxID: &demotedHash, Vout: 0}}
+	mockStore.On("SetConflicting", mock.Anything, []chainhash.Hash{demotedHash}, true).
+		Return(demotedSpends, []chainhash.Hash{}, nil).Once()
+	mockStore.On("Unspend", mock.Anything, mock.AnythingOfType("[]*utxo.Spend"), mock.Anything).
+		Return(nil).Once()
+
+	mockStore.On("Get", mock.Anything, &lowerHashCounter, mock.Anything).
+		Return(&meta.Data{Tx: lowerCounterTx}, nil).Once()
+	mockStore.On("Spend", mock.Anything, lowerCounterTx, mock.Anything, mock.Anything).
+		Return([]*Spend{}, nil).Once()
+	mockStore.On("SetConflicting", mock.Anything, []chainhash.Hash{lowerHashCounter}, false).
+		Return([]*Spend{}, []chainhash.Hash{}, nil).Once()
+
+	touched, err := ReverseProcessConflicting(ctx, mockStore, 100,
+		[]chainhash.Hash{demotedHash})
+
+	require.NoError(t, err)
+	require.Contains(t, touched, lowerHashCounter)
+	require.NotContains(t, touched, higherHashCounter,
+		"higher-hash counter must not be touched when CreatedAt ties")
+	mockStore.AssertExpectations(t)
+}
+
+// TestIsOlderCounter_OrdersByTimestampThenHash spot-checks the comparison
+// helper directly so the heuristic's tiebreak semantics are pinned without
+// having to walk the full ReverseProcessConflicting flow.
+func TestIsOlderCounter_OrdersByTimestampThenHash(t *testing.T) {
+	lower := chainhash.Hash{0x00}
+	higher := chainhash.Hash{0xff}
+
+	// Lower CreatedAt always wins regardless of hash order.
+	assert.True(t, isOlderCounter(100, higher, 200, lower))
+	assert.False(t, isOlderCounter(200, lower, 100, higher))
+
+	// Equal CreatedAt → hash lex compare.
+	assert.True(t, isOlderCounter(500, lower, 500, higher))
+	assert.False(t, isOlderCounter(500, higher, 500, lower))
+
+	// Identical pair is not strictly less than itself.
+	assert.False(t, isOlderCounter(500, lower, 500, lower))
+
+	// Missing CreatedAt (0) is treated as newer than any timestamped record:
+	// we never prefer the unknown-vintage candidate over a known one.
+	assert.False(t, isOlderCounter(0, lower, 1, higher),
+		"CreatedAt=0 must not beat a real timestamp")
+	assert.True(t, isOlderCounter(1, lower, 0, higher),
+		"real timestamp must beat CreatedAt=0")
+
+	// Both missing → fall through to hash lex.
+	assert.True(t, isOlderCounter(0, lower, 0, higher))
+	assert.False(t, isOlderCounter(0, higher, 0, lower))
+}
+
 // TestUnmarkConflictingRecursively_BFSCascade verifies that the BFS
 // inversely mirrors MarkConflictingRecursively: input set + every
 // descendant reached via SpendingDatas have Conflicting=false applied.
