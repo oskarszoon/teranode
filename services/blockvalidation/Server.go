@@ -524,16 +524,19 @@ func (u *Server) Init(ctx context.Context) (err error) {
 		u.blockValidation = NewBlockValidation(ctx, u.logger, u.settings, u.blockchainClient, u.subtreeStore, u.txStore, u.utxoStore, u.validatorClient, subtreeValidationClient)
 	}
 
-	// if our FSM state is CATCHINGBLOCKS, this is probably a remnant of a crash, put the node back in RUNNING state
+	// if our FSM state is CATCHINGBLOCKS, this is probably a remnant of a crash, put the node back in RUNNING state.
+	// The blockchain server may legitimately refuse the RUN transition (e.g. local tip below the network's highest
+	// hard-coded checkpoint), in which case we stay in CATCHINGBLOCKS — real catchup will drive the transition
+	// later. Log and continue rather than crashing init.
 	isCatchingBlocks, err := u.blockchainClient.IsFSMCurrentState(ctx, blockchain.FSMStateCATCHINGBLOCKS)
 	if err != nil {
 		u.logger.Errorf("[Init] failed to check if FSM currently catching blocks: %v", err)
 	}
 
 	if isCatchingBlocks {
-		u.logger.Infof("[Init] FSM is in CATCHINGBLOCKS state, setting it to RUNNING")
+		u.logger.Infof("[Init] FSM is in CATCHINGBLOCKS state, attempting to restore to RUNNING")
 		if err = u.blockchainClient.Run(ctx, "blockvalidation"); err != nil {
-			return errors.NewServiceError("[Init] failed to set FSM state to RUNNING", err)
+			u.logger.Warnf("[Init] RUN rejected, staying in CATCHINGBLOCKS until catchup advances the chain: %v", err)
 		}
 	}
 
