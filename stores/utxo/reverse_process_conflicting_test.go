@@ -105,7 +105,7 @@ func TestReverseProcessConflicting_RestoresOriginalSpender(t *testing.T) {
 	mockStore.On("SetConflicting", mock.Anything, []chainhash.Hash{counterHash}, false).
 		Return([]*Spend{}, []chainhash.Hash{}, nil).Once()
 
-	touched, err := ReverseProcessConflicting(ctx, mockStore, 100,
+	_, touched, err := ReverseProcessConflicting(ctx, mockStore, 100,
 		[]chainhash.Hash{demotedHash})
 
 	require.NoError(t, err)
@@ -130,7 +130,7 @@ func TestReverseProcessConflicting_SkipsAlreadyReversedDemoted(t *testing.T) {
 	mockStore.On("Get", mock.Anything, &demotedHash, mock.Anything).
 		Return(&meta.Data{Tx: demotedTx, Conflicting: true}, nil).Once()
 
-	touched, err := ReverseProcessConflicting(ctx, mockStore, 100,
+	_, touched, err := ReverseProcessConflicting(ctx, mockStore, 100,
 		[]chainhash.Hash{demotedHash})
 
 	require.NoError(t, err)
@@ -177,7 +177,7 @@ func TestReverseProcessConflicting_FiltersCounterWithMismatchedOutput(t *testing
 	mockStore.On("Unspend", mock.Anything, mock.AnythingOfType("[]*utxo.Spend"), mock.Anything).
 		Return(nil).Once()
 
-	touched, err := ReverseProcessConflicting(ctx, mockStore, 100,
+	_, touched, err := ReverseProcessConflicting(ctx, mockStore, 100,
 		[]chainhash.Hash{demotedHash})
 
 	require.NoError(t, err)
@@ -217,7 +217,7 @@ func TestReverseProcessConflicting_NoCounterToPromote(t *testing.T) {
 	mockStore.On("Unspend", mock.Anything, mock.AnythingOfType("[]*utxo.Spend"), mock.Anything).
 		Return(nil).Once()
 
-	touched, err := ReverseProcessConflicting(ctx, mockStore, 100,
+	_, touched, err := ReverseProcessConflicting(ctx, mockStore, 100,
 		[]chainhash.Hash{demotedHash})
 
 	require.NoError(t, err)
@@ -260,7 +260,7 @@ func TestReverseProcessConflicting_SkipsCounterAlreadyNonConflicting(t *testing.
 	mockStore.On("Unspend", mock.Anything, mock.AnythingOfType("[]*utxo.Spend"), mock.Anything).
 		Return(nil).Once()
 
-	touched, err := ReverseProcessConflicting(ctx, mockStore, 100,
+	_, touched, err := ReverseProcessConflicting(ctx, mockStore, 100,
 		[]chainhash.Hash{demotedHash})
 
 	require.NoError(t, err)
@@ -277,7 +277,7 @@ func TestReverseProcessConflicting_CoinbasePlaceholderSkipped(t *testing.T) {
 
 	// No expectations set — the placeholder branch should short-circuit
 	// without touching the store.
-	touched, err := ReverseProcessConflicting(ctx, mockStore, 1,
+	_, touched, err := ReverseProcessConflicting(ctx, mockStore, 1,
 		[]chainhash.Hash{subtree.CoinbasePlaceholderHashValue})
 
 	require.NoError(t, err)
@@ -291,7 +291,7 @@ func TestReverseProcessConflicting_EmptyInput(t *testing.T) {
 	ctx := context.Background()
 	mockStore := &MockUtxostore{}
 
-	touched, err := ReverseProcessConflicting(ctx, mockStore, 1, nil)
+	_, touched, err := ReverseProcessConflicting(ctx, mockStore, 1, nil)
 
 	require.NoError(t, err)
 	assert.Nil(t, touched)
@@ -310,7 +310,7 @@ func TestReverseProcessConflicting_PropagatesGetError(t *testing.T) {
 	mockStore.On("Get", mock.Anything, &demotedHash, mock.Anything).
 		Return((*meta.Data)(nil), errors.NewProcessingError("aerospike unavailable")).Once()
 
-	touched, err := ReverseProcessConflicting(ctx, mockStore, 1,
+	_, touched, err := ReverseProcessConflicting(ctx, mockStore, 1,
 		[]chainhash.Hash{demotedHash})
 
 	require.Error(t, err)
@@ -368,7 +368,7 @@ func TestReverseProcessConflicting_PicksOldestCounterByCreatedAt(t *testing.T) {
 	mockStore.On("SetConflicting", mock.Anything, []chainhash.Hash{oldestHash}, false).
 		Return([]*Spend{}, []chainhash.Hash{}, nil).Once()
 
-	touched, err := ReverseProcessConflicting(ctx, mockStore, 100,
+	_, touched, err := ReverseProcessConflicting(ctx, mockStore, 100,
 		[]chainhash.Hash{demotedHash})
 
 	require.NoError(t, err)
@@ -426,7 +426,7 @@ func TestReverseProcessConflicting_TiebreakOnEqualCreatedAtByHash(t *testing.T) 
 	mockStore.On("SetConflicting", mock.Anything, []chainhash.Hash{lowerHashCounter}, false).
 		Return([]*Spend{}, []chainhash.Hash{}, nil).Once()
 
-	touched, err := ReverseProcessConflicting(ctx, mockStore, 100,
+	_, touched, err := ReverseProcessConflicting(ctx, mockStore, 100,
 		[]chainhash.Hash{demotedHash})
 
 	require.NoError(t, err)

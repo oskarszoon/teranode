@@ -217,16 +217,22 @@ func ProcessConflicting(ctx context.Context, s Store, blockHeight uint32, confli
 // previous reverse already ran. Demoted txs with no counter currently
 // conflicting are skipped at the per-input level: nothing to restore.
 //
-// Returns the union of every hash whose Conflicting flag this call changed
-// (both directions). Callers feed this into the moveBack
-// processedConflictingHashesMap so the subsequent moveForwardBlock pass can
-// relax the ProcessConflicting precondition for those same hashes.
-func ReverseProcessConflicting(ctx context.Context, s Store, blockHeight uint32, demotedTxHashes []chainhash.Hash) ([]chainhash.Hash, error) {
+// Returns:
+//   - cascadedToConflicting: every hash whose Conflicting flag this call flipped
+//     to true (the demoted txs + their spending descendants). Callers feed
+//     this into the moveForward dequeue path so the queue evicts the
+//     unmined-side cascade.
+//   - allTouched: union of cascadedToConflicting and the un-cascade hashes
+//     whose flag flipped back to false (counter + descendants). Callers
+//     feed this into processedConflictingHashesMap so the subsequent
+//     moveForwardBlock pass skips ProcessConflicting on these hashes —
+//     re-running it would double-apply the UTXO swap and fail.
+func ReverseProcessConflicting(ctx context.Context, s Store, blockHeight uint32, demotedTxHashes []chainhash.Hash) (cascadedToConflicting []chainhash.Hash, allTouched []chainhash.Hash, err error) {
 	ctx, _, deferFn := tracing.Tracer("utxo").Start(ctx, "ReverseProcessConflicting")
 	defer deferFn()
 
 	if len(demotedTxHashes) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	demotedSet := make(map[chainhash.Hash]struct{}, len(demotedTxHashes))
@@ -234,7 +240,8 @@ func ReverseProcessConflicting(ctx context.Context, s Store, blockHeight uint32,
 		demotedSet[h] = struct{}{}
 	}
 
-	touched := make(map[chainhash.Hash]struct{}, 2*len(demotedTxHashes))
+	cascadedConflictingSet := make(map[chainhash.Hash]struct{}, 2*len(demotedTxHashes))
+	touchedSet := make(map[chainhash.Hash]struct{}, 2*len(demotedTxHashes))
 
 	for i := range demotedTxHashes {
 		demotedHash := demotedTxHashes[i]
@@ -243,9 +250,9 @@ func ReverseProcessConflicting(ctx context.Context, s Store, blockHeight uint32,
 			continue
 		}
 
-		demotedMeta, err := s.Get(ctx, &demotedHash, fields.Tx, fields.Conflicting)
-		if err != nil {
-			return nil, errors.NewProcessingError("[ReverseProcessConflicting][%s] error getting demoted tx meta", demotedHash.String(), err)
+		demotedMeta, getErr := s.Get(ctx, &demotedHash, fields.Tx, fields.Conflicting)
+		if getErr != nil {
+			return nil, nil, errors.NewProcessingError("[ReverseProcessConflicting][%s] error getting demoted tx meta", demotedHash.String(), getErr)
 		}
 
 		if demotedMeta == nil || demotedMeta.Tx == nil {
@@ -261,71 +268,77 @@ func ReverseProcessConflicting(ctx context.Context, s Store, blockHeight uint32,
 		}
 
 		// Step 1: identify counters per input.
-		countersToPromote, err := selectCountersForDemotedTx(ctx, s, demotedMeta.Tx, demotedSet)
-		if err != nil {
-			return nil, err
+		countersToPromote, selErr := selectCountersForDemotedTx(ctx, s, demotedMeta.Tx, demotedSet)
+		if selErr != nil {
+			return nil, nil, selErr
 		}
 
 		// Step 2: re-mark D + descendants Conflicting=true.
-		_, markedOrder, err := MarkConflictingRecursively(ctx, s, []chainhash.Hash{demotedHash})
-		if err != nil {
-			return nil, errors.NewProcessingError("[ReverseProcessConflicting][%s] error marking demoted tx + descendants conflicting", demotedHash.String(), err)
+		_, markedOrder, markErr := MarkConflictingRecursively(ctx, s, []chainhash.Hash{demotedHash})
+		if markErr != nil {
+			return nil, nil, errors.NewProcessingError("[ReverseProcessConflicting][%s] error marking demoted tx + descendants conflicting", demotedHash.String(), markErr)
 		}
 
 		for _, h := range markedOrder {
-			touched[h] = struct{}{}
+			cascadedConflictingSet[h] = struct{}{}
+			touchedSet[h] = struct{}{}
 		}
 
 		// Step 3: unspend D's input spends so parent.SpendingDatas[vout]
 		// no longer points at D.
-		demotedSpends, err := spendsForTx(demotedMeta.Tx)
-		if err != nil {
-			return nil, errors.NewProcessingError("[ReverseProcessConflicting][%s] error building unspend records", demotedHash.String(), err)
+		demotedSpends, buildErr := spendsForTx(demotedMeta.Tx)
+		if buildErr != nil {
+			return nil, nil, errors.NewProcessingError("[ReverseProcessConflicting][%s] error building unspend records", demotedHash.String(), buildErr)
 		}
 
-		if err = s.Unspend(ctx, demotedSpends, false); err != nil {
-			return nil, errors.NewProcessingError("[ReverseProcessConflicting][%s] error unspending demoted tx inputs", demotedHash.String(), err)
+		if unspendErr := s.Unspend(ctx, demotedSpends, false); unspendErr != nil {
+			return nil, nil, errors.NewProcessingError("[ReverseProcessConflicting][%s] error unspending demoted tx inputs", demotedHash.String(), unspendErr)
 		}
 
 		// Step 4 & 5: per counter, re-spend its inputs and un-cascade.
 		for _, counterHash := range countersToPromote {
-			counterMeta, err := s.Get(ctx, &counterHash, fields.Tx)
-			if err != nil {
-				return nil, errors.NewProcessingError("[ReverseProcessConflicting][%s] error getting counter tx %s", demotedHash.String(), counterHash.String(), err)
+			counterMeta, getCounterErr := s.Get(ctx, &counterHash, fields.Tx)
+			if getCounterErr != nil {
+				return nil, nil, errors.NewProcessingError("[ReverseProcessConflicting][%s] error getting counter tx %s", demotedHash.String(), counterHash.String(), getCounterErr)
 			}
 
 			if counterMeta == nil || counterMeta.Tx == nil {
 				continue
 			}
 
-			if _, err = s.Spend(ctx, counterMeta.Tx, blockHeight, IgnoreFlags{
+			if _, spendErr := s.Spend(ctx, counterMeta.Tx, blockHeight, IgnoreFlags{
 				IgnoreConflicting: true,
 				IgnoreLocked:      true,
-			}); err != nil {
-				return nil, errors.NewProcessingError("[ReverseProcessConflicting][%s] error spending counter %s", demotedHash.String(), counterHash.String(), err)
+			}); spendErr != nil {
+				return nil, nil, errors.NewProcessingError("[ReverseProcessConflicting][%s] error spending counter %s", demotedHash.String(), counterHash.String(), spendErr)
 			}
 
-			unmarked, err := UnmarkConflictingRecursively(ctx, s, []chainhash.Hash{counterHash})
-			if err != nil {
-				return nil, errors.NewProcessingError("[ReverseProcessConflicting][%s] error un-marking counter %s + descendants", demotedHash.String(), counterHash.String(), err)
+			unmarked, unmarkErr := UnmarkConflictingRecursively(ctx, s, []chainhash.Hash{counterHash})
+			if unmarkErr != nil {
+				return nil, nil, errors.NewProcessingError("[ReverseProcessConflicting][%s] error un-marking counter %s + descendants", demotedHash.String(), counterHash.String(), unmarkErr)
 			}
 
 			for _, h := range unmarked {
-				touched[h] = struct{}{}
+				touchedSet[h] = struct{}{}
 			}
 		}
 	}
 
-	if len(touched) == 0 {
-		return nil, nil
+	if len(touchedSet) == 0 {
+		return nil, nil, nil
 	}
 
-	result := make([]chainhash.Hash, 0, len(touched))
-	for h := range touched {
-		result = append(result, h)
+	cascadedToConflicting = make([]chainhash.Hash, 0, len(cascadedConflictingSet))
+	for h := range cascadedConflictingSet {
+		cascadedToConflicting = append(cascadedToConflicting, h)
 	}
 
-	return result, nil
+	allTouched = make([]chainhash.Hash, 0, len(touchedSet))
+	for h := range touchedSet {
+		allTouched = append(allTouched, h)
+	}
+
+	return cascadedToConflicting, allTouched, nil
 }
 
 // selectCountersForDemotedTx walks the inputs of a demoted tx and returns the
