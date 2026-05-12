@@ -17,6 +17,8 @@ import (
 	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/stores/utxo/fields"
 	"github.com/bsv-blockchain/teranode/stores/utxo/meta"
+	spendpkg "github.com/bsv-blockchain/teranode/stores/utxo/spend"
+	"github.com/bsv-blockchain/teranode/util"
 	"github.com/bsv-blockchain/teranode/util/tracing"
 	"golang.org/x/sync/errgroup"
 )
@@ -185,6 +187,283 @@ func ProcessConflicting(ctx context.Context, s Store, blockHeight uint32, confli
 	}
 
 	return losingTxHashesMap, allMarkedConflicting, nil
+}
+
+// ReverseProcessConflicting undoes the side effects of a previous
+// ProcessConflicting call so the UTXO store is restored to the state it would
+// have been in had that call never happened. It is the inverse of
+// ProcessConflicting and is meant to run inside moveBackBlock when the block
+// whose subtree was processed is being removed from the chain.
+//
+// Inputs: demotedTxHashes is the list of txs originally passed to
+// ProcessConflicting as winners (i.e. subtree.ConflictingNodes from the block
+// being moved back).
+//
+// Operation for each demoted tx D, per input (parentHash, vout):
+//
+//  1. Pick a counter tx C from parent.ConflictingChildren that
+//     (a) is not in demotedTxHashes, (b) is currently Conflicting=true, and
+//     (c) spends the same (parentHash, vout) as D. C is the original mempool
+//     spender that ProcessConflicting demoted.
+//  2. Mark D and its spending descendants Conflicting=true (cascade). This
+//     undoes Phase 4 of the original call for D and rebuilds the cascade for
+//     D's descendants in case any were added after ProcessConflicting ran.
+//  3. Unspend(D's inputs) so parent.SpendingDatas no longer points at D.
+//  4. Spend(C's tx) so parent.SpendingDatas[vout] points at C again.
+//  5. UnmarkConflictingRecursively(C) so C and its descendants flip back to
+//     Conflicting=false.
+//
+// Demoted txs whose Conflicting flag is already true are skipped — the
+// previous reverse already ran. Demoted txs with no counter currently
+// conflicting are skipped at the per-input level: nothing to restore.
+//
+// Returns the union of every hash whose Conflicting flag this call changed
+// (both directions). Callers feed this into the moveBack
+// processedConflictingHashesMap so the subsequent moveForwardBlock pass can
+// relax the ProcessConflicting precondition for those same hashes.
+func ReverseProcessConflicting(ctx context.Context, s Store, blockHeight uint32, demotedTxHashes []chainhash.Hash) ([]chainhash.Hash, error) {
+	ctx, _, deferFn := tracing.Tracer("utxo").Start(ctx, "ReverseProcessConflicting")
+	defer deferFn()
+
+	if len(demotedTxHashes) == 0 {
+		return nil, nil
+	}
+
+	demotedSet := make(map[chainhash.Hash]struct{}, len(demotedTxHashes))
+	for _, h := range demotedTxHashes {
+		demotedSet[h] = struct{}{}
+	}
+
+	touched := make(map[chainhash.Hash]struct{}, 2*len(demotedTxHashes))
+
+	for i := range demotedTxHashes {
+		demotedHash := demotedTxHashes[i]
+
+		if demotedHash.Equal(subtree.CoinbasePlaceholderHashValue) {
+			continue
+		}
+
+		demotedMeta, err := s.Get(ctx, &demotedHash, fields.Tx, fields.Conflicting)
+		if err != nil {
+			return nil, errors.NewProcessingError("[ReverseProcessConflicting][%s] error getting demoted tx meta", demotedHash.String(), err)
+		}
+
+		if demotedMeta == nil || demotedMeta.Tx == nil {
+			continue
+		}
+
+		if demotedMeta.Conflicting {
+			// already reversed (or never promoted) — Phase 4 of the
+			// original ProcessConflicting wouldn't have cleared the flag
+			// if precondition failed, so observing Conflicting=true here
+			// means there's nothing for us to undo.
+			continue
+		}
+
+		// Step 1: identify counters per input.
+		countersToPromote, err := selectCountersForDemotedTx(ctx, s, demotedMeta.Tx, demotedSet)
+		if err != nil {
+			return nil, err
+		}
+
+		// Step 2: re-mark D + descendants Conflicting=true.
+		_, markedOrder, err := MarkConflictingRecursively(ctx, s, []chainhash.Hash{demotedHash})
+		if err != nil {
+			return nil, errors.NewProcessingError("[ReverseProcessConflicting][%s] error marking demoted tx + descendants conflicting", demotedHash.String(), err)
+		}
+
+		for _, h := range markedOrder {
+			touched[h] = struct{}{}
+		}
+
+		// Step 3: unspend D's input spends so parent.SpendingDatas[vout]
+		// no longer points at D.
+		demotedSpends, err := spendsForTx(demotedMeta.Tx)
+		if err != nil {
+			return nil, errors.NewProcessingError("[ReverseProcessConflicting][%s] error building unspend records", demotedHash.String(), err)
+		}
+
+		if err = s.Unspend(ctx, demotedSpends, false); err != nil {
+			return nil, errors.NewProcessingError("[ReverseProcessConflicting][%s] error unspending demoted tx inputs", demotedHash.String(), err)
+		}
+
+		// Step 4 & 5: per counter, re-spend its inputs and un-cascade.
+		for _, counterHash := range countersToPromote {
+			counterMeta, err := s.Get(ctx, &counterHash, fields.Tx)
+			if err != nil {
+				return nil, errors.NewProcessingError("[ReverseProcessConflicting][%s] error getting counter tx %s", demotedHash.String(), counterHash.String(), err)
+			}
+
+			if counterMeta == nil || counterMeta.Tx == nil {
+				continue
+			}
+
+			if _, err = s.Spend(ctx, counterMeta.Tx, blockHeight, IgnoreFlags{
+				IgnoreConflicting: true,
+				IgnoreLocked:      true,
+			}); err != nil {
+				return nil, errors.NewProcessingError("[ReverseProcessConflicting][%s] error spending counter %s", demotedHash.String(), counterHash.String(), err)
+			}
+
+			unmarked, err := UnmarkConflictingRecursively(ctx, s, []chainhash.Hash{counterHash})
+			if err != nil {
+				return nil, errors.NewProcessingError("[ReverseProcessConflicting][%s] error un-marking counter %s + descendants", demotedHash.String(), counterHash.String(), err)
+			}
+
+			for _, h := range unmarked {
+				touched[h] = struct{}{}
+			}
+		}
+	}
+
+	if len(touched) == 0 {
+		return nil, nil
+	}
+
+	result := make([]chainhash.Hash, 0, len(touched))
+	for h := range touched {
+		result = append(result, h)
+	}
+
+	return result, nil
+}
+
+// selectCountersForDemotedTx walks the inputs of a demoted tx and returns the
+// set of counter txs (other spenders of the same (parent, vout)) that are
+// currently Conflicting=true and not themselves being demoted. These are the
+// original mempool spenders that the previous ProcessConflicting call demoted
+// and that we want to restore as the canonical spenders.
+//
+// The same counter may legitimately spend multiple of the demoted tx's
+// inputs; the function deduplicates so we only Spend()/Unmark() it once.
+func selectCountersForDemotedTx(ctx context.Context, s Store, demotedTx *bt.Tx, demotedSet map[chainhash.Hash]struct{}) ([]chainhash.Hash, error) {
+	seen := make(map[chainhash.Hash]struct{})
+
+	result := make([]chainhash.Hash, 0)
+
+	for _, input := range demotedTx.Inputs {
+		parentHash := input.PreviousTxIDChainHash()
+		vout := input.PreviousTxOutIndex
+
+		parentMeta, err := s.Get(ctx, parentHash, fields.ConflictingChildren)
+		if err != nil {
+			return nil, errors.NewProcessingError("[selectCountersForDemotedTx][%s] error getting parent meta", parentHash.String(), err)
+		}
+
+		if parentMeta == nil {
+			continue
+		}
+
+		for j := range parentMeta.ConflictingChildren {
+			candidate := parentMeta.ConflictingChildren[j]
+
+			if _, demoted := demotedSet[candidate]; demoted {
+				continue
+			}
+
+			if _, dup := seen[candidate]; dup {
+				continue
+			}
+
+			candidateMeta, err := s.Get(ctx, &candidate, fields.Tx, fields.Conflicting)
+			if err != nil {
+				return nil, errors.NewProcessingError("[selectCountersForDemotedTx][%s] error getting candidate counter", candidate.String(), err)
+			}
+
+			if candidateMeta == nil || candidateMeta.Tx == nil {
+				continue
+			}
+
+			if !candidateMeta.Conflicting {
+				continue
+			}
+
+			if !candidateSpendsOutput(candidateMeta.Tx, parentHash, vout) {
+				continue
+			}
+
+			seen[candidate] = struct{}{}
+			result = append(result, candidate)
+		}
+	}
+
+	return result, nil
+}
+
+func candidateSpendsOutput(tx *bt.Tx, parentHash *chainhash.Hash, vout uint32) bool {
+	for _, in := range tx.Inputs {
+		if in.PreviousTxOutIndex == vout && in.PreviousTxIDChainHash().IsEqual(parentHash) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// spendsForTx builds the []*Spend records for tx.Inputs in the same shape
+// Unspend / Spend expect.
+func spendsForTx(tx *bt.Tx) ([]*Spend, error) {
+	spends := make([]*Spend, len(tx.Inputs))
+
+	for i, input := range tx.Inputs {
+		utxoHash, err := util.UTXOHashFromInput(input)
+		if err != nil {
+			return nil, err
+		}
+
+		spends[i] = &Spend{
+			TxID:         input.PreviousTxIDChainHash(),
+			Vout:         input.PreviousTxOutIndex,
+			UTXOHash:     utxoHash,
+			SpendingData: spendpkg.NewSpendingData(tx.TxIDChainHash(), i),
+		}
+	}
+
+	return spends, nil
+}
+
+// UnmarkConflictingRecursively flips Conflicting=false on the given txs and
+// every spending descendant reached via BFS over SpendingDatas. Inverse of
+// MarkConflictingRecursively.
+//
+// Returns the BFS-ordered list of every hash whose flag this call cleared
+// (the input set plus every descendant the cascade reached).
+func UnmarkConflictingRecursively(ctx context.Context, s Store, hashes []chainhash.Hash) ([]chainhash.Hash, error) {
+	ctx, _, deferFn := tracing.Tracer("utxo").Start(ctx, "UnmarkConflictingRecursively")
+	defer deferFn()
+
+	toProcess := hashes
+
+	visited := make(map[chainhash.Hash]struct{}, len(hashes))
+	clearedOrder := make([]chainhash.Hash, 0, len(hashes))
+
+	for _, h := range hashes {
+		if _, ok := visited[h]; !ok {
+			visited[h] = struct{}{}
+			clearedOrder = append(clearedOrder, h)
+		}
+	}
+
+	for len(toProcess) > 0 {
+		_, spendingChildTxs, err := s.SetConflicting(ctx, toProcess, false)
+		if err != nil {
+			return nil, err
+		}
+
+		// filter out already-visited hashes to prevent infinite loops
+		nextBatch := spendingChildTxs[:0]
+		for _, child := range spendingChildTxs {
+			if _, ok := visited[child]; !ok {
+				visited[child] = struct{}{}
+				clearedOrder = append(clearedOrder, child)
+				nextBatch = append(nextBatch, child)
+			}
+		}
+
+		toProcess = nextBatch
+	}
+
+	return clearedOrder, nil
 }
 
 // MarkConflictingRecursively marks the given transactions as conflicting, and iteratively marks all their spending

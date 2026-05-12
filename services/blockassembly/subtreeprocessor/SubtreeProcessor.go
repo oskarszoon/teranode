@@ -2708,6 +2708,19 @@ func (stp *SubtreeProcessor) reorgBlocks(ctx context.Context, moveBackBlocks []*
 		}
 
 		if len(conflictingHashes) > 0 {
+			// The block being moved back carried a non-empty
+			// subtree.ConflictingNodes list. Its original moveForwardBlock
+			// therefore invoked ProcessConflicting in the UTXO store,
+			// swapping parent.SpendingDatas to the txs in
+			// conflictingHashes and flipping the prior counter-spenders
+			// to Conflicting=true. moveBack does not naturally undo those
+			// UTXO-level side effects — call ReverseProcessConflicting so
+			// the UTXO state matches what it would have been had the now-
+			// orphaned block never been part of the chain.
+			if _, reverseErr := utxostore.ReverseProcessConflicting(ctx, stp.utxoStore, block.Height, conflictingHashes); reverseErr != nil {
+				return errors.NewProcessingError("[reorgBlocks][%s] error reversing conflict resolution from moved-back block", block.String(), reverseErr)
+			}
+
 			for _, hash := range conflictingHashes {
 				processedConflictingHashesMap[hash] = true
 			}
