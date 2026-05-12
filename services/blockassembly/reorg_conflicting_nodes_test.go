@@ -6,11 +6,14 @@ import (
 
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	subtreepkg "github.com/bsv-blockchain/go-subtree"
+	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/model"
 	"github.com/bsv-blockchain/teranode/pkg/fileformat"
+	"github.com/bsv-blockchain/teranode/services/blockchain"
 	"github.com/bsv-blockchain/teranode/stores/blob"
 	blob_memory "github.com/bsv-blockchain/teranode/stores/blob/memory"
 	"github.com/bsv-blockchain/teranode/ulogger"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -125,6 +128,52 @@ func TestHasConflictingNodesInBlocks_DetectsStaleConflicts(t *testing.T) {
 			},
 			expectFound: true,
 		},
+		{
+			name: "nil subtree-hash entry is skipped",
+			setup: func(t *testing.T, ba *BlockAssembler) []*model.Block {
+				storeSubtreeInBlob(t, ba.subtreeStore, conflictingSubtree)
+				return []*model.Block{
+					{Subtrees: []*chainhash.Hash{nil, conflictingSubtree.RootHash()}},
+				}
+			},
+			expectFound: true,
+		},
+		{
+			name: "corrupt subtree on disk is tolerated (deserialize error logged, scan continues)",
+			setup: func(t *testing.T, ba *BlockAssembler) []*model.Block {
+				// Truncated subtree blob — has only the file magic header and a
+				// few bytes, so DeserializeSubtreeConflictingFromReader will fail
+				// while reading the leaf count varint.
+				corruptRoot := chainhash.HashH([]byte("corrupt-subtree-root"))
+				require.NoError(t, ba.subtreeStore.Set(
+					context.Background(),
+					corruptRoot[:],
+					fileformat.FileTypeSubtree,
+					[]byte("S-1.0   \x00"),
+				))
+				storeSubtreeInBlob(t, ba.subtreeStore, conflictingSubtree)
+				return []*model.Block{
+					{Subtrees: []*chainhash.Hash{&corruptRoot, conflictingSubtree.RootHash()}},
+				}
+			},
+			expectFound: true,
+		},
+		{
+			name: "corrupt subtree with no following healthy subtree returns false",
+			setup: func(t *testing.T, ba *BlockAssembler) []*model.Block {
+				corruptRoot := chainhash.HashH([]byte("corrupt-only-root"))
+				require.NoError(t, ba.subtreeStore.Set(
+					context.Background(),
+					corruptRoot[:],
+					fileformat.FileTypeSubtree,
+					[]byte("S-1.0   \x00"),
+				))
+				return []*model.Block{
+					{Subtrees: []*chainhash.Hash{&corruptRoot}},
+				}
+			},
+			expectFound: false,
+		},
 	}
 
 	for _, tc := range tests {
@@ -173,4 +222,65 @@ func storeSubtreeInBlob(t *testing.T, store blob.Store, s *subtreepkg.Subtree) {
 	require.NoError(t, err)
 
 	require.NoError(t, store.Set(context.Background(), s.RootHash()[:], fileformat.FileTypeSubtree, bytes))
+}
+
+// TestRepairConflictStateAfterReorg_NoOpWhenNoConflicts verifies that the
+// repair runs nothing — no log, no reset, no blockchain client call — when
+// moveBackBlocks carry no ConflictingNodes. The detection is the only safety
+// net against a spurious post-reorg reset on every block.
+func TestRepairConflictStateAfterReorg_NoOpWhenNoConflicts(t *testing.T) {
+	mockBlockchain := &blockchain.Mock{}
+	// No expectations set: any call into blockchainClient will fail the test.
+
+	ba := &BlockAssembler{
+		logger:           ulogger.TestLogger{},
+		subtreeStore:     blob_memory.New(),
+		blockchainClient: mockBlockchain,
+	}
+
+	ba.repairConflictStateAfterReorg(context.Background(), []*model.Block{
+		{Subtrees: nil},
+	})
+
+	mockBlockchain.AssertExpectations(t)
+}
+
+// TestRepairConflictStateAfterReorg_LogsAndContinuesOnResetError verifies that
+// the reorg is not failed when the input-validation reset itself errors out.
+// The chain move already succeeded by this point — failing the whole reorg
+// because the repair step couldn't talk to the blockchain client would make
+// the situation worse. Operators have the `--validate-inputs` CLI to retry.
+//
+// Coverage target: the `if resetErr := b.reset(...); resetErr != nil` branch
+// inside repairConflictStateAfterReorg and the subsequent Errorf log.
+func TestRepairConflictStateAfterReorg_LogsAndContinuesOnResetError(t *testing.T) {
+	conflictHash := chainhash.HashH([]byte("repair-test-conflict-tx"))
+	conflictingSubtree := buildSubtreeWithConflictingNodes(t,
+		[]chainhash.Hash{conflictHash},
+		[]chainhash.Hash{conflictHash},
+	)
+
+	subtreeStore := blob_memory.New()
+	storeSubtreeInBlob(t, subtreeStore, conflictingSubtree)
+
+	mockBlockchain := &blockchain.Mock{}
+	// b.reset() fails at its first step — GetBestBlockHeader — so we never
+	// need to mock any other blockchainClient call.
+	mockBlockchain.On("GetBestBlockHeader", mock.Anything).
+		Return((*model.BlockHeader)(nil), (*model.BlockHeaderMeta)(nil),
+			errors.NewProcessingError("simulated blockchain unavailable"))
+
+	ba := &BlockAssembler{
+		logger:           ulogger.TestLogger{},
+		subtreeStore:     subtreeStore,
+		blockchainClient: mockBlockchain,
+	}
+
+	// Must not panic, must not return; the test passes if the function
+	// completes despite reset() returning an error.
+	ba.repairConflictStateAfterReorg(context.Background(), []*model.Block{
+		{Subtrees: []*chainhash.Hash{conflictingSubtree.RootHash()}},
+	})
+
+	mockBlockchain.AssertCalled(t, "GetBestBlockHeader", mock.Anything)
 }

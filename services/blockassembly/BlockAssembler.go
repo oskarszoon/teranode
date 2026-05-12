@@ -1352,25 +1352,6 @@ func (b *BlockAssembler) handleReorg(ctx context.Context, header *model.BlockHea
 		reorgFailed = true
 	}
 
-	// Detect stale ConflictingNodes that ProcessConflicting consumed during the
-	// original moveForwardBlock of any moveBackBlock. moveBackBlock does NOT
-	// reverse those effects (no inverse-unspend / re-flip-conflicting), and
-	// moveForward of the new chain blocks may not detect the same conflicts —
-	// their subtree files can have empty ConflictingNodes when produced by an
-	// upstream node before the conflict materialized locally. This leaves
-	// the losing-side tx (and any descendants) in the UTXO store with
-	// Conflicting=false, so block assembly keeps proposing them and SVNode
-	// rejects the candidate with bad-txns-inputs-missingorspent.
-	//
-	// validateUnminedTxInputs Case 2 detects this: for each unmined tx,
-	// check parent.ConflictingChildren for a counter-conflicting tx confirmed
-	// on the current chain. When found, mark the unmined tx as conflicting and
-	// cascade to its descendants.
-	hasMovedBackConflicts := false
-	if !reorgFailed && err == nil {
-		hasMovedBackConflicts = b.hasConflictingNodesInBlocks(ctx, moveBackBlocks)
-	}
-
 	if reset {
 		// we have an invalid block in the reorg or reorg failed, we need to reset the block assembly and load the unmined transactions again
 		b.logger.Warnf("[BlockAssembler] reorg contains invalid block, resetting block assembly, moveBackBlocks: %d, moveForwardBlocks: %d", len(moveBackBlocks), len(moveForwardBlocks))
@@ -1390,20 +1371,48 @@ func (b *BlockAssembler) handleReorg(ctx context.Context, header *model.BlockHea
 		return errors.NewBlockAssemblyResetError("reorg fallback reset, moveBackBlocks: %d, moveForwardBlocks: %d", len(moveBackBlocks), len(moveForwardBlocks))
 	}
 
-	if hasMovedBackConflicts {
-		b.logger.Infof("[BlockAssembler] reorg moveBackBlocks had ConflictingNodes, triggering reset with input validation to repair conflict state")
-
-		if resetErr := b.reset(ctx, true); resetErr != nil {
-			b.logger.Errorf("[BlockAssembler] error in input-validation reset after reorg with ConflictingNodes: %v", resetErr)
-			// Don't fail the reorg — the chain move itself succeeded. Operators
-			// can run `teranode-cli resetblockassembly --validate-inputs` to
-			// retry the repair.
-		}
-	}
+	// Successful Reorg path: detect stale ConflictingNodes that
+	// ProcessConflicting consumed during the original moveForwardBlock of any
+	// moveBackBlock and run validateUnminedTxInputs to repair the UTXO state.
+	// See repairConflictStateAfterReorg for the full rationale.
+	b.repairConflictStateAfterReorg(ctx, moveBackBlocks)
 
 	prometheusBlockAssemblerReorgDuration.Observe(float64(time.Since(startTime).Microseconds()) / 1_000_000)
 
 	return nil
+}
+
+// repairConflictStateAfterReorg detects stale ConflictingNodes that
+// ProcessConflicting consumed during the original moveForwardBlock of any
+// moveBackBlock and triggers an input-validation reset to repair UTXO state.
+//
+// moveBackBlock does NOT reverse ProcessConflicting's side effects
+// (no inverse-unspend / re-flip-conflicting), and moveForward of the new
+// chain blocks may not detect the same conflicts — their subtree files can
+// have empty ConflictingNodes when produced by an upstream node before the
+// conflict materialized locally. This leaves the losing-side tx (and any
+// descendants) in the UTXO store with Conflicting=false, so block assembly
+// keeps proposing them and SVNode rejects the candidate with
+// bad-txns-inputs-missingorspent.
+//
+// validateUnminedTxInputs Case 2 detects this: for each unmined tx,
+// check parent.ConflictingChildren for a counter-conflicting tx confirmed
+// on the current chain. When found, mark the unmined tx as conflicting and
+// cascade to its descendants.
+//
+// On reset failure the reorg is not failed — the chain move itself
+// succeeded. Operators can re-run the repair via
+// `teranode-cli resetblockassembly --validate-inputs`.
+func (b *BlockAssembler) repairConflictStateAfterReorg(ctx context.Context, moveBackBlocks []*model.Block) {
+	if !b.hasConflictingNodesInBlocks(ctx, moveBackBlocks) {
+		return
+	}
+
+	b.logger.Infof("[BlockAssembler] reorg moveBackBlocks had ConflictingNodes, triggering reset with input validation to repair conflict state")
+
+	if resetErr := b.reset(ctx, true); resetErr != nil {
+		b.logger.Errorf("[BlockAssembler] error in input-validation reset after reorg with ConflictingNodes: %v", resetErr)
+	}
 }
 
 // hasConflictingNodesInBlocks reports whether any subtree referenced by the
