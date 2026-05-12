@@ -791,3 +791,78 @@ func TestSelectCountersForDemotedTx_CandidateMetaNilSkipsCandidate(t *testing.T)
 		"pruned candidate must be skipped, live one promoted")
 	mockStore.AssertExpectations(t)
 }
+
+// TestSpendsForTx covers the helper that builds []*Spend records for
+// Unspend / Spend. ReverseProcessConflicting uses it on the demoted tx
+// before un-spending its inputs — if the helper silently dropped a bad
+// input we'd leave parent.SpendingDatas[vout] still pointing at the
+// demoted tx. Test the happy path AND the error propagation so a future
+// refactor can't downgrade the error to a skip.
+func TestSpendsForTx(t *testing.T) {
+	t.Run("single input populated -> single Spend record", func(t *testing.T) {
+		parentHash := createTestHash("spends-single-parent")
+		tx := createSpendableTestTransaction(parentHash, 7)
+
+		got, err := spendsForTx(tx)
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+
+		assert.Equal(t, &parentHash, got[0].TxID)
+		assert.Equal(t, uint32(7), got[0].Vout)
+		assert.NotNil(t, got[0].UTXOHash, "UTXOHash must be derived from input fields")
+		require.NotNil(t, got[0].SpendingData, "SpendingData must point at the spending tx")
+		assert.Equal(t, tx.TxIDChainHash(), got[0].SpendingData.TxID)
+	})
+
+	t.Run("multiple inputs -> records returned in input order with correct vout indices", func(t *testing.T) {
+		parentA := createTestHash("spends-multi-A")
+		parentB := createTestHash("spends-multi-B")
+
+		// Two inputs, distinct parents + distinct vouts.
+		txA := createSpendableTestTransaction(parentA, 0)
+		txB := createSpendableTestTransaction(parentB, 3)
+		// Merge inputs into a single tx so we exercise the per-input loop.
+		merged := bt.NewTx()
+		merged.Inputs = append(merged.Inputs, txA.Inputs[0], txB.Inputs[0])
+		merged.Outputs = append(merged.Outputs, txA.Outputs[0])
+
+		got, err := spendsForTx(merged)
+		require.NoError(t, err)
+		require.Len(t, got, 2)
+
+		assert.Equal(t, &parentA, got[0].TxID)
+		assert.Equal(t, uint32(0), got[0].Vout)
+		assert.Equal(t, 0, got[0].SpendingData.Vin, "SpendingData.Vin must be the input index")
+
+		assert.Equal(t, &parentB, got[1].TxID)
+		assert.Equal(t, uint32(3), got[1].Vout)
+		assert.Equal(t, 1, got[1].SpendingData.Vin)
+
+		assert.NotEqual(t, got[0].UTXOHash, got[1].UTXOHash, "distinct inputs must yield distinct UTXO hashes")
+	})
+
+	t.Run("input with nil PreviousTxScript surfaces UTXOHashFromInput error", func(t *testing.T) {
+		// util.UTXOHashFromInput returns "locking script is nil" when the
+		// input's PreviousTxScript is nil. Reverse must not silently skip
+		// this — it would leave the demoted tx's input un-spent on the
+		// parent UTXO. createSpendableTestTransaction sets a stub script;
+		// reach in and null it to trigger the error.
+		parentHash := createTestHash("spends-bad-input")
+		tx := createSpendableTestTransaction(parentHash, 0)
+		tx.Inputs[0].PreviousTxScript = nil
+
+		got, err := spendsForTx(tx)
+		require.Error(t, err)
+		assert.Nil(t, got, "error path must return nil slice — partial results would mask the bad input downstream")
+		assert.Contains(t, err.Error(), "locking script is nil")
+	})
+
+	t.Run("empty inputs slice -> empty Spends slice, no error", func(t *testing.T) {
+		// Idempotent guard. A tx with zero inputs should not happen in
+		// production (coinbase has one input), but the helper must not
+		// panic and must not over-allocate.
+		got, err := spendsForTx(bt.NewTx())
+		require.NoError(t, err)
+		assert.Empty(t, got)
+	})
+}
