@@ -17,7 +17,6 @@ import (
 	"github.com/bsv-blockchain/go-subtree"
 	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/model"
-	"github.com/bsv-blockchain/teranode/pkg/fileformat"
 	"github.com/bsv-blockchain/teranode/services/blockassembly/subtreeprocessor"
 	"github.com/bsv-blockchain/teranode/services/blockchain"
 	"github.com/bsv-blockchain/teranode/settings"
@@ -1356,9 +1355,13 @@ func (b *BlockAssembler) handleReorg(ctx context.Context, header *model.BlockHea
 		// we have an invalid block in the reorg or reorg failed, we need to reset the block assembly and load the unmined transactions again
 		b.logger.Warnf("[BlockAssembler] reorg contains invalid block, resetting block assembly, moveBackBlocks: %d, moveForwardBlocks: %d", len(moveBackBlocks), len(moveForwardBlocks))
 
-		// Validate inputs when the Reorg itself failed — getConflictingNodes()
-		// may miss conflicts not stored in subtree files and
+		// Only validate inputs when the Reorg itself failed — in that case
+		// getConflictingNodes() may miss conflicts not stored in subtree files and
 		// validateUnminedTxInputs() independently catches them via SpendingData.
+		// When Reorg succeeded (e.g. reset is due to hasInvalidBlock), conflicts were
+		// already detected by reorgBlocks; re-running validateInputs here is redundant
+		// and currently broken (fields.Inputs alone does not populate data.Tx in the
+		// SQL store, so validateUnminedTxInputs always returns false).
 		if err = b.reset(ctx, reorgFailed); err != nil {
 			return errors.NewProcessingError("error resetting block assembly after reorg with invalid block", err)
 		}
@@ -1371,101 +1374,9 @@ func (b *BlockAssembler) handleReorg(ctx context.Context, header *model.BlockHea
 		return errors.NewBlockAssemblyResetError("reorg fallback reset, moveBackBlocks: %d, moveForwardBlocks: %d", len(moveBackBlocks), len(moveForwardBlocks))
 	}
 
-	// Successful Reorg path: detect stale ConflictingNodes that
-	// ProcessConflicting consumed during the original moveForwardBlock of any
-	// moveBackBlock and run validateUnminedTxInputs to repair the UTXO state.
-	// See repairConflictStateAfterReorg for the full rationale.
-	b.repairConflictStateAfterReorg(ctx, moveBackBlocks)
-
 	prometheusBlockAssemblerReorgDuration.Observe(float64(time.Since(startTime).Microseconds()) / 1_000_000)
 
 	return nil
-}
-
-// repairConflictStateAfterReorg detects stale ConflictingNodes that
-// ProcessConflicting consumed during the original moveForwardBlock of any
-// moveBackBlock and triggers an input-validation reset to repair UTXO state.
-//
-// moveBackBlock does NOT reverse ProcessConflicting's side effects
-// (no inverse-unspend / re-flip-conflicting), and moveForward of the new
-// chain blocks may not detect the same conflicts — their subtree files can
-// have empty ConflictingNodes when produced by an upstream node before the
-// conflict materialized locally. This leaves the losing-side tx (and any
-// descendants) in the UTXO store with Conflicting=false, so block assembly
-// keeps proposing them and SVNode rejects the candidate with
-// bad-txns-inputs-missingorspent.
-//
-// validateUnminedTxInputs Case 2 detects this: for each unmined tx,
-// check parent.ConflictingChildren for a counter-conflicting tx confirmed
-// on the current chain. When found, mark the unmined tx as conflicting and
-// cascade to its descendants.
-//
-// On reset failure the reorg is not failed — the chain move itself
-// succeeded. Operators can re-run the repair via
-// `teranode-cli resetblockassembly --validate-inputs`.
-func (b *BlockAssembler) repairConflictStateAfterReorg(ctx context.Context, moveBackBlocks []*model.Block) {
-	if !b.hasConflictingNodesInBlocks(ctx, moveBackBlocks) {
-		return
-	}
-
-	b.logger.Infof("[BlockAssembler] reorg moveBackBlocks had ConflictingNodes, triggering reset with input validation to repair conflict state")
-
-	if resetErr := b.reset(ctx, true); resetErr != nil {
-		b.logger.Errorf("[BlockAssembler] error in input-validation reset after reorg with ConflictingNodes: %v", resetErr)
-	}
-}
-
-// hasConflictingNodesInBlocks reports whether any subtree referenced by the
-// provided blocks has a non-empty ConflictingNodes list on disk.
-//
-// Used after a successful Reorg to decide whether validateUnminedTxInputs needs
-// to run: a moveBackBlock that carries ConflictingNodes is one whose
-// moveForwardBlock previously invoked ProcessConflicting in the UTXO store.
-// moveBack does not reverse those side effects, so the UTXO record for the
-// (now back-in-mempool) losing-side tx can disagree with the new main chain
-// — Conflicting=false on a tx whose counter is confirmed elsewhere. Returning
-// true here is intentionally over-eager: missing a single bad reorg leaves
-// block assembly producing rejected candidates, while a spurious reset only
-// reloads unmined transactions.
-//
-// Errors fetching or deserializing a single subtree are logged and treated as
-// "no conflicting nodes for that subtree"; the function only returns true on
-// observed evidence.
-func (b *BlockAssembler) hasConflictingNodesInBlocks(ctx context.Context, blocks []*model.Block) bool {
-	for _, block := range blocks {
-		if block == nil {
-			continue
-		}
-
-		for _, subtreeHash := range block.Subtrees {
-			if subtreeHash == nil {
-				continue
-			}
-
-			reader, err := b.subtreeStore.GetIoReader(ctx, subtreeHash[:], fileformat.FileTypeSubtree)
-			if err != nil {
-				reader, err = b.subtreeStore.GetIoReader(ctx, subtreeHash[:], fileformat.FileTypeSubtreeToCheck)
-				if err != nil {
-					b.logger.Debugf("[hasConflictingNodesInBlocks] subtree %s unavailable: %v", subtreeHash.String(), err)
-					continue
-				}
-			}
-
-			conflictingNodes, deserializeErr := subtree.DeserializeSubtreeConflictingFromReader(reader)
-			_ = reader.Close()
-
-			if deserializeErr != nil {
-				b.logger.Warnf("[hasConflictingNodesInBlocks] error deserializing conflicting nodes from subtree %s: %v", subtreeHash.String(), deserializeErr)
-				continue
-			}
-
-			if len(conflictingNodes) > 0 {
-				return true
-			}
-		}
-	}
-
-	return false
 }
 
 // getReorgBlocks retrieves blocks involved in reorganization.
