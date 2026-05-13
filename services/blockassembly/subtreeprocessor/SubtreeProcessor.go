@@ -2902,9 +2902,28 @@ func (stp *SubtreeProcessor) reorgBlocks(ctx context.Context, moveBackBlocks []*
 			// rebuilds via losingTxHashesMap — neither touches a tx that's
 			// already settled in chainedSubtrees. Mirror what
 			// BlockAssembler.markAsConflicting does on the validate-inputs
-			// path: walk the cascade and call Remove on each. Counter-side
-			// (unmarked) hashes are intentionally NOT evicted — they're now
-			// Conflicting=false and remain valid mempool entries.
+			// path: walk the cascade and call Remove on each.
+			//
+			// Counter-side (un-cascaded) hashes are intentionally NOT
+			// re-added to chainedSubtrees here. Their state after the
+			// reverse:
+			//   - Conflicting=false in the UTXO store (valid mempool entry
+			//     visible via RPC / GetSpend).
+			//   - NOT in chainedSubtrees — they were Conflicting=true before
+			//     the reverse and so never made it into the in-memory
+			//     subtree. The reverse only flips the flag; it does not
+			//     stp.Add them.
+			// Re-introduction to the mining flow therefore depends on:
+			//   - Validator re-feeding from gossip (works when other nodes
+			//     also held the tx), or
+			//   - Operator RPC resubmit.
+			// For a tx only this node held — which is rare since the
+			// original demotion was triggered by a competing mined tx the
+			// rest of the network saw too — the counter is effectively
+			// shelved until resubmit. The alternative is calling stp.Add
+			// here per counter, but that needs the tx body in hand and
+			// risks adding txs whose parents are still missing post-reorg.
+			// Documented gap, not silently swept under "valid mempool entry".
 			//
 			// Warn-and-continue on Remove error (mirrors BlockAssembler.go:2551).
 			// Failing the reorg here would not roll the UTXO mutations back —

@@ -10,6 +10,7 @@ import (
 	"github.com/bsv-blockchain/go-subtree"
 	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/stores/utxo/meta"
+	spendpkg "github.com/bsv-blockchain/teranode/stores/utxo/spend"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -126,9 +127,21 @@ func TestReverseProcessConflicting_SkipsAlreadyReversedDemoted(t *testing.T) {
 	demotedHash := createTestHash("reverse-already-conflicting")
 	demotedTx := createTestTransaction()
 
-	// Demoted already Conflicting=true → skip.
+	// createTestTransaction has a single input pointing at "prev-tx" vout 0.
+	parentHash := createTestHash("prev-tx")
+	// A non-D spender already populates parent.SpendingDatas[0] →
+	// isReverseFullyApplied returns true → short-circuit holds.
+	counterSpenderHash := createTestHash("reverse-counter-spender")
+
+	// Demoted Conflicting=true.
 	mockStore.On("Get", mock.Anything, &demotedHash, mock.Anything).
 		Return(&meta.Data{Tx: demotedTx, Conflicting: true}, nil).Once()
+
+	// Parent state confirms reverse fully applied (SpendingDatas[0] != D, non-nil).
+	mockStore.On("Get", mock.Anything, &parentHash, mock.Anything).
+		Return(&meta.Data{SpendingDatas: []*spendpkg.SpendingData{
+			{TxID: &counterSpenderHash, Vin: 0},
+		}}, nil).Once()
 
 	_, touched, err := ReverseProcessConflicting(ctx, mockStore, 100,
 		[]chainhash.Hash{demotedHash})
@@ -136,6 +149,199 @@ func TestReverseProcessConflicting_SkipsAlreadyReversedDemoted(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, touched, "no work done → no touched hashes")
 	mockStore.AssertExpectations(t)
+}
+
+// TestReverseProcessConflicting_PartialStateRetryCompletes pins the
+// recovery path Simon flagged in PR #845 review: if a previous reverse
+// failed between step 1 (Mark) and step 3 (Spend(C)), the demoted tx is
+// stuck Conflicting=true with parent.SpendingDatas[vout] empty. A retry
+// MUST detect the partial state via parent observable state and re-run
+// the steps to completion, not short-circuit on D.Conflicting alone.
+func TestReverseProcessConflicting_PartialStateRetryCompletes(t *testing.T) {
+	ctx := context.Background()
+	mockStore := &MockUtxostore{}
+
+	parentHash := createTestHash("partial-retry-parent")
+	demotedHash := createTestHash("partial-retry-demoted")
+	counterHash := createTestHash("partial-retry-counter")
+
+	const vout = uint32(0)
+
+	demotedTx := createSpendableTestTransaction(parentHash, vout)
+	counterTx := createSpendableTestTransaction(parentHash, vout)
+
+	// Top-of-loop Get: D.Conflicting=true (partial state from earlier failure).
+	mockStore.On("Get", mock.Anything, &demotedHash, mock.Anything).
+		Return(&meta.Data{Tx: demotedTx, Conflicting: true}, nil).Once()
+
+	// isReverseFullyApplied → Get parent.SpendingDatas. Slot 0 nil (Unspend
+	// cleared it, Spend(C) never ran). Returns false → fall through to retry.
+	mockStore.On("Get", mock.Anything, &parentHash, mock.Anything).
+		Return(&meta.Data{SpendingDatas: []*spendpkg.SpendingData{nil}}, nil).Once()
+
+	// selectCountersForDemotedTx → Get parent.ConflictingChildren → finds counter.
+	mockStore.On("Get", mock.Anything, &parentHash, mock.Anything).
+		Return(&meta.Data{ConflictingChildren: []chainhash.Hash{counterHash}}, nil).Once()
+	// Counter still Conflicting=true (Unmark never ran on it).
+	mockStore.On("Get", mock.Anything, &counterHash, mock.Anything).
+		Return(&meta.Data{Tx: counterTx, Conflicting: true, CreatedAt: 1}, nil).Once()
+
+	// Re-run Mark+Unspend idempotently (already-true, already-cleared — no-ops
+	// at the store level, but the helper still issues the calls).
+	mockStore.On("SetConflicting", mock.Anything, []chainhash.Hash{demotedHash}, true).
+		Return([]*Spend{}, []chainhash.Hash{}, nil).Once()
+	mockStore.On("Unspend", mock.Anything, mock.AnythingOfType("[]*utxo.Spend"), mock.Anything).
+		Return(nil).Once()
+
+	// Now the step 3 retry: Get counter body, Spend(C) succeeds this time,
+	// Unmark counter.
+	mockStore.On("Get", mock.Anything, &counterHash, mock.Anything).
+		Return(&meta.Data{Tx: counterTx}, nil).Once()
+	mockStore.On("Spend", mock.Anything, counterTx, mock.Anything, mock.Anything).
+		Return([]*Spend{}, nil).Once()
+	mockStore.On("SetConflicting", mock.Anything, []chainhash.Hash{counterHash}, false).
+		Return([]*Spend{}, []chainhash.Hash{}, nil).Once()
+
+	cascade, touched, err := ReverseProcessConflicting(ctx, mockStore, 1,
+		[]chainhash.Hash{demotedHash})
+	require.NoError(t, err)
+
+	assert.Contains(t, cascade, demotedHash, "demoted remains in cascade even on retry — caller still needs eviction")
+	assert.Contains(t, touched, demotedHash)
+	assert.Contains(t, touched, counterHash, "counter must be touched on the completing retry — confirms Unmark ran")
+	mockStore.AssertExpectations(t)
+}
+
+// TestReverseProcessConflicting_DConflictingButParentStillPointsToD —
+// pathological case: D.Conflicting=true but parent.SpendingDatas[vout]
+// still points to D. Means an earlier MarkConflictingRecursively
+// succeeded but Unspend never ran. Retry must NOT short-circuit; it
+// must run Unspend (clearing the slot) and Spend(C).
+func TestReverseProcessConflicting_DConflictingButParentStillPointsToD(t *testing.T) {
+	ctx := context.Background()
+	mockStore := &MockUtxostore{}
+
+	parentHash := createTestHash("d-stuck-parent")
+	demotedHash := createTestHash("d-stuck-demoted")
+	counterHash := createTestHash("d-stuck-counter")
+
+	const vout = uint32(0)
+
+	demotedTx := createSpendableTestTransaction(parentHash, vout)
+	counterTx := createSpendableTestTransaction(parentHash, vout)
+
+	mockStore.On("Get", mock.Anything, &demotedHash, mock.Anything).
+		Return(&meta.Data{Tx: demotedTx, Conflicting: true}, nil).Once()
+
+	// Parent shows D still as the recorded spender — Unspend never ran.
+	mockStore.On("Get", mock.Anything, &parentHash, mock.Anything).
+		Return(&meta.Data{SpendingDatas: []*spendpkg.SpendingData{
+			{TxID: &demotedHash, Vin: 0},
+		}}, nil).Once()
+
+	// Fall through to retry — selectCountersForDemotedTx Get on parent.
+	mockStore.On("Get", mock.Anything, &parentHash, mock.Anything).
+		Return(&meta.Data{ConflictingChildren: []chainhash.Hash{counterHash}}, nil).Once()
+	mockStore.On("Get", mock.Anything, &counterHash, mock.Anything).
+		Return(&meta.Data{Tx: counterTx, Conflicting: true, CreatedAt: 1}, nil).Once()
+
+	mockStore.On("SetConflicting", mock.Anything, []chainhash.Hash{demotedHash}, true).
+		Return([]*Spend{}, []chainhash.Hash{}, nil).Once()
+	mockStore.On("Unspend", mock.Anything, mock.AnythingOfType("[]*utxo.Spend"), mock.Anything).
+		Return(nil).Once()
+	mockStore.On("Get", mock.Anything, &counterHash, mock.Anything).
+		Return(&meta.Data{Tx: counterTx}, nil).Once()
+	mockStore.On("Spend", mock.Anything, counterTx, mock.Anything, mock.Anything).
+		Return([]*Spend{}, nil).Once()
+	mockStore.On("SetConflicting", mock.Anything, []chainhash.Hash{counterHash}, false).
+		Return([]*Spend{}, []chainhash.Hash{}, nil).Once()
+
+	_, _, err := ReverseProcessConflicting(ctx, mockStore, 1,
+		[]chainhash.Hash{demotedHash})
+	require.NoError(t, err)
+	mockStore.AssertExpectations(t)
+}
+
+// TestIsReverseFullyApplied unit-tests the parent-state predicate
+// directly. The guard semantics are critical — a false positive (claim
+// fully reversed when it isn't) traps partial state; a false negative
+// triggers an unnecessary re-run (idempotent, but wasteful).
+func TestIsReverseFullyApplied(t *testing.T) {
+	parentHash := createTestHash("isrev-parent")
+	demotedHash := createTestHash("isrev-demoted")
+	otherSpenderHash := createTestHash("isrev-other")
+
+	demotedTx := createSpendableTestTransaction(parentHash, 0)
+
+	t.Run("parent.SpendingDatas[vout] points to non-D non-nil spender -> true", func(t *testing.T) {
+		mockStore := &MockUtxostore{}
+		mockStore.On("Get", mock.Anything, &parentHash, mock.Anything).
+			Return(&meta.Data{SpendingDatas: []*spendpkg.SpendingData{
+				{TxID: &otherSpenderHash, Vin: 0},
+			}}, nil).Once()
+
+		got, err := isReverseFullyApplied(context.Background(), mockStore, demotedTx, demotedHash)
+		require.NoError(t, err)
+		assert.True(t, got)
+		mockStore.AssertExpectations(t)
+	})
+
+	t.Run("parent.SpendingDatas[vout] is nil -> false", func(t *testing.T) {
+		mockStore := &MockUtxostore{}
+		mockStore.On("Get", mock.Anything, &parentHash, mock.Anything).
+			Return(&meta.Data{SpendingDatas: []*spendpkg.SpendingData{nil}}, nil).Once()
+
+		got, err := isReverseFullyApplied(context.Background(), mockStore, demotedTx, demotedHash)
+		require.NoError(t, err)
+		assert.False(t, got)
+		mockStore.AssertExpectations(t)
+	})
+
+	t.Run("parent.SpendingDatas[vout].TxID == D -> false", func(t *testing.T) {
+		mockStore := &MockUtxostore{}
+		mockStore.On("Get", mock.Anything, &parentHash, mock.Anything).
+			Return(&meta.Data{SpendingDatas: []*spendpkg.SpendingData{
+				{TxID: &demotedHash, Vin: 0},
+			}}, nil).Once()
+
+		got, err := isReverseFullyApplied(context.Background(), mockStore, demotedTx, demotedHash)
+		require.NoError(t, err)
+		assert.False(t, got)
+		mockStore.AssertExpectations(t)
+	})
+
+	t.Run("parent.SpendingDatas slice shorter than vout -> false", func(t *testing.T) {
+		mockStore := &MockUtxostore{}
+		mockStore.On("Get", mock.Anything, &parentHash, mock.Anything).
+			Return(&meta.Data{SpendingDatas: []*spendpkg.SpendingData{}}, nil).Once()
+
+		got, err := isReverseFullyApplied(context.Background(), mockStore, demotedTx, demotedHash)
+		require.NoError(t, err)
+		assert.False(t, got)
+		mockStore.AssertExpectations(t)
+	})
+
+	t.Run("parent meta nil -> false (parent pruned or missing)", func(t *testing.T) {
+		mockStore := &MockUtxostore{}
+		mockStore.On("Get", mock.Anything, &parentHash, mock.Anything).
+			Return((*meta.Data)(nil), nil).Once()
+
+		got, err := isReverseFullyApplied(context.Background(), mockStore, demotedTx, demotedHash)
+		require.NoError(t, err)
+		assert.False(t, got, "missing parent must not be treated as fully-reversed evidence")
+		mockStore.AssertExpectations(t)
+	})
+
+	t.Run("store error propagates", func(t *testing.T) {
+		mockStore := &MockUtxostore{}
+		mockStore.On("Get", mock.Anything, &parentHash, mock.Anything).
+			Return((*meta.Data)(nil), errors.NewProcessingError("parent get failed")).Once()
+
+		_, err := isReverseFullyApplied(context.Background(), mockStore, demotedTx, demotedHash)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "error getting parent")
+		mockStore.AssertExpectations(t)
+	})
 }
 
 // TestReverseProcessConflicting_FiltersCounterWithMismatchedOutput

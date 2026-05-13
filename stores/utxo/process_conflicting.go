@@ -327,11 +327,25 @@ func ReverseProcessConflicting(ctx context.Context, s Store, blockHeight uint32,
 		}
 
 		if demotedMeta.Conflicting {
-			// already reversed (or never promoted) — Phase 4 of the
-			// original ProcessConflicting wouldn't have cleared the flag
-			// if precondition failed, so observing Conflicting=true here
-			// means there's nothing for us to undo.
-			continue
+			// D.Conflicting=true alone is NOT sufficient evidence the
+			// reverse is fully applied — a previous call may have failed
+			// after step 1 (Mark) succeeded but before step 3 (Spend(C))
+			// completed, leaving parent.SpendingDatas[vout] empty (cleared
+			// in step 2). On retry we must complete the missing
+			// Spend(C)+Unmark(C) work, not short-circuit. Confirm full
+			// completion via observable parent state: every input of D must
+			// have parent.SpendingDatas[vout] pointing to a non-nil,
+			// non-D spender. If any input shows nil or still points at D,
+			// fall through and re-run the steps below; the Mark and
+			// Unspend are idempotent on the already-applied state.
+			fullyReversed, checkErr := isReverseFullyApplied(ctx, s, demotedMeta.Tx, demotedHash)
+			if checkErr != nil {
+				return nil, nil, errors.NewProcessingError("[ReverseProcessConflicting][%s] error confirming reverse completion via parent state", demotedHash.String(), checkErr)
+			}
+
+			if fullyReversed {
+				continue
+			}
 		}
 
 		// Step 1: identify counters per input.
@@ -406,6 +420,56 @@ func ReverseProcessConflicting(ctx context.Context, s Store, blockHeight uint32,
 	}
 
 	return cascadedToConflicting, allTouched, nil
+}
+
+// isReverseFullyApplied returns true iff every input of the demoted tx D has
+// parent.SpendingDatas[vout] populated with a non-nil spender that is not D
+// itself. Used as the post-D.Conflicting=true guard to distinguish a fully
+// applied reverse from a partial one (Mark/Unspend done but Spend(C) failed
+// last time around).
+//
+// Returns false (no error) on:
+//   - any input whose parent.SpendingDatas[vout] is nil (post-Unspend, pre-Spend
+//     state)
+//   - any input whose parent.SpendingDatas[vout].TxID equals demotedHash
+//     (Unspend never ran successfully for that input)
+//   - any input whose parent has no SpendingDatas slice or is shorter than vout
+//     (defensive: a parent that's been pruned / never existed shouldn't block
+//     retry, but it also shouldn't be claimed as fully reversed)
+//
+// Returns true only when ALL inputs unambiguously have a non-D spender. An
+// error is surfaced for any Get failure on a parent — that's a store-level
+// problem, not a state question, and the caller must abort the reverse rather
+// than make assumptions.
+func isReverseFullyApplied(ctx context.Context, s Store, demotedTx *bt.Tx, demotedHash chainhash.Hash) (bool, error) {
+	for _, input := range demotedTx.Inputs {
+		parentHash := input.PreviousTxIDChainHash()
+		vout := input.PreviousTxOutIndex
+
+		parentMeta, err := s.Get(ctx, parentHash, fields.Utxos)
+		if err != nil {
+			return false, errors.NewProcessingError("[isReverseFullyApplied][%s] error getting parent %s meta", demotedHash.String(), parentHash.String(), err)
+		}
+
+		if parentMeta == nil {
+			return false, nil
+		}
+
+		if int(vout) >= len(parentMeta.SpendingDatas) {
+			return false, nil
+		}
+
+		sd := parentMeta.SpendingDatas[vout]
+		if sd == nil || sd.TxID == nil {
+			return false, nil
+		}
+
+		if sd.TxID.IsEqual(&demotedHash) {
+			return false, nil
+		}
+	}
+
+	return true, nil
 }
 
 // selectCountersForDemotedTx walks the inputs of a demoted tx and returns the
