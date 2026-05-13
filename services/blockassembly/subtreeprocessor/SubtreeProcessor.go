@@ -2905,8 +2905,17 @@ func (stp *SubtreeProcessor) reorgBlocks(ctx context.Context, moveBackBlocks []*
 			// path: walk the cascade and call Remove on each. Counter-side
 			// (unmarked) hashes are intentionally NOT evicted — they're now
 			// Conflicting=false and remain valid mempool entries.
-			for _, hash := range cascadedConflicting {
-				h := hash
+			//
+			// Warn-and-continue on Remove error (mirrors BlockAssembler.go:2551).
+			// Failing the reorg here would not roll the UTXO mutations back —
+			// the cascade is already committed as Conflicting=true, the
+			// counter-side already Spend/Unmarked. The realistic Remove failure
+			// is "tx already absent" (race with a concurrent eviction) which is
+			// the desired end state anyway. A genuine corruption case is
+			// recoverable via the next reorg/reset or `teranode-cli
+			// resetblockassembly --validate-inputs` — the same recovery path
+			// the validate-inputs cascade relies on.
+			for _, h := range cascadedConflicting {
 				if removeErr := stp.Remove(ctx, h); removeErr != nil {
 					stp.logger.Warnf("[reorgBlocks][%s] failed to evict reverse-demoted tx %s from in-memory subtree: %v", block.String(), h.String(), removeErr)
 				}
