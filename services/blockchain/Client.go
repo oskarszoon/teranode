@@ -1272,8 +1272,9 @@ func (c *Client) SubscribeToServer(ctx context.Context, source string) (chan *bl
 
 		// zombieTimeout is 2× the heartbeat interval. If no Recv returns within
 		// this window the watchdog cancels the stream context, forcing Recv to
-		// error and the reconnect path to fire. The watchdog ticks at half the
-		// timeout so the worst-case detection latency is zombieTimeout + 1 tick.
+		// error and the reconnect path to fire. The watchdog ticks at a quarter
+		// of the timeout so worst-case detection latency is ~1.25× zombieTimeout
+		// (zombieTimeout + one tick at zombieTimeout/4).
 		zombieTimeout := 2 * c.settings.BlockChain.HeartbeatInterval
 
 		for c.running.Load() {
