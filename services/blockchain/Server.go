@@ -62,10 +62,21 @@ import (
 //
 // This struct enables the publish-subscribe pattern where multiple services can
 // receive real-time updates about blockchain state changes without polling.
+// subscriberBufferSize is the cap of each subscriber's pending-notification
+// channel. When this fills, the subscriber is too slow to keep up and is
+// evicted via deadSubscriptions to prevent backpressure on the broadcast loop.
+//
+// At normal block cadence (~1 notification per block) plus ~6 heartbeats/min,
+// 64 messages is roughly 9 minutes of buffer before eviction — short enough
+// that operators see the disconnect promptly, long enough to tolerate brief
+// consumer lag during reorgs.
+const subscriberBufferSize = 64
+
 type subscriber struct {
 	subscription blockchain_api.BlockchainAPI_SubscribeServer // The gRPC subscription server
 	source       string                                       // Source identifier of the subscription
 	done         chan struct{}                                // Channel to signal when subscription is done
+	pending      chan *blockchain_api.Notification            // Per-subscriber delivery buffer (issue #872)
 }
 
 // Blockchain represents the main blockchain service structure.
@@ -681,15 +692,16 @@ func (b *Blockchain) startSubscriptions() {
 				b.logger.Debugf("[Blockchain Server] Sending notification: %s", notification)
 
 				b.subscribersMu.RLock()
-				// Collect dead subscribers to remove after releasing the read lock
+				// Non-blocking fan-out: push to each subscriber's pending buffer.
+				// One slow subscriber can no longer block delivery to the others
+				// (issue #872). Subscribers whose buffers are full are evicted as
+				// dead — that bounds how long a stuck consumer applies backpressure.
 				var dead []subscriber
 				for sub := range b.subscribers {
-					b.logger.Debugf("[Blockchain][startSubscriptions] Sending notification to %s: %s", sub.source, notification.Stringify())
-
-					// Send synchronously — NOT in a goroutine. Concurrent Send() calls
-					// on the same gRPC ServerStream corrupt the stream, causing the
-					// subscriber to be silently dropped and never receive notifications.
-					if err := sub.subscription.Send(notification); err != nil {
+					select {
+					case sub.pending <- notification:
+					default:
+						b.logger.Warnf("[Blockchain][startSubscriptions] Subscriber %s pending buffer full (cap=%d), marking dead", sub.source, subscriberBufferSize)
 						dead = append(dead, sub)
 					}
 				}
@@ -697,33 +709,100 @@ func (b *Blockchain) startSubscriptions() {
 
 				// Queue dead subscribers for removal
 				for _, s := range dead {
-					b.deadSubscriptions <- s
+					select {
+					case b.deadSubscriptions <- s:
+					case <-b.AppCtx.Done():
+						return
+					}
 				}
 			}()
 			b.stats.NewStat("channel-subscription.Send", true).AddTime(start)
 
 		case s := <-b.newSubscriptions:
-			// Send initial notification BEFORE adding to the subscribers map.
-			// This prevents concurrent Send() between sendInitialNotification
-			// and the notification delivery loop above.
-			b.sendInitialNotification(s)
-
+			// Add to map and start drain goroutine first so the subscriber is
+			// ready to receive before we enqueue the initial notification. This
+			// keeps the newSubscriptions case non-blocking: sendInitialNotification
+			// now enqueues into s.pending (non-blocking) rather than calling
+			// sub.subscription.Send directly, so a slow stream cannot stall here.
 			b.subscribersMu.Lock()
 			b.subscribers[s] = true
 			b.subscribersMu.Unlock()
 
+			// One drain goroutine per subscriber owns Send on that stream.
+			// Concurrent Send() on a single gRPC ServerStream is unsafe; the
+			// per-subscriber goroutine preserves the no-concurrent-Send invariant
+			// while letting a slow Send block only its own stream.
+			go b.runSubscriberDrain(s)
+
+			// Enqueue the initial chain-tip notification so it arrives ahead of
+			// any subsequent broadcast. Goes through pending so the broadcast loop
+			// is never blocked on initial delivery.
+			b.sendInitialNotification(s)
+
 		case s := <-b.deadSubscriptions:
 			b.subscribersMu.Lock()
-			delete(b.subscribers, s)
+			_, existed := b.subscribers[s]
+			if existed {
+				delete(b.subscribers, s)
+			}
 			remaining := len(b.subscribers)
 			b.subscribersMu.Unlock()
+			if existed && s.pending != nil {
+				// Close pending only on the first dead notice for this subscriber.
+				// A second dead push (e.g. the drain goroutine reporting a Send
+				// error after the broadcast loop has already marked the sub dead
+				// via buffer-full) would panic on a double-close. The map check
+				// above guards that.
+				close(s.pending)
+			}
 			safeClose(s.done)
 			b.logger.Infof("[Blockchain][startSubscriptions] Subscription removed (Total=%d).", remaining)
 		}
 	}
 }
 
-// sendInitialNotification sends the current chain tip (or genesis) to a new subscriber.
+// runSubscriberDrain pulls notifications from the subscriber's pending buffer
+// and calls Send on its gRPC stream. One goroutine per subscriber preserves
+// the gRPC no-concurrent-Send invariant on each stream while isolating slow
+// consumers — Send blocking here parks only this goroutine, not the broadcast
+// loop in startSubscriptions.
+//
+// Exits when:
+//   - pending is closed (cleanup path in startSubscriptions)
+//   - Send returns an error (stream broken or context cancelled)
+//   - AppCtx is cancelled (service shutdown)
+//
+// On Send error the goroutine pushes itself onto deadSubscriptions so cleanup
+// is triggered. A second dead-push for the same subscriber (when the broadcast
+// loop already evicted it via buffer-full) is benign — the cleanup path's map
+// check makes the second handler a no-op.
+func (b *Blockchain) runSubscriberDrain(s subscriber) {
+	for {
+		select {
+		case <-b.AppCtx.Done():
+			return
+		case <-s.done:
+			return
+		case n, ok := <-s.pending:
+			if !ok {
+				return
+			}
+			if err := s.subscription.Send(n); err != nil {
+				b.logger.Warnf("[Blockchain][runSubscriberDrain] Send to %s failed: %v", s.source, err)
+				select {
+				case b.deadSubscriptions <- s:
+				case <-b.AppCtx.Done():
+				}
+				return
+			}
+		}
+	}
+}
+
+// sendInitialNotification enqueues the current chain tip (or genesis) into the
+// subscriber's pending buffer. The drain goroutine delivers it via Send.
+// Non-blocking: if the buffer is full the subscriber is already overloaded and
+// will be evicted shortly; dropping the initial notification is acceptable.
 func (b *Blockchain) sendInitialNotification(sub subscriber) {
 	chainTip, _, err := b.store.GetBestBlockHeader(context.Background())
 	var initialNotification *blockchain_api.Notification
@@ -741,9 +820,10 @@ func (b *Blockchain) sendInitialNotification(sub subscriber) {
 	}
 
 	b.logger.Infof("[Blockchain][startSubscriptions] Sending initial notification to %s", sub.source)
-	if err := sub.subscription.Send(initialNotification); err != nil {
-		b.logger.Errorf("[Blockchain][startSubscriptions] Failed to send initial notification to %s: %v", sub.source, err)
-		b.deadSubscriptions <- sub
+	select {
+	case sub.pending <- initialNotification:
+	default:
+		b.logger.Warnf("[Blockchain][startSubscriptions] Pending buffer full on initial notification for %s, dropping", sub.source)
 	}
 }
 
@@ -1789,14 +1869,15 @@ func (b *Blockchain) Subscribe(req *blockchain_api.SubscribeRequest, sub blockch
 	defer deferFn()
 
 	// Keep this subscription alive without endless loop - use a channel that blocks forever.
-	ch := make(chan struct{})
+	s := subscriber{
+		subscription: sub,
+		done:         make(chan struct{}),
+		source:       req.Source,
+		pending:      make(chan *blockchain_api.Notification, subscriberBufferSize),
+	}
 
 	b.logger.Infof("[Blockchain] Sending new subscription to handler for source: %s", req.Source)
-	b.newSubscriptions <- subscriber{
-		subscription: sub,
-		done:         ch,
-		source:       req.Source,
-	}
+	b.newSubscriptions <- s
 
 	b.subscribersMu.RLock()
 	noOfSubscribers := len(b.subscribers)
@@ -1806,20 +1887,18 @@ func (b *Blockchain) Subscribe(req *blockchain_api.SubscribeRequest, sub blockch
 	for {
 		select {
 		case <-ctx.Done():
-			// Client disconnected - clean up subscriber from map
+			// Client disconnected - clean up subscriber from map.
+			// Must pass the same subscriber value (including pending) so the map
+			// key matches the entry added in the newSubscriptions case.
 			b.logger.Infof("[Blockchain] GRPC client disconnected: %s", req.Source)
 			select {
-			case b.deadSubscriptions <- subscriber{
-				subscription: sub,
-				done:         ch,
-				source:       req.Source,
-			}:
+			case b.deadSubscriptions <- s:
 			case <-b.AppCtx.Done():
 				// Server is shutting down, startSubscriptions already cleaned up
 			}
 			return nil
-		case <-ch:
-			// Subscription ended.
+		case <-s.done:
+			// Subscription ended (drained and cleaned up by startSubscriptions).
 			return nil
 		}
 	}
