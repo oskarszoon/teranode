@@ -99,6 +99,7 @@ func NewClient(ctx context.Context, logger ulogger.Logger, tSettings *settings.S
 
 // NewClientWithAddress creates a new blockchain client with a specified address.
 func NewClientWithAddress(ctx context.Context, logger ulogger.Logger, tSettings *settings.Settings, address string, source string) (ClientI, error) {
+	initPrometheusMetrics()
 	var err error
 
 	var baConn *grpc.ClientConn
@@ -1329,7 +1330,7 @@ func (c *Client) SubscribeToServer(ctx context.Context, source string) (chan *bl
 			watchdogDone := make(chan struct{})
 			go func() {
 				defer close(watchdogDone)
-				ticker := time.NewTicker(zombieTimeout / 2)
+				ticker := time.NewTicker(zombieTimeout / 4)
 				defer ticker.Stop()
 				for {
 					select {
@@ -1339,6 +1340,7 @@ func (c *Client) SubscribeToServer(ctx context.Context, source string) (chan *bl
 						age := time.Since(time.Unix(0, lastRecvAt.Load()))
 						if age > zombieTimeout {
 							c.logger.Warnf("[Blockchain][SubscribeToServer] watchdog: no Recv for %s on source %s — forcing stream close", age, source)
+							prometheusBlockchainWatchdogFires.WithLabelValues(source).Inc()
 							cancelStream()
 							return
 						}

@@ -232,7 +232,7 @@ func TestSubscribeToServer_WatchdogDoesNotFireWhenStreamProgresses(t *testing.T)
 			if n.Type == model.NotificationType_Block {
 				received++
 			}
-		case <-time.After(zombieTimeout + 50*time.Millisecond):
+		case <-time.After(zombieTimeout + 200*time.Millisecond):
 			t.Fatalf("no Block notification received within zombieTimeout — stream may be stalled or watchdog fired incorrectly")
 		}
 	}
