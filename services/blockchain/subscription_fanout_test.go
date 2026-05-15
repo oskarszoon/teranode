@@ -234,6 +234,22 @@ func TestStartSubscriptions_FullBufferMarksSubscriberDead(t *testing.T) {
 	t.Fatalf("stuck subscriber should have been marked dead; subscribers remaining=%d", got)
 }
 
+// extractTestIndex returns the sequence index encoded in a test notification's
+// Hash field (first byte), plus true. Returns 0, false for notifications that
+// were not produced by the order-preservation test (wrong type, wrong length,
+// or non-zero trailing bytes).
+func extractTestIndex(n *blockchain_api.Notification) (int, bool) {
+	if n.Type != model.NotificationType_Block || len(n.Hash) != 32 {
+		return 0, false
+	}
+	for _, b := range n.Hash[1:] {
+		if b != 0 {
+			return 0, false
+		}
+	}
+	return int(n.Hash[0]), true
+}
+
 // TestStartSubscriptions_PerSubscriberOrderPreserved verifies that for a
 // single subscriber, notifications arrive in the order they were produced.
 // The fan-out redesign uses one goroutine per subscriber, which preserves
@@ -282,21 +298,10 @@ func TestStartSubscriptions_PerSubscriberOrderPreserved(t *testing.T) {
 	// notification that startSubscriptions may have sent).
 	var indices []int
 	for _, n := range received {
-		if n.Type != model.NotificationType_Block || len(n.Hash) != 32 {
-			continue
+		idx, ok := extractTestIndex(n)
+		if ok {
+			indices = append(indices, idx)
 		}
-		// Heuristic: if the rest of the hash is zero, this is one of ours.
-		allZero := true
-		for _, b := range n.Hash[1:] {
-			if b != 0 {
-				allZero = false
-				break
-			}
-		}
-		if !allZero {
-			continue
-		}
-		indices = append(indices, int(n.Hash[0]))
 	}
 
 	require.GreaterOrEqual(t, len(indices), N,
