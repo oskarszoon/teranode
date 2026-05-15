@@ -312,6 +312,22 @@ func (b *BlockAssembler) startChannelListeners(ctx context.Context) (err error) 
 		// variables are defined here to prevent unnecessary allocations
 		b.setCurrentRunningState(StateRunning)
 
+		// Periodic reconcile watchdog. See issue #872: when the blockchain
+		// notification stream goes silent (e.g. gRPC EOF that some subscribers
+		// re-establish but BA does not), notification-driven reconciles never
+		// fire and BA sits at a stale tip indefinitely. A ticker calling
+		// triggerReconcile bounds recovery time to one interval regardless of
+		// subscription state. Idempotent: when BA's tip matches the chain tip
+		// processNewBlockAnnouncement returns early with no work.
+		//
+		// Interval=0 disables the ticker (escape hatch for tests / dev).
+		var periodicReconcileC <-chan time.Time
+		if interval := b.settings.BlockAssembly.PeriodicReconcileInterval; interval > 0 {
+			periodicReconcileTicker := time.NewTicker(interval)
+			defer periodicReconcileTicker.Stop()
+			periodicReconcileC = periodicReconcileTicker.C
+		}
+
 		for {
 			select {
 			case <-ctx.Done():
@@ -319,6 +335,10 @@ func (b *BlockAssembler) startChannelListeners(ctx context.Context) (err error) 
 				// Note: We don't close blockchainSubscriptionCh here because we don't own it -
 				// it's created by the blockchain client's Subscribe method
 				return
+
+			case <-periodicReconcileC:
+				prometheusBlockAssemblyPeriodicReconcile.Inc()
+				b.triggerReconcile()
 
 			case resetReq := <-b.resetCh:
 				b.setCurrentRunningState(StateResetting)

@@ -67,6 +67,12 @@ var (
 	prometheusBlockAssemblerAddDirectlyTotal            prometheus.Counter
 	prometheusBlockAssemblerAddDirectlyBatchTime        prometheus.Histogram
 	prometheusBlockAssemblerSubtreeStoredHist           prometheus.Histogram
+
+	// prometheusBlockAssemblyPeriodicReconcile counts ticker-driven reconcile
+	// triggers in startChannelListeners. See issue #872: a non-zero rate is
+	// expected (defense-in-depth ticker); a sustained high rate paired with
+	// missing notification-driven reconciles indicates subscription drift.
+	prometheusBlockAssemblyPeriodicReconcile prometheus.Counter
 )
 
 var (
@@ -441,6 +447,15 @@ func _initPrometheusMetrics() {
 			Name:      "add_directly_batch_seconds",
 			Help:      "Time taken to add all unmined transactions to subtree processor",
 			Buckets:   util.MetricsBucketsSeconds,
+		},
+	)
+
+	prometheusBlockAssemblyPeriodicReconcile = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Namespace: "teranode",
+			Subsystem: "blockassembly",
+			Name:      "periodic_reconcile_total",
+			Help:      "Number of ticker-driven reconcile triggers in the BlockAssembler listener goroutine. Defense-in-depth against silent blockchain-subscription drift (issue #872).",
 		},
 	)
 }
