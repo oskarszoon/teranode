@@ -167,12 +167,16 @@ func New(ctx context.Context, logger ulogger.Logger, tSettings *settings.Setting
 	}
 
 	b := &Blockchain{
-		store:                         store,
-		logger:                        logger,
-		settings:                      tSettings,
-		addBlockChan:                  make(chan *blockchain_api.AddBlockRequest, 10),
-		newSubscriptions:              make(chan subscriber, 10),
-		deadSubscriptions:             make(chan subscriber, 10),
+		store:            store,
+		logger:           logger,
+		settings:         tSettings,
+		addBlockChan:     make(chan *blockchain_api.AddBlockRequest, 10),
+		newSubscriptions: make(chan subscriber, 10),
+		// deadSubscriptions buffered large enough to absorb a connection-pool
+		// burst where many subscribers fail Send simultaneously. The original
+		// cap (10) made the dead-push from drain goroutines a potential
+		// bottleneck during the kind of 18-EOF burst observed in issue #872.
+		deadSubscriptions:             make(chan subscriber, 1000),
 		subscribers:                   make(map[subscriber]bool),
 		notifications:                 make(chan *blockchain_api.Notification, 100),
 		newBlock:                      make(chan struct{}, 10),
@@ -702,6 +706,7 @@ func (b *Blockchain) startSubscriptions() {
 					case sub.pending <- notification:
 					default:
 						b.logger.Warnf("[Blockchain][startSubscriptions] Subscriber %s pending buffer full (cap=%d), marking dead", sub.source, subscriberBufferSize)
+						prometheusBlockchainSubscriberPendingFull.WithLabelValues(sub.source).Inc()
 						dead = append(dead, sub)
 					}
 				}
@@ -761,6 +766,14 @@ func (b *Blockchain) startSubscriptions() {
 	}
 }
 
+// sendDeadline is the maximum time a single Send call is allowed before the
+// subscriber is evicted. gRPC ServerStream.Send has no context parameter, so
+// the deadline is enforced by racing the Send against a timer in a helper
+// goroutine. When the deadline fires, the drain goroutine exits immediately;
+// the helper goroutine continues until Send eventually returns, then discards
+// the result — this residual goroutine is bounded to one per stuck stream.
+const sendDeadline = 5 * time.Second
+
 // runSubscriberDrain pulls notifications from the subscriber's pending buffer
 // and calls Send on its gRPC stream. One goroutine per subscriber preserves
 // the gRPC no-concurrent-Send invariant on each stream while isolating slow
@@ -770,12 +783,13 @@ func (b *Blockchain) startSubscriptions() {
 // Exits when:
 //   - pending is closed (cleanup path in startSubscriptions)
 //   - Send returns an error (stream broken or context cancelled)
+//   - Send exceeds sendDeadline (subscriber evicted to bound goroutine lifetime)
 //   - AppCtx is cancelled (service shutdown)
 //
-// On Send error the goroutine pushes itself onto deadSubscriptions so cleanup
-// is triggered. A second dead-push for the same subscriber (when the broadcast
-// loop already evicted it via buffer-full) is benign — the cleanup path's map
-// check makes the second handler a no-op.
+// On Send error or deadline the goroutine pushes itself onto deadSubscriptions
+// so cleanup is triggered. A second dead-push for the same subscriber (when
+// the broadcast loop already evicted it via buffer-full) is benign — the
+// cleanup path's map check makes the second handler a no-op.
 func (b *Blockchain) runSubscriberDrain(s subscriber) {
 	for {
 		select {
@@ -787,12 +801,36 @@ func (b *Blockchain) runSubscriberDrain(s subscriber) {
 			if !ok {
 				return
 			}
-			if err := s.subscription.Send(n); err != nil {
-				b.logger.Warnf("[Blockchain][runSubscriberDrain] Send to %s failed: %v", s.source, err)
+			// Race Send against a deadline. gRPC ServerStream.Send does not
+			// accept a context, so we use a helper goroutine. If the deadline
+			// fires first, we evict the subscriber and return. The helper
+			// goroutine is a residual leak bounded to one per stuck stream; it
+			// exits once Send eventually returns (error or success).
+			sendErr := make(chan error, 1)
+			go func() { sendErr <- s.subscription.Send(n) }()
+
+			select {
+			case err := <-sendErr:
+				if err != nil {
+					b.logger.Warnf("[Blockchain][runSubscriberDrain] Send to %s failed: %v", s.source, err)
+					prometheusBlockchainSubscriberSendErrors.WithLabelValues(s.source).Inc()
+					select {
+					case b.deadSubscriptions <- s:
+					case <-b.AppCtx.Done():
+					}
+					return
+				}
+			case <-time.After(sendDeadline):
+				b.logger.Warnf("[Blockchain][runSubscriberDrain] Send to %s exceeded %s deadline, evicting", s.source, sendDeadline)
+				prometheusBlockchainSubscriberSendErrors.WithLabelValues(s.source).Inc()
 				select {
 				case b.deadSubscriptions <- s:
 				case <-b.AppCtx.Done():
 				}
+				return
+			case <-b.AppCtx.Done():
+				return
+			case <-s.done:
 				return
 			}
 		}
