@@ -2,6 +2,7 @@
 package blockassembly
 
 import (
+	"context"
 	"database/sql"
 	"net/url"
 	"sync/atomic"
@@ -20,6 +21,20 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// shutdownListenerGoroutine cancels ctx and gives the BlockAssembler's
+// listener goroutine a brief grace window to exit before the test returns.
+// BlockAssembler doesn't expose a Stop method (Stop lives on the BlockAssembly
+// server wrapper), so context cancellation is the supported shutdown signal —
+// see BlockAssembler.go:317 (`case <-ctx.Done(): ... return`). The grace
+// sleep avoids leaving a goroutine alive in -race runs of subsequent tests.
+func shutdownListenerGoroutine(t *testing.T, cancel context.CancelFunc) {
+	t.Helper()
+	t.Cleanup(func() {
+		cancel()
+		time.Sleep(50 * time.Millisecond)
+	})
+}
+
 // TestBlockAssembler_PeriodicReconcile_FiresWhenIntervalSet verifies that when
 // PeriodicReconcileInterval is configured to a positive duration, the listener
 // goroutine fires a reconcile on the configured cadence. The reconcile path
@@ -34,13 +49,16 @@ import (
 func TestBlockAssembler_PeriodicReconcile_FiresWhenIntervalSet(t *testing.T) {
 	initPrometheusMetrics()
 
+	ctx, cancel := context.WithCancel(t.Context())
+	shutdownListenerGoroutine(t, cancel)
+
 	tSettings := createTestSettings(t)
 	tSettings.BlockAssembly.PeriodicReconcileInterval = 50 * time.Millisecond
 
 	utxoStoreURL, err := url.Parse("sqlitememory:///test")
 	require.NoError(t, err)
 
-	uStore, err := utxostoresql.New(t.Context(), ulogger.TestLogger{}, tSettings, utxoStoreURL)
+	uStore, err := utxostoresql.New(ctx, ulogger.TestLogger{}, tSettings, utxoStoreURL)
 	require.NoError(t, err)
 
 	stats := gocore.NewStat("test")
@@ -69,10 +87,10 @@ func TestBlockAssembler_PeriodicReconcile_FiresWhenIntervalSet(t *testing.T) {
 	subChan := make(chan *blockchain_api.Notification, 1)
 	blockchainClient.On("Subscribe", mock.Anything, mock.Anything).Return(subChan, nil)
 
-	ba, err := NewBlockAssembler(t.Context(), ulogger.TestLogger{}, tSettings, stats, uStore, nil, blockchainClient, nil)
+	ba, err := NewBlockAssembler(ctx, ulogger.TestLogger{}, tSettings, stats, uStore, nil, blockchainClient, nil)
 	require.NoError(t, err)
 
-	require.NoError(t, ba.Start(t.Context()))
+	require.NoError(t, ba.Start(ctx))
 
 	// Let startup settle and capture baseline. Startup paths (initState,
 	// loadUnminedTransactions, the initial triggerReconcile in
@@ -98,13 +116,16 @@ func TestBlockAssembler_PeriodicReconcile_FiresWhenIntervalSet(t *testing.T) {
 func TestBlockAssembler_PeriodicReconcile_DisabledWhenIntervalZero(t *testing.T) {
 	initPrometheusMetrics()
 
+	ctx, cancel := context.WithCancel(t.Context())
+	shutdownListenerGoroutine(t, cancel)
+
 	tSettings := createTestSettings(t)
 	tSettings.BlockAssembly.PeriodicReconcileInterval = 0
 
 	utxoStoreURL, err := url.Parse("sqlitememory:///test")
 	require.NoError(t, err)
 
-	uStore, err := utxostoresql.New(t.Context(), ulogger.TestLogger{}, tSettings, utxoStoreURL)
+	uStore, err := utxostoresql.New(ctx, ulogger.TestLogger{}, tSettings, utxoStoreURL)
 	require.NoError(t, err)
 
 	stats := gocore.NewStat("test")
@@ -130,9 +151,9 @@ func TestBlockAssembler_PeriodicReconcile_DisabledWhenIntervalZero(t *testing.T)
 	subChan := make(chan *blockchain_api.Notification, 1)
 	blockchainClient.On("Subscribe", mock.Anything, mock.Anything).Return(subChan, nil)
 
-	ba, err := NewBlockAssembler(t.Context(), ulogger.TestLogger{}, tSettings, stats, uStore, nil, blockchainClient, nil)
+	ba, err := NewBlockAssembler(ctx, ulogger.TestLogger{}, tSettings, stats, uStore, nil, blockchainClient, nil)
 	require.NoError(t, err)
-	require.NoError(t, ba.Start(t.Context()))
+	require.NoError(t, ba.Start(ctx))
 
 	// Let startup paths complete.
 	time.Sleep(200 * time.Millisecond)
@@ -157,6 +178,9 @@ func TestBlockAssembler_PeriodicReconcile_DisabledWhenIntervalZero(t *testing.T)
 func TestBlockAssembler_PeriodicReconcile_NotificationStillProcessed(t *testing.T) {
 	initPrometheusMetrics()
 
+	ctx, cancel := context.WithCancel(t.Context())
+	shutdownListenerGoroutine(t, cancel)
+
 	tSettings := createTestSettings(t)
 	// Long interval so any GetBestBlockHeader calls during the test window
 	// can only be attributed to the notification arm (or startup), never the
@@ -166,7 +190,7 @@ func TestBlockAssembler_PeriodicReconcile_NotificationStillProcessed(t *testing.
 	utxoStoreURL, err := url.Parse("sqlitememory:///test")
 	require.NoError(t, err)
 
-	uStore, err := utxostoresql.New(t.Context(), ulogger.TestLogger{}, tSettings, utxoStoreURL)
+	uStore, err := utxostoresql.New(ctx, ulogger.TestLogger{}, tSettings, utxoStoreURL)
 	require.NoError(t, err)
 
 	stats := gocore.NewStat("test")
@@ -192,9 +216,9 @@ func TestBlockAssembler_PeriodicReconcile_NotificationStillProcessed(t *testing.
 	subChan := make(chan *blockchain_api.Notification, 4)
 	blockchainClient.On("Subscribe", mock.Anything, mock.Anything).Return(subChan, nil)
 
-	ba, err := NewBlockAssembler(t.Context(), ulogger.TestLogger{}, tSettings, stats, uStore, nil, blockchainClient, nil)
+	ba, err := NewBlockAssembler(ctx, ulogger.TestLogger{}, tSettings, stats, uStore, nil, blockchainClient, nil)
 	require.NoError(t, err)
-	require.NoError(t, ba.Start(t.Context()))
+	require.NoError(t, ba.Start(ctx))
 
 	// Let startup settle.
 	time.Sleep(150 * time.Millisecond)
