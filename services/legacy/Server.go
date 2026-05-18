@@ -37,6 +37,7 @@ import (
 	"github.com/bsv-blockchain/teranode/services/blockassembly"
 	"github.com/bsv-blockchain/teranode/services/blockchain"
 	"github.com/bsv-blockchain/teranode/services/blockvalidation"
+	legacypeer "github.com/bsv-blockchain/teranode/services/legacy/peer"
 	"github.com/bsv-blockchain/teranode/services/legacy/peer_api"
 	"github.com/bsv-blockchain/teranode/services/subtreevalidation"
 	"github.com/bsv-blockchain/teranode/services/validator"
@@ -252,6 +253,15 @@ func (s *Server) Init(ctx context.Context) error {
 	var err error
 
 	wire.SetLimits(4000000000)
+
+	// Stream-decode incoming "block" messages straight from the socket
+	// instead of buffering the full payload first. On multi-GB blocks the
+	// default ReadMessageWithEncodingN path allocated a fresh []byte the
+	// size of the entire block, ~2.86 GB of inuse heap at peak per the
+	// 2026-05-16 eu-4 fat-block capture. The streaming handler trades
+	// per-payload checksum verification for that allocation, matching the
+	// existing tradeoff already taken for extended-format messages.
+	legacypeer.RegisterStreamingBlockHandler()
 
 	// get the public IP and listen on it
 	ip, err := GetOutboundIP()
