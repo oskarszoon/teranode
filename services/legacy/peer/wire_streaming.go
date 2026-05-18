@@ -1,6 +1,7 @@
 package peer
 
 import (
+	"fmt"
 	"io"
 	"sync"
 
@@ -16,16 +17,16 @@ import (
 // to RSS after the per-tx scratch buffer.
 //
 // Note on the wire-level DoubleHash checksum: the default path verifies the
-// peer-supplied checksum over the payload bytes. This handler skips it, but
-// integrity is preserved by the existing downstream validation in
+// peer-supplied checksum over the payload bytes. This handler skips it, so
+// the early-rejection signal that checksum provides is lost. Integrity is
+// preserved by the existing downstream validation in
 // netsync.HandleBlockDirect — PoW via HasMetTargetDifficulty, merkle root
 // reconstruction during subtree preparation, and per-tx parse + validate.
-// Any wire-corruption that a checksum would have caught also fails one of
-// those downstream checks. TCP framing CRC covers the remaining
-// transit-corruption surface. The default path only retains the checksum
-// because it must hold the full payload in []byte anyway; preserving that
-// property under streaming (a TeeReader → SHA-256 pass over multi-GB
-// payloads) is not justified given the downstream guarantees.
+// Any payload corruption that a wire-level checksum would have caught also
+// fails one of those downstream checks; what we give up is rejecting a bad
+// block before paying the decode cost. Preserving the checksum under
+// streaming would require a TeeReader → SHA-256 pass over multi-GB
+// payloads, which is not justified given the downstream guarantees.
 func streamingBlockHandler(r io.Reader, length uint64, totalBytes int) (int, wire.Message, []byte, error) {
 	// Cap the inner decoder so a malformed varint cannot read past the
 	// declared payload boundary and desync the next ReadMessage call.
@@ -34,11 +35,26 @@ func streamingBlockHandler(r io.Reader, length uint64, totalBytes int) (int, wir
 	msg := &wire.MsgBlock{}
 	decodeErr := msg.Bsvdecode(lr, wire.ProtocolVersion, wire.BaseEncoding)
 
-	// Always drain any unread payload bytes — both on error (so the next
-	// ReadMessage sees a fresh header) and on success (in case the encoded
-	// length included trailing bytes the decoder did not consume).
+	// Drain any unread payload bytes so the next ReadMessage starts on a
+	// clean header boundary, and surface a short-stream as an error.
+	// io.Copy on a LimitedReader returns nil if the underlying reader
+	// EOFs before N reaches 0; we must check lr.N explicitly to detect
+	// that case, otherwise a successful Bsvdecode followed by an
+	// undersized stream would silently desync subsequent reads.
+	var drainErr error
 	if lr.N > 0 {
-		_, _ = io.Copy(io.Discard, lr)
+		if _, err := io.Copy(io.Discard, lr); err != nil {
+			drainErr = err
+		} else if lr.N > 0 {
+			drainErr = fmt.Errorf("streaming block: peer declared %d byte payload but stream ended with %d bytes unread", length, lr.N)
+		}
+	}
+
+	// Decode errors take precedence — they describe the actual failure,
+	// whereas drainErr is a downstream symptom of the truncated stream.
+	err := decodeErr
+	if err == nil {
+		err = drainErr
 	}
 
 	// totalBytes accounts for the header already read by
@@ -46,7 +62,7 @@ func streamingBlockHandler(r io.Reader, length uint64, totalBytes int) (int, wir
 	// the caller's bytesReceived counter stays consistent with the
 	// non-streaming path regardless of how many bytes Bsvdecode actually
 	// consumed before erroring.
-	return totalBytes + int(length), msg, nil, decodeErr
+	return totalBytes + int(length), msg, nil, err
 }
 
 var registerStreamingBlockHandlerOnce sync.Once

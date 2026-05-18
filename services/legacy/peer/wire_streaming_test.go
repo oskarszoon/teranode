@@ -96,6 +96,24 @@ func TestStreamingBlockHandler_DrainsOnError(t *testing.T) {
 	require.Equal(t, tail, got, "handler must drain exactly the declared payload, leaving the next message intact")
 }
 
+// TestStreamingBlockHandler_ShortStreamReturnsError verifies that when the
+// underlying reader EOFs before the declared payload length is fully
+// consumed, the handler returns an error. Without this check, a successful
+// Bsvdecode followed by an undersized stream would silently succeed (io.Copy
+// reports EOF as nil) and the next ReadMessage would desync.
+func TestStreamingBlockHandler_ShortStreamReturnsError(t *testing.T) {
+	const declared = 1024
+	// 100 zero bytes is enough for Bsvdecode to parse an empty block (80
+	// byte header + 1 byte tx-count varint = 81 bytes), with 19 bytes left
+	// in the stream that the drain will consume before hitting EOF — well
+	// short of the 1024 byte declared length.
+	src := bytes.NewReader(make([]byte, 100))
+
+	_, _, _, err := streamingBlockHandler(src, declared, 0)
+	require.Error(t, err, "handler must surface short-stream as an error")
+	require.Contains(t, err.Error(), "stream ended with", "error must identify the short-stream condition")
+}
+
 // TestRegisterStreamingBlockHandler_DispatchesViaWire verifies that after
 // registration, wire.ReadMessageWithEncodingN takes the streaming code
 // path for the "block" command: the returned payload slice must be nil
