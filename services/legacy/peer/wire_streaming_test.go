@@ -96,11 +96,41 @@ func TestStreamingBlockHandler_DrainsOnError(t *testing.T) {
 	require.Equal(t, tail, got, "handler must drain exactly the declared payload, leaving the next message intact")
 }
 
-// TestRegisterStreamingBlockHandler_Idempotent guards against double
-// registration causing the handler to be set repeatedly (cheap to test;
-// the sync.Once contract is what we actually care about).
-func TestRegisterStreamingBlockHandler_Idempotent(t *testing.T) {
+// TestRegisterStreamingBlockHandler_DispatchesViaWire verifies that after
+// registration, wire.ReadMessageWithEncodingN takes the streaming code
+// path for the "block" command: the returned payload slice must be nil
+// (the streaming handler does not retain bytes) and the decoded block
+// must match the original. This proves the handler is installed for the
+// correct command, not just that calls do not panic.
+func TestRegisterStreamingBlockHandler_DispatchesViaWire(t *testing.T) {
+	wire.SetLimits(4000000000)
+	RegisterStreamingBlockHandler()
+
+	want := makeTestBlock(t, 4, 64)
+
+	var buf bytes.Buffer
+	_, err := wire.WriteMessageN(&buf, want, wire.ProtocolVersion, wire.MainNet)
+	require.NoError(t, err)
+
+	_, msg, raw, err := wire.ReadMessageWithEncodingN(&buf, wire.ProtocolVersion, wire.MainNet, wire.BaseEncoding)
+	require.NoError(t, err)
+	require.Nil(t, raw, "streaming handler must not return the payload slice")
+
+	got, ok := msg.(*wire.MsgBlock)
+	require.True(t, ok, "expected *wire.MsgBlock, got %T", msg)
+	require.Equal(t, want.BlockHash(), got.BlockHash())
+	require.Equal(t, len(want.Transactions), len(got.Transactions))
+
+	// Re-registering must not displace the installed handler — verify the
+	// streaming path still wins after a second Register call.
 	RegisterStreamingBlockHandler()
 	RegisterStreamingBlockHandler()
-	RegisterStreamingBlockHandler()
+
+	buf.Reset()
+	_, err = wire.WriteMessageN(&buf, want, wire.ProtocolVersion, wire.MainNet)
+	require.NoError(t, err)
+
+	_, _, raw, err = wire.ReadMessageWithEncodingN(&buf, wire.ProtocolVersion, wire.MainNet, wire.BaseEncoding)
+	require.NoError(t, err)
+	require.Nil(t, raw, "streaming handler must remain installed after repeated Register calls")
 }

@@ -258,9 +258,11 @@ func (s *Server) Init(ctx context.Context) error {
 	// instead of buffering the full payload first. On multi-GB blocks the
 	// default ReadMessageWithEncodingN path allocated a fresh []byte the
 	// size of the entire block, ~2.86 GB of inuse heap at peak per the
-	// 2026-05-16 eu-4 fat-block capture. The streaming handler trades
-	// per-payload checksum verification for that allocation, matching the
-	// existing tradeoff already taken for extended-format messages.
+	// 2026-05-16 fat-block capture. The wire-level DoubleHash checksum
+	// is not preserved on this path; payload integrity is enforced by
+	// the existing downstream validation in netsync.HandleBlockDirect
+	// (PoW, merkle reconstruction, per-tx parse). See the doc comment
+	// on streamingBlockHandler for the full rationale.
 	legacypeer.RegisterStreamingBlockHandler()
 
 	// get the public IP and listen on it
