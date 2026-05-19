@@ -1198,8 +1198,15 @@ func (s *Store) PreviousOutputsDecorate(_ context.Context, tx *bt.Tx) error {
 // waited the full OutpointBatcherDurationMillis before the batch fired, making wall
 // time scale as O(N_tx * duration) - e.g. 2856 tx x 5 ms ~= 14 s observed in
 // production.
+//
+// Fan-out is bounded by UtxoStore.OutpointBatcherSize to keep memory predictable
+// on large blocks and to mirror the Phase 1 errgroup bound in the legacy caller
+// (services/legacy/netsync/handle_block.go). Throughput is not affected by the
+// bound: the actual ceiling is BatcherMaxConcurrent aerospike batches in flight,
+// not the goroutine count, since producers are mostly parked on errChan receives.
 func (s *Store) BatchPreviousOutputsDecorate(ctx context.Context, txs []*bt.Tx) error {
 	g, gCtx := errgroup.WithContext(ctx)
+	util.SafeSetLimit(g, s.settings.UtxoStore.OutpointBatcherSize)
 
 	for _, tx := range txs {
 		tx := tx
