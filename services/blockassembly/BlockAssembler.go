@@ -1395,35 +1395,27 @@ func (b *BlockAssembler) handleReorg(ctx context.Context, header *model.BlockHea
 	return nil
 }
 
-// handleCatchUp advances the assembler over a sequence of forward-only blocks when there
-// are no blocks to move back (moveBack == 0). Unlike handleReorg, which loads all forward
-// blocks into memory simultaneously via Reorg(), this walks them one at a time so that
-// per-block error handling applies and a mid-sequence failure leaves state consistent at
-// the last successfully processed block.
-//
-// Returns the first error encountered; no further blocks are processed after an error.
-func (b *BlockAssembler) handleCatchUp(ctx context.Context, blocks []blockWithMeta) error {
-	if len(blocks) == 0 {
+// handleCatchUp executes a forward-only catch-up. Delegates to the subtree
+// processor's reorgBlocks fast path (the `len(moveBackBlocks)==0 && len(moveForwardBlocks)>0`
+// branch, see SubtreeProcessor.go:2794), which iterates moveForwardBlock per block with
+// skipNotification + skipDequeue on every block except the last and rolls back to
+// pre-catchup state on mid-loop failure. ctx is unused at this layer — Reorg controls
+// its own internal lifecycle via reorgBlockChan.
+func (b *BlockAssembler) handleCatchUp(_ context.Context, moveForward []blockWithMeta) error {
+	if len(moveForward) == 0 {
 		return nil
 	}
 
 	prometheusBlockAssemblerCatchUp.Inc()
-	b.logger.Infof("[BlockAssembler] catching up %d block(s)", len(blocks))
+	b.logger.Infof("[BlockAssembler] catching up %d block(s)", len(moveForward))
 
-	for _, bwm := range blocks {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if err := b.subtreeProcessor.MoveForwardBlock(bwm.block); err != nil {
-			return errors.NewProcessingError("error moving forward block %s during catch-up", bwm.block.Hash(), err)
-		}
-		// Track BA tip per-block so a mid-loop failure doesn't desync BA from the
-		// subtree processor — both stay at the last successfully processed block,
-		// and the next processNewBlockAnnouncement resumes cleanly from there.
-		b.setBestBlockHeader(bwm.block.Header, bwm.meta.Height)
+	blocks := make([]*model.Block, len(moveForward))
+	for i, bwm := range moveForward {
+		blocks[i] = bwm.block
 	}
-
-	return nil
+	// MUST be non-nil empty slice — reorgBlocks rejects nil (SubtreeProcessor.go:2778)
+	// but takes the fast path at len(moveBackBlocks)==0 (SubtreeProcessor.go:2794).
+	return b.subtreeProcessor.Reorg([]*model.Block{}, blocks)
 }
 
 // getReorgBlocks retrieves blocks involved in reorganization.

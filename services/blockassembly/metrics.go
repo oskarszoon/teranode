@@ -221,7 +221,7 @@ func _initPrometheusMetrics() {
 			Namespace: "teranode",
 			Subsystem: "blockassembly",
 			Name:      "catchup",
-			Help:      "Number of catch-up (forward-only, no rollback) sequences in block assembler",
+			Help:      "Number of forward-only catch-ups (moveBack=0) handled in block assembler",
 		},
 	)
 

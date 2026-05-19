@@ -99,7 +99,8 @@ func TestProcessNewBlockAnnouncement_CatchupVsReorg(t *testing.T) {
 		mockStp.AssertNotCalled(t, "Reorg", mock.Anything, mock.Anything)
 	})
 
-	// gap=2, moveBack=0: pure catch-up — two MoveForwardBlock calls in order, no Reorg.
+	// gap=2, moveBack=0: pure catch-up — delegates to Reorg(empty, [chain0, chain1]) via the
+	// len(moveBackBlocks)==0 fast path in reorgBlocks (SubtreeProcessor.go:2794).
 	t.Run("gap=2 catch-up moveBack=0", func(t *testing.T) {
 		items := setupBlockAssemblyTest(t)
 		genesis := genesisHeader(t, items)
@@ -107,10 +108,12 @@ func TestProcessNewBlockAnnouncement_CatchupVsReorg(t *testing.T) {
 		chain := buildChain(genesis, 2, 300)
 		addChain(t, items, chain)
 
-		var callOrder []string
+		var capturedForward []*model.Block
 		mockStp := &subtreeprocessor.MockSubtreeProcessor{}
-		mockStp.On("MoveForwardBlock", mock.MatchedBy(func(b *model.Block) bool {
-			callOrder = append(callOrder, b.Header.Hash().String())
+		mockStp.On("Reorg", mock.MatchedBy(func(back []*model.Block) bool {
+			return len(back) == 0
+		}), mock.MatchedBy(func(fwd []*model.Block) bool {
+			capturedForward = fwd
 			return true
 		})).Return(nil)
 		injectMockStp(t, items, mockStp)
@@ -120,10 +123,11 @@ func TestProcessNewBlockAnnouncement_CatchupVsReorg(t *testing.T) {
 
 		items.blockAssembler.processNewBlockAnnouncement(t.Context())
 
-		require.Len(t, callOrder, 2, "MoveForwardBlock must be called twice for a 2-block catch-up")
-		require.Equal(t, chain[0].Hash().String(), callOrder[0], "blocks must advance in order")
-		require.Equal(t, chain[1].Hash().String(), callOrder[1])
-		mockStp.AssertNotCalled(t, "Reorg", mock.Anything, mock.Anything)
+		mockStp.AssertCalled(t, "Reorg", mock.Anything, mock.Anything)
+		mockStp.AssertNotCalled(t, "MoveForwardBlock", mock.Anything)
+		require.Len(t, capturedForward, 2, "Reorg must receive both catch-up blocks")
+		require.Equal(t, chain[0].Hash().String(), capturedForward[0].Header.Hash().String(), "blocks must be in order")
+		require.Equal(t, chain[1].Hash().String(), capturedForward[1].Header.Hash().String())
 	})
 
 	// large catch-up (moveBack=0, moveForward=150): must NOT trigger full reset even when
@@ -136,11 +140,14 @@ func TestProcessNewBlockAnnouncement_CatchupVsReorg(t *testing.T) {
 		addChain(t, items, chain)
 
 		resetCalled := false
-		callCount := 0
+		var capturedForward []*model.Block
 		mockStp := &subtreeprocessor.MockSubtreeProcessor{}
-		mockStp.On("MoveForwardBlock", mock.Anything).Return(nil).Run(func(_ mock.Arguments) {
-			callCount++
-		})
+		mockStp.On("Reorg", mock.MatchedBy(func(back []*model.Block) bool {
+			return len(back) == 0
+		}), mock.MatchedBy(func(fwd []*model.Block) bool {
+			capturedForward = fwd
+			return true
+		})).Return(nil)
 		mockStp.On("Reset", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
 			Return(subtreeprocessor.ResetResponse{}).
 			Run(func(_ mock.Arguments) { resetCalled = true })
@@ -151,8 +158,8 @@ func TestProcessNewBlockAnnouncement_CatchupVsReorg(t *testing.T) {
 		items.blockAssembler.processNewBlockAnnouncement(t.Context())
 
 		require.False(t, resetCalled, "full reset must NOT fire on a catch-up regardless of block count")
-		require.Equal(t, 150, callCount, "each of the 150 blocks must advance individually")
-		mockStp.AssertNotCalled(t, "Reorg", mock.Anything, mock.Anything)
+		require.Len(t, capturedForward, 150, "Reorg must receive all 150 catch-up blocks")
+		mockStp.AssertNotCalled(t, "MoveForwardBlock", mock.Anything)
 	})
 
 	// Real reorg: moveBack=1, moveForward=2 — fork chain is longer so it wins on chainwork.
@@ -225,8 +232,8 @@ func TestProcessNewBlockAnnouncement_CatchupVsReorg(t *testing.T) {
 			"large reorg must return ErrBlockAssemblyReset, got: %v", err)
 	})
 
-	// Catch-up where one MoveForwardBlock errors mid-way: must stop at the failing block
-	// and not call MoveForwardBlock for any subsequent blocks.
+	// Catch-up where Reorg returns an error (mid-loop failure rolls back inside stp):
+	// BA must remain at pre-catchup tip — no setBestBlockHeader fired on error path.
 	t.Run("catch-up mid-error stops", func(t *testing.T) {
 		items := setupBlockAssemblyTest(t)
 		genesis := genesisHeader(t, items)
@@ -234,15 +241,9 @@ func TestProcessNewBlockAnnouncement_CatchupVsReorg(t *testing.T) {
 		chain := buildChain(genesis, 3, 800)
 		addChain(t, items, chain)
 
-		callCount := 0
 		mockStp := &subtreeprocessor.MockSubtreeProcessor{}
-		// First call succeeds.
-		mockStp.On("MoveForwardBlock", mock.MatchedBy(func(b *model.Block) bool {
-			return b.Header.Hash().IsEqual(chain[0].Hash())
-		})).Return(nil).Run(func(_ mock.Arguments) { callCount++ })
-		// Second call (and any subsequent) errors.
-		mockStp.On("MoveForwardBlock", mock.Anything).Return(errors.NewProcessingError("simulated block error")).
-			Run(func(_ mock.Arguments) { callCount++ })
+		mockStp.On("Reorg", mock.Anything, mock.Anything).
+			Return(errors.NewProcessingError("simulated mid-catchup error"))
 		injectMockStp(t, items, mockStp)
 
 		// BA is at genesis; tip is chain[2] → 3-block catch-up.
@@ -250,12 +251,10 @@ func TestProcessNewBlockAnnouncement_CatchupVsReorg(t *testing.T) {
 
 		items.blockAssembler.processNewBlockAnnouncement(t.Context())
 
-		// First call succeeds, second call fails, third call must never happen.
-		require.Equal(t, 2, callCount, "MoveForwardBlock must stop at the first error")
-
-		// BA tip must be aligned with the subtree processor — both at the last-good block.
+		// Reorg errored → handleCatchUp returned error → processNewBlockAnnouncement
+		// returned early, so setBestBlockHeader was NOT called. BA stays at genesis.
 		currentHeader, currentHeight := items.blockAssembler.CurrentBlock()
-		require.Equal(t, chain[0].Hash().String(), currentHeader.Hash().String(), "BA tip should be the last successfully processed block")
-		require.Equal(t, uint32(1), currentHeight, "BA height should be the last successfully processed height")
+		require.Equal(t, genesis.Hash().String(), currentHeader.Hash().String(), "BA tip must stay at pre-catchup state after Reorg error")
+		require.Equal(t, uint32(0), currentHeight, "BA height must stay at pre-catchup height after Reorg error")
 	})
 }
