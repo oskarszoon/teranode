@@ -708,19 +708,35 @@ func (b *BlockAssembler) processNewBlockAnnouncement(ctx context.Context) {
 		return
 
 	case !bestBlockchainBlockHeader.HashPrevBlock.IsEqual(bestBlockAccordingToBlockAssembly.Hash()):
-		ctxLogger.Infof("[BlockAssembler][%s] best block header is not the same as the previous best block header, reorging: %s", bestBlockchainBlockHeader.Hash(), bestBlockAccordingToBlockAssembly.Hash())
-		b.setCurrentRunningState(StateReorging)
-
-		err = b.handleReorg(ctx, bestBlockchainBlockHeader, bestBlockchainBlockHeaderMeta.Height)
+		moveBackBlocksWithMeta, moveForwardBlocksWithMeta, err := b.getReorgBlocks(ctx, bestBlockchainBlockHeader, bestBlockchainBlockHeaderMeta.Height)
 		if err != nil {
-			if errors.Is(err, errors.ErrBlockAssemblyReset) {
-				// only warn about the reset
-				ctxLogger.Warnf("[BlockAssembler][%s] error handling reorg: %v", bestBlockchainBlockHeader.Hash(), err)
-			} else {
-				ctxLogger.Errorf("[BlockAssembler][%s] error handling reorg: %v", bestBlockchainBlockHeader.Hash(), err)
-			}
-
+			ctxLogger.Errorf("[BlockAssembler][%s] error fetching blocks for reorg/catch-up decision: %v", bestBlockchainBlockHeader.Hash(), err)
 			return
+		}
+
+		if len(moveBackBlocksWithMeta) == 0 {
+			// Pure catch-up — advance one block at a time, no Reset path.
+			ctxLogger.Infof("[BlockAssembler][%s] catching up %d block(s), not a reorg: %s", bestBlockchainBlockHeader.Hash(), len(moveForwardBlocksWithMeta), bestBlockAccordingToBlockAssembly.Hash())
+			b.setCurrentRunningState(StateMovingUp)
+
+			if err = b.handleCatchUp(ctx, moveForwardBlocksWithMeta); err != nil {
+				ctxLogger.Errorf("[BlockAssembler][%s] error catching up: %v", bestBlockchainBlockHeader.Hash(), err)
+				return
+			}
+		} else {
+			ctxLogger.Infof("[BlockAssembler][%s] best block header is not the same as the previous best block header, reorging: %s", bestBlockchainBlockHeader.Hash(), bestBlockAccordingToBlockAssembly.Hash())
+			b.setCurrentRunningState(StateReorging)
+
+			if err = b.handleReorg(ctx, bestBlockchainBlockHeader, bestBlockchainBlockHeaderMeta.Height); err != nil {
+				if errors.Is(err, errors.ErrBlockAssemblyReset) {
+					// only warn about the reset
+					ctxLogger.Warnf("[BlockAssembler][%s] error handling reorg: %v", bestBlockchainBlockHeader.Hash(), err)
+				} else {
+					ctxLogger.Errorf("[BlockAssembler][%s] error handling reorg: %v", bestBlockchainBlockHeader.Hash(), err)
+				}
+
+				return
+			}
 		}
 	default:
 		ctxLogger.Infof("[BlockAssembler][%s] best block header is the same as the previous best block header, moving up: %s", bestBlockchainBlockHeader.Hash(), bestBlockAccordingToBlockAssembly.Hash())
@@ -1375,6 +1391,37 @@ func (b *BlockAssembler) handleReorg(ctx context.Context, header *model.BlockHea
 	}
 
 	prometheusBlockAssemblerReorgDuration.Observe(float64(time.Since(startTime).Microseconds()) / 1_000_000)
+
+	return nil
+}
+
+// handleCatchUp advances the assembler over a sequence of forward-only blocks when there
+// are no blocks to move back (moveBack == 0). Unlike handleReorg, which loads all forward
+// blocks into memory simultaneously via Reorg(), this walks them one at a time so that
+// per-block error handling applies and a mid-sequence failure leaves state consistent at
+// the last successfully processed block.
+//
+// Returns the first error encountered; no further blocks are processed after an error.
+func (b *BlockAssembler) handleCatchUp(ctx context.Context, blocks []blockWithMeta) error {
+	if len(blocks) == 0 {
+		return nil
+	}
+
+	prometheusBlockAssemblerCatchUp.Inc()
+	b.logger.Infof("[BlockAssembler] catching up %d block(s)", len(blocks))
+
+	for _, bwm := range blocks {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := b.subtreeProcessor.MoveForwardBlock(bwm.block); err != nil {
+			return errors.NewProcessingError("error moving forward block %s during catch-up", bwm.block.Hash(), err)
+		}
+		// Track BA tip per-block so a mid-loop failure doesn't desync BA from the
+		// subtree processor — both stay at the last successfully processed block,
+		// and the next processNewBlockAnnouncement resumes cleanly from there.
+		b.setBestBlockHeader(bwm.block.Header, bwm.meta.Height)
+	}
 
 	return nil
 }
