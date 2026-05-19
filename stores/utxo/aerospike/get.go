@@ -1188,14 +1188,62 @@ func (s *Store) PreviousOutputsDecorate(_ context.Context, tx *bt.Tx) error {
 }
 
 // BatchPreviousOutputsDecorate fetches previous output information for inputs across
-// multiple transactions. The Aerospike implementation delegates to per-tx PreviousOutputsDecorate
-// which already uses an internal batcher for efficiency.
-func (s *Store) BatchPreviousOutputsDecorate(ctx context.Context, txs []*bt.Tx) error {
+// multiple transactions in one flat pass through the outpoint batcher.
+//
+// The naive per-tx loop (PreviousOutputsDecorate called once per tx) is correct but
+// pathologically slow during legacy sync: a typical tx has ~2 inputs, far below
+// the batcher's size threshold (OutpointBatcherSize, default 100/4096 depending on
+// override), so each per-tx call waits the full OutpointBatcherDurationMillis timer
+// before the batch fires. That makes wall time scale as O(N_tx * duration) — e.g.
+// 2856 tx × 5 ms ≈ 14 s observed in production.
+//
+// Flattening every input across every tx into one Put loop lets the batcher fill by
+// size for the bulk of the work, collapsing wall time to roughly
+// O(total_inputs / OutpointBatcherSize) aerospike round-trips plus at most one
+// duration-timer flush for the tail.
+func (s *Store) BatchPreviousOutputsDecorate(_ context.Context, txs []*bt.Tx) error {
+	totalInputs := 0
 	for _, tx := range txs {
-		if err := s.PreviousOutputsDecorate(ctx, tx); err != nil {
+		if tx == nil {
+			continue
+		}
+		totalInputs += len(tx.Inputs)
+	}
+	if totalInputs == 0 {
+		return nil
+	}
+
+	errChans := make([]chan error, 0, totalInputs)
+
+	for _, tx := range txs {
+		if tx == nil {
+			continue
+		}
+		for _, input := range tx.Inputs {
+			if input == nil || input.PreviousTxScript != nil {
+				// already decorated (e.g. by an earlier same-block phase) — skip.
+				continue
+			}
+
+			errChan := make(chan error, 1)
+			errChans = append(errChans, errChan)
+
+			s.outpointBatcher.Put(&batchOutpoint{
+				outpoint: input,
+				errCh:    errChan,
+			})
+		}
+	}
+
+	// Drain all results. Each errChan is buffered (cap 1) and writes go through
+	// sendErrorAndClose, so returning early on the first error never blocks
+	// in-flight batcher workers — they complete their non-blocking send and exit.
+	for _, errChan := range errChans {
+		if err := <-errChan; err != nil {
 			return err
 		}
 	}
+
 	return nil
 }
 
