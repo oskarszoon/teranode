@@ -725,13 +725,9 @@ func (b *Block) checkDuplicateTransactions(ctx context.Context, logger ulogger.L
 func (b *Block) checkDuplicateTransactionsInSubtree(subtree *subtreepkg.Subtree, subIdx, subtreeSize int) (err error) {
 	var idx64 uint64
 
-	// Calculate the base index for this subtree by summing sizes of all previous subtrees.
-	// We cannot use (subIdx * subtreeSize) because the last subtree may be smaller.
-	// Per Block.go:1192: "all subtrees need to be the same size as the first tree, except the last one"
-	baseIdx := 0
-	for i := 0; i < subIdx; i++ {
-		baseIdx += b.SubtreeSlices[i].Size()
-	}
+	// O(1): subtrees before subIdx are always full-size per Block.go:1293 invariant, so their sum
+	// equals subIdx*subtreeSize. The loop (O(N) per subtree, O(N²) total) was a regression from #198.
+	baseIdx := subIdx * subtreeSize
 
 	for txIdx := 0; txIdx < len(subtree.Nodes); txIdx++ {
 		if subIdx == 0 && txIdx == 0 && subtree.Nodes[txIdx].Hash.Equal(subtreepkg.CoinbasePlaceholderHashValue) {
