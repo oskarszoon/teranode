@@ -725,8 +725,10 @@ func (b *Block) checkDuplicateTransactions(ctx context.Context, logger ulogger.L
 func (b *Block) checkDuplicateTransactionsInSubtree(subtree *subtreepkg.Subtree, subIdx, subtreeSize int) (err error) {
 	var idx64 uint64
 
-	// O(1): subtrees before subIdx are always full-size per Block.go:1293 invariant, so their sum
-	// equals subIdx*subtreeSize. The loop (O(N) per subtree, O(N²) total) was a regression from #198.
+	// O(1): per the "all subtrees need to be the same size as the first tree, except the last one"
+	// invariant, every subtree BEFORE subIdx is full-size (the smaller-last-subtree never appears
+	// in the sum), so sum-of-predecessors = subIdx*subtreeSize. The loop (O(N) per subtree, O(N²)
+	// total) was a regression from #198.
 	baseIdx := subIdx * subtreeSize
 
 	for txIdx := 0; txIdx < len(subtree.Nodes); txIdx++ {
