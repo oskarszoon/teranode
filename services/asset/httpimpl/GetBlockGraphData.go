@@ -44,19 +44,21 @@ func pickBucketSeconds(rangeSeconds int64) int64 {
 // aggregateDataPoints groups data points into fixed-size time buckets, summing TxCount per bucket.
 // Returns the input unchanged if bucketSeconds is 0 or the input is empty.
 // Output is always sorted by timestamp ASC regardless of input order.
+// The input is not modified.
 func aggregateDataPoints(in *model.BlockDataPoints, bucketSeconds int64) *model.BlockDataPoints {
 	if bucketSeconds == 0 || len(in.DataPoints) == 0 {
 		return in
 	}
-	// Sort input so that bucket order in the output matches chronological order.
-	// SQL should already return ORDER BY block_time ASC, but this is belt-and-braces.
-	sort.Slice(in.DataPoints, func(i, j int) bool {
-		return in.DataPoints[i].Timestamp < in.DataPoints[j].Timestamp
+	// Copy the slice before sorting so the caller's order is not disturbed.
+	sorted := make([]*model.DataPoint, len(in.DataPoints))
+	copy(sorted, in.DataPoints)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].Timestamp < sorted[j].Timestamp
 	})
 	bs := uint64(bucketSeconds)
 	buckets := make(map[uint32]uint64)
 	order := make([]uint32, 0)
-	for _, dp := range in.DataPoints {
+	for _, dp := range sorted {
 		// uint64 arithmetic avoids overflow on uint32 timestamps near year 2106.
 		b := uint32((uint64(dp.Timestamp) / bs) * bs)
 		if _, ok := buckets[b]; !ok {

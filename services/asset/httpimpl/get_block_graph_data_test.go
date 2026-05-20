@@ -247,4 +247,60 @@ func TestGetBlockGraphData(t *testing.T) {
 		// Check response body
 		assert.Equal(t, "PROCESSING (4): error getting block graph data", echoErr.Message)
 	})
+
+	t.Run("All period passes periodMillis=0", func(t *testing.T) {
+		httpServer, mockRepo, echoContext, responseRecorder := GetMockHTTP(t, nil)
+
+		// Expect the mock to be called with exactly periodMillis=0 (no time filter).
+		mockRepo.On("GetBlockGraphData", uint64(0)).Return(&model.BlockDataPoints{
+			DataPoints: []*model.DataPoint{
+				{Timestamp: 1230768000, TxCount: 1}, // 2009-01-01
+				{Timestamp: 1231372800, TxCount: 2}, // 2009-01-07, ~7d later
+			},
+		}, nil)
+
+		echoContext.SetPath("/blocks/graph/:period")
+		echoContext.SetParamNames("period")
+		echoContext.SetParamValues("all")
+
+		err := httpServer.GetBlockGraphData(echoContext)
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusOK, responseRecorder.Code)
+		mockRepo.AssertExpectations(t)
+	})
+
+	t.Run("Bucketing applied when data spans more than 24h", func(t *testing.T) {
+		httpServer, mockRepo, echoContext, responseRecorder := GetMockHTTP(t, nil)
+
+		// Data spans ~3 days — pickBucketSeconds will select bucket1h.
+		// Four blocks: two in the same 1h bucket, two in later buckets.
+		base := uint32(1700000000)
+		mockRepo.On("GetBlockGraphData", mock.Anything, mock.Anything).Return(&model.BlockDataPoints{
+			DataPoints: []*model.DataPoint{
+				{Timestamp: base, TxCount: 10},
+				{Timestamp: base + 1800, TxCount: 5},   // same 1h bucket as base
+				{Timestamp: base + 7200, TxCount: 20},  // 2h later, different bucket
+				{Timestamp: base + 86400*3, TxCount: 3}, // 3 days later, different bucket
+			},
+		}, nil)
+
+		echoContext.SetPath("/blocks/graph/:period")
+		echoContext.SetParamNames("period")
+		echoContext.SetParamValues("all")
+
+		err := httpServer.GetBlockGraphData(echoContext)
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusOK, responseRecorder.Code)
+
+		var response map[string]interface{}
+		require.NoError(t, json.Unmarshal(responseRecorder.Body.Bytes(), &response))
+
+		dataPoints := response["data_points"].([]interface{})
+		// base and base+1800 share a bucket; base+7200 and base+86400*3 are each their own.
+		assert.Equal(t, 3, len(dataPoints))
+
+		// First bucket sums base (10) + base+1800 (5) = 15.
+		dp0 := dataPoints[0].(map[string]interface{})
+		assert.Equal(t, float64(15), dp0["tx_count"])
+	})
 }
