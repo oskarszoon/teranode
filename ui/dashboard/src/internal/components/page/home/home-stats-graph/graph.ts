@@ -116,7 +116,9 @@ export const getGraphObj = (t, data, period, smooth = false) => {
     case 'all':
       // The backend returns every block when period is "all"; pin the x-axis
       // to the earliest sample so the full series is visible. The SQL query
-      // returns rows in undefined order so we derive the minimum explicitly.
+      // now orders by block_time ASC, but the explicit reduce here mirrors the
+      // backend's defensive sort in aggregateDataPoints — belt-and-braces
+      // against any future query change that loses the ordering.
       if (graphData.length > 0) {
         startDate = graphData.reduce(
           (min, point) => (point[0] < min ? point[0] : min),

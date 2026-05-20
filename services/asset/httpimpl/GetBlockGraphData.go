@@ -2,14 +2,79 @@
 package httpimpl
 
 import (
+	"math"
 	"net/http"
+	"sort"
 	"time"
 
 	safeconversion "github.com/bsv-blockchain/go-safe-conversion"
 	"github.com/bsv-blockchain/teranode/errors"
+	"github.com/bsv-blockchain/teranode/model"
 	"github.com/bsv-blockchain/teranode/util/tracing"
 	"github.com/labstack/echo/v4"
 )
+
+const (
+	bucket1h  = int64(3600)
+	bucket6h  = int64(21600)
+	bucket1d  = int64(86400)
+	bucket1w  = int64(604800)
+	bucket30d = int64(2592000)
+)
+
+// pickBucketSeconds returns the bucket size in seconds for a given time range.
+// Returns 0 (no bucketing) for ranges ≤ 24h.
+func pickBucketSeconds(rangeSeconds int64) int64 {
+	switch {
+	case rangeSeconds <= 86400: // ≤ 24h: per-block resolution
+		return 0
+	case rangeSeconds <= 604800: // ≤ 1w: 1h buckets (~168)
+		return bucket1h
+	case rangeSeconds <= 7776000: // ≤ 3m (90d): 6h buckets (~360)
+		return bucket6h
+	case rangeSeconds <= 31536000: // ≤ 1y: 1d buckets (~365)
+		return bucket1d
+	case rangeSeconds <= 157680000: // ≤ 5y: 1w buckets (~260)
+		return bucket1w
+	default: // > 5y: 30d buckets
+		return bucket30d
+	}
+}
+
+// aggregateDataPoints groups data points into fixed-size time buckets, summing TxCount per bucket.
+// Returns the input unchanged if bucketSeconds is 0 or the input is empty.
+// Output is always sorted by timestamp ASC regardless of input order.
+func aggregateDataPoints(in *model.BlockDataPoints, bucketSeconds int64) *model.BlockDataPoints {
+	if bucketSeconds == 0 || len(in.DataPoints) == 0 {
+		return in
+	}
+	// Sort input so that bucket order in the output matches chronological order.
+	// SQL should already return ORDER BY block_time ASC, but this is belt-and-braces.
+	sort.Slice(in.DataPoints, func(i, j int) bool {
+		return in.DataPoints[i].Timestamp < in.DataPoints[j].Timestamp
+	})
+	bs := uint64(bucketSeconds)
+	buckets := make(map[uint32]uint64)
+	order := make([]uint32, 0)
+	for _, dp := range in.DataPoints {
+		// uint64 arithmetic avoids overflow on uint32 timestamps near year 2106.
+		b := uint32((uint64(dp.Timestamp) / bs) * bs)
+		if _, ok := buckets[b]; !ok {
+			order = append(order, b)
+		}
+		buckets[b] += dp.TxCount
+	}
+	out := &model.BlockDataPoints{
+		DataPoints: make([]*model.DataPoint, 0, len(order)),
+	}
+	for _, b := range order {
+		out.DataPoints = append(out.DataPoints, &model.DataPoint{
+			Timestamp: b,
+			TxCount:   buckets[b],
+		})
+	}
+	return out
+}
 
 // GetBlockGraphData retrieves time-series data points showing transaction count
 // over time. It supports various time periods for data aggregation.
@@ -106,6 +171,21 @@ func (h *HTTP) GetBlockGraphData(c echo.Context) error {
 	dataPoints, err := h.repository.GetBlockGraphData(ctx, periodMillisUint64)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+
+	if len(dataPoints.DataPoints) > 1 {
+		var minTS uint32 = math.MaxUint32
+		var maxTS uint32
+		for _, dp := range dataPoints.DataPoints {
+			if dp.Timestamp < minTS {
+				minTS = dp.Timestamp
+			}
+			if dp.Timestamp > maxTS {
+				maxTS = dp.Timestamp
+			}
+		}
+		rangeSeconds := int64(maxTS - minTS)
+		dataPoints = aggregateDataPoints(dataPoints, pickBucketSeconds(rangeSeconds))
 	}
 
 	return c.JSONPretty(200, dataPoints, "  ")

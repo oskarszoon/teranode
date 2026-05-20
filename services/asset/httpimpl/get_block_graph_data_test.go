@@ -13,6 +13,107 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestPickBucketSeconds_RangeRules(t *testing.T) {
+	tests := []struct {
+		name         string
+		rangeSeconds int64
+		want         int64
+	}{
+		{"zero range", 0, 0},
+		{"at 24h boundary", 86400, 0},
+		{"just over 24h", 86401, bucket1h},
+		{"at 1w boundary", 604800, bucket1h},
+		{"just over 1w", 604801, bucket6h},
+		{"at 3m boundary", 7776000, bucket6h},
+		{"just over 3m", 7776001, bucket1d},
+		{"at 1y boundary", 31536000, bucket1d},
+		{"just over 1y", 31536001, bucket1w},
+		{"at 5y boundary", 157680000, bucket1w},
+		{"just over 5y", 157680001, bucket30d},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, pickBucketSeconds(tt.rangeSeconds))
+		})
+	}
+}
+
+func TestAggregateDataPoints_BucketsAndSums(t *testing.T) {
+	// Three points spanning ~1h — directly tests aggregation with explicit bucket1h
+	base := uint32(1_700_000_000)
+	in := &model.BlockDataPoints{
+		DataPoints: []*model.DataPoint{
+			{Timestamp: base, TxCount: 10},
+			{Timestamp: base + 300, TxCount: 5},  // same 1h bucket as base
+			{Timestamp: base + 3600, TxCount: 7}, // next 1h bucket
+		},
+	}
+	out := aggregateDataPoints(in, bucket1h)
+	require.Equal(t, 2, len(out.DataPoints))
+
+	b0 := (base / uint32(bucket1h)) * uint32(bucket1h)
+	b1 := ((base + 3600) / uint32(bucket1h)) * uint32(bucket1h)
+
+	assert.Equal(t, b0, out.DataPoints[0].Timestamp)
+	assert.Equal(t, uint64(15), out.DataPoints[0].TxCount)
+	assert.Equal(t, b1, out.DataPoints[1].Timestamp)
+	assert.Equal(t, uint64(7), out.DataPoints[1].TxCount)
+}
+
+func TestAggregateDataPoints_EmptyAndSingle(t *testing.T) {
+	t.Run("empty input passthrough", func(t *testing.T) {
+		in := &model.BlockDataPoints{DataPoints: []*model.DataPoint{}}
+		out := aggregateDataPoints(in, bucket1h)
+		require.Equal(t, in, out)
+	})
+
+	t.Run("zero bucket passthrough", func(t *testing.T) {
+		in := &model.BlockDataPoints{
+			DataPoints: []*model.DataPoint{
+				{Timestamp: 1_700_000_000, TxCount: 42},
+			},
+		}
+		out := aggregateDataPoints(in, 0)
+		require.Equal(t, in, out)
+	})
+
+	t.Run("single point bucketed", func(t *testing.T) {
+		ts := uint32(1_700_000_000)
+		in := &model.BlockDataPoints{
+			DataPoints: []*model.DataPoint{
+				{Timestamp: ts, TxCount: 42},
+			},
+		}
+		out := aggregateDataPoints(in, bucket1h)
+		require.Equal(t, 1, len(out.DataPoints))
+		expected := (ts / uint32(bucket1h)) * uint32(bucket1h)
+		assert.Equal(t, expected, out.DataPoints[0].Timestamp)
+		assert.Equal(t, uint64(42), out.DataPoints[0].TxCount)
+	})
+}
+
+func TestAggregateDataPoints_UnsortedInput(t *testing.T) {
+	// Feed points in reverse order — output must be sorted ASC and buckets correct.
+	base := uint32(1_700_000_000)
+	in := &model.BlockDataPoints{
+		DataPoints: []*model.DataPoint{
+			{Timestamp: base + 3600, TxCount: 7}, // second bucket, given first
+			{Timestamp: base + 300, TxCount: 5},  // first bucket
+			{Timestamp: base, TxCount: 10},        // first bucket
+		},
+	}
+	out := aggregateDataPoints(in, bucket1h)
+	require.Equal(t, 2, len(out.DataPoints))
+
+	b0 := (base / uint32(bucket1h)) * uint32(bucket1h)
+	b1 := ((base + 3600) / uint32(bucket1h)) * uint32(bucket1h)
+
+	assert.Equal(t, b0, out.DataPoints[0].Timestamp)
+	assert.Equal(t, uint64(15), out.DataPoints[0].TxCount)
+	assert.Equal(t, b1, out.DataPoints[1].Timestamp)
+	assert.Equal(t, uint64(7), out.DataPoints[1].TxCount)
+}
+
 func TestGetBlockGraphData(t *testing.T) {
 	initPrometheusMetrics()
 
