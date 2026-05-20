@@ -91,6 +91,7 @@ export const getGraphObj = (t, data, period, smooth = false) => {
   ]
 
   let startDate = new Date().getTime()
+  let endDate = new Date().getTime()
   switch (period) {
     case '2h':
       startDate -= 2 * 60 * 60 * 1000
@@ -114,14 +115,15 @@ export const getGraphObj = (t, data, period, smooth = false) => {
       startDate -= 90 * 24 * 60 * 60 * 1000
       break
     case 'all':
-      // The backend returns every block when period is "all"; pin the x-axis
-      // to the earliest sample so the full series is visible. The SQL query
-      // now orders by block_time ASC, but the explicit reduce here mirrors the
-      // backend's defensive sort in aggregateDataPoints — belt-and-braces
-      // against any future query change that loses the ordering.
+      // Pin both ends of the x-axis to the actual data range so historical
+      // chains (e.g. syncing from 2009) don't produce a huge empty right side.
       if (graphData.length > 0) {
         startDate = graphData.reduce(
           (min, point) => (point[0] < min ? point[0] : min),
+          graphData[0][0],
+        )
+        endDate = graphData.reduce(
+          (max, point) => (point[0] > max ? point[0] : max),
           graphData[0][0],
         )
       }
@@ -149,7 +151,7 @@ export const getGraphObj = (t, data, period, smooth = false) => {
           },
           alignTicks: true,
           min: startDate,
-          max: new Date().getTime(),
+          max: endDate,
         },
       ],
       yAxis: [
