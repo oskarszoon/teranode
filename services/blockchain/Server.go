@@ -34,6 +34,9 @@ import (
 	"github.com/bsv-blockchain/teranode/model"
 	"github.com/bsv-blockchain/teranode/services/blockchain/blockchain_api"
 	"github.com/bsv-blockchain/teranode/settings"
+	"github.com/bsv-blockchain/teranode/stores/blob"
+	blobstoreoptions "github.com/bsv-blockchain/teranode/stores/blob/options"
+	blobstoretypes "github.com/bsv-blockchain/teranode/stores/blob/storetypes"
 	blockchain_store "github.com/bsv-blockchain/teranode/stores/blockchain"
 	blockchainoptions "github.com/bsv-blockchain/teranode/stores/blockchain/options"
 	blockchain_sql "github.com/bsv-blockchain/teranode/stores/blockchain/sql"
@@ -99,6 +102,7 @@ type Blockchain struct {
 	blockchain_api.UnimplementedPeerRegistryServiceServer
 	addBlockChan                  chan *blockchain_api.AddBlockRequest // Channel for adding blocks
 	store                         blockchain_store.Store               // Storage interface for blockchain data
+	peerRegistryStore             blob.Store                           // Blob store for peer-registry persistence (nil = disabled)
 	logger                        ulogger.Logger                       // Logger instance
 	settings                      *settings.Settings                   // Configuration settings
 	newSubscriptions              chan subscriber                      // Channel for new subscriptions
@@ -450,19 +454,26 @@ func (b *Blockchain) Start(ctx context.Context, readyCh chan<- struct{}) error {
 	cleanupInterval := b.settings.P2P.PeerRegistryCleanupInterval
 	maxSize := b.settings.P2P.PeerRegistryMaxSize
 
-	if path := b.settings.BlockChain.PeerRegistryPath; path != "" {
-		// Use the configured TTL on Load so persisted reputation history
-		// survives exactly as long as operators have asked for, instead of
-		// the hardcoded 24h that ignored their config.
-		if err := b.peerRegistry.Load(path, registryTTL); err != nil {
-			b.logger.Warnf("[Blockchain] failed to load peer registry from %s: %v", path, err)
+	if storeURL := b.settings.BlockChain.PeerRegistryStore; storeURL != nil {
+		store, err := blob.NewStore(b.logger, storeURL,
+			blobstoreoptions.WithStoreType(blobstoretypes.PEERREGISTRYSTORE))
+		if err != nil {
+			b.logger.Warnf("[Blockchain] failed to construct peer registry blob store %s: %v", storeURL.Redacted(), err)
 		} else {
-			b.logger.Infof("[Blockchain] loaded %d peers from %s", b.peerRegistry.Count(), path)
-		}
-		if interval := b.settings.BlockChain.PeerRegistrySaveInterval; interval > 0 {
-			go b.savePeerRegistryPeriodically(ctx, path, interval)
-		} else {
-			b.logger.Warnf("[Blockchain] PeerRegistrySaveInterval not configured, periodic saves disabled")
+			b.peerRegistryStore = store
+			// Use the configured TTL on Load so persisted reputation history
+			// survives exactly as long as operators have asked for, instead of
+			// a hardcoded value that ignored their config.
+			if err := b.peerRegistry.Load(ctx, store, registryTTL); err != nil {
+				b.logger.Warnf("[Blockchain] failed to load peer registry from %s: %v", storeURL.Redacted(), err)
+			} else {
+				b.logger.Infof("[Blockchain] loaded %d peers from %s", b.peerRegistry.Count(), storeURL.Redacted())
+			}
+			if interval := b.settings.BlockChain.PeerRegistrySaveInterval; interval > 0 {
+				go b.savePeerRegistryPeriodically(ctx, interval)
+			} else {
+				b.logger.Warnf("[Blockchain] PeerRegistrySaveInterval not configured, periodic saves disabled")
+			}
 		}
 	}
 
@@ -928,14 +939,14 @@ func (b *Blockchain) sendInitialNotification(sub subscriber) {
 //
 // Returns:
 // - Error if shutdown encounters issues, nil on successful shutdown
-func (b *Blockchain) Stop(_ context.Context) error {
-	// Drain background goroutines (ban decay loop) before saving so we can't
-	// race a decay write against the final Save snapshot. Close is idempotent
-	// and safe to call even if StartBanDecay never ran.
+func (b *Blockchain) Stop(ctx context.Context) error {
+	// Drain background goroutines (ban decay loop, cleanup loop) before saving
+	// so we can't race a write against the final Save snapshot. Close is
+	// idempotent and safe to call even if StartBanDecay never ran.
 	b.peerRegistry.Close()
 
-	if path := b.settings.BlockChain.PeerRegistryPath; path != "" {
-		if err := b.peerRegistry.Save(path); err != nil {
+	if b.peerRegistryStore != nil {
+		if err := b.peerRegistry.Save(ctx, b.peerRegistryStore); err != nil {
 			// A failed save on shutdown means peer state since the last
 			// periodic write is gone — banned peers may reconnect after
 			// restart. Log at error level and surface to the caller so the
@@ -943,13 +954,16 @@ func (b *Blockchain) Stop(_ context.Context) error {
 			b.logger.Errorf("[Blockchain] failed to save peer registry on shutdown: %v", err)
 			return errors.NewProcessingError("[Blockchain][Stop] save peer registry", err)
 		}
+		if err := b.peerRegistryStore.Close(ctx); err != nil {
+			b.logger.Warnf("[Blockchain] failed to close peer registry blob store: %v", err)
+		}
 	}
 	return nil
 }
 
-// savePeerRegistryPeriodically saves the peer registry to disk at the configured interval
-// until ctx is cancelled.
-func (b *Blockchain) savePeerRegistryPeriodically(ctx context.Context, path string, interval time.Duration) {
+// savePeerRegistryPeriodically saves the peer registry to the configured blob
+// store at the configured interval until ctx is cancelled.
+func (b *Blockchain) savePeerRegistryPeriodically(ctx context.Context, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -958,7 +972,7 @@ func (b *Blockchain) savePeerRegistryPeriodically(ctx context.Context, path stri
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := b.peerRegistry.Save(path); err != nil {
+			if err := b.peerRegistry.Save(ctx, b.peerRegistryStore); err != nil {
 				b.logger.Warnf("[Blockchain] failed to save peer registry: %v", err)
 			}
 		}

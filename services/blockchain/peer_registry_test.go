@@ -2,13 +2,15 @@ package blockchain
 
 import (
 	"context"
-	"os"
-	"path/filepath"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/bsv-blockchain/teranode/pkg/fileformat"
 	"github.com/bsv-blockchain/teranode/services/blockchain/blockchain_api"
+	"github.com/bsv-blockchain/teranode/stores/blob"
+	"github.com/bsv-blockchain/teranode/ulogger"
 	"github.com/stretchr/testify/require"
 )
 
@@ -157,18 +159,29 @@ func TestCentralizedPeerRegistry_UpdateMetrics_Malicious(t *testing.T) {
 	require.Equal(t, int64(1), got.MaliciousCount)
 }
 
+// newTestBlobStore returns an in-memory blob.Store for persistence tests.
+func newTestBlobStore(t *testing.T) blob.Store {
+	t.Helper()
+	u, err := url.Parse("memory://")
+	require.NoError(t, err)
+	store, err := blob.NewStore(ulogger.TestLogger{}, u)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close(context.Background()) })
+	return store
+}
+
 func TestCentralizedPeerRegistry_Persistence(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "peers.json")
+	store := newTestBlobStore(t)
+	ctx := context.Background()
 
 	r := NewCentralizedPeerRegistry(DefaultBanConfig())
 	r.Register(&PeerInfo{ID: "peer-1", Height: 42, TransportType: blockchain_api.TransportType_TRANSPORT_WIRE_PROTOCOL})
 	r.Register(&PeerInfo{ID: "peer-2", Height: 99, TransportType: blockchain_api.TransportType_TRANSPORT_HTTP})
 
-	require.NoError(t, r.Save(path))
+	require.NoError(t, r.Save(ctx, store))
 
 	r2 := NewCentralizedPeerRegistry(DefaultBanConfig())
-	require.NoError(t, r2.Load(path, 24*time.Hour))
+	require.NoError(t, r2.Load(ctx, store, 24*time.Hour))
 
 	require.Equal(t, 2, r2.Count())
 
@@ -178,34 +191,35 @@ func TestCentralizedPeerRegistry_Persistence(t *testing.T) {
 	require.Equal(t, blockchain_api.TransportType_TRANSPORT_WIRE_PROTOCOL, p1.TransportType)
 }
 
-func TestCentralizedPeerRegistry_Persistence_MissingFile(t *testing.T) {
-	dir := t.TempDir()
+func TestCentralizedPeerRegistry_Persistence_MissingKey(t *testing.T) {
+	store := newTestBlobStore(t)
 	r := NewCentralizedPeerRegistry(DefaultBanConfig())
 
-	// Loading from a non-existent path should succeed and leave the registry empty.
-	require.NoError(t, r.Load(filepath.Join(dir, "nonexistent.json"), 24*time.Hour))
+	// Loading from a store with no peer registry blob should succeed and leave the registry empty.
+	require.NoError(t, r.Load(context.Background(), store, 24*time.Hour))
 	require.Equal(t, 0, r.Count())
 }
 
-func TestCentralizedPeerRegistry_Persistence_CorruptFile(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "peers.json")
+func TestCentralizedPeerRegistry_Persistence_CorruptBlob(t *testing.T) {
+	store := newTestBlobStore(t)
+	ctx := context.Background()
 
-	require.NoError(t, os.WriteFile(path, []byte("not valid json {{{{"), 0o600))
+	require.NoError(t, store.Set(ctx, peerRegistryBlobKey, fileformat.FileTypePeerRegistry, []byte("not valid json {{{{")))
 
 	r := NewCentralizedPeerRegistry(DefaultBanConfig())
-	// Should not return an error — corrupt file is renamed and registry starts empty.
-	require.NoError(t, r.Load(path, 24*time.Hour))
+	// Should not return an error — corrupt blob is dropped and registry starts empty.
+	require.NoError(t, r.Load(ctx, store, 24*time.Hour))
 	require.Equal(t, 0, r.Count())
 
-	// The corrupt file should have been renamed.
-	_, err := os.Stat(path + ".corrupted")
+	// The corrupt blob should have been deleted.
+	exists, err := store.Exists(ctx, peerRegistryBlobKey, fileformat.FileTypePeerRegistry)
 	require.NoError(t, err)
+	require.False(t, exists)
 }
 
 func TestCentralizedPeerRegistry_Persistence_TTLCleanup(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "peers.json")
+	store := newTestBlobStore(t)
+	ctx := context.Background()
 
 	r := NewCentralizedPeerRegistry(DefaultBanConfig())
 	r.Register(&PeerInfo{ID: "fresh"})
@@ -216,10 +230,10 @@ func TestCentralizedPeerRegistry_Persistence_TTLCleanup(t *testing.T) {
 	r.peers["stale"].LastSeen = time.Now().Add(-48 * time.Hour)
 	r.mu.Unlock()
 
-	require.NoError(t, r.Save(path))
+	require.NoError(t, r.Save(ctx, store))
 
 	r2 := NewCentralizedPeerRegistry(DefaultBanConfig())
-	require.NoError(t, r2.Load(path, 24*time.Hour))
+	require.NoError(t, r2.Load(ctx, store, 24*time.Hour))
 
 	require.Equal(t, 1, r2.Count())
 	_, ok := r2.Get("fresh")

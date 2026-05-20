@@ -1,14 +1,14 @@
 package blockchain
 
 import (
+	"context"
 	"encoding/json"
-	"os"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
+	"github.com/bsv-blockchain/teranode/pkg/fileformat"
 	"github.com/bsv-blockchain/teranode/services/blockchain/blockchain_api"
 	"github.com/stretchr/testify/require"
 )
@@ -16,8 +16,8 @@ import (
 // TestCentralizedPeerRegistry_Persistence_AllFields verifies that Save then Load
 // preserves every PeerInfo field, not just Height and TransportType.
 func TestCentralizedPeerRegistry_Persistence_AllFields(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "peers.json")
+	store := newTestBlobStore(t)
+	ctx := context.Background()
 
 	blockHash, err := chainhash.NewHashFromStr("000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f")
 	require.NoError(t, err)
@@ -37,7 +37,6 @@ func TestCentralizedPeerRegistry_Persistence_AllFields(t *testing.T) {
 		BlockHash:      blockHash,
 	})
 
-	// Override internal fields that Register sets or that accumulate over time.
 	r.mu.Lock()
 	p := r.peers["full-peer"]
 	p.BytesSent = 999888
@@ -58,7 +57,6 @@ func TestCentralizedPeerRegistry_Persistence_AllFields(t *testing.T) {
 		Banned:   true,
 		BanUntil: time.Now().Add(24 * time.Hour),
 	}
-	// Set time fields to known values.
 	fixedTime := time.Date(2025, 6, 15, 12, 0, 0, 0, time.UTC)
 	p.ConnectedAt = fixedTime
 	p.LastMessageTime = fixedTime.Add(1 * time.Minute)
@@ -68,17 +66,15 @@ func TestCentralizedPeerRegistry_Persistence_AllFields(t *testing.T) {
 	p.LastSeen = fixedTime.Add(5 * time.Minute)
 	r.mu.Unlock()
 
-	require.NoError(t, r.Save(path))
+	require.NoError(t, r.Save(ctx, store))
 
-	// Load into a fresh registry with a generous TTL so the peer survives.
 	r2 := NewCentralizedPeerRegistry(DefaultBanConfig())
-	require.NoError(t, r2.Load(path, 365*24*time.Hour))
+	require.NoError(t, r2.Load(ctx, store, 365*24*time.Hour))
 	require.Equal(t, 1, r2.Count())
 
 	got, ok := r2.Get("full-peer")
 	require.True(t, ok)
 
-	// Core identity
 	require.Equal(t, "full-peer", got.ID)
 	require.Equal(t, blockchain_api.TransportType_TRANSPORT_WIRE_PROTOCOL, got.TransportType)
 	require.Equal(t, "test-node/0.1", got.ClientName)
@@ -87,11 +83,9 @@ func TestCentralizedPeerRegistry_Persistence_AllFields(t *testing.T) {
 	require.Equal(t, "192.168.1.100:8333", got.NetworkAddress)
 	require.Equal(t, "aerospike", got.Storage)
 
-	// BlockHash
 	require.NotNil(t, got.BlockHash)
 	require.Equal(t, blockHash.String(), got.BlockHash.String())
 
-	// Counters
 	require.Equal(t, uint64(999888), got.BytesSent)
 	require.Equal(t, uint64(777666), got.BytesReceived)
 	require.Equal(t, int64(50), got.InteractionAttempts)
@@ -101,11 +95,9 @@ func TestCentralizedPeerRegistry_Persistence_AllFields(t *testing.T) {
 	require.Equal(t, 42.5, got.ReputationScore)
 	require.Equal(t, int64(250), got.AvgResponseTimeMs)
 
-	// Ban fields
 	require.True(t, got.IsBanned)
 	require.Equal(t, int32(80), got.BanScore)
 
-	// Time fields
 	require.True(t, got.ConnectedAt.Equal(fixedTime))
 	require.True(t, got.LastMessageTime.Equal(fixedTime.Add(1*time.Minute)))
 	require.True(t, got.LastInteractionAttempt.Equal(fixedTime.Add(2*time.Minute)))
@@ -114,22 +106,19 @@ func TestCentralizedPeerRegistry_Persistence_AllFields(t *testing.T) {
 	require.True(t, got.LastSeen.Equal(fixedTime.Add(5*time.Minute)))
 }
 
-// TestCentralizedPeerRegistry_Persistence_MultiplePeersRoundTrip verifies that
-// saving and loading multiple peers with different transport types preserves all
-// entries and their identity.
 func TestCentralizedPeerRegistry_Persistence_MultiplePeersRoundTrip(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "multi.json")
+	store := newTestBlobStore(t)
+	ctx := context.Background()
 
 	r := NewCentralizedPeerRegistry(DefaultBanConfig())
 	r.Register(&PeerInfo{ID: "http-peer", TransportType: blockchain_api.TransportType_TRANSPORT_HTTP, Height: 100, Storage: "s3"})
 	r.Register(&PeerInfo{ID: "wire-peer", TransportType: blockchain_api.TransportType_TRANSPORT_WIRE_PROTOCOL, Height: 200, Storage: "aerospike"})
 	r.Register(&PeerInfo{ID: "unknown-peer", Height: 50})
 
-	require.NoError(t, r.Save(path))
+	require.NoError(t, r.Save(ctx, store))
 
 	r2 := NewCentralizedPeerRegistry(DefaultBanConfig())
-	require.NoError(t, r2.Load(path, 24*time.Hour))
+	require.NoError(t, r2.Load(ctx, store, 24*time.Hour))
 	require.Equal(t, 3, r2.Count())
 
 	for _, id := range []string{"http-peer", "wire-peer", "unknown-peer"} {
@@ -144,38 +133,32 @@ func TestCentralizedPeerRegistry_Persistence_MultiplePeersRoundTrip(t *testing.T
 	require.Equal(t, "aerospike", got.Storage)
 }
 
-// TestCentralizedPeerRegistry_Persistence_EmptyRegistrySave verifies that saving
-// an empty registry produces a valid file that loads cleanly.
 func TestCentralizedPeerRegistry_Persistence_EmptyRegistrySave(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "empty.json")
+	store := newTestBlobStore(t)
+	ctx := context.Background()
 
 	r := NewCentralizedPeerRegistry(DefaultBanConfig())
-	require.NoError(t, r.Save(path))
+	require.NoError(t, r.Save(ctx, store))
 
 	r2 := NewCentralizedPeerRegistry(DefaultBanConfig())
-	require.NoError(t, r2.Load(path, 24*time.Hour))
+	require.NoError(t, r2.Load(ctx, store, 24*time.Hour))
 	require.Equal(t, 0, r2.Count())
 }
 
-// TestCentralizedPeerRegistry_Persistence_LoadReplacesExistingState verifies that
-// Load fully replaces the in-memory state, not merges with it.
 func TestCentralizedPeerRegistry_Persistence_LoadReplacesExistingState(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "replace.json")
+	store := newTestBlobStore(t)
+	ctx := context.Background()
 
-	// Save a registry with one peer.
 	r := NewCentralizedPeerRegistry(DefaultBanConfig())
 	r.Register(&PeerInfo{ID: "persisted-peer", Height: 10})
-	require.NoError(t, r.Save(path))
+	require.NoError(t, r.Save(ctx, store))
 
-	// Create a new registry with a different peer.
 	r2 := NewCentralizedPeerRegistry(DefaultBanConfig())
 	r2.Register(&PeerInfo{ID: "in-memory-peer", Height: 20})
 	require.Equal(t, 1, r2.Count())
 
-	// Load should replace, not merge.
-	require.NoError(t, r2.Load(path, 24*time.Hour))
+	// Load replaces, not merges.
+	require.NoError(t, r2.Load(ctx, store, 24*time.Hour))
 	require.Equal(t, 1, r2.Count())
 	_, ok := r2.Get("persisted-peer")
 	require.True(t, ok)
@@ -183,59 +166,17 @@ func TestCentralizedPeerRegistry_Persistence_LoadReplacesExistingState(t *testin
 	require.False(t, ok)
 }
 
-// TestCentralizedPeerRegistry_Persistence_FilePermissions verifies that the saved
-// file has restrictive permissions (0600).
-func TestCentralizedPeerRegistry_Persistence_FilePermissions(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "perms.json")
-
-	r := NewCentralizedPeerRegistry(DefaultBanConfig())
-	r.Register(&PeerInfo{ID: "peer-1"})
-	require.NoError(t, r.Save(path))
-
-	info, err := os.Stat(path)
-	require.NoError(t, err)
-	require.Equal(t, os.FileMode(0o600), info.Mode().Perm())
-}
-
-// TestCentralizedPeerRegistry_Persistence_SaveToReadOnlyDir verifies that Save
-// returns an error when writing to a read-only directory.
-func TestCentralizedPeerRegistry_Persistence_SaveToReadOnlyDir(t *testing.T) {
-	dir := t.TempDir()
-	// Make the directory read-only so the temp file write fails.
-	require.NoError(t, os.Chmod(dir, 0o555))
-	t.Cleanup(func() {
-		_ = os.Chmod(dir, 0o755) // restore so TempDir cleanup works
-	})
-
-	path := filepath.Join(dir, "peers.json")
-
-	r := NewCentralizedPeerRegistry(DefaultBanConfig())
-	r.Register(&PeerInfo{ID: "peer-1"})
-
-	err := r.Save(path)
-	require.Error(t, err)
-	require.ErrorContains(t, err, "create peer registry tmp file")
-}
-
-// TestSavePeerRegistry_AtomicRename verifies that the final file contains valid
-// JSON after a successful save (i.e. the rename happened correctly).
-func TestSavePeerRegistry_AtomicRename(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "atomic.json")
+func TestSavePeerRegistry_EnvelopeShape(t *testing.T) {
+	store := newTestBlobStore(t)
+	ctx := context.Background()
 
 	peers := []*PeerInfo{
 		{ID: "a", Height: 1},
 		{ID: "b", Height: 2},
 	}
-	require.NoError(t, savePeerRegistry(path, peers, nil))
+	require.NoError(t, savePeerRegistry(ctx, store, peers, nil))
 
-	// The temp file should not exist after a successful save.
-	_, err := os.Stat(path + ".tmp")
-	require.True(t, os.IsNotExist(err))
-
-	// The final file should contain valid JSON in the persisted-envelope shape.
-	data, err := os.ReadFile(path)
+	data, err := store.Get(ctx, peerRegistryBlobKey, fileformat.FileTypePeerRegistry)
 	require.NoError(t, err)
 
 	var loaded persistedRegistry
@@ -244,11 +185,9 @@ func TestSavePeerRegistry_AtomicRename(t *testing.T) {
 	require.Equal(t, persistedRegistryVersion, loaded.Version)
 }
 
-// TestLoadPeerRegistry_AllExpired verifies that if every peer is past the TTL
-// cutoff the result is an empty slice (not nil).
 func TestLoadPeerRegistry_AllExpired(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "expired.json")
+	store := newTestBlobStore(t)
+	ctx := context.Background()
 
 	stale := time.Now().Add(-72 * time.Hour)
 	envelope := persistedRegistry{
@@ -260,9 +199,9 @@ func TestLoadPeerRegistry_AllExpired(t *testing.T) {
 	}
 	data, err := json.Marshal(&envelope)
 	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(path, data, 0o600))
+	require.NoError(t, store.Set(ctx, peerRegistryBlobKey, fileformat.FileTypePeerRegistry, data))
 
-	loaded, _, err := loadPeerRegistry(path, 24*time.Hour)
+	loaded, _, err := loadPeerRegistry(ctx, store, 24*time.Hour)
 	require.NoError(t, err)
 	require.Empty(t, loaded)
 }
@@ -271,28 +210,27 @@ func TestLoadPeerRegistry_AllExpired(t *testing.T) {
 // banScores are written and restored across Save/Load, so an in-flight ban
 // keeps enforcing after a process restart.
 func TestPersistence_BansSurviveRestart(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "ban-state.json")
+	store := newTestBlobStore(t)
+	ctx := context.Background()
 
 	r := NewCentralizedPeerRegistry(DefaultBanConfig())
 	r.Register(&PeerInfo{ID: "p"})
-	// spam = 50, threshold = 100. Two strikes => banned.
 	r.AddBanScore("p", "spam", 0)
 	r.AddBanScore("p", "spam", 0)
 	require.True(t, r.IsBannedPeer("p"))
 
-	require.NoError(t, r.Save(path))
+	require.NoError(t, r.Save(ctx, store))
 
 	r2 := NewCentralizedPeerRegistry(DefaultBanConfig())
-	require.NoError(t, r2.Load(path, 24*time.Hour))
+	require.NoError(t, r2.Load(ctx, store, 24*time.Hour))
 
 	require.True(t, r2.IsBannedPeer("p"), "ban must persist across Save/Load")
 	require.Equal(t, []string{"p"}, r2.ListBannedPeers())
 }
 
 func TestPersistence_BannedPeersExemptFromTTL(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "ban-ttl.json")
+	store := newTestBlobStore(t)
+	ctx := context.Background()
 
 	r := NewCentralizedPeerRegistry(DefaultBanConfig())
 	r.Register(&PeerInfo{ID: "p"})
@@ -305,34 +243,35 @@ func TestPersistence_BannedPeersExemptFromTTL(t *testing.T) {
 	r.peers["p"].LastSeen = time.Now().Add(-48 * time.Hour)
 	r.mu.Unlock()
 
-	require.NoError(t, r.Save(path))
+	require.NoError(t, r.Save(ctx, store))
 
 	r2 := NewCentralizedPeerRegistry(DefaultBanConfig())
-	require.NoError(t, r2.Load(path, 24*time.Hour))
+	require.NoError(t, r2.Load(ctx, store, 24*time.Hour))
 
 	require.True(t, r2.IsBannedPeer("p"))
 	_, ok := r2.Get("p")
 	require.True(t, ok, "banned peer must not be evicted by TTL on Load")
 }
 
-func TestPersistence_CorruptFileGetsRenamedAndRegistryStartsEmpty(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "corrupt.json")
+func TestPersistence_CorruptBlobDroppedAndRegistryStartsEmpty(t *testing.T) {
+	store := newTestBlobStore(t)
+	ctx := context.Background()
 
-	require.NoError(t, os.WriteFile(path, []byte("not valid json {{{"), 0o600))
+	require.NoError(t, store.Set(ctx, peerRegistryBlobKey, fileformat.FileTypePeerRegistry, []byte("not valid json {{{")))
 
 	r := NewCentralizedPeerRegistry(DefaultBanConfig())
-	require.NoError(t, r.Load(path, 24*time.Hour))
+	require.NoError(t, r.Load(ctx, store, 24*time.Hour))
 	require.Equal(t, 0, r.Count())
 
-	// loadPeerRegistry must rename the bad file so operators can recover it.
-	_, err := os.Stat(path + ".corrupted")
+	// Corrupt blob must have been deleted from the store.
+	exists, err := store.Exists(ctx, peerRegistryBlobKey, fileformat.FileTypePeerRegistry)
 	require.NoError(t, err)
+	require.False(t, exists)
 }
 
 func TestPersistence_LoadAnchorsLastDecayWhenMissing(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "no-decay.json")
+	store := newTestBlobStore(t)
+	ctx := context.Background()
 
 	envelope := persistedRegistry{
 		Version: persistedRegistryVersion,
@@ -341,18 +280,18 @@ func TestPersistence_LoadAnchorsLastDecayWhenMissing(t *testing.T) {
 				Score:    50,
 				Banned:   false,
 				BanUntil: time.Time{},
-				// LastDecay deliberately zero — older serialised state may
-				// lack it; Load anchors it to "now" so the next AddBanScore
-				// doesn't retroactively decay across the restart gap.
+				// LastDecay deliberately zero — older serialised state may lack it;
+				// Load anchors it to "now" so the next AddBanScore doesn't
+				// retroactively decay across the restart gap.
 			},
 		},
 	}
 	data, err := json.Marshal(&envelope)
 	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(path, data, 0o600))
+	require.NoError(t, store.Set(ctx, peerRegistryBlobKey, fileformat.FileTypePeerRegistry, data))
 
 	r := NewCentralizedPeerRegistry(DefaultBanConfig())
-	require.NoError(t, r.Load(path, 24*time.Hour))
+	require.NoError(t, r.Load(ctx, store, 24*time.Hour))
 
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -361,43 +300,13 @@ func TestPersistence_LoadAnchorsLastDecayWhenMissing(t *testing.T) {
 	require.False(t, entry.LastDecay.IsZero(), "Load must anchor LastDecay")
 }
 
-func TestPersistence_ConcurrentSavesUseUniqueTmpFiles(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "concurrent.json")
-
-	r := NewCentralizedPeerRegistry(DefaultBanConfig())
-	for i := 0; i < 10; i++ {
-		r.Register(&PeerInfo{ID: filepath.Base(filepath.Join("peer", string(rune('a'+i))))})
-	}
-
-	const writers = 8
-	errs := make(chan error, writers)
-	for i := 0; i < writers; i++ {
-		go func() {
-			errs <- r.Save(path)
-		}()
-	}
-	for i := 0; i < writers; i++ {
-		require.NoError(t, <-errs)
-	}
-
-	// No leftover tmp files: only the final file (and possibly nothing else).
-	entries, err := os.ReadDir(dir)
-	require.NoError(t, err)
-	for _, e := range entries {
-		require.NotContains(t, e.Name(), ".tmp", "stale tmp file: %s", e.Name())
-	}
-}
-
 func TestPersistence_ConcurrentSavesSerialize(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "serialized.json")
+	store := newTestBlobStore(t)
+	ctx := context.Background()
 
 	r := NewCentralizedPeerRegistry(DefaultBanConfig())
 	r.Register(&PeerInfo{ID: "p1"})
 
-	// Two concurrent saves: each holds the in-memory snapshot during marshal,
-	// the saveMu serializes the rename so they cannot trample one another.
 	const writers = 32
 	errCh := make(chan error, writers)
 	var wg sync.WaitGroup
@@ -405,7 +314,7 @@ func TestPersistence_ConcurrentSavesSerialize(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			errCh <- r.Save(path)
+			errCh <- r.Save(ctx, store)
 		}()
 	}
 	wg.Wait()
@@ -415,32 +324,24 @@ func TestPersistence_ConcurrentSavesSerialize(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	// Final file is valid JSON in the new envelope shape.
-	data, err := os.ReadFile(path)
+	data, err := store.Get(ctx, peerRegistryBlobKey, fileformat.FileTypePeerRegistry)
 	require.NoError(t, err)
 	var env persistedRegistry
 	require.NoError(t, json.Unmarshal(data, &env))
 	require.Equal(t, persistedRegistryVersion, env.Version)
 	require.Len(t, env.Peers, 1)
-
-	// No leftover .tmp files.
-	entries, err := os.ReadDir(dir)
-	require.NoError(t, err)
-	for _, e := range entries {
-		require.NotContains(t, e.Name(), ".tmp", "stale tmp file: %s", e.Name())
-	}
 }
 
 func TestPersistence_LoadClearsBanFlagOnExpiredEntry(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "expired-on-disk.json")
+	store := newTestBlobStore(t)
+	ctx := context.Background()
 
 	envelope := persistedRegistry{
 		Version: persistedRegistryVersion,
 		Peers: []*PeerInfo{
 			{
 				ID:       "p",
-				IsBanned: true, // peer struct still flagged
+				IsBanned: true,
 				BanScore: 200,
 				LastSeen: time.Now(),
 			},
@@ -449,16 +350,16 @@ func TestPersistence_LoadClearsBanFlagOnExpiredEntry(t *testing.T) {
 			"p": {
 				Score:    200,
 				Banned:   true,
-				BanUntil: time.Now().Add(-1 * time.Hour), // already expired
+				BanUntil: time.Now().Add(-1 * time.Hour),
 			},
 		},
 	}
 	data, err := json.Marshal(&envelope)
 	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(path, data, 0o600))
+	require.NoError(t, store.Set(ctx, peerRegistryBlobKey, fileformat.FileTypePeerRegistry, data))
 
 	r := NewCentralizedPeerRegistry(DefaultBanConfig())
-	require.NoError(t, r.Load(path, 24*time.Hour))
+	require.NoError(t, r.Load(ctx, store, 24*time.Hour))
 
 	got, ok := r.Get("p")
 	require.True(t, ok)
@@ -468,8 +369,8 @@ func TestPersistence_LoadClearsBanFlagOnExpiredEntry(t *testing.T) {
 }
 
 func TestPersistence_ExpiredBanDroppedOnLoad(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "expired-ban.json")
+	store := newTestBlobStore(t)
+	ctx := context.Background()
 
 	envelope := persistedRegistry{
 		Version: persistedRegistryVersion,
@@ -488,10 +389,10 @@ func TestPersistence_ExpiredBanDroppedOnLoad(t *testing.T) {
 	}
 	data, err := json.Marshal(&envelope)
 	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(path, data, 0o600))
+	require.NoError(t, store.Set(ctx, peerRegistryBlobKey, fileformat.FileTypePeerRegistry, data))
 
 	r := NewCentralizedPeerRegistry(DefaultBanConfig())
-	require.NoError(t, r.Load(path, 24*time.Hour))
+	require.NoError(t, r.Load(ctx, store, 24*time.Hour))
 
 	require.False(t, r.IsBannedPeer("already-expired"))
 	require.True(t, r.IsBannedPeer("still-banned"))

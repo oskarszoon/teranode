@@ -1,14 +1,23 @@
 package blockchain
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/bsv-blockchain/teranode/errors"
+	"github.com/bsv-blockchain/teranode/pkg/fileformat"
+	"github.com/bsv-blockchain/teranode/stores/blob"
+	"github.com/bsv-blockchain/teranode/stores/blob/options"
 )
+
+// peerRegistryBlobKey is the fixed key used to address the persisted registry
+// envelope inside the configured blob.Store. Using a constant means there is
+// always exactly one persisted record per store regardless of how many
+// blockchain processes share it.
+var peerRegistryBlobKey = []byte("peer-registry")
 
 // persistedRegistry is the on-disk JSON envelope. Versioned so format changes
 // (e.g. adding more fields, splitting files) can be handled without losing the
@@ -32,10 +41,11 @@ type persistedBanEntry struct {
 
 const persistedRegistryVersion = 1
 
-// savePeerRegistry marshals the registry envelope to JSON and atomically
-// replaces the file at path. A temp file is written first and then renamed so
-// readers never see a partial write.
-func savePeerRegistry(path string, peers []*PeerInfo, banScores map[string]persistedBanEntry) error {
+// savePeerRegistry marshals the registry envelope to JSON and writes it to the
+// configured blob.Store. The store is responsible for atomic publication
+// (local-fs backend uses temp-file + rename; remote backends use their own
+// strong consistency primitives).
+func savePeerRegistry(ctx context.Context, store blob.Store, peers []*PeerInfo, banScores map[string]persistedBanEntry) error {
 	envelope := persistedRegistry{
 		Version:   persistedRegistryVersion,
 		SavedAt:   time.Now().UTC(),
@@ -48,67 +58,49 @@ func savePeerRegistry(path string, peers []*PeerInfo, banScores map[string]persi
 		return errors.NewProcessingError("marshal peer registry", err)
 	}
 
-	// Use a unique temp file per call so concurrent saves (periodic ticker +
-	// shutdown) don't clobber each other. os.CreateTemp gives us O_EXCL +
-	// 0600 perms in one shot.
-	dir := filepath.Dir(path)
-	tmpFile, err := os.CreateTemp(dir, filepath.Base(path)+".tmp.*")
-	if err != nil {
-		return errors.NewProcessingError("create peer registry tmp file", err)
+	if err = store.Set(ctx, peerRegistryBlobKey, fileformat.FileTypePeerRegistry, data,
+		options.WithAllowOverwrite(true)); err != nil {
+		return errors.NewProcessingError("write peer registry to blob store", err)
 	}
-	tmp := tmpFile.Name()
-
-	if _, err = tmpFile.Write(data); err != nil {
-		_ = tmpFile.Close()
-		_ = os.Remove(tmp)
-		return errors.NewProcessingError("write peer registry tmp file", err)
-	}
-	if err = tmpFile.Close(); err != nil {
-		_ = os.Remove(tmp)
-		return errors.NewProcessingError("close peer registry tmp file", err)
-	}
-
-	if err = os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp) // best-effort cleanup
-		return errors.NewProcessingError("rename peer registry tmp file", err)
-	}
-
 	return nil
 }
 
-// loadPeerRegistry reads and deserialises the peer registry from path,
+// loadPeerRegistry reads and deserialises the peer registry from the blob store,
 // discarding peer entries whose LastSeen timestamp is older than ttl. Banned
 // peers are exempt from the TTL filter — bans must outlive idle gaps,
-// otherwise restarts would silently clear in-flight bans. Their associated
-// ban-score map is returned alongside.
+// otherwise restarts would silently clear in-flight bans.
 //
 // Two non-fatal situations are handled silently:
-//   - File does not exist: returns empty state (first startup is fine).
-//   - File is corrupt: renamed to path+".corrupted" so operators can inspect
-//     it, a warning is printed to stderr, and empty state is returned.
-func loadPeerRegistry(path string, ttl time.Duration) ([]*PeerInfo, map[string]persistedBanEntry, error) {
-	data, err := os.ReadFile(path)
+//   - Key missing: returns empty state (first startup is fine).
+//   - Stored blob is corrupt JSON: logs a warning, returns empty state, and
+//     drops the bad entry so the next save will overwrite it.
+func loadPeerRegistry(ctx context.Context, store blob.Store, ttl time.Duration) ([]*PeerInfo, map[string]persistedBanEntry, error) {
+	exists, err := store.Exists(ctx, peerRegistryBlobKey, fileformat.FileTypePeerRegistry)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return []*PeerInfo{}, nil, nil
-		}
-		return nil, nil, errors.NewProcessingError("read peer registry", err)
+		return nil, nil, errors.NewProcessingError("check peer registry blob existence", err)
+	}
+	if !exists {
+		return []*PeerInfo{}, nil, nil
+	}
+
+	data, err := store.Get(ctx, peerRegistryBlobKey, fileformat.FileTypePeerRegistry)
+	if err != nil {
+		return nil, nil, errors.NewProcessingError("read peer registry from blob store", err)
 	}
 
 	var envelope persistedRegistry
 	if err = json.Unmarshal(data, &envelope); err != nil {
-		corrupted := path + ".corrupted"
-		// Best-effort rename — ignore error since we are already in a degraded path.
-		_ = os.Rename(path, corrupted)
-		fmt.Fprintf(os.Stderr, "peer registry: corrupt file renamed to %s, starting with empty registry: %v\n", corrupted, err)
+		// Corrupt JSON in the blob store: drop the entry so the next save
+		// starts clean, then report empty state. Equivalent to the old
+		// file-based "rename .corrupted" path but without leaking a copy.
+		fmt.Fprintf(os.Stderr, "peer registry: corrupt blob dropped, starting with empty registry: %v\n", err)
+		_ = store.Del(ctx, peerRegistryBlobKey, fileformat.FileTypePeerRegistry)
 		return []*PeerInfo{}, nil, nil
 	}
 
 	cutoff := time.Now().Add(-ttl)
 	live := make([]*PeerInfo, 0, len(envelope.Peers))
 	for _, p := range envelope.Peers {
-		// Banned peers are always retained: dropping them on TTL would let a
-		// peer clear its own ban by going quiet for ttl, then reconnecting.
 		if p.IsBanned || p.LastSeen.After(cutoff) {
 			live = append(live, p)
 		}
@@ -117,10 +109,14 @@ func loadPeerRegistry(path string, ttl time.Duration) ([]*PeerInfo, map[string]p
 	return live, envelope.BanScores, nil
 }
 
-// Save persists the current registry state to path. Safe to call concurrently
-// — saveMu serializes the snapshot+write+rename so a slow earlier save can't
-// rename its older snapshot over a newer one.
-func (r *CentralizedPeerRegistry) Save(path string) error {
+// Save persists the current registry state to the supplied blob.Store. Safe to
+// call concurrently — saveMu serializes the snapshot+write so a slow earlier
+// save can't overwrite a newer one inside the store.
+func (r *CentralizedPeerRegistry) Save(ctx context.Context, store blob.Store) error {
+	if store == nil {
+		return nil
+	}
+
 	r.saveMu.Lock()
 	defer r.saveMu.Unlock()
 
@@ -143,16 +139,20 @@ func (r *CentralizedPeerRegistry) Save(path string) error {
 	}
 	r.mu.RUnlock()
 
-	return savePeerRegistry(path, peers, bans)
+	return savePeerRegistry(ctx, store, peers, bans)
 }
 
-// Load reads the registry from path and replaces the current in-memory state.
-// Stale peer entries (older than ttl, not banned) are dropped on load.
-// Ban-score entries that have already expired (BanUntil in the past) are
-// discarded; everything else is restored so a node restart does not reset
-// in-flight bans.
-func (r *CentralizedPeerRegistry) Load(path string, ttl time.Duration) error {
-	peers, bans, err := loadPeerRegistry(path, ttl)
+// Load reads the registry from the supplied blob.Store and replaces the
+// current in-memory state. Stale peer entries (older than ttl, not banned)
+// are dropped on load. Ban-score entries that have already expired
+// (BanUntil in the past) are discarded; everything else is restored so a
+// node restart does not reset in-flight bans.
+func (r *CentralizedPeerRegistry) Load(ctx context.Context, store blob.Store, ttl time.Duration) error {
+	if store == nil {
+		return nil
+	}
+
+	peers, bans, err := loadPeerRegistry(ctx, store, ttl)
 	if err != nil {
 		return err
 	}
