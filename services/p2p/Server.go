@@ -138,6 +138,11 @@ type Server struct {
 	peerMapCleanupTicker *time.Ticker  // Ticker for periodic cleanup of peer maps
 	peerMapMaxSize       int           // Maximum number of entries in peer maps
 	peerMapTTL           time.Duration // Time-to-live for peer map entries
+
+	// reputationCache is a short-lived cache of peer reputation scores used by
+	// shouldSkipUnhealthyPeer to avoid a gRPC round-trip per pubsub message.
+	// Entries expire after reputationCacheTTL; misses fall back to the registry.
+	reputationCache sync.Map // peerID string -> reputationCacheEntry
 }
 
 // NewServer creates a new P2P server instance with the provided configuration and dependencies.
@@ -158,18 +163,16 @@ type Server struct {
 // Returns a configured Server instance ready to be initialized and started, or an error if configuration
 // validation fails or any dependencies cannot be properly initialized.
 
-// getPeerCacheFilePath constructs the full path to the teranode_peers.json file based on the configured directory.
-// If no directory is specified, it defaults to the current working directory.
-// The filename is always "teranode_peers.json" for consistency.
-func getPeerCacheFilePath(configuredDir string) string {
-	var dir string
-	if configuredDir != "" {
-		dir = configuredDir
-	} else {
-		// Default to current working directory
+// p2pCacheFilePath returns the path for the libp2p peer-cache file. This is
+// separate from the Teranode peer registry (now owned by the blockchain
+// service); the libp2p library uses this file for its own peer-address cache
+// to speed up reconnects after restarts.
+func p2pCacheFilePath(configuredDir string) string {
+	dir := configuredDir
+	if dir == "" {
 		dir = "."
 	}
-	return filepath.Join(dir, "teranode_peers.json")
+	return filepath.Join(dir, "p2p_peers.json")
 }
 
 func NewServer(
@@ -240,10 +243,8 @@ func NewServer(
 	// 2. Read from p2p.key file
 	// 3. Generate new key and save to p2p.key file
 	if privateKey == "" {
-		// Construct the key file path (same directory as teranode_peers.json)
-		keyFilePath := getPeerCacheFilePath(tSettings.P2P.PeerCacheDir)
-		// Replace the filename from teranode_peers.json to p2p.key
-		keyFilePath = filepath.Join(filepath.Dir(keyFilePath), "p2p.key")
+		// Derive the key file path from the same directory as the p2p cache.
+		keyFilePath := filepath.Join(filepath.Dir(p2pCacheFilePath(tSettings.P2P.PeerCacheDir)), "p2p.key")
 
 		if keyData, err := os.ReadFile(keyFilePath); err == nil {
 			// File exists, use its content
@@ -342,7 +343,7 @@ func NewServer(
 		PrivateKey:         privKey,
 		Name:               tSettings.ClientName,
 		Logger:             logger,
-		PeerCacheFile:      getPeerCacheFilePath(tSettings.P2P.PeerCacheDir),
+		PeerCacheFile:      p2pCacheFilePath(tSettings.P2P.PeerCacheDir),
 		BootstrapPeers:     tSettings.P2P.BootstrapPeers,
 		StaticPeers:        tSettings.P2P.StaticPeers,
 		ProtocolVersion:    bitcoinProtocolVersion,

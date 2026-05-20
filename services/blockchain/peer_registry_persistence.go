@@ -101,6 +101,12 @@ func loadPeerRegistry(ctx context.Context, store blob.Store, ttl time.Duration) 
 	cutoff := time.Now().Add(-ttl)
 	live := make([]*PeerInfo, 0, len(envelope.Peers))
 	for _, p := range envelope.Peers {
+		// TTL filter uses LastSeen only (not peerActivity / LastMessageTime) because
+		// Save snapshots LastSeen on every successful interaction path, so it is the
+		// most reliable freshness signal in persisted state. LastMessageTime is only
+		// bumped by the explicit UpdateLastMessageTime RPC, which is a subset of the
+		// events that refresh LastSeen — using the max of both at load would keep
+		// entries alive slightly longer but adds no correctness benefit.
 		if p.IsBanned || p.LastSeen.After(cutoff) {
 			live = append(live, p)
 		}

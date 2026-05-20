@@ -212,8 +212,12 @@ func (r *CentralizedPeerRegistry) Register(info *PeerInfo) {
 	if info.TransportTypeSet {
 		existing.TransportType = info.TransportType
 	}
+	// Bump LastSeen to record that we received fresh metadata for this peer.
+	// LastMessageTime is intentionally NOT updated here — it is only set by
+	// UpdateLastMessageTime, which is called on actual wire-protocol messages.
+	// Updating it here would prevent TTL eviction for peers that send metadata
+	// updates but no actual messages.
 	existing.LastSeen = now
-	existing.LastMessageTime = now
 }
 
 // UpdateMetrics atomically applies delta network counters and interaction outcome
@@ -287,26 +291,56 @@ func (r *CentralizedPeerRegistry) Remove(peerID string) {
 
 // Get returns a copy of the peer info for peerID, or false if not found.
 // Returning a copy prevents callers from modifying registry state without
-// locking. Acquires the write lock so it can normalise expired ban state
-// before producing the snapshot — otherwise a peer whose ban window has
-// elapsed could still report IsBanned=true to dashboards / RPC clients.
+// locking. Uses a read lock for the common case; upgrades to a write lock
+// only when the target peer carries a stale IsBanned=true flag that needs
+// to be normalised before the snapshot is produced.
 func (r *CentralizedPeerRegistry) Get(peerID string) (*PeerInfo, bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	r.expireBansLocked()
-
+	r.mu.RLock()
 	info, exists := r.peers[peerID]
 	if !exists {
+		r.mu.RUnlock()
 		return nil, false
 	}
 
+	// Fast path: no ban expiry needed for this peer. Copy under the read lock.
+	needsExpiry := info.IsBanned && r.isBanExpiredLocked(peerID)
+	if !needsExpiry {
+		peerCopy := *info
+		if info.BlockHash != nil {
+			hashCopy := *info.BlockHash
+			peerCopy.BlockHash = &hashCopy
+		}
+		r.mu.RUnlock()
+		return &peerCopy, true
+	}
+	r.mu.RUnlock()
+
+	// Slow path: this peer has an expired ban — take the write lock, expire it,
+	// then return the updated snapshot.
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.expireBansLocked()
+
+	info, exists = r.peers[peerID]
+	if !exists {
+		return nil, false
+	}
 	peerCopy := *info
 	if info.BlockHash != nil {
 		hashCopy := *info.BlockHash
 		peerCopy.BlockHash = &hashCopy
 	}
 	return &peerCopy, true
+}
+
+// isBanExpiredLocked reports whether peerID has an entry in banScores whose
+// ban window has already passed. Must be called with at least the read lock.
+func (r *CentralizedPeerRegistry) isBanExpiredLocked(peerID string) bool {
+	entry, ok := r.banScores[peerID]
+	if !ok {
+		return false
+	}
+	return entry.Banned && time.Now().After(entry.BanUntil)
 }
 
 // List returns copies of peers that pass all active filters, sorted by reputation
@@ -329,10 +363,11 @@ func (r *CentralizedPeerRegistry) List(
 	defer r.mu.Unlock()
 	r.expireBansLocked()
 
+	now := time.Now()
 	result := make([]*PeerInfo, 0, len(r.peers))
 
 	for _, info := range r.peers {
-		if excludeBanned && r.isPeerBannedLocked(info.ID) {
+		if excludeBanned && r.isPeerBannedLocked(info.ID, now) {
 			continue
 		}
 		if transportFilter != nil && info.TransportType != *transportFilter {
@@ -391,14 +426,15 @@ func (r *CentralizedPeerRegistry) Count() int {
 	return len(r.peers)
 }
 
-// isPeerBannedLocked checks if a peer is currently banned, considering expiry.
-// Must be called with r.mu held (read or write lock).
-func (r *CentralizedPeerRegistry) isPeerBannedLocked(peerID string) bool {
+// isPeerBannedLocked checks if a peer is currently banned considering expiry.
+// now is passed in so callers that already have a timestamp don't need an
+// extra time.Now() call per iteration. Must be called with r.mu held.
+func (r *CentralizedPeerRegistry) isPeerBannedLocked(peerID string, now time.Time) bool {
 	entry, ok := r.banScores[peerID]
 	if !ok || !entry.Banned {
 		return false
 	}
-	return time.Now().Before(entry.BanUntil)
+	return now.Before(entry.BanUntil)
 }
 
 // expireBansLocked sweeps banScores for entries whose BanUntil has passed,
@@ -876,9 +912,11 @@ func (r *CentralizedPeerRegistry) ClearAllSyncAttempts() int {
 // reputation. Caller must hold the write lock.
 func (r *CentralizedPeerRegistry) recordReceivedSuccessLocked(info *PeerInfo, counter *int64, responseTimeMs int64) {
 	*counter++
+	info.InteractionAttempts++
 	info.InteractionSuccesses++
-	info.LastInteractionSuccess = time.Now()
-	info.LastSeen = info.LastInteractionSuccess
+	info.LastInteractionAttempt = time.Now()
+	info.LastInteractionSuccess = info.LastInteractionAttempt
+	info.LastSeen = info.LastInteractionAttempt
 
 	if responseTimeMs > 0 {
 		if info.AvgResponseTimeMs == 0 {

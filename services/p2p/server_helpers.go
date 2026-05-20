@@ -24,6 +24,13 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+const reputationCacheTTL = 5 * time.Second
+
+type reputationCacheEntry struct {
+	score     float64
+	expiresAt time.Time
+}
+
 func (s *Server) handleBlockTopic(_ context.Context, m []byte, fromID string) {
 	var (
 		blockMessage BlockMessage
@@ -903,38 +910,54 @@ func (s *Server) shouldSkipBannedPeer(from string, messageType string) bool {
 	return false
 }
 
-// shouldSkipUnhealthyPeer checks if we should skip a message from an unhealthy peer
-// Only checks health for directly connected peers (not gossiped peers)
+// shouldSkipUnhealthyPeer checks if we should skip a message from an unhealthy
+// peer. Reputation scores are cached for reputationCacheTTL to avoid a gRPC
+// round-trip on every pubsub message. Only applies to directly connected peers
+// whose ID can be decoded as a libp2p peer.ID; gossiped relay IDs are allowed
+// through unconditionally.
 func (s *Server) shouldSkipUnhealthyPeer(from string, messageType string) bool {
-	// If no peer registry, allow all messages
 	if s.peerRegistry == nil {
 		return false
 	}
 
 	peerID, err := peer.Decode(from)
 	if err != nil {
-		// If we can't decode the peer ID (e.g., from is a hostname/identifier in gossiped messages),
-		// we can't check health status, so allow the message through.
-		// This is normal for gossiped messages where 'from' is the relay peer's identifier, not a valid peer ID.
 		return false
 	}
+	idStr := peerID.String()
 
-	peerInfo, exists, err := s.peerRegistry.GetPeer(s.gCtx, peerID.String())
+	// Check cache first.
+	now := time.Now()
+	if v, ok := s.reputationCache.Load(idStr); ok {
+		entry := v.(reputationCacheEntry)
+		if now.Before(entry.expiresAt) {
+			if entry.score < 20.0 {
+				s.logger.Debugf("[%s] ignoring notification from low reputation peer %s (cached score: %.2f)", messageType, from, entry.score)
+				return true
+			}
+			return false
+		}
+	}
+
+	// Cache miss or expired — fetch from registry.
+	peerInfo, exists, err := s.peerRegistry.GetPeer(s.gCtx, idStr)
 	if err != nil {
 		s.logger.Warnf("[shouldSkipUnhealthyPeer] GetPeer %s failed: %v", peerID, err)
 		return false
 	}
 	if !exists {
-		// Peer not in registry - allow message (peer might be new)
 		return false
 	}
 
-	// Filter peers with very low reputation scores
+	s.reputationCache.Store(idStr, reputationCacheEntry{
+		score:     peerInfo.ReputationScore,
+		expiresAt: now.Add(reputationCacheTTL),
+	})
+
 	if peerInfo.ReputationScore < 20.0 {
 		s.logger.Debugf("[%s] ignoring notification from low reputation peer %s (score: %.2f)", messageType, from, peerInfo.ReputationScore)
 		return true
 	}
-
 	return false
 }
 
