@@ -113,6 +113,17 @@ export const getGraphObj = (t, data, period, smooth = false) => {
     case '3m':
       startDate -= 90 * 24 * 60 * 60 * 1000
       break
+    case 'all':
+      // The backend returns every block when period is "all"; pin the x-axis
+      // to the earliest sample so the full series is visible. The SQL query
+      // returns rows in undefined order so we derive the minimum explicitly.
+      if (graphData.length > 0) {
+        startDate = graphData.reduce(
+          (min, point) => (point[0] < min ? point[0] : min),
+          graphData[0][0],
+        )
+      }
+      break
   }
 
   // graph options
