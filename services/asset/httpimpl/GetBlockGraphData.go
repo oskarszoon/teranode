@@ -26,6 +26,7 @@ import (
 //   - "1w"  - Last week
 //   - "1m"  - Last month (30 days)
 //   - "3m"  - Last 3 months (90 days)
+//   - "all" - All available data
 //
 // Returns:
 //   - error: Any error encountered during processing
@@ -91,6 +92,8 @@ func (h *HTTP) GetBlockGraphData(c echo.Context) error {
 		periodMillis = time.Now().Add(-30*24*time.Hour).UnixNano() / int64(time.Millisecond)
 	case "3m":
 		periodMillis = time.Now().Add(-90*24*time.Hour).UnixNano() / int64(time.Millisecond)
+	case "all":
+		periodMillis = 0
 	default:
 		return echo.NewHTTPError(http.StatusBadRequest, errors.NewInvalidArgumentError("a valid period is required").Error())
 	}

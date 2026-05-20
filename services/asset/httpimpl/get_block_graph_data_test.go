@@ -88,7 +88,7 @@ func TestGetBlockGraphData(t *testing.T) {
 		echoContext.SetPath("/blocks/graph/:period")
 		echoContext.SetParamNames("period")
 
-		periods := []string{"2h", "6h", "12h", "24h", "1w", "1m", "3m"}
+		periods := []string{"2h", "6h", "12h", "24h", "1w", "1m", "3m", "all"}
 
 		for _, period := range periods {
 			echoContext.SetParamValues(period)
