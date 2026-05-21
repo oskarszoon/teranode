@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/bsv-blockchain/teranode/errors"
-	"github.com/docker/go-connections/nat"
 	_ "github.com/lib/pq"
 	testcontainers "github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -44,9 +43,9 @@ func RunPostgresTestContainer(ctx context.Context, testID string) (*PostgresTest
 		WithStartupTimeout(30 * time.Second)
 
 	// SQL query check
-	waitForSQL := wait.ForSQL("5432/tcp", "postgres", func(host string, port nat.Port) string {
+	waitForSQL := wait.ForSQL("5432/tcp", "postgres", func(host string, port string) string {
 		return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable",
-			postgresUser, postgresPassword, host, port.Port(), postgresDB)
+			postgresUser, postgresPassword, host, port, postgresDB)
 	}).WithQuery("SELECT 1").WithStartupTimeout(30 * time.Second)
 
 	// Combine the strategies
