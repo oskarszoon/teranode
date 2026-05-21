@@ -5,14 +5,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/bsv-blockchain/go-bt/v2"
-	"net/netip"
-
 	"github.com/bsv-blockchain/teranode/errors"
 	helper "github.com/bsv-blockchain/teranode/test/utils"
 	"github.com/moby/moby/api/types/container"
