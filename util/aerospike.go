@@ -149,7 +149,7 @@ func getAerospikeClient(logger ulogger.Logger, url *url.URL, tSettings *settings
 			return nil, errors.NewConfigurationError("no aerospike_readPolicy found")
 		}
 
-		logger.Infof("[Aerospike] readPolicy url %s", readPolicyURL)
+		logger.Infof("[Aerospike] readPolicy url %s", redactURL(readPolicyURL))
 
 		var err error
 
@@ -188,7 +188,7 @@ func getAerospikeClient(logger ulogger.Logger, url *url.URL, tSettings *settings
 			return nil, errors.NewConfigurationError("no aerospike_writePolicy setting found")
 		}
 
-		logger.Infof("[Aerospike] writePolicy url %s", writePolicyURL)
+		logger.Infof("[Aerospike] writePolicy url %s", redactURL(writePolicyURL))
 
 		writeMaxRetries, err = getQueryInt(writePolicyURL, "MaxRetries", aerospike.NewWritePolicy(0, 0).MaxRetries, logger)
 		if err != nil {
@@ -226,7 +226,7 @@ func getAerospikeClient(logger ulogger.Logger, url *url.URL, tSettings *settings
 			return nil, errors.NewConfigurationError("no aerospike_batchPolicy setting found")
 		}
 
-		logger.Infof("[Aerospike] batchPolicy url %s", batchPolicyURL)
+		logger.Infof("[Aerospike] batchPolicy url %s", redactURL(batchPolicyURL))
 
 		batchTotalTimeout, err = getQueryDuration(batchPolicyURL, "TotalTimeout", aerospike.NewBatchPolicy().TotalTimeout, logger)
 		if err != nil {
@@ -273,7 +273,7 @@ func getAerospikeClient(logger ulogger.Logger, url *url.URL, tSettings *settings
 			querySleepBetweenRetries = aerospike.NewQueryPolicy().SleepBetweenRetries
 			querySleepMultiplier = aerospike.NewQueryPolicy().SleepMultiplier
 		} else {
-			logger.Infof("[Aerospike] queryPolicy url %s", queryPolicyURL)
+			logger.Infof("[Aerospike] queryPolicy url %s", redactURL(queryPolicyURL))
 
 			queryMaxRetries, err = getQueryInt(queryPolicyURL, "MaxRetries", aerospike.NewQueryPolicy().MaxRetries, logger)
 			if err != nil {
@@ -304,7 +304,7 @@ func getAerospikeClient(logger ulogger.Logger, url *url.URL, tSettings *settings
 		// todo optimize these https://github.com/aerospike/aerospike-client-go/issues/256#issuecomment-479964112
 		// todo optimize read policies
 		// todo optimize write policies
-		logger.Infof("[Aerospike] base/connection policy url %s", url)
+		logger.Infof("[Aerospike] base/connection policy url %s", redactURL(url))
 
 		policy.LimitConnectionsToQueueSize, err = getQueryBool(url, "LimitConnectionsToQueueSize", policy.LimitConnectionsToQueueSize, logger)
 		if err != nil {
