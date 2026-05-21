@@ -273,11 +273,14 @@ func (u *Server) ProcessSubtreeUTXOStreaming(ctx context.Context, subtreeHash ch
 	// 3. Stream through transactions and process UTXO changes
 	subtreeLen := subtree.Length()
 
+	arena := getBlockpersisterArena()
+	defer putBlockpersisterArena(arena)
+	var hashScratch []byte
+
 	for i := 0; i < subtreeLen; i++ {
 		tx := &bt.Tx{}
 
-		// Read transaction from buffered reader
-		if _, err = tx.ReadFrom(bufferedReader); err != nil {
+		if _, err = tx.ReadFromWithArena(bufferedReader, arena); err != nil {
 			return errors.NewProcessingError("[BlockPersister] error reading transaction at index %d from subtree %s", i, subtreeHash.String(), err)
 		}
 
@@ -295,7 +298,8 @@ func (u *Server) ProcessSubtreeUTXOStreaming(ctx context.Context, subtreeHash ch
 
 		// check the tx hash matches the expected hash (from subtree), except for coinbase
 		if !tx.IsCoinbase() {
-			txHash := tx.TxIDChainHash()
+			var txHash chainhash.Hash
+			txHash, hashScratch = tx.HashTxIDInto(hashScratch)
 			if !txHash.Equal(subtree.Nodes[i].Hash) {
 				return errors.NewProcessingError("[BlockPersister] transaction hash mismatch at index %d: expected %s, got %s", i, subtree.Nodes[i].Hash.String(), txHash.String())
 			}
