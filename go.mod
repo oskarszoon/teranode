@@ -23,7 +23,7 @@ require (
 	github.com/centrifugal/centrifuge v0.33.2
 	github.com/centrifugal/centrifuge-go v0.10.1
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc
-	github.com/docker/go-connections v0.7.0
+	github.com/docker/go-connections v0.7.0 // indirect
 	github.com/dolthub/swiss v0.2.1
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
@@ -140,7 +140,6 @@ require (
 	github.com/mitchellh/hashstructure/v2 v2.0.2 // indirect
 	github.com/moby/docker-image-spec v1.3.1 // indirect
 	github.com/moby/go-archive v0.2.0 // indirect
-	github.com/moby/moby/api v1.54.2 // indirect
 	github.com/moby/moby/client v0.4.1 // indirect
 	github.com/moby/sys/atomicwriter v0.1.0 // indirect
 	github.com/moby/sys/capability v0.4.0 // indirect
@@ -212,6 +211,7 @@ require (
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/dgraph-io/badger/v4 v4.8.0
 	github.com/felixge/fgprof v0.9.5
+	github.com/moby/moby/api v1.54.2
 	github.com/ordishs/go-bitcoin v1.0.88
 	github.com/seiflotfy/cuckoofilter v0.0.0-20240715131351-a2f2c23f1771
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.42.0
@@ -269,7 +269,7 @@ require (
 	github.com/distribution/reference v0.6.0 // indirect
 	github.com/docker/buildx v0.33.0 // indirect
 	github.com/docker/cli v29.4.0+incompatible // indirect
-	github.com/docker/docker v28.5.2+incompatible
+	github.com/docker/docker v28.5.2+incompatible // indirect
 	github.com/docker/docker-credential-helpers v0.9.5 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
 	github.com/dolthub/maphash v0.1.0 // indirect
