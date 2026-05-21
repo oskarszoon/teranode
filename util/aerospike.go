@@ -72,6 +72,40 @@ func init() {
 // GetAerospikeClient creates or retrieves a cached Aerospike client for the given URL.
 // It configures connection policies, authentication, and connection pooling based on settings.
 // Returns a thread-safe client instance that can be shared across goroutines.
+// redactURL returns the URL string with the userinfo password component
+// masked. It does not mutate the input. A nil input returns "<nil>".
+func redactURL(u *url.URL) string {
+	if u == nil {
+		return "<nil>"
+	}
+
+	if u.User == nil {
+		return u.String()
+	}
+
+	if _, hasPwd := u.User.Password(); !hasPwd {
+		return u.String()
+	}
+
+	clone := *u
+	clone.User = url.UserPassword(u.User.Username(), "REDACTED")
+
+	return clone.String()
+}
+
+// aerospikePolicySummary returns a log-safe summary of an aerospike.ClientPolicy.
+// The Password field is never printed.
+func aerospikePolicySummary(p *aerospike.ClientPolicy) string {
+	if p == nil {
+		return "<nil>"
+	}
+
+	return fmt.Sprintf(
+		"ClientPolicy{User:%q, Password:***, ConnectionQueueSize:%d, Timeout:%s}",
+		p.User, p.ConnectionQueueSize, p.Timeout,
+	)
+}
+
 func GetAerospikeClient(logger ulogger.Logger, url *url.URL, tSettings *settings.Settings) (*uaerospike.Client, error) {
 	logger = logger.New("uaero")
 
@@ -364,7 +398,7 @@ func getAerospikeClient(logger ulogger.Logger, url *url.URL, tSettings *settings
 		}
 	}
 
-	logger.Debugf("url %s policy %#v\n", url, policy)
+	logger.Debugf("url %s policy %s\n", redactURL(url), aerospikePolicySummary(policy))
 
 	// policy = aerospike.NewClientPolicy()
 	client, err := uaerospike.NewClientWithPolicyAndHost(policy, hosts...)
