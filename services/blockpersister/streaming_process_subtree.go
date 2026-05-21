@@ -273,6 +273,13 @@ func (u *Server) ProcessSubtreeUTXOStreaming(ctx context.Context, subtreeHash ch
 	// 3. Stream through transactions and process UTXO changes
 	subtreeLen := subtree.Length()
 
+	// Arena-backed tx decode is safe here because utxoDiff is
+	// *utxopersister.UTXOSet (NOT services/blockpersister/utxoset/model.UTXODiff,
+	// which retains script slices in an in-memory map). UTXOSet.ProcessTx
+	// serialises via UTXOWrapper.Bytes -> UTXO.Bytes, which does
+	// `append(b, u.Script...)` — a heap copy — and then writes through a
+	// bufio.Writer (which copies into its internal buffer). No arena-backed
+	// slice survives this function frame.
 	arena := getBlockpersisterArena()
 	defer putBlockpersisterArena(arena)
 	var hashScratch []byte
