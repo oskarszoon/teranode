@@ -5,7 +5,9 @@ import (
 	"reflect"
 )
 
-const redactedPlaceholder = "***REDACTED***"
+// redactedValue is defined in export.go; both export and the log-safe
+// Redact() helper share the same placeholder so consumers see a
+// consistent marker.
 
 // Redact returns a deep clone of s with every field tagged `redact:"true"`
 // replaced by a placeholder. The clone is safe to marshal to JSON for logging.
@@ -62,6 +64,52 @@ func redactValue(v reflect.Value) {
 	}
 }
 
+// extractSensitiveKeys walks the Settings struct via reflection and returns
+// a map of config keys (the `key:"X"` tag value) for every field tagged
+// `redact:"true"`. Single source of truth for sensitive field identification —
+// add `redact:"true"` to mark new fields. Used by export.go to identify
+// settings whose values must be redacted in the settings portal.
+func extractSensitiveKeys() map[string]bool {
+	out := map[string]bool{}
+	walkSensitiveTags(reflect.TypeOf(Settings{}), out)
+
+	return out
+}
+
+func walkSensitiveTags(t reflect.Type, out map[string]bool) {
+	if t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+
+	if t.Kind() != reflect.Struct {
+		return
+	}
+
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+
+		if f.Tag.Get("redact") == "true" {
+			if k := f.Tag.Get("key"); k != "" {
+				out[k] = true
+			}
+
+			continue
+		}
+
+		ft := f.Type
+		if ft.Kind() == reflect.Pointer {
+			ft = ft.Elem()
+		}
+
+		if ft.Kind() == reflect.Struct {
+			walkSensitiveTags(ft, out)
+		}
+	}
+}
+
 func zeroSecret(v reflect.Value) {
 	if !v.CanSet() {
 		return
@@ -69,11 +117,11 @@ func zeroSecret(v reflect.Value) {
 
 	switch v.Kind() {
 	case reflect.String:
-		v.SetString(redactedPlaceholder)
+		v.SetString(redactedValue)
 	case reflect.Slice:
 		if v.Type().Elem().Kind() == reflect.String {
 			for i := 0; i < v.Len(); i++ {
-				v.Index(i).SetString(redactedPlaceholder)
+				v.Index(i).SetString(redactedValue)
 			}
 
 			return
