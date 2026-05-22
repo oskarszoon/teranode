@@ -110,6 +110,13 @@ func RunPostgresTestContainer(ctx context.Context, testID string) (*PostgresTest
 
 		lastErr = err
 
+		// GenericContainer may have started the container even when err != nil
+		// (e.g. wait strategy timeout). Terminate it so it does not leak.
+		if container != nil {
+			_ = container.Terminate(ctx)
+			container = nil
+		}
+
 		// Check if this is a port binding error
 		if strings.Contains(err.Error(), "bind: address already in use") {
 			// This is a port binding error, continue with retries
@@ -128,21 +135,25 @@ func RunPostgresTestContainer(ctx context.Context, testID string) (*PostgresTest
 	// Get container state
 	state, err := container.State(ctx)
 	if err != nil {
+		_ = container.Terminate(ctx)
 		return nil, errors.NewServiceError("failed to get container state", err)
 	}
 
 	// Check if container is running
 	if !state.Running {
+		_ = container.Terminate(ctx)
 		return nil, errors.NewServiceError("postgres container is not running after startup", nil)
 	}
 
 	host, err := container.Host(ctx)
 	if err != nil {
+		_ = container.Terminate(ctx)
 		return nil, errors.NewServiceError("failed to get postgres container host", err)
 	}
 
 	port, err := container.MappedPort(ctx, "5432")
 	if err != nil {
+		_ = container.Terminate(ctx)
 		return nil, errors.NewServiceError("failed to get mapped port for postgres container", err)
 	}
 
