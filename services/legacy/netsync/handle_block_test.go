@@ -1162,16 +1162,13 @@ func TestSyncManager_createUtxos_ChunksExistingTxs(t *testing.T) {
 	logger := ulogger.TestLogger{}
 	tSettings := test.CreateBaseTestSettings(t)
 
-	// Force small chunks so the test is cheap but still exercises the >1 chunk path.
 	tSettings.UtxoStore.MaxMinedBatchSize = 4
 	tSettings.UtxoStore.MaxMinedRoutines = 2
 
-	const totalTxs = 10 // 10 / 4 = 3 chunks (4, 4, 2)
+	const totalTxs = 10 // 2 workers × ceil(5/4) chunks each = 4 chunks of sizes (4, 1, 4, 1)
 
 	mockStore := &utxo.MockUtxostore{}
 
-	// Build N distinct synthetic txs. They never need to be valid on-chain — Create
-	// returns ErrTxExists immediately so we never inspect them.
 	txs := make([]*bt.Tx, totalTxs)
 	hashes := make([]chainhash.Hash, totalTxs)
 	for i := 0; i < totalTxs; i++ {
@@ -1182,12 +1179,10 @@ func TestSyncManager_createUtxos_ChunksExistingTxs(t *testing.T) {
 		hashes[i] = *tx.TxIDChainHash()
 	}
 
-	// Every Create returns ErrTxExists, forcing all txs into the existing path.
 	mockStore.On("Create",
 		mock.Anything, mock.Anything, mock.Anything, mock.Anything,
 	).Return((*meta.Data)(nil), errors.ErrTxExists)
 
-	// Capture every chunk passed to SetMinedMulti.
 	var (
 		callMu      sync.Mutex
 		callChunks  [][]chainhash.Hash
@@ -1309,7 +1304,7 @@ func TestSyncManager_createUtxos_ChunkErrorPropagates(t *testing.T) {
 
 	err := sm.createUtxos(ctx, txMap, block, 42)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "failed to merge blockID into pre-existing txs",
+	require.Contains(t, err.Error(), "failed to merge blockID into 20 pre-existing txs",
 		"expected wrapped ProcessingError, got: %v", err)
 
 	// Expect strictly fewer than total chunks (5) to have executed — siblings short-circuited.

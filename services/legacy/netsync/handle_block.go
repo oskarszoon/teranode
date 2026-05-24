@@ -788,7 +788,7 @@ func (sm *SyncManager) createUtxos(ctx context.Context, txMap *txmap.SyncedMap[c
 		}
 
 		if err = mergeG.Wait(); err != nil {
-			return errors.NewProcessingError("failed to merge blockID into pre-existing txs", err)
+			return errors.NewProcessingError("failed to merge blockID into %d pre-existing txs", len(existingTxHashes), err)
 		}
 	}
 
