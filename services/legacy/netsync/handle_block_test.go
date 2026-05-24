@@ -29,6 +29,7 @@ import (
 	"github.com/bsv-blockchain/teranode/services/legacy/testdata"
 	"github.com/bsv-blockchain/teranode/services/validator"
 	"github.com/bsv-blockchain/teranode/stores/blob/memory"
+	"github.com/bsv-blockchain/teranode/stores/utxo"
 	"github.com/bsv-blockchain/teranode/stores/utxo/fields"
 	"github.com/bsv-blockchain/teranode/stores/utxo/meta"
 	"github.com/bsv-blockchain/teranode/stores/utxo/nullstore"
@@ -1148,6 +1149,175 @@ func TestSyncManager_createUtxos_MergesBlockIDsForExistingTxs(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, post.BlockIDs, expectedBlockID,
 		"createUtxos must merge blockID %d into the pre-existing tx", expectedBlockID)
+}
+
+// TestSyncManager_createUtxos_ChunksExistingTxs verifies that when many pre-existing
+// transactions need their blockID merged, createUtxos splits the merge across multiple
+// SetMinedMulti calls bounded by MaxMinedBatchSize, instead of submitting a single
+// monolithic slice that exhausts the aerospike client connection pool. See issue #936.
+func TestSyncManager_createUtxos_ChunksExistingTxs(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	logger := ulogger.TestLogger{}
+	tSettings := test.CreateBaseTestSettings(t)
+
+	// Force small chunks so the test is cheap but still exercises the >1 chunk path.
+	tSettings.UtxoStore.MaxMinedBatchSize = 4
+	tSettings.UtxoStore.MaxMinedRoutines = 2
+
+	const totalTxs = 10 // 10 / 4 = 3 chunks (4, 4, 2)
+
+	mockStore := &utxo.MockUtxostore{}
+
+	// Build N distinct synthetic txs. They never need to be valid on-chain — Create
+	// returns ErrTxExists immediately so we never inspect them.
+	txs := make([]*bt.Tx, totalTxs)
+	hashes := make([]chainhash.Hash, totalTxs)
+	for i := 0; i < totalTxs; i++ {
+		tx := bt.NewTx()
+		tx.Version = 1
+		require.NoError(t, tx.PayToAddress("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", uint64(1000+i)))
+		txs[i] = tx
+		hashes[i] = *tx.TxIDChainHash()
+	}
+
+	// Every Create returns ErrTxExists, forcing all txs into the existing path.
+	mockStore.On("Create",
+		mock.Anything, mock.Anything, mock.Anything, mock.Anything,
+	).Return((*meta.Data)(nil), errors.ErrTxExists)
+
+	// Capture every chunk passed to SetMinedMulti.
+	var (
+		callMu      sync.Mutex
+		callChunks  [][]chainhash.Hash
+		emptyResult = map[chainhash.Hash][]uint32{}
+	)
+	mockStore.On("SetMinedMulti",
+		mock.Anything, mock.Anything, mock.Anything,
+	).Run(func(args mock.Arguments) {
+		chunk := args.Get(1).([]*chainhash.Hash)
+		copied := make([]chainhash.Hash, len(chunk))
+		for i, h := range chunk {
+			copied[i] = *h
+		}
+		callMu.Lock()
+		callChunks = append(callChunks, copied)
+		callMu.Unlock()
+	}).Return(emptyResult, nil)
+
+	sm := &SyncManager{
+		settings:  tSettings,
+		logger:    logger,
+		utxoStore: mockStore,
+	}
+
+	txMap := txmap.NewSyncedMap[chainhash.Hash, *TxMapWrapper](totalTxs)
+	for i, h := range hashes {
+		txMap.Set(h, &TxMapWrapper{Tx: txs[i]})
+	}
+
+	block := bsvutil.NewBlock(&wire.MsgBlock{Header: wire.BlockHeader{Version: 1}})
+	block.SetHeight(100)
+
+	require.NoError(t, sm.createUtxos(ctx, txMap, block, 42))
+
+	// Assert 1: at least 2 calls (proves chunking happens).
+	require.GreaterOrEqual(t, len(callChunks), 2,
+		"expected multiple SetMinedMulti calls; got %d (monolithic call regression)", len(callChunks))
+
+	// Assert 2: every chunk respects MaxMinedBatchSize.
+	for i, chunk := range callChunks {
+		require.LessOrEqual(t, len(chunk), tSettings.UtxoStore.MaxMinedBatchSize,
+			"chunk %d size %d exceeds MaxMinedBatchSize=%d", i, len(chunk), tSettings.UtxoStore.MaxMinedBatchSize)
+	}
+
+	// Assert 3: union of all chunks equals the input set (no duplicates, no drops).
+	seen := make(map[chainhash.Hash]int, totalTxs)
+	for _, chunk := range callChunks {
+		for _, h := range chunk {
+			seen[h]++
+		}
+	}
+	require.Len(t, seen, totalTxs, "expected %d unique hashes across chunks, got %d", totalTxs, len(seen))
+	for _, h := range hashes {
+		require.Equalf(t, 1, seen[h], "hash %s missing or duplicated across chunks", h)
+	}
+}
+
+// TestSyncManager_createUtxos_ChunkErrorPropagates verifies that a chunked
+// SetMinedMulti failure short-circuits sibling workers and propagates a wrapped
+// ProcessingError, instead of silently swallowing failures or completing remaining
+// chunks after a fatal store error.
+func TestSyncManager_createUtxos_ChunkErrorPropagates(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	logger := ulogger.TestLogger{}
+	tSettings := test.CreateBaseTestSettings(t)
+	tSettings.UtxoStore.MaxMinedBatchSize = 4
+	tSettings.UtxoStore.MaxMinedRoutines = 2
+
+	const totalTxs = 20 // 20 / 4 = 5 chunks — plenty of room for short-circuit
+
+	mockStore := &utxo.MockUtxostore{}
+
+	txs := make([]*bt.Tx, totalTxs)
+	hashes := make([]chainhash.Hash, totalTxs)
+	for i := 0; i < totalTxs; i++ {
+		tx := bt.NewTx()
+		tx.Version = 1
+		require.NoError(t, tx.PayToAddress("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", uint64(2000+i)))
+		txs[i] = tx
+		hashes[i] = *tx.TxIDChainHash()
+	}
+
+	mockStore.On("Create",
+		mock.Anything, mock.Anything, mock.Anything, mock.Anything,
+	).Return((*meta.Data)(nil), errors.ErrTxExists)
+
+	// Second SetMinedMulti call fails; remaining workers should short-circuit on
+	// gCtx.Err(). Track total call count so we can prove some were skipped.
+	var (
+		callMu    sync.Mutex
+		callCount int
+	)
+	mockStore.On("SetMinedMulti",
+		mock.Anything, mock.Anything, mock.Anything,
+	).Run(func(args mock.Arguments) {
+		callMu.Lock()
+		callCount++
+		callMu.Unlock()
+	}).Return(
+		map[chainhash.Hash][]uint32{},
+		errors.NewStorageError("synthetic chunk failure"),
+	)
+
+	sm := &SyncManager{
+		settings:  tSettings,
+		logger:    logger,
+		utxoStore: mockStore,
+	}
+
+	txMap := txmap.NewSyncedMap[chainhash.Hash, *TxMapWrapper](totalTxs)
+	for i, h := range hashes {
+		txMap.Set(h, &TxMapWrapper{Tx: txs[i]})
+	}
+
+	block := bsvutil.NewBlock(&wire.MsgBlock{Header: wire.BlockHeader{Version: 1}})
+	block.SetHeight(100)
+
+	err := sm.createUtxos(ctx, txMap, block, 42)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "failed to merge blockID into pre-existing txs",
+		"expected wrapped ProcessingError, got: %v", err)
+
+	// Expect strictly fewer than total chunks (5) to have executed — siblings short-circuited.
+	// Allow up to numWorkers (2) in-flight when the first failure lands, so finalCount <= 4.
+	callMu.Lock()
+	defer callMu.Unlock()
+	require.LessOrEqual(t, callCount, 4,
+		"expected siblings to short-circuit; observed %d/%d chunk calls", callCount, 5)
 }
 
 func TestSyncManager_quickValidationAllowed(t *testing.T) {
