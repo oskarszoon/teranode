@@ -1253,7 +1253,7 @@ func TestSyncManager_createUtxos_ChunkErrorPropagates(t *testing.T) {
 	tSettings.UtxoStore.MaxMinedBatchSize = 4
 	tSettings.UtxoStore.MaxMinedRoutines = 2
 
-	const totalTxs = 20 // 20 / 4 = 5 chunks — plenty of room for short-circuit
+	const totalTxs = 20 // 2 workers × ceil(10/4) chunks each = 6 chunks of sizes (4, 4, 2, 4, 4, 2)
 
 	mockStore := &utxo.MockUtxostore{}
 
@@ -1307,12 +1307,12 @@ func TestSyncManager_createUtxos_ChunkErrorPropagates(t *testing.T) {
 	require.Contains(t, err.Error(), "failed to merge blockID into 20 pre-existing txs",
 		"expected wrapped ProcessingError, got: %v", err)
 
-	// Expect strictly fewer than total chunks (5) to have executed — siblings short-circuited.
+	// Expect strictly fewer than total chunks (6) to have executed — siblings short-circuited.
 	// Allow up to numWorkers (2) in-flight when the first failure lands, so finalCount <= 4.
 	callMu.Lock()
 	defer callMu.Unlock()
 	require.LessOrEqual(t, callCount, 4,
-		"expected siblings to short-circuit; observed %d/%d chunk calls", callCount, 5)
+		"expected siblings to short-circuit; observed %d/6 chunk calls", callCount)
 }
 
 func TestSyncManager_quickValidationAllowed(t *testing.T) {
