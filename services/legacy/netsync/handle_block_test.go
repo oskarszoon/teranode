@@ -1299,124 +1299,89 @@ func TestSyncManager_createUtxos_ChunkErrorReturnsWrappedProcessingError(t *test
 		"expected wrapped ProcessingError, got: %v", err)
 }
 
-// TestSyncManager_createUtxos_ChunkFailureCancelsSiblings proves the mergeCtx.Err()
-// check at the top of each worker's inner loop actually does work: when one chunk
-// fails, errgroup cancels mergeCtx and any surviving sibling worker that is about
-// to enter its next iteration must observe the cancellation and return WITHOUT
-// issuing another SetMinedMulti call.
+// TestSyncManager_createUtxos_ChunkFailureCancelsSiblings proves the
+// `if mergeCtx.Err() != nil { return mergeCtx.Err() }` short-circuit at the top
+// of each worker's inner loop actually suppresses sibling iterations after a
+// chunk fails.
 //
-// Detecting the check requires careful orchestration. A naive "fail every call
-// after N" only observes 2 post-trigger calls (one per worker — each worker dies
-// on its own first error) and cannot distinguish a working check from a stripped
-// impl. Instead we synchronize the two workers so the failing call lands BEFORE
-// the surviving worker re-enters its loop:
+// Why this design (vs orchestrating worker identity): worker A vs worker B
+// identity at runtime is not predictable from the input hash array — the
+// `existingTxHashes` slice is appended by parallel Create() goroutines in
+// arbitrary scheduler order, so subsequent worker ranges are scheduler-derived.
+// We avoid that by not trying to pin which worker calls which expectation.
 //
-//  1. totalTxs=16, batchSize=4, routines=2 → numChunks=4, numWorkers=2,
-//     rangeSize=8 — each worker iterates exactly twice (chunks of 4 + 4).
-//  2. Two `Once()` expectations make the first call (whichever worker arrives
-//     first) succeed, and the second call (the other worker's first iteration)
-//     BLOCK until the failure has been triggered, then succeed.
-//  3. A third `Once()` expectation makes the next call FAIL. By construction
-//     that's the originally-first worker's SECOND iteration. errgroup cancels
-//     mergeCtx; the originally-first worker returns the error.
-//  4. The blocked worker is then released and returns success from its first
-//     call. Its loop checks mergeCtx.Err() at the top of iteration 2. With the
-//     short-circuit: returns nil immediately, no further SetMinedMulti call.
-//     Without the short-circuit: it calls SetMinedMulti, hitting expectation 4
-//     (.Maybe) which bumps failureCount.
+// Instead: pick a worker/chunk topology where the surviving worker has many
+// remaining iterations after the trigger, so the mutation's effect dominates
+// any in-flight noise.
 //
-// Assertion: failureCount strictly equals 1 (only the triggering call). Removing
-// `if mergeCtx.Err() != nil { return mergeCtx.Err() }` from handle_block.go
-// causes the surviving worker to make its second call → failureCount == 2.
+//	totalTxs=32, batchSize=4, routines=2 → 8 chunks, 4 per worker.
+//	exp1 .Times(2) — first 2 calls succeed.
+//	exp2 .Once()   — 3rd call fails, cancels mergeCtx.
+//	exp3 .Maybe()  — catch-all, increments postTriggerCount.
+//
+// Across every interleaving the surviving worker has at least 3 remaining
+// iterations after the trigger:
+//   - W_A blasts iter1+iter2 success, iter3 fails → W_B has all 4 iters remaining.
+//   - W_A.iter1 + W_B.iter1 → W_A.iter2 fails → W_B has 3 iters remaining.
+//   - W_B.iter1 + W_B.iter2 → W_B.iter3 fails → W_A has all 4 iters remaining.
+//
+// With the check intact, the surviving worker's for-loop top observes the
+// cancelled mergeCtx on every remaining iteration and bails without a Called.
+// Post-trigger count = 0 normally, or 1 if the sibling's next call was already
+// in flight when cancellation propagated.
+//
+// With the check removed, the surviving worker calls SetMinedMulti for each
+// remaining iteration → exp3 fires ≥ 2 times → postTriggerCount ≥ 2.
+//
+// Assertion: postTriggerCount ≤ 1. Mutation produces 2-4 across interleavings,
+// so the bound reliably distinguishes the two cases.
 func TestSyncManager_createUtxos_ChunkFailureCancelsSiblings(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	const totalTxs = 16 // 2 workers × 2 chunks each = 4 chunks total
+	const totalTxs = 32 // 2 workers × 4 chunks each = 8 chunks total
 	sm, txMap, block, mockStore, _ := newChunkingTestSetup(t, totalTxs, 4, 2)
 
 	var (
-		mu            sync.Mutex
-		successCount  int
-		failureCount  int
-		firstArrived  = make(chan struct{}) // closed when first call lands
-		failureLanded = make(chan struct{}) // closed when failing call has run
+		postTriggerMu    sync.Mutex
+		postTriggerCount int
 	)
 
-	// Expectation 1: first SetMinedMulti call (either worker) returns success
-	// immediately. Signals that workers are running.
 	mockStore.On("SetMinedMulti",
 		mock.Anything, mock.Anything, mock.Anything,
-	).Run(func(args mock.Arguments) {
-		mu.Lock()
-		successCount++
-		mu.Unlock()
-		close(firstArrived)
-	}).Return(map[chainhash.Hash][]uint32{}, nil).Once()
+	).Return(map[chainhash.Hash][]uint32{}, nil).Times(2)
 
-	// Expectation 2: second SetMinedMulti call (the other worker's first
-	// iteration) BLOCKS until (a) the failure has been triggered AND (b) the
-	// errgroup has actually cancelled mergeCtx. (a) alone is not enough — we
-	// could otherwise wake the surviving worker before errgroup observes the
-	// returned error and cancels its context, and the surviving worker's
-	// loop-top check would see an uncancelled context and continue. We use
-	// the SetMinedMulti ctx arg (which IS mergeCtx) and wait on its Done.
 	mockStore.On("SetMinedMulti",
 		mock.Anything, mock.Anything, mock.Anything,
-	).Run(func(args mock.Arguments) {
-		<-firstArrived
-		<-failureLanded
-		// Wait for the errgroup to propagate the cancellation that the
-		// failing call below will trigger when it returns its error.
-		mergeCtx := args.Get(0).(context.Context)
-		<-mergeCtx.Done()
-		mu.Lock()
-		successCount++
-		mu.Unlock()
-	}).Return(map[chainhash.Hash][]uint32{}, nil).Once()
-
-	// Expectation 3: third SetMinedMulti call FAILS. This is the originally-
-	// first worker's second iteration. The failure triggers errgroup
-	// cancellation. We close failureLanded so the blocked worker can proceed.
-	mockStore.On("SetMinedMulti",
-		mock.Anything, mock.Anything, mock.Anything,
-	).Run(func(args mock.Arguments) {
-		<-firstArrived
-		mu.Lock()
-		failureCount++
-		mu.Unlock()
-		close(failureLanded)
-	}).Return(
+	).Return(
 		map[chainhash.Hash][]uint32{},
 		errors.NewStorageError("synthetic chunk failure"),
 	).Once()
 
-	// Expectation 4: catch-all for any further SetMinedMulti call. Should NOT
-	// fire when the short-circuit is in place. If it fires, failureCount jumps
-	// to 2 and the assertion fails.
+	// Catch-all returns nil so the surviving worker keeps iterating under
+	// mutation — if it returned an error, the worker would bail on its first
+	// post-trigger call (postTriggerCount=1) and the mutation would slip past
+	// the `<= 1` assertion. With nil returns, the surviving worker drains all
+	// its remaining iterations and postTriggerCount ≥ 3.
 	mockStore.On("SetMinedMulti",
 		mock.Anything, mock.Anything, mock.Anything,
 	).Run(func(args mock.Arguments) {
-		mu.Lock()
-		failureCount++
-		mu.Unlock()
-	}).Return(
-		map[chainhash.Hash][]uint32{},
-		errors.NewStorageError("post short-circuit call (should not happen)"),
-	).Maybe()
+		postTriggerMu.Lock()
+		postTriggerCount++
+		postTriggerMu.Unlock()
+	}).Return(map[chainhash.Hash][]uint32{}, nil).Maybe()
 
 	err := sm.createUtxos(ctx, txMap, block, 42)
 	require.Error(t, err, "expected error to propagate from failing chunk")
 
-	mu.Lock()
-	finalFailures := failureCount
-	finalSuccesses := successCount
-	mu.Unlock()
+	postTriggerMu.Lock()
+	finalCount := postTriggerCount
+	postTriggerMu.Unlock()
 
-	require.Equal(t, 2, finalSuccesses,
-		"both workers must execute their first iteration successfully; got %d", finalSuccesses)
-	require.Equal(t, 1, finalFailures,
-		"expected mergeCtx short-circuit to suppress the surviving worker's second iteration; got %d failure call(s)", finalFailures)
+	require.LessOrEqual(t, finalCount, 1,
+		"mergeCtx short-circuit should suppress sibling iterations after a chunk fails; "+
+			"observed %d post-trigger call(s). Removing the short-circuit produces ≥ 2.",
+		finalCount)
 }
 
 // TestSyncManager_createUtxos_ExactBatchSize covers n == MaxMinedBatchSize.
