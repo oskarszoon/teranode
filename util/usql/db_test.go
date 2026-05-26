@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -733,4 +734,19 @@ func BenchmarkExec(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
+}
+
+func TestDB_EngineField(t *testing.T) {
+	db, _, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+
+	wrapped := WrapDB(db)
+	require.Equal(t, Engine(""), wrapped.Engine(), "default engine is empty until set")
+
+	wrapped.SetEngine(EnginePostgres)
+	require.Equal(t, EnginePostgres, wrapped.Engine())
+
+	wrapped.SetEngine(EngineCockroach)
+	require.Equal(t, EngineCockroach, wrapped.Engine())
 }

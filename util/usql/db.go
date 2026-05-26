@@ -18,6 +18,7 @@ type DB struct {
 	*sql.DB
 	retryConfig    RetryConfig
 	circuitBreaker *CircuitBreaker
+	engine         Engine
 }
 
 func Open(driverName, dataSourceName string) (*DB, error) {
@@ -194,4 +195,18 @@ func (db *DB) recordCircuitBreakerResult(err error) {
 		db.circuitBreaker.RecordSuccess()
 	}
 	// Non-retriable errors (business logic errors) are ignored by the circuit breaker
+}
+
+// Engine returns the SQL engine identity for this connection. Set once at
+// init via SetEngine (typically by util.InitSQLDB after DetectEngine). The
+// zero value is the empty Engine; callers must not assume any particular
+// engine before SetEngine has been invoked.
+func (db *DB) Engine() Engine {
+	return db.engine
+}
+
+// SetEngine stashes the engine identity on the wrapper. Idempotent; the
+// expected pattern is one call at init time.
+func (db *DB) SetEngine(e Engine) {
+	db.engine = e
 }
