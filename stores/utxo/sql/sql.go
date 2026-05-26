@@ -663,16 +663,19 @@ WITH new_tx AS (
 	SELECT new_tx.id, u.idx, u.prev_hash, u.prev_idx, u.prev_satoshis, u.prev_script, u.unlock_script, u.seq_num
 	FROM new_tx, UNNEST($11::int[],$12::bytea[],$13::int[],$14::bigint[],$15::bytea[],$16::bytea[],$17::bigint[])
 		AS u(idx, prev_hash, prev_idx, prev_satoshis, prev_script, unlock_script, seq_num)
+	RETURNING 1
 ), ins_outputs AS (
 	INSERT INTO outputs (transaction_id,idx,locking_script,satoshis,coinbase_spending_height,utxo_hash,spending_data)
 	SELECT new_tx.id, u.idx, u.locking_script, u.satoshis, u.csh, u.utxo_hash, NULL
 	FROM new_tx, UNNEST($18::int[],$19::bytea[],$20::bigint[],$21::int[],$22::bytea[])
 		AS u(idx, locking_script, satoshis, csh, utxo_hash)
+	RETURNING 1
 ), ins_block_ids AS (
 	INSERT INTO block_ids (transaction_id,block_id,block_height,subtree_idx)
 	SELECT new_tx.id, u.block_id, u.block_height, u.subtree_idx
 	FROM new_tx, UNNEST($23::int[],$24::int[],$25::int[])
 		AS u(block_id, block_height, subtree_idx)
+	RETURNING 1
 )
 SELECT id FROM new_tx
 `

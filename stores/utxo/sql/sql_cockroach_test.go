@@ -79,16 +79,6 @@ func TestCockroach_SpendRoundtrip(t *testing.T) {
 
 	logger := ulogger.TestLogger{}
 	tSettings := test.CreateBaseTestSettings(t)
-	// The "batched SQL" Create path uses a single CTE
-	// (WITH ins_inputs AS (INSERT...)) with no RETURNING. Postgres accepts
-	// this; CockroachDB v24.1 rejects it with SQLSTATE 0A000 ("WITH clause
-	// does not return any columns"). The fast-path is currently gated on
-	// isPostgresLike, which is overreaching — CRDB needs a separate path.
-	// That gate fix is an isPostgresLike (Task 6) follow-up. To keep this
-	// integration test focused on the engine-detection + non-batched Create
-	// + Spend roundtrip, disable the CTE batch path here.
-	tSettings.UtxoStore.BatchSQLOperations = false
-	tSettings.UtxoStore.StoreBatcherSize = 1
 
 	parsed, err := url.Parse(connURL)
 	require.NoError(t, err)
