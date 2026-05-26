@@ -4865,14 +4865,14 @@ func verifyUTXOSchema(ctx context.Context, db DBExecutor, engine usql.Engine) er
 			WHERE table_name = $1
 		`, table)
 		if err != nil {
-			return fmt.Errorf("verify %s schema (%s): %w", table, engine, err)
+			return errors.NewStorageError("verify %s schema (%s): %w", table, engine, err)
 		}
 		present := map[string]struct{}{}
 		for rows.Next() {
 			var c string
 			if err := rows.Scan(&c); err != nil {
 				_ = rows.Close()
-				return fmt.Errorf("verify %s schema (%s): scan: %w", table, engine, err)
+				return errors.NewStorageError("verify %s schema (%s) scan: %w", table, engine, err)
 			}
 			present[c] = struct{}{}
 		}
@@ -4884,7 +4884,7 @@ func verifyUTXOSchema(ctx context.Context, db DBExecutor, engine usql.Engine) er
 			}
 		}
 		if len(missing) > 0 {
-			return fmt.Errorf("table %s on %s missing columns: %v", table, engine, missing)
+			return errors.NewStorageError("table %s on %s missing columns: %v", table, engine, missing)
 		}
 	}
 	return nil

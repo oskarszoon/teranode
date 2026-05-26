@@ -546,7 +546,7 @@ func isBlockchainSchemaCurrent(db *usql.DB, withIndexes bool) (bool, error) {
 // (NOT) EXISTS that both engines accept), but is reserved so future migrations
 // that need to be Postgres-only — e.g. plpgsql DO $$ blocks, which Cockroach
 // does not implement — can branch on it without another signature change.
-func createPostgresSchemaUnlocked(db *usql.DB, withIndexes bool, engine usql.Engine)error {
+func createPostgresSchemaUnlocked(db *usql.DB, withIndexes bool, engine usql.Engine) error {
 	if _, err := db.Exec(`
       CREATE TABLE IF NOT EXISTS state (
 	    key            VARCHAR(32) PRIMARY KEY
@@ -915,14 +915,14 @@ func verifyBlockchainSchema(ctx context.Context, db *usql.DB, engine usql.Engine
 			WHERE table_name = $1
 		`, table)
 		if err != nil {
-			return fmt.Errorf("verify %s schema (%s): %w", table, engine, err)
+			return errors.NewStorageError("verify %s schema (%s): %w", table, engine, err)
 		}
 		present := map[string]struct{}{}
 		for rows.Next() {
 			var c string
 			if err := rows.Scan(&c); err != nil {
 				_ = rows.Close()
-				return fmt.Errorf("verify %s schema (%s): scan: %w", table, engine, err)
+				return errors.NewStorageError("verify %s schema (%s) scan: %w", table, engine, err)
 			}
 			present[c] = struct{}{}
 		}
@@ -934,7 +934,7 @@ func verifyBlockchainSchema(ctx context.Context, db *usql.DB, engine usql.Engine
 			}
 		}
 		if len(missing) > 0 {
-			return fmt.Errorf("table %s on %s missing columns: %v", table, engine, missing)
+			return errors.NewStorageError("table %s on %s missing columns: %v", table, engine, missing)
 		}
 	}
 	return nil

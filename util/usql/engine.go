@@ -2,8 +2,9 @@ package usql
 
 import (
 	"context"
-	"fmt"
 	"strings"
+
+	"github.com/bsv-blockchain/teranode/errors"
 )
 
 // Engine identifies the SQL engine behind a *usql.DB connection.
@@ -37,7 +38,7 @@ func IsPostgresLike(e Engine) bool {
 func DetectEngine(ctx context.Context, db *DB) (Engine, error) {
 	var v string
 	if err := db.DB.QueryRowContext(ctx, "SELECT version()").Scan(&v); err != nil {
-		return "", fmt.Errorf("detect engine: %w", err)
+		return "", errors.New(errors.ERR_ERROR, "detect engine: %w", err)
 	}
 	switch {
 	case strings.Contains(v, "CockroachDB"):
@@ -45,6 +46,6 @@ func DetectEngine(ctx context.Context, db *DB) (Engine, error) {
 	case strings.Contains(v, "PostgreSQL"):
 		return EnginePostgres, nil
 	default:
-		return "", fmt.Errorf("unrecognized engine: %q", v)
+		return "", errors.New(errors.ERR_ERROR, "unrecognized engine: %q", v)
 	}
 }
