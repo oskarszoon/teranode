@@ -167,10 +167,10 @@ func TestRedactPreservesNonSecretFields(t *testing.T) {
 	// Sentinel values used to assert non-secret fields survive the
 	// JSON-roundtrip + redaction pass intact.
 	const (
-		sentinelLogLevel    = "DEBUG_SENTINEL"
-		sentinelProfilerAddr = "localhost:6060-sentinel"
+		sentinelLogLevel      = "DEBUG_SENTINEL"
+		sentinelProfilerAddr  = "localhost:6060-sentinel"
 		sentinelArbitraryText = "miner-pool-sentinel"
-		sentinelSecret      = "should-not-survive"
+		sentinelSecret        = "should-not-survive"
 	)
 
 	in := &Settings{
