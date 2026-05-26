@@ -546,7 +546,7 @@ func isBlockchainSchemaCurrent(db *usql.DB, withIndexes bool) (bool, error) {
 // (NOT) EXISTS that both engines accept), but is reserved so future migrations
 // that need to be Postgres-only — e.g. plpgsql DO $$ blocks, which Cockroach
 // does not implement — can branch on it without another signature change.
-func createPostgresSchemaUnlocked(db *usql.DB, withIndexes bool, _ usql.Engine) error {
+func createPostgresSchemaUnlocked(db *usql.DB, withIndexes bool, engine usql.Engine)error {
 	if _, err := db.Exec(`
       CREATE TABLE IF NOT EXISTS state (
 	    key            VARCHAR(32) PRIMARY KEY
@@ -777,32 +777,40 @@ func createPostgresSchemaUnlocked(db *usql.DB, withIndexes bool, _ usql.Engine) 
 		}
 	}
 
-	if _, err := db.Exec(`
-		CREATE OR REPLACE FUNCTION reverse_bytes_iter(bytes bytea, length int, midpoint int, index int)
-		RETURNS bytea AS
-		$$
-		  SELECT CASE WHEN index >= midpoint THEN bytes ELSE
-			reverse_bytes_iter(
-			  set_byte(
-				set_byte(bytes, index, get_byte(bytes, length-index)),
-				length-index, get_byte(bytes, index)
-			  ),
-			  length, midpoint, index + 1
-			)
-		  END;
-		$$ LANGUAGE SQL IMMUTABLE;
-   `); err != nil {
-		_ = db.Close()
-		return errors.NewStorageError("could not create block_transactions_map table", err)
-	}
+	// reverse_bytes / reverse_bytes_iter are legacy SQL UDFs left over from an
+	// earlier main-chain-height lookup path. They are unused by current Go code
+	// (the partial index above replaced them). CockroachDB v24.x rejects the
+	// recursive self-reference during planning ("unknown function:
+	// reverse_bytes_iter"), so gate the block to PostgreSQL until the functions
+	// can be removed entirely.
+	if engine == usql.EnginePostgres {
+		if _, err := db.Exec(`
+			CREATE OR REPLACE FUNCTION reverse_bytes_iter(bytes bytea, length int, midpoint int, index int)
+			RETURNS bytea AS
+			$$
+			  SELECT CASE WHEN index >= midpoint THEN bytes ELSE
+				reverse_bytes_iter(
+				  set_byte(
+					set_byte(bytes, index, get_byte(bytes, length-index)),
+					length-index, get_byte(bytes, index)
+				  ),
+				  length, midpoint, index + 1
+				)
+			  END;
+			$$ LANGUAGE SQL IMMUTABLE;
+	   `); err != nil {
+			_ = db.Close()
+			return errors.NewStorageError("could not create reverse_bytes_iter function", err)
+		}
 
-	if _, err := db.Exec(`
-		CREATE OR REPLACE FUNCTION reverse_bytes(bytes bytea) RETURNS bytea AS
-		'SELECT reverse_bytes_iter(bytes, octet_length(bytes)-1, octet_length(bytes)/2, 0)'
-		LANGUAGE SQL IMMUTABLE;
-	`); err != nil {
-		_ = db.Close()
-		return errors.NewStorageError("could not create block_transactions_map table", err)
+		if _, err := db.Exec(`
+			CREATE OR REPLACE FUNCTION reverse_bytes(bytes bytea) RETURNS bytea AS
+			'SELECT reverse_bytes_iter(bytes, octet_length(bytes)-1, octet_length(bytes)/2, 0)'
+			LANGUAGE SQL IMMUTABLE;
+		`); err != nil {
+			_ = db.Close()
+			return errors.NewStorageError("could not create reverse_bytes function", err)
+		}
 	}
 
 	if _, err := db.Exec(`
