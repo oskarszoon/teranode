@@ -2,6 +2,7 @@ package util
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"net/url"
 	"os"
@@ -100,6 +101,24 @@ func InitPostgresDB(logger ulogger.Logger, storeURL *url.URL, tSettings *setting
 	if err != nil {
 		_ = db.Close()
 		return nil, errors.NewServiceError("failed to detect postgres engine", err)
+	}
+
+	if engine == usql.EngineCockroach {
+		// CockroachDB's BIGSERIAL default is unique_rowid() — globally unique but
+		// 64-bit "snowflake" values that overflow Go's uint32 fields downstream
+		// (e.g. block.ID). Switching to sql_sequence makes BIGSERIAL emit a
+		// monotonic small-integer sequence at CREATE TABLE time, matching
+		// PostgreSQL semantics. The DEFAULT clause is captured at column-creation
+		// time, so the setting only needs to be active when DDL runs — but we
+		// install it on every connection for safety in case of future schema
+		// extensions added at runtime.
+		_ = db.Close()
+		connector := stdlib.GetConnector(*connConfig, stdlib.OptionAfterConnect(func(ctx context.Context, conn *pgx.Conn) error {
+			_, err := conn.Exec(ctx, "SET serial_normalization = 'sql_sequence'")
+			return err
+		}))
+		sqlDB = sql.OpenDB(connector)
+		db = usql.WrapDB(sqlDB)
 	}
 	db.SetEngine(engine)
 	logger.Infof("Detected SQL engine: %s", engine)
