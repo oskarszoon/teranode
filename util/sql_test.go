@@ -54,9 +54,12 @@ func TestInitSQLDB(t *testing.T) {
 		errType string
 	}{
 		{
-			name:    "valid postgres scheme",
-			url:     "postgres://user:pass@localhost:5432/testdb",
-			wantErr: false, // sql.Open doesn't actually connect, just validates driver
+			name: "valid postgres scheme",
+			url:  "postgres://user:pass@localhost:5432/testdb",
+			// InitPostgresDB now runs DetectEngine (SELECT version()) at init.
+			// Without a reachable Postgres on localhost:5432 the call must fail.
+			wantErr: true,
+			errType: "service error",
 		},
 		{
 			name:    "valid sqlite scheme",
@@ -148,13 +151,14 @@ func TestInitPostgresDB(t *testing.T) {
 
 			db, err := util.InitPostgresDB(logger, storeURL, testSettings, nil)
 
-			// sql.Open doesn't actually connect, it just validates the driver.
-			// Connection only happens on first query/ping.
-			assert.NoError(t, err)
-			assert.NotNil(t, db)
-			if db != nil {
-				db.Close()
-			}
+			// InitPostgresDB now calls DetectEngine which forces a real connection
+			// via SELECT version(). Without a reachable Postgres on localhost:5432
+			// this fails — the error path also closes the underlying *sql.DB, so
+			// db must be nil. The error message confirms config parsing succeeded
+			// and we reached the engine-detection step.
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "failed to detect postgres engine")
+			assert.Nil(t, db)
 		})
 	}
 }
@@ -500,16 +504,16 @@ func TestInitPostgresDB_PoolSettings(t *testing.T) {
 			// we'll test the helper function that determines pool settings
 			// by creating a mock that captures what would be set
 
-			// Test the merging logic by calling InitPostgresDB
-			// It will fail to connect, but we can verify the error is about connection, not settings
+			// Test that the call gets past config parsing and reaches engine
+			// detection (which fails because no PG is listening on localhost:5432).
+			// Pool-setting merging happens after DetectEngine, so this test no
+			// longer exercises that path — see TestPostgresPoolSettingsMerging
+			// for the unit-test coverage of the merge logic itself.
 			db, err := util.InitPostgresDB(logger, storeURL, tt.globalSettings, tt.servicePoolSettings)
 
-			// We expect a connection error, not a configuration error
-			if err != nil {
-				// Verify it's a connection error, not a settings error
-				assert.Contains(t, err.Error(), "failed to open postgres DB")
-				assert.Nil(t, db)
-			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "failed to detect postgres engine")
+			assert.Nil(t, db)
 
 			// To actually verify the pool settings were applied correctly,
 			// we would need a real PostgreSQL connection. For unit tests,
@@ -626,8 +630,11 @@ func TestInitSQLDB_WithServicePoolSettings(t *testing.T) {
 			name:                "postgres with nil service settings",
 			url:                 "postgres://user:pass@localhost:5432/testdb",
 			servicePoolSettings: nil,
-			wantErr:             false,
-			description:         "Should use global defaults when service settings are nil",
+			// InitPostgresDB now runs DetectEngine; without a reachable PG on
+			// localhost:5432 the call fails. The merge-logic coverage lives in
+			// TestPostgresPoolSettingsMerging.
+			wantErr:     true,
+			description: "Postgres path fails at engine detection when no DB is reachable",
 		},
 		{
 			name: "postgres with service settings",
@@ -635,8 +642,8 @@ func TestInitSQLDB_WithServicePoolSettings(t *testing.T) {
 			servicePoolSettings: &settings.PostgresSettings{
 				MaxOpenConns: 80,
 			},
-			wantErr:     false,
-			description: "Should merge service settings with global defaults",
+			wantErr:     true,
+			description: "Postgres path fails at engine detection when no DB is reachable",
 		},
 		{
 			name:                "sqlite ignores service pool settings",

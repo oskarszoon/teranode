@@ -1,6 +1,7 @@
 package util
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 	"os"
@@ -17,12 +18,16 @@ import (
 	"github.com/labstack/gommon/random"
 )
 
-type SQLEngine string
+// SQLEngine is preserved as an alias to usql.Engine for backwards
+// compatibility with existing call sites. New code should use usql.Engine
+// directly. The aliases below let existing references to util.Postgres etc.
+// keep compiling during the migration to a single canonical type.
+type SQLEngine = usql.Engine
 
 const (
-	Postgres     SQLEngine = "postgres"
-	Sqlite       SQLEngine = "sqlite"
-	SqliteMemory SQLEngine = "sqlitememory"
+	Postgres     = usql.EnginePostgres
+	Sqlite       = usql.EngineSqlite
+	SqliteMemory = usql.EngineSqliteMemory
 )
 
 // InitSQLDB initializes a SQL database connection based on the provided URL scheme.
@@ -87,6 +92,17 @@ func InitPostgresDB(logger ulogger.Logger, storeURL *url.URL, tSettings *setting
 
 	sqlDB := stdlib.OpenDB(*connConfig)
 	db := usql.WrapDB(sqlDB)
+
+	// Identify the engine (Postgres vs Cockroach) via a single SELECT version().
+	// Cockroach speaks the PG wire protocol so the connection succeeds either way;
+	// engine identity gates the schema-init code paths downstream.
+	engine, err := usql.DetectEngine(context.Background(), db)
+	if err != nil {
+		_ = db.Close()
+		return nil, errors.NewServiceError("failed to detect postgres engine", err)
+	}
+	db.SetEngine(engine)
+	logger.Infof("Detected SQL engine: %s", engine)
 
 	logger.Infof("Using postgres DB: %s@%s:%d/%s", dbUser, dbHost, dbPort, dbName)
 
@@ -244,6 +260,12 @@ func InitSQLiteDB(logger ulogger.Logger, storeURL *url.URL, tSettings *settings.
 	db, err = usql.Open("sqlite", filename)
 	if err != nil {
 		return nil, errors.NewServiceError("failed to open sqlite DB", err)
+	}
+
+	if storeURL.Scheme == "sqlitememory" {
+		db.SetEngine(usql.EngineSqliteMemory)
+	} else {
+		db.SetEngine(usql.EngineSqlite)
 	}
 
 	// foreign_keys is set per-connection via the `_pragma=foreign_keys=on`
