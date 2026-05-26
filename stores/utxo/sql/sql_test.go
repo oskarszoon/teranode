@@ -1349,8 +1349,9 @@ func TestCreatePostgresSchema(t *testing.T) {
 	// Setup successful mock expectations for all DDL operations
 	SetupCreatePostgresSchemaSuccessMocks(mockDB)
 
-	// Call the function under test using the mock
-	err := createPostgresSchemaImpl(mockDB)
+	// Call the function under test using the mock. Pass EnginePostgres so the
+	// DO $$ migration blocks execute and the mock expectations all fire.
+	err := createPostgresSchemaImpl(mockDB, usql.EnginePostgres)
 
 	// Verify success
 	assert.NoError(t, err)

@@ -240,18 +240,21 @@ func TestCreatePostgresSchema_ErrorAtUnspentByParentIndex(t *testing.T) {
 // The ACTUAL solution to get coverage: Create a testable interface version
 // and temporarily modify the original function to be testable
 
-// Helper function that calls the ACTUAL extracted implementation
+// Helper function that calls the ACTUAL extracted implementation.
+// Engine is hard-coded to Postgres so the DO $$ migration blocks execute and
+// all mock expectations are satisfied.
 func createPostgresSchemaWithMockDB(_ *usql.DB, mockDB *MockDB) error {
 	// Now we can call the actual implementation function with our mock!
-	return createPostgresSchemaImpl(mockDB)
+	return createPostgresSchemaImpl(mockDB, usql.EnginePostgres)
 }
 
 // createPostgresSchemaTestWrapper delegates to the real implementation.
+// Engine is hard-coded to Postgres so the DO $$ migration blocks execute.
 func createPostgresSchemaTestWrapper(db interface {
 	Exec(query string, args ...interface{}) (sql.Result, error)
 	Close() error
 }) error {
-	return createPostgresSchemaImpl(db)
+	return createPostgresSchemaImpl(db, usql.EnginePostgres)
 }
 
 // Direct test of our wrapper function to show coverage

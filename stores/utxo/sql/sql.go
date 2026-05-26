@@ -175,7 +175,7 @@ func New(ctx context.Context, logger ulogger.Logger, tSettings *settings.Setting
 
 	switch storeURL.Scheme {
 	case "postgres":
-		if err = createPostgresSchema(db); err != nil {
+		if err = createPostgresSchema(db, db.Engine()); err != nil {
 			return nil, errors.NewStorageError("failed to create postgres schema", err)
 		}
 
@@ -4534,14 +4534,21 @@ type DBExecutor interface {
 // Advisory lock ID for UTXO schema creation serialization across pods.
 const utxoSchemaLockID int64 = 7_265_726_117 // "tera" + "ux" in ASCII-ish
 
-func createPostgresSchema(db *usql.DB) error {
+func createPostgresSchema(db *usql.DB, engine usql.Engine) error {
+	// Cockroach does not implement pg_advisory_lock. Concurrent CREATE TABLE
+	// IF NOT EXISTS on Cockroach is safe under transactional DDL — duplicate
+	// creates are no-ops. There is no migration block to serialize on a fresh
+	// Cockroach install because we skip the DO $$ blocks below.
+	if engine == usql.EngineCockroach {
+		return createPostgresSchemaImpl(db, engine)
+	}
 	return usql.WithAdvisoryLock(context.Background(), db, utxoSchemaLockID, func() error {
-		return createPostgresSchemaImpl(db)
+		return createPostgresSchemaImpl(db, engine)
 	})
 }
 
 // createPostgresSchemaImpl contains the actual implementation, now testable
-func createPostgresSchemaImpl(db DBExecutor) error {
+func createPostgresSchemaImpl(db DBExecutor, engine usql.Engine) error {
 	if _, err := db.Exec(`
       CREATE TABLE IF NOT EXISTS transactions (
          id               BIGSERIAL PRIMARY KEY
@@ -4597,8 +4604,11 @@ func createPostgresSchemaImpl(db DBExecutor) error {
 		return errors.NewStorageError("could not create inputs table - [%+v]", err)
 	}
 
-	// Ensure inputs FK has ON DELETE CASCADE — only drop+recreate if it exists without CASCADE
-	if _, err := db.Exec(`
+	// Ensure inputs FK has ON DELETE CASCADE — only drop+recreate if it exists without CASCADE.
+	// Postgres-only: Cockroach does not implement plpgsql DO blocks and does not need the
+	// migration (fresh installs land with the CASCADE FK from CREATE TABLE above).
+	if engine == usql.EnginePostgres {
+		if _, err := db.Exec(`
 		DO $$
 		BEGIN
 			IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'inputs_transaction_id_fkey' AND contype = 'f' AND confdeltype != 'c') THEN
@@ -4609,8 +4619,9 @@ func createPostgresSchemaImpl(db DBExecutor) error {
 			END IF;
 		END $$;
 	`); err != nil {
-		_ = db.Close()
-		return errors.NewStorageError("could not ensure CASCADE foreign key on inputs table - [%+v]", err)
+			_ = db.Close()
+			return errors.NewStorageError("could not ensure CASCADE foreign key on inputs table - [%+v]", err)
+		}
 	}
 
 	// All fields are NOT NULL except for the spending_data which is NULL for unspent outputs.
@@ -4634,8 +4645,11 @@ func createPostgresSchemaImpl(db DBExecutor) error {
 		return errors.NewStorageError("could not create outputs table - [%+v]", err)
 	}
 
-	// Ensure outputs FK has ON DELETE CASCADE — only drop+recreate if it exists without CASCADE
-	if _, err := db.Exec(`
+	// Ensure outputs FK has ON DELETE CASCADE — only drop+recreate if it exists without CASCADE.
+	// Postgres-only: Cockroach does not implement plpgsql DO blocks and does not need the
+	// migration (fresh installs land with the CASCADE FK from CREATE TABLE above).
+	if engine == usql.EnginePostgres {
+		if _, err := db.Exec(`
 		DO $$
 		BEGIN
 			IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'outputs_transaction_id_fkey' AND contype = 'f' AND confdeltype != 'c') THEN
@@ -4646,8 +4660,9 @@ func createPostgresSchemaImpl(db DBExecutor) error {
 			END IF;
 		END $$;
 	`); err != nil {
-		_ = db.Close()
-		return errors.NewStorageError("could not ensure CASCADE foreign key on outputs table - [%+v]", err)
+			_ = db.Close()
+			return errors.NewStorageError("could not ensure CASCADE foreign key on outputs table - [%+v]", err)
+		}
 	}
 
 	if _, err := db.Exec(`
@@ -4663,8 +4678,11 @@ func createPostgresSchemaImpl(db DBExecutor) error {
 		return errors.NewStorageError("could not create block_ids table - [%+v]", err)
 	}
 
-	// Add new columns to block_ids table if they don't exist
-	if _, err := db.Exec(`
+	// Add new columns to block_ids table if they don't exist.
+	// Postgres-only: Cockroach does not implement plpgsql DO blocks and does not need the
+	// migration (fresh installs already have these columns from CREATE TABLE above).
+	if engine == usql.EnginePostgres {
+		if _, err := db.Exec(`
 		DO $$
 		BEGIN
 			IF NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'block_ids'::regclass AND attname = 'block_height' AND NOT attisdropped) THEN
@@ -4676,12 +4694,16 @@ func createPostgresSchemaImpl(db DBExecutor) error {
 			END IF;
 		END $$;
 	`); err != nil {
-		_ = db.Close()
-		return errors.NewStorageError("could not add new columns to block_ids table - [%+v]", err)
+			_ = db.Close()
+			return errors.NewStorageError("could not add new columns to block_ids table - [%+v]", err)
+		}
 	}
 
-	// Add unmined_since column to transactions table if it doesn't exist
-	if _, err := db.Exec(`
+	// Add unmined_since column to transactions table if it doesn't exist.
+	// Postgres-only: Cockroach does not implement plpgsql DO blocks and does not need the
+	// migration (fresh installs already have the column from CREATE TABLE above).
+	if engine == usql.EnginePostgres {
+		if _, err := db.Exec(`
 		DO $$
 		BEGIN
 			IF NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'transactions'::regclass AND attname = 'unmined_since' AND NOT attisdropped) THEN
@@ -4689,12 +4711,16 @@ func createPostgresSchemaImpl(db DBExecutor) error {
 			END IF;
 		END $$;
 	`); err != nil {
-		_ = db.Close()
-		return errors.NewStorageError("could not add unmined_since column to transactions table - [%+v]", err)
+			_ = db.Close()
+			return errors.NewStorageError("could not add unmined_since column to transactions table - [%+v]", err)
+		}
 	}
 
-	// Add preserve_until column to transactions table if it doesn't exist
-	if _, err := db.Exec(`
+	// Add preserve_until column to transactions table if it doesn't exist.
+	// Postgres-only: Cockroach does not implement plpgsql DO blocks and does not need the
+	// migration (fresh installs already have the column from CREATE TABLE above).
+	if engine == usql.EnginePostgres {
+		if _, err := db.Exec(`
 		DO $$
 		BEGIN
 			IF NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'transactions'::regclass AND attname = 'preserve_until' AND NOT attisdropped) THEN
@@ -4702,12 +4728,16 @@ func createPostgresSchemaImpl(db DBExecutor) error {
 			END IF;
 		END $$;
 	`); err != nil {
-		_ = db.Close()
-		return errors.NewStorageError("could not add preserve_until column to transactions table - [%+v]", err)
+			_ = db.Close()
+			return errors.NewStorageError("could not add preserve_until column to transactions table - [%+v]", err)
+		}
 	}
 
-	// Ensure block_ids FK has ON DELETE CASCADE — only drop+recreate if it exists without CASCADE
-	if _, err := db.Exec(`
+	// Ensure block_ids FK has ON DELETE CASCADE — only drop+recreate if it exists without CASCADE.
+	// Postgres-only: Cockroach does not implement plpgsql DO blocks and does not need the
+	// migration (fresh installs land with the CASCADE FK from CREATE TABLE above).
+	if engine == usql.EnginePostgres {
+		if _, err := db.Exec(`
 		DO $$
 		BEGIN
 			IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'block_ids_transaction_id_fkey' AND contype = 'f' AND confdeltype != 'c') THEN
@@ -4718,8 +4748,9 @@ func createPostgresSchemaImpl(db DBExecutor) error {
 			END IF;
 		END $$;
 	`); err != nil {
-		_ = db.Close()
-		return errors.NewStorageError("could not ensure CASCADE foreign key on block_ids table - [%+v]", err)
+			_ = db.Close()
+			return errors.NewStorageError("could not ensure CASCADE foreign key on block_ids table - [%+v]", err)
+		}
 	}
 
 	if _, err := db.Exec(`
