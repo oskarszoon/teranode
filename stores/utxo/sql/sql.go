@@ -98,7 +98,7 @@ type Store struct {
 	settings        *settings.Settings
 	db              *usql.DB
 	storeURL        *url.URL
-	engine          string
+	engine          usql.Engine
 	blockHeight     atomic.Uint32
 	medianBlockTime atomic.Uint32
 	ctx             context.Context
@@ -106,6 +106,13 @@ type Store struct {
 	getBatcher      *batcher.Batcher[batchGetItem]
 	createBatcher   *batcher.Batcher[batchCreateItem]
 	unlockBatcher   *batcher.Batcher[batchUnlockItem]
+}
+
+// isPostgresLike reports whether the store is backed by a Postgres-wire engine
+// (PostgreSQL or CockroachDB). Used to gate fast paths that work on both:
+// pgx batching, CTEs, UNNEST, partial indexes, ON CONFLICT.
+func (s *Store) isPostgresLike() bool {
+	return usql.IsPostgresLike(s.engine)
 }
 
 // batchUnlockItem represents a single SetLocked(false) request.
@@ -186,7 +193,7 @@ func New(ctx context.Context, logger ulogger.Logger, tSettings *settings.Setting
 		settings:        tSettings,
 		db:              db,
 		storeURL:        storeURL,
-		engine:          storeURL.Scheme,
+		engine:          db.Engine(),
 		blockHeight:     atomic.Uint32{},
 		medianBlockTime: atomic.Uint32{},
 		ctx:             ctx,
@@ -397,7 +404,7 @@ func (s *Store) createWithRetry(ctx context.Context, tx *bt.Tx, blockHeight uint
 	}
 
 	// Postgres with batching: single-CTE with UNNEST arrays — one round-trip, auto-atomic
-	if s.settings.UtxoStore.BatchSQLOperations && s.engine == "postgres" {
+	if s.settings.UtxoStore.BatchSQLOperations && s.isPostgresLike() {
 		return s.createCTE(ctx, tx, blockHeight, options, txHash, txMeta, isCoinbase, unminedSince)
 	}
 
@@ -1932,7 +1939,7 @@ func (s *Store) sendSpendBatch(batch []*batchSpend) {
 // Returns false if the batch completed (success or non-retryable error) and results
 // have been sent to all item errCh channels.
 func (s *Store) trySendSpendBatch(batch []*batchSpend) (retryable bool) {
-	if s.settings.UtxoStore.BatchSQLOperations && s.engine == "postgres" {
+	if s.settings.UtxoStore.BatchSQLOperations && s.isPostgresLike() {
 		return s.trySendSpendBatchBulk(batch)
 	}
 	return s.trySendSpendBatchPerRow(batch)
@@ -3913,7 +3920,7 @@ func (s *Store) BatchPreviousOutputsDecorate(ctx context.Context, txs []*bt.Tx) 
 	//   - Postgres caps at 65535; fewer, larger queries win because the planner
 	//     fuses the IN list and we save round-trips. 4000 pairs = 8000 params.
 	chunkSize := maxINClauseSize
-	if s.engine == string(util.Postgres) {
+	if s.isPostgresLike() {
 		chunkSize = postgresBatchDecorateChunkSize
 	}
 	if batchDecorateChunkSizeOverride > 0 {
@@ -4203,7 +4210,7 @@ func (s *Store) SetLocked(ctx context.Context, txHashes []chainhash.Hash, setVal
 
 	if setValue {
 		// Postgres: pipeline all lock UPDATEs in a single network flush
-		if s.engine == "postgres" {
+		if s.isPostgresLike() {
 			return s.setLockedPipelined(ctx, txHashes)
 		}
 		// SQLite: sequential updates
@@ -4237,7 +4244,7 @@ func (s *Store) SetLocked(ctx context.Context, txHashes []chainhash.Hash, setVal
 	}
 
 	// Postgres: bulk unlock + DAH in chunked UPDATE statements
-	if s.engine == "postgres" {
+	if s.isPostgresLike() {
 		return s.setUnlockedBulk(ctx, txHashes)
 	}
 
@@ -5235,13 +5242,13 @@ type outpointPair struct {
 // parent. The VALUES-join form forces a per-pair composite-PK lookup
 // (`transaction_id = t.id AND idx = v.i`), an ~90× cost reduction on 3-pair
 // cases and a much larger reduction when parent txs have many outputs.
-func buildCompositeValuesPairs(pairs []outpointPair, startIdx int, engine string) (string, []interface{}) {
+func buildCompositeValuesPairs(pairs []outpointPair, startIdx int, engine usql.Engine) (string, []interface{}) {
 	if len(pairs) == 0 {
 		return "", nil
 	}
 	groups := make([]string, len(pairs))
 	args := make([]interface{}, 0, len(pairs)*2)
-	postgres := engine == string(util.Postgres)
+	postgres := usql.IsPostgresLike(engine)
 	for i, p := range pairs {
 		a := startIdx + (2 * i)
 		b := a + 1

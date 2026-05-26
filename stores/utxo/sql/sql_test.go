@@ -61,6 +61,7 @@ import (
 	"github.com/bsv-blockchain/teranode/ulogger"
 	"github.com/bsv-blockchain/teranode/util"
 	"github.com/bsv-blockchain/teranode/util/test"
+	"github.com/bsv-blockchain/teranode/util/usql"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1495,7 +1496,7 @@ func TestCreateSqliteSchemaDirectly(t *testing.T) {
 	store, err := New(ctx, logger, tSettings, utxoStoreURL)
 	require.NoError(t, err)
 	require.NotNil(t, store)
-	assert.Equal(t, "sqlitememory", store.engine)
+	assert.Equal(t, usql.EngineSqliteMemory, store.engine)
 
 	// Verify all expected tables were created
 	expectedTables := []string{"transactions", "inputs", "outputs", "block_ids", "conflicting_children"}
