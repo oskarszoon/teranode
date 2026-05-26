@@ -1,6 +1,11 @@
 //go:build cockroach
 
-package testcontainers
+// Package crdb provides a build-tagged CockroachDB testcontainer helper.
+// It lives in a sub-package (separate from test/testcontainers) so that
+// stores can import it without dragging in the daemon dependency that the
+// parent package carries — daemon → stores/utxo/factory → stores/utxo/sql
+// would create an import cycle otherwise.
+package crdb
 
 import (
 	"context"
@@ -26,7 +31,17 @@ func StartCockroach(t *testing.T, ctx context.Context, dbName string) (url strin
 	req := testcontainers.ContainerRequest{
 		Image:        "cockroachdb/cockroach:v24.1.13",
 		ExposedPorts: []string{"26257/tcp"},
-		Cmd:          []string{"start-single-node", "--insecure", "--listen-addr=0.0.0.0:26257"},
+		// CRDB v24.1 rejects "--listen-addr=0.0.0.0:..." with: hostname of
+		// listen_addr must be "127.0.0.1" or "localhost". An empty hostname
+		// (":26257") binds all interfaces and is what CRDB itself recommends
+		// for containerised single-node test setups; --advertise-addr makes
+		// the node usable from outside the container via the mapped port.
+		Cmd: []string{
+			"start-single-node",
+			"--insecure",
+			"--listen-addr=:26257",
+			"--advertise-addr=localhost:26257",
+		},
 		WaitingFor: wait.ForAll(
 			wait.ForListeningPort("26257/tcp"),
 			wait.ForLog("nodeID:"),
