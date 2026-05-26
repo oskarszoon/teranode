@@ -179,6 +179,12 @@ func New(ctx context.Context, logger ulogger.Logger, tSettings *settings.Setting
 			return nil, errors.NewStorageError("failed to create postgres schema", err)
 		}
 
+		if usql.IsPostgresLike(db.Engine()) {
+			if err = verifyUTXOSchema(ctx, db, db.Engine()); err != nil {
+				return nil, errors.NewServiceError("utxo schema verification failed", err)
+			}
+		}
+
 	case "sqlite", "sqlitememory":
 		if err = createSqliteSchema(db); err != nil {
 			return nil, errors.NewStorageError("failed to create sqlite schema", err)
@@ -4526,8 +4532,11 @@ func (s *Store) MarkTransactionsOnLongestChain(ctx context.Context, txHashes []c
 }
 
 // DBExecutor interface for database operations needed by schema creation
+// and verification. Both createPostgresSchemaImpl and verifyUTXOSchema rely
+// on this minimal surface so tests can substitute fakes.
 type DBExecutor interface {
 	Exec(query string, args ...interface{}) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error)
 	Close() error
 }
 
@@ -4781,6 +4790,100 @@ func createPostgresSchemaImpl(db DBExecutor, engine usql.Engine) error {
 		return errors.NewStorageError("could not create px_outputs_unspent_by_parent index - [%+v]", err)
 	}
 
+	return nil
+}
+
+// utxoSchemaExpectedColumns is the post-init column set for each UTXO store
+// table. verifyUTXOSchema enforces this on both PostgreSQL and Cockroach so a
+// future migration that drifts the bare CREATE TABLE definition (and forgets
+// to mirror the DO $$ block for Cockroach) fails loud at startup.
+//
+// Column names are stored lowercase to match Postgres' information_schema
+// catalog representation: unquoted identifiers in DDL (e.g. spendableIn) are
+// folded to lowercase by both PostgreSQL and CockroachDB.
+var utxoSchemaExpectedColumns = map[string][]string{
+	"transactions": {
+		"id",
+		"hash",
+		"version",
+		"lock_time",
+		"fee",
+		"size_in_bytes",
+		"coinbase",
+		"frozen",
+		"conflicting",
+		"locked",
+		"delete_at_height",
+		"unmined_since",
+		"preserve_until",
+		"inserted_at",
+	},
+	"inputs": {
+		"transaction_id",
+		"idx",
+		"previous_transaction_hash",
+		"previous_tx_idx",
+		"previous_tx_satoshis",
+		"previous_tx_script",
+		"unlocking_script",
+		"sequence_number",
+	},
+	"outputs": {
+		"transaction_id",
+		"idx",
+		"locking_script",
+		"satoshis",
+		"coinbase_spending_height",
+		"utxo_hash",
+		"spending_data",
+		"frozen",
+		"spendablein",
+	},
+	"block_ids": {
+		"transaction_id",
+		"block_id",
+		"block_height",
+		"subtree_idx",
+	},
+	"conflicting_children": {
+		"transaction_id",
+		"child_transaction_id",
+	},
+}
+
+// verifyUTXOSchema queries information_schema.columns (standard, both PG and
+// Cockroach) and confirms every expected column is present on every expected
+// table. Returns an error listing missing columns; does not check column types.
+func verifyUTXOSchema(ctx context.Context, db DBExecutor, engine usql.Engine) error {
+	for table, expected := range utxoSchemaExpectedColumns {
+		rows, err := db.QueryContext(ctx, `
+			SELECT column_name
+			FROM information_schema.columns
+			WHERE table_name = $1
+		`, table)
+		if err != nil {
+			return fmt.Errorf("verify %s schema (%s): %w", table, engine, err)
+		}
+		present := map[string]struct{}{}
+		for rows.Next() {
+			var c string
+			if err := rows.Scan(&c); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("verify %s schema (%s): scan: %w", table, engine, err)
+			}
+			present[c] = struct{}{}
+		}
+		_ = rows.Close()
+		var missing []string
+		for _, col := range expected {
+			if _, ok := present[col]; !ok {
+				missing = append(missing, col)
+			}
+		}
+		if len(missing) > 0 {
+			return fmt.Errorf("table %s on %s missing columns: %v", table, engine, missing)
+		}
+	}
 	return nil
 }
 

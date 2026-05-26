@@ -1,6 +1,7 @@
 package sql
 
 import (
+	"context"
 	"database/sql"
 	"testing"
 
@@ -252,6 +253,7 @@ func createPostgresSchemaWithMockDB(_ *usql.DB, mockDB *MockDB) error {
 // Engine is hard-coded to Postgres so the DO $$ migration blocks execute.
 func createPostgresSchemaTestWrapper(db interface {
 	Exec(query string, args ...interface{}) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error)
 	Close() error
 }) error {
 	return createPostgresSchemaImpl(db, usql.EnginePostgres)
