@@ -164,9 +164,21 @@ func TestSensitiveKeysDerivedMatchesExpected(t *testing.T) {
 }
 
 func TestRedactPreservesNonSecretFields(t *testing.T) {
+	// Sentinel values used to assert non-secret fields survive the
+	// JSON-roundtrip + redaction pass intact.
+	const (
+		sentinelLogLevel    = "DEBUG_SENTINEL"
+		sentinelProfilerAddr = "localhost:6060-sentinel"
+		sentinelArbitraryText = "miner-pool-sentinel"
+		sentinelSecret      = "should-not-survive"
+	)
+
 	in := &Settings{
+		LogLevel:     sentinelLogLevel,
+		ProfilerAddr: sentinelProfilerAddr,
 		Coinbase: CoinbaseSettings{
-			UserPwd: "secret",
+			ArbitraryText: sentinelArbitraryText,
+			UserPwd:       sentinelSecret,
 		},
 	}
 
@@ -176,5 +188,16 @@ func TestRedactPreservesNonSecretFields(t *testing.T) {
 
 	data, err := json.Marshal(out)
 	require.NoError(t, err)
-	require.True(t, strings.Contains(string(data), redactedValue), "expected redacted placeholder")
+	js := string(data)
+
+	// Placeholder is present (the secret was redacted).
+	require.Contains(t, js, redactedValue, "expected redacted placeholder in output")
+
+	// Non-secret fields survive the redact pipeline verbatim.
+	require.Contains(t, js, sentinelLogLevel, "non-secret LogLevel must survive redaction")
+	require.Contains(t, js, sentinelProfilerAddr, "non-secret ProfilerAddr must survive redaction")
+	require.Contains(t, js, sentinelArbitraryText, "non-secret Coinbase.ArbitraryText must survive redaction")
+
+	// Secret value does not survive.
+	require.NotContains(t, js, sentinelSecret, "secret UserPwd value leaked through redaction")
 }

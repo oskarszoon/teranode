@@ -72,40 +72,6 @@ func init() {
 // GetAerospikeClient creates or retrieves a cached Aerospike client for the given URL.
 // It configures connection policies, authentication, and connection pooling based on settings.
 // Returns a thread-safe client instance that can be shared across goroutines.
-// redactURL returns the URL string with the userinfo password component
-// masked. It does not mutate the input. A nil input returns "<nil>".
-func redactURL(u *url.URL) string {
-	if u == nil {
-		return "<nil>"
-	}
-
-	if u.User == nil {
-		return u.String()
-	}
-
-	if _, hasPwd := u.User.Password(); !hasPwd {
-		return u.String()
-	}
-
-	clone := *u
-	clone.User = url.UserPassword(u.User.Username(), "REDACTED")
-
-	return clone.String()
-}
-
-// aerospikePolicySummary returns a log-safe summary of an aerospike.ClientPolicy.
-// The Password field is never printed.
-func aerospikePolicySummary(p *aerospike.ClientPolicy) string {
-	if p == nil {
-		return "<nil>"
-	}
-
-	return fmt.Sprintf(
-		"ClientPolicy{User:%q, Password:***, ConnectionQueueSize:%d, Timeout:%s}",
-		p.User, p.ConnectionQueueSize, p.Timeout,
-	)
-}
-
 func GetAerospikeClient(logger ulogger.Logger, url *url.URL, tSettings *settings.Settings) (*uaerospike.Client, error) {
 	logger = logger.New("uaero")
 
@@ -423,6 +389,64 @@ func getAerospikeClient(logger ulogger.Logger, url *url.URL, tSettings *settings
 	initStats(logger, client, tSettings)
 
 	return client, nil
+}
+
+// redactURL returns the URL string with the userinfo password component
+// masked. It does not mutate the input. A nil input returns "<nil>".
+//
+// The placeholder "REDACTED" is intentionally URL-safe; "***" would be
+// percent-encoded as %2A%2A%2A by url.UserPassword because '*' is a
+// reserved character in the userinfo subcomponent (RFC 3986).
+func redactURL(u *url.URL) string {
+	if u == nil {
+		return "<nil>"
+	}
+
+	if u.User == nil {
+		return u.String()
+	}
+
+	if _, hasPwd := u.User.Password(); !hasPwd {
+		return u.String()
+	}
+
+	clone := *u
+	clone.User = url.UserPassword(u.User.Username(), "REDACTED")
+
+	return clone.String()
+}
+
+// aerospikePolicySummary returns a log-safe summary of an aerospike.ClientPolicy.
+// The Password field is never printed. The selected fields are the ones useful
+// for diagnosing connection-pool and authentication configuration without
+// revealing secrets; the full ClientPolicy has many more fields not deemed
+// useful enough to log here. Add fields here if a debug session needs them.
+func aerospikePolicySummary(p *aerospike.ClientPolicy) string {
+	if p == nil {
+		return "<nil>"
+	}
+
+	tlsState := "no"
+	if p.TlsConfig != nil {
+		tlsState = "yes"
+	}
+
+	return fmt.Sprintf(
+		"ClientPolicy{User:%q, Password:***, AuthMode:%d, ClusterName:%q, "+
+			"Timeout:%s, IdleTimeout:%s, LoginTimeout:%s, "+
+			"ConnectionQueueSize:%d, MinConnectionsPerNode:%d, "+
+			"MaxErrorRate:%d, ErrorRateWindow:%d, "+
+			"LimitConnectionsToQueueSize:%t, FailIfNotConnected:%t, "+
+			"TendInterval:%s, UseServicesAlternate:%t, RackAware:%t, "+
+			"TLS:%s}",
+		p.User, p.AuthMode, p.ClusterName,
+		p.Timeout, p.IdleTimeout, p.LoginTimeout,
+		p.ConnectionQueueSize, p.MinConnectionsPerNode,
+		p.MaxErrorRate, p.ErrorRateWindow,
+		p.LimitConnectionsToQueueSize, p.FailIfNotConnected,
+		p.TendInterval, p.UseServicesAlternate, p.RackAware,
+		tlsState,
+	)
 }
 
 func initStats(logger ulogger.Logger, client *uaerospike.Client, tSettings *settings.Settings) {

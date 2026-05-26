@@ -12,6 +12,14 @@ import (
 // Redact returns a deep clone of s with every field tagged `redact:"true"`
 // replaced by a placeholder. The clone is safe to marshal to JSON for logging.
 // A nil input returns nil with no error.
+//
+// Implementation note: the deep clone uses a JSON round-trip, so any fields
+// that do not survive json.Marshal/Unmarshal — function pointers, channels,
+// unexported state, *chaincfg.Params methods, big.Int internal representation —
+// are NOT preserved in the returned struct. The returned value is intended
+// solely for logging the user-configurable surface of Settings; do not feed
+// it back into runtime code that depends on those non-JSON-marshalable
+// fields.
 func Redact(s *Settings) (*Settings, error) {
 	if s == nil {
 		return nil, nil
@@ -76,6 +84,12 @@ func extractSensitiveKeys() map[string]bool {
 	return out
 }
 
+// walkSensitiveTags is a recursive helper for extractSensitiveKeys. It only
+// descends into struct types (directly or through a pointer-to-struct); it
+// does not recurse into slices, arrays, maps, or interfaces. This is correct
+// for the current Settings shape because every `redact:"true"` field lives
+// at struct depth — no secret is held inside a map value, slice element type,
+// or interface. Extend this walker if that ever changes.
 func walkSensitiveTags(t reflect.Type, out map[string]bool) {
 	if t.Kind() == reflect.Pointer {
 		t = t.Elem()
