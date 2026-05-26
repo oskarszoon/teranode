@@ -7,7 +7,6 @@ import (
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/model"
-	"github.com/bsv-blockchain/teranode/util"
 	"github.com/bsv-blockchain/teranode/util/tracing"
 )
 
@@ -31,7 +30,7 @@ func (s *SQL) FindBlocksContainingSubtree(ctx context.Context, subtreeHash *chai
 	}
 
 	subtreeSearchClause := "instr(b.subtrees, $1) > 0"
-	if s.engine == util.Postgres {
+	if s.isPostgresLike() {
 		subtreeSearchClause = "position($1 in b.subtrees) > 0"
 	}
 

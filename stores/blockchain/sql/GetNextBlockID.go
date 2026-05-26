@@ -2,8 +2,6 @@ package sql
 
 import (
 	"context"
-
-	"github.com/bsv-blockchain/teranode/util"
 )
 
 // GetNextBlockID retrieves the next available block ID from the database.
@@ -16,7 +14,7 @@ import (
 //   - uint64: The next available block ID
 //   - error: Error if retrieval fails
 func (s *SQL) GetNextBlockID(ctx context.Context) (uint64, error) {
-	if s.engine == util.Postgres {
+	if s.isPostgresLike() {
 		return s.getNextBlockIdFromPostgres(ctx)
 	}
 

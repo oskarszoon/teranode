@@ -5,7 +5,6 @@ import (
 
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	"github.com/bsv-blockchain/teranode/errors"
-	"github.com/bsv-blockchain/teranode/util"
 )
 
 // SetBlockProcessedAt updates the processed_at timestamp for a block.
@@ -24,7 +23,7 @@ func (s *SQL) SetBlockProcessedAt(ctx context.Context, blockHash *chainhash.Hash
 			WHERE hash = $1
 		`
 	} else {
-		if s.engine == util.Postgres {
+		if s.isPostgresLike() {
 			q = `
 				UPDATE blocks
 				SET processed_at = CURRENT_TIMESTAMP

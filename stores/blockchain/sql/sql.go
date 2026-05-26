@@ -74,8 +74,10 @@ const migrationFullRebuildTimeout = 30 * time.Minute
 type SQL struct {
 	// db is the underlying SQL database connection pool
 	db *usql.DB
-	// engine identifies which SQL engine is being used (PostgreSQL, SQLite, etc.)
-	engine util.SQLEngine
+	// engine identifies which SQL engine is being used (PostgreSQL, SQLite, etc.).
+	// Stored as usql.Engine so callers can use the IsPostgresLike helper to
+	// share code paths between PostgreSQL and CockroachDB.
+	engine usql.Engine
 	// logger provides structured logging capabilities
 	logger ulogger.Logger
 	// responseCache provides a time-based cache for frequently accessed query results
@@ -179,8 +181,18 @@ func New(logger ulogger.Logger, storeURL *url.URL, tSettings *settings.Settings)
 		// The 'seeder' query parameter is used to optimize bulk imports by bypassing index creation.
 		// Creating indexes during data insertion can significantly slow down the process, so we skip
 		// index creation when 'seeder=true' is specified in the query parameters.
-		if err = createPostgresSchema(logger, db, storeURL.Query().Get("seeder") != trueStr); err != nil {
+		if err = createPostgresSchema(logger, db, storeURL.Query().Get("seeder") != trueStr, db.Engine()); err != nil {
 			return nil, errors.NewStorageError("failed to create postgres schema", err)
+		}
+
+		// Verify the post-init schema on every Postgres-like engine so a future
+		// migration that diverges Postgres and Cockroach schemas (e.g. forgets
+		// to mirror a DO $$ block) fails loud at startup instead of producing
+		// silently-wrong queries.
+		if usql.IsPostgresLike(db.Engine()) {
+			if err = verifyBlockchainSchema(context.Background(), db, db.Engine()); err != nil {
+				return nil, errors.NewStorageError("blockchain schema verification failed", err)
+			}
 		}
 
 		if storeURL.Query().Get("seeder") == trueStr {
@@ -228,7 +240,7 @@ func New(logger ulogger.Logger, storeURL *url.URL, tSettings *settings.Settings)
 
 	s := &SQL{
 		db:                    db,
-		engine:                util.SQLEngine(storeURL.Scheme),
+		engine:                db.Engine(),
 		logger:                logger,
 		responseCache:         NewGenerationalCache(),
 		cacheTTL:              2 * time.Minute,
@@ -338,6 +350,13 @@ func (s *SQL) GetDBEngine() util.SQLEngine {
 	return s.engine
 }
 
+// isPostgresLike reports whether the store is backed by a Postgres-wire engine
+// (PostgreSQL or CockroachDB). Used to gate fast paths that work on both:
+// CTEs, partial indexes, RETURNING, dollar-quoted placeholders.
+func (s *SQL) isPostgresLike() bool {
+	return usql.IsPostgresLike(s.engine)
+}
+
 func (s *SQL) Close() error {
 	// Signal the background refresh goroutine to stop.
 	if s.backgroundDone != nil {
@@ -359,7 +378,30 @@ func (s *SQL) Close() error {
 // These must be unique per schema-creation context and stable across releases.
 const blockchainSchemaLockID int64 = 7_265_726_101 // "tera" + "bc" in ASCII-ish
 
-func createPostgresSchema(logger ulogger.Logger, db *usql.DB, withIndexes bool) error {
+func createPostgresSchema(logger ulogger.Logger, db *usql.DB, withIndexes bool, engine usql.Engine) error {
+	// Cockroach does not implement pg_advisory_lock. Concurrent CREATE TABLE
+	// IF NOT EXISTS on Cockroach is safe under transactional DDL — duplicate
+	// creates are no-ops — and the column/index migrations below are also
+	// idempotent (IF NOT EXISTS / IF EXISTS guarded). So we skip the advisory
+	// lock dance entirely for Cockroach and run the schema sequence directly.
+	if engine == usql.EngineCockroach {
+		logger.Infof("[blockchain schema] cockroach engine, skipping advisory lock and checking schema")
+		current, err := isBlockchainSchemaCurrent(db, withIndexes)
+		if err != nil {
+			logger.Warnf("[blockchain schema] current-schema probe failed, will run full DDL: %v", err)
+		} else if current {
+			logger.Infof("[blockchain schema] current (withIndexes=%v), skipping DDL", withIndexes)
+			return nil
+		} else {
+			logger.Infof("[blockchain schema] not current (withIndexes=%v), running DDL sequence", withIndexes)
+		}
+		if err := createPostgresSchemaUnlocked(db, withIndexes, engine); err != nil {
+			return err
+		}
+		logger.Infof("[blockchain schema] DDL sequence complete")
+		return nil
+	}
+
 	logger.Infof("[blockchain schema] acquiring advisory lock (id=%d) and checking schema", blockchainSchemaLockID)
 	return usql.WithAdvisoryLock(context.Background(), db, blockchainSchemaLockID, func() error {
 		// Fast path: if the schema is already current, skip the DDL sequence
@@ -387,7 +429,7 @@ func createPostgresSchema(logger ulogger.Logger, db *usql.DB, withIndexes bool) 
 		} else {
 			logger.Infof("[blockchain schema] not current (withIndexes=%v), running DDL sequence", withIndexes)
 		}
-		if err := createPostgresSchemaUnlocked(db, withIndexes); err != nil {
+		if err := createPostgresSchemaUnlocked(db, withIndexes, engine); err != nil {
 			return err
 		}
 		logger.Infof("[blockchain schema] DDL sequence complete")
@@ -497,7 +539,14 @@ func isBlockchainSchemaCurrent(db *usql.DB, withIndexes bool) (bool, error) {
 	return true, nil
 }
 
-func createPostgresSchemaUnlocked(db *usql.DB, withIndexes bool) error {
+// createPostgresSchemaUnlocked is the actual DDL sequence — split out from
+// createPostgresSchema so the Postgres path can wrap it in an advisory lock and
+// the Cockroach path can call it directly. The engine parameter is currently
+// unused inside this function (all statements are idempotent CREATE/ALTER IF
+// (NOT) EXISTS that both engines accept), but is reserved so future migrations
+// that need to be Postgres-only — e.g. plpgsql DO $$ blocks, which Cockroach
+// does not implement — can branch on it without another signature change.
+func createPostgresSchemaUnlocked(db *usql.DB, withIndexes bool, _ usql.Engine) error {
 	if _, err := db.Exec(`
       CREATE TABLE IF NOT EXISTS state (
 	    key            VARCHAR(32) PRIMARY KEY
@@ -781,6 +830,105 @@ func createPostgresSchemaUnlocked(db *usql.DB, withIndexes bool) error {
 		return errors.NewStorageError("could not create idx_scheduled_blob_deletions_height index", err)
 	}
 
+	return nil
+}
+
+// blockchainSchemaExpectedColumnsByTable is the full post-init column set for
+// every table created by createPostgresSchemaUnlocked. verifyBlockchainSchema
+// enforces this on both PostgreSQL and CockroachDB so a future migration that
+// drifts the bare CREATE TABLE definition (and forgets to mirror an ALTER for
+// Cockroach) fails loud at startup instead of producing silently-wrong
+// queries against a half-populated schema.
+//
+// Column names are lowercase to match Postgres' information_schema catalog
+// representation: unquoted identifiers in DDL are folded to lowercase by both
+// PostgreSQL and CockroachDB.
+//
+// Kept in sync with the CREATE TABLE / ADD COLUMN statements in
+// createPostgresSchemaUnlocked above. blockchainSchemaExpectedColumns
+// (declared earlier) covers only the columns added post-CREATE-TABLE for the
+// fast-path probe; this map covers every expected column on every table.
+var blockchainSchemaExpectedColumnsByTable = map[string][]string{
+	"state": {
+		"key",
+		"data",
+		"inserted_at",
+		"updated_at",
+	},
+	"blocks": {
+		"id",
+		"parent_id",
+		"version",
+		"hash",
+		"previous_hash",
+		"merkle_root",
+		"block_time",
+		"n_bits",
+		"nonce",
+		"height",
+		"chain_work",
+		"tx_count",
+		"size_in_bytes",
+		"subtree_count",
+		"subtrees",
+		"coinbase_tx",
+		"invalid",
+		"mined_set",
+		"subtrees_set",
+		"peer_id",
+		"inserted_at",
+		"processed_at",
+		"persisted_at",
+		"median_time_past",
+		"coinbase_bump",
+		"on_main_chain",
+	},
+	"scheduled_blob_deletions": {
+		"id",
+		"blob_key",
+		"file_type",
+		"store_type",
+		"delete_at_height",
+		"retry_count",
+		"last_retry_at",
+	},
+}
+
+// verifyBlockchainSchema queries information_schema.columns (standard, both PG
+// and Cockroach) and confirms every expected column is present on every
+// expected table. Returns an error listing missing columns; does not check
+// column types. Called from New() after createPostgresSchema completes, only
+// on Postgres-like engines.
+func verifyBlockchainSchema(ctx context.Context, db *usql.DB, engine usql.Engine) error {
+	for table, expected := range blockchainSchemaExpectedColumnsByTable {
+		rows, err := db.QueryContext(ctx, `
+			SELECT column_name
+			FROM information_schema.columns
+			WHERE table_name = $1
+		`, table)
+		if err != nil {
+			return fmt.Errorf("verify %s schema (%s): %w", table, engine, err)
+		}
+		present := map[string]struct{}{}
+		for rows.Next() {
+			var c string
+			if err := rows.Scan(&c); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("verify %s schema (%s): scan: %w", table, engine, err)
+			}
+			present[c] = struct{}{}
+		}
+		_ = rows.Close()
+		var missing []string
+		for _, col := range expected {
+			if _, ok := present[col]; !ok {
+				missing = append(missing, col)
+			}
+		}
+		if len(missing) > 0 {
+			return fmt.Errorf("table %s on %s missing columns: %v", table, engine, missing)
+		}
+	}
 	return nil
 }
 
@@ -1070,7 +1218,7 @@ func (s *SQL) insertGenesisTransaction(logger ulogger.Logger, params *chaincfg.P
 		// turn off foreign key checks when inserting the genesis block
 		if s.engine == util.Sqlite || s.engine == util.SqliteMemory {
 			_, _ = s.db.Exec("PRAGMA foreign_keys = OFF")
-		} else if s.engine == util.Postgres {
+		} else if s.isPostgresLike() {
 			_, _ = s.db.Exec("SET session_replication_role = 'replica'")
 		}
 
@@ -1084,7 +1232,7 @@ func (s *SQL) insertGenesisTransaction(logger ulogger.Logger, params *chaincfg.P
 		// turn foreign key checks back on
 		if s.engine == util.Sqlite || s.engine == util.SqliteMemory {
 			_, _ = s.db.Exec("PRAGMA foreign_keys = ON")
-		} else if s.engine == util.Postgres {
+		} else if s.isPostgresLike() {
 			_, _ = s.db.Exec("SET session_replication_role = 'origin'")
 		}
 	} else if !bytes.Equal(hash, params.GenesisHash[:]) {

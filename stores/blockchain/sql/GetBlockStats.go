@@ -18,7 +18,6 @@ import (
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/model"
-	"github.com/bsv-blockchain/teranode/util"
 	"github.com/bsv-blockchain/teranode/util/tracing"
 )
 
@@ -68,7 +67,7 @@ func (s *SQL) GetBlockStats(ctx context.Context) (*model.BlockStats, error) {
 
 	tweak := "X'00'"
 
-	if s.GetDBEngine() == util.Postgres {
+	if s.isPostgresLike() {
 		tweak = "'\\x00'::bytea"
 	}
 

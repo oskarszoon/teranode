@@ -20,7 +20,6 @@ import (
 	"github.com/bsv-blockchain/teranode/model"
 	"github.com/bsv-blockchain/teranode/services/blockchain/work"
 	"github.com/bsv-blockchain/teranode/stores/blockchain/options"
-	"github.com/bsv-blockchain/teranode/util"
 	"github.com/bsv-blockchain/teranode/util/tracing"
 	"github.com/bsv-blockchain/teranode/util/usql"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -554,7 +553,7 @@ RETURNING id
 
 	if storeBlockOptions.PersistedAt {
 		now := time.Now()
-		if s.engine == util.Postgres {
+		if s.isPostgresLike() {
 			persistedAt = now
 		} else {
 			// SQLite stores timestamps as TEXT - format as "YYYY-MM-DD HH:MM:SS"

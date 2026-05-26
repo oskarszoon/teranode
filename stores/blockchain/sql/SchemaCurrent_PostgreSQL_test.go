@@ -194,7 +194,7 @@ func TestCreatePostgresSchema_FastPathOnSecondCall(t *testing.T) {
 		`SELECT oid FROM pg_class WHERE relname = 'idx_on_main_chain_height'`,
 	).Scan(&oidBefore))
 
-	require.NoError(t, createPostgresSchema(ulogger.TestLogger{}, db, true))
+	require.NoError(t, createPostgresSchema(ulogger.TestLogger{}, db, true, usql.EnginePostgres))
 
 	var oidAfter int64
 	require.NoError(t, db.QueryRow(

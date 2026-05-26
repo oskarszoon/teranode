@@ -5,7 +5,6 @@ import (
 
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	"github.com/bsv-blockchain/teranode/errors"
-	"github.com/bsv-blockchain/teranode/util"
 )
 
 // SetBlockPersistedAt updates the persisted_at timestamp for a block.
@@ -17,7 +16,7 @@ func (s *SQL) SetBlockPersistedAt(ctx context.Context, blockHash *chainhash.Hash
 
 	var q string
 
-	if s.engine == util.Postgres {
+	if s.isPostgresLike() {
 		q = `
 			UPDATE blocks
 			SET persisted_at = CURRENT_TIMESTAMP

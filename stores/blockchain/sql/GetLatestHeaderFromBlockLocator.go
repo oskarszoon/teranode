@@ -150,7 +150,7 @@ func (s *SQL) GetLatestBlockHeaderFromBlockLocator(ctx context.Context, bestBloc
 		FROM blocks b
 		JOIN ChainBlocks cb ON b.id = cb.id`
 
-		if s.engine == util.Postgres {
+		if s.isPostgresLike() {
 			hashBytes := make(pgtype.FlatArray[[]byte], len(blockLocator))
 			for i, hash := range blockLocator {
 				hashBytes[i] = hash[:]
@@ -199,7 +199,7 @@ func (s *SQL) GetLatestBlockHeaderFromBlockLocator(ctx context.Context, bestBloc
 		WHERE b.on_main_chain = true
 		  AND b.height <= (SELECT height FROM blocks WHERE hash = $1 LIMIT 1)`
 
-		if s.engine == util.Postgres {
+		if s.isPostgresLike() {
 			hashBytes := make(pgtype.FlatArray[[]byte], len(blockLocator))
 			for i, hash := range blockLocator {
 				hashBytes[i] = hash[:]

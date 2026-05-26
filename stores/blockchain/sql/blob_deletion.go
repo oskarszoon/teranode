@@ -98,7 +98,7 @@ func (s *SQL) GetPendingBlobDeletions(ctx context.Context, height uint32, limit 
         LIMIT $2
     `
 
-	if s.engine == "postgres" {
+	if s.isPostgresLike() {
 		query += "\n        FOR UPDATE SKIP LOCKED"
 	}
 
@@ -307,7 +307,7 @@ func (s *SQL) AcquireBlobDeletionBatch(ctx context.Context, height uint32, limit
     `
 
 	// Add locking for PostgreSQL
-	if s.engine == "postgres" {
+	if s.isPostgresLike() {
 		query += "\n        FOR UPDATE SKIP LOCKED"
 	}
 
