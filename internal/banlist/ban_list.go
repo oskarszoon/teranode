@@ -53,7 +53,7 @@ func NewFromSettings(logger ulogger.Logger, tSettings *settings.Settings) (*BanL
 	}
 
 	engine := store.GetDBEngine()
-	if engine != util.Postgres && engine != util.Sqlite && engine != util.SqliteMemory {
+	if !usql.IsPostgresLike(engine) && engine != util.Sqlite && engine != util.SqliteMemory {
 		return nil, errors.NewStorageError("unsupported database engine: %s", engine)
 	}
 
@@ -340,6 +340,9 @@ func (b *BanList) notifySubscribersAsync(event BanEvent) {
 const banlistSchemaLockID int64 = 7_265_726_098 // "tera" + "bl" in ASCII-ish
 
 func (b *BanList) createTables(ctx context.Context) error {
+	// Cockroach doesn't implement pg_advisory_lock and concurrent CREATE TABLE
+	// IF NOT EXISTS is safe under CRDB's transactional DDL — duplicate creates
+	// are no-ops. Only PostgreSQL needs the lock.
 	if b.engine == util.Postgres {
 		return usql.WithAdvisoryLock(ctx, b.db, banlistSchemaLockID, func() error {
 			return b.createTablesUnlocked(ctx)
