@@ -75,3 +75,67 @@ func TestDetectEngine_QueryError(t *testing.T) {
 	_, err = DetectEngine(context.Background(), WrapDB(db))
 	require.Error(t, err)
 }
+
+func TestVerifySchemaColumns(t *testing.T) {
+	expected := map[string][]string{
+		"transactions": {"id", "hash", "version"},
+		"outputs":      {"transaction_id", "idx"},
+	}
+
+	t.Run("all present", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		require.NoError(t, err)
+		defer db.Close()
+
+		mock.ExpectQuery("SELECT column_name").WithArgs("outputs").
+			WillReturnRows(sqlmock.NewRows([]string{"column_name"}).AddRow("transaction_id").AddRow("idx"))
+		mock.ExpectQuery("SELECT column_name").WithArgs("transactions").
+			WillReturnRows(sqlmock.NewRows([]string{"column_name"}).AddRow("id").AddRow("hash").AddRow("version"))
+
+		err = VerifySchemaColumns(context.Background(), db, EngineCockroach, expected)
+		require.NoError(t, err)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("missing column reported", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		require.NoError(t, err)
+		defer db.Close()
+
+		mock.ExpectQuery("SELECT column_name").WithArgs("outputs").
+			WillReturnRows(sqlmock.NewRows([]string{"column_name"}).AddRow("transaction_id").AddRow("idx"))
+		mock.ExpectQuery("SELECT column_name").WithArgs("transactions").
+			WillReturnRows(sqlmock.NewRows([]string{"column_name"}).AddRow("id").AddRow("hash"))
+
+		err = VerifySchemaColumns(context.Background(), db, EngineCockroach, expected)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "transactions: version")
+	})
+
+	t.Run("query error propagated", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		require.NoError(t, err)
+		defer db.Close()
+
+		mock.ExpectQuery("SELECT column_name").WithArgs("outputs").WillReturnError(context.DeadlineExceeded)
+
+		err = VerifySchemaColumns(context.Background(), db, EngineCockroach, expected)
+		require.Error(t, err)
+	})
+
+	t.Run("multi-table drift in one error", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		require.NoError(t, err)
+		defer db.Close()
+
+		mock.ExpectQuery("SELECT column_name").WithArgs("outputs").
+			WillReturnRows(sqlmock.NewRows([]string{"column_name"}).AddRow("transaction_id"))
+		mock.ExpectQuery("SELECT column_name").WithArgs("transactions").
+			WillReturnRows(sqlmock.NewRows([]string{"column_name"}).AddRow("id"))
+
+		err = VerifySchemaColumns(context.Background(), db, EngineCockroach, expected)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "outputs: idx")
+		require.Contains(t, err.Error(), "transactions: hash,version")
+	})
+}

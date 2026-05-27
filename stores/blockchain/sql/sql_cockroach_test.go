@@ -66,4 +66,12 @@ func TestCockroach_BlockchainRoundtrip(t *testing.T) {
 	retrieved, err := store.GetBlockByID(ctx, id)
 	require.NoError(t, err)
 	require.Equal(t, block1.Hash().String(), retrieved.Hash().String())
+
+	// Exercise GetNextBlockID, which queries pg_get_serial_sequence — only
+	// returns a non-NULL sequence on CRDB if serial_normalization='sql_sequence'
+	// was active when the blocks table was created. Guards against future
+	// reordering of the AfterConnect hook relative to schema init.
+	nextID, err := store.GetNextBlockID(ctx)
+	require.NoError(t, err)
+	require.Greater(t, nextID, uint64(0))
 }
