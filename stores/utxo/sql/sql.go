@@ -4854,40 +4854,11 @@ var utxoSchemaExpectedColumns = map[string][]string{
 	},
 }
 
-// verifyUTXOSchema queries information_schema.columns (standard, both PG and
-// Cockroach) and confirms every expected column is present on every expected
-// table. Returns an error listing missing columns; does not check column types.
-func verifyUTXOSchema(ctx context.Context, db DBExecutor, engine usql.Engine) error {
-	for table, expected := range utxoSchemaExpectedColumns {
-		rows, err := db.QueryContext(ctx, `
-			SELECT column_name
-			FROM information_schema.columns
-			WHERE table_name = $1
-		`, table)
-		if err != nil {
-			return errors.NewStorageError("verify %s schema (%s): %w", table, engine, err)
-		}
-		present := map[string]struct{}{}
-		for rows.Next() {
-			var c string
-			if err := rows.Scan(&c); err != nil {
-				_ = rows.Close()
-				return errors.NewStorageError("verify %s schema (%s) scan: %w", table, engine, err)
-			}
-			present[c] = struct{}{}
-		}
-		_ = rows.Close()
-		var missing []string
-		for _, col := range expected {
-			if _, ok := present[col]; !ok {
-				missing = append(missing, col)
-			}
-		}
-		if len(missing) > 0 {
-			return errors.NewStorageError("table %s on %s missing columns: %v", table, engine, missing)
-		}
-	}
-	return nil
+// verifyUTXOSchema delegates to usql.VerifySchemaColumns with the UTXO-store
+// expected column map. Runs post-init on Postgres-like engines so a future
+// migration that drifts the bare CREATE TABLE definition fails loud.
+func verifyUTXOSchema(ctx context.Context, db usql.SchemaQuerier, engine usql.Engine) error {
+	return usql.VerifySchemaColumns(ctx, db, engine, utxoSchemaExpectedColumns)
 }
 
 func createSqliteSchema(db *usql.DB) error {
