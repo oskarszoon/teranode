@@ -60,3 +60,8 @@ func (a *merkleProofAdapter) FindBlocksContainingSubtree(subtreeHash *chainhash.
 	// The repository method now returns both block IDs and heights
 	return a.repo.FindBlocksContainingSubtree(a.ctx, subtreeHash)
 }
+
+// IsBlockOnMainChain reports whether the given internal block ID is part of the current best chain.
+func (a *merkleProofAdapter) IsBlockOnMainChain(blockID uint32) (bool, error) {
+	return a.repo.GetBlockchainClient().CheckBlockIsInCurrentChain(a.ctx, []uint32{blockID})
+}
