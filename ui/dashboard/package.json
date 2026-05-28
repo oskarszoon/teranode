@@ -21,7 +21,7 @@
     "perf": "cd perf/preview && lighthouse http://localhost:4173/ --output html --output json --view && cd ../.."
   },
   "devDependencies": {
-    "@playwright/test": "^1.28.1",
+    "@playwright/test": "^1.55.0",
     "@poppanator/sveltekit-svg": "^7.0.0",
     "@sveltejs/adapter-static": "^3.0.1",
     "@sveltejs/kit": "^2.61.1",
