@@ -207,6 +207,10 @@ func New(ctx context.Context, logger ulogger.Logger, tSettings *settings.Setting
 		mtpCache:    newMTPCache(),
 	}
 
+	// Wire the registry's diagnostic logger so corruption events surface via
+	// structured logs instead of stderr.
+	b.peerRegistry.SetLogger(logger)
+
 	// Initialize subscription manager as not ready
 	b.subscriptionManagerReady.Store(false)
 

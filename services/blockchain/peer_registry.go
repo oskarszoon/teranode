@@ -10,6 +10,7 @@ import (
 
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	"github.com/bsv-blockchain/teranode/services/blockchain/blockchain_api"
+	"github.com/bsv-blockchain/teranode/ulogger"
 )
 
 // maxPeerNameLength caps untrusted peer-supplied client names to prevent
@@ -149,6 +150,11 @@ type CentralizedPeerRegistry struct {
 	stopCh   chan struct{}
 	stopOnce sync.Once
 	wg       sync.WaitGroup
+
+	// logger is used for non-fatal diagnostics during Load / Save (e.g. corrupt
+	// persisted blob). Optional — defaults to a "CentralizedPeerRegistry"
+	// logger if unset so tests don't have to wire one up.
+	logger ulogger.Logger
 }
 
 // NewCentralizedPeerRegistry creates an empty peer registry with the given ban configuration.
@@ -159,6 +165,25 @@ func NewCentralizedPeerRegistry(banCfg BanConfig) *CentralizedPeerRegistry {
 		banConfig: banCfg,
 		stopCh:    make(chan struct{}),
 	}
+}
+
+// SetLogger installs a logger for non-fatal diagnostics during Load / Save.
+// Idempotent; safe to call multiple times. Must be called before Load if the
+// caller wants corruption events surfaced via the structured logger instead of
+// the default fallback.
+func (r *CentralizedPeerRegistry) SetLogger(l ulogger.Logger) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.logger = l
+}
+
+// log returns the configured logger or a sensible default. Never returns nil
+// so callers don't have to nil-check on every error path.
+func (r *CentralizedPeerRegistry) log() ulogger.Logger {
+	if r.logger != nil {
+		return r.logger
+	}
+	return ulogger.New("CentralizedPeerRegistry")
 }
 
 // Register adds a new peer or updates non-zero fields of an existing peer.
@@ -577,7 +602,12 @@ func (r *CentralizedPeerRegistry) AddBanScore(peerID string, reason string, poin
 		}
 	}
 
-	// Apply decay (guard against zero interval to avoid division by zero)
+	// Apply decay (guard against zero interval to avoid division by zero).
+	// Advance LastDecay by exactly decaySteps*DecayInterval — NOT to "now" —
+	// so the leftover sub-interval elapsed (decaySteps*interval < elapsed <
+	// (decaySteps+1)*interval) is preserved for the next call. Setting
+	// LastDecay = now would silently bleed a small amount of time on every
+	// invocation, lengthening effective ban duration over many calls.
 	if r.banConfig.DecayInterval > 0 {
 		elapsed := now.Sub(entry.LastDecay)
 		decaySteps := int32(elapsed / r.banConfig.DecayInterval)
@@ -586,7 +616,7 @@ func (r *CentralizedPeerRegistry) AddBanScore(peerID string, reason string, poin
 			if entry.Score < 0 {
 				entry.Score = 0
 			}
-			entry.LastDecay = now
+			entry.LastDecay = entry.LastDecay.Add(time.Duration(decaySteps) * r.banConfig.DecayInterval)
 		}
 	}
 
@@ -755,7 +785,9 @@ func (r *CentralizedPeerRegistry) decayBanScores() {
 			if entry.Score < 0 {
 				entry.Score = 0
 			}
-			entry.LastDecay = now
+			// Preserve the sub-interval remainder so accumulated drift doesn't
+			// extend the effective ban window. See AddBanScore for rationale.
+			entry.LastDecay = entry.LastDecay.Add(time.Duration(decaySteps) * r.banConfig.DecayInterval)
 
 			// Sync to peer info
 			if peer, exists := r.peers[peerID]; exists {

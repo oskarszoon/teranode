@@ -517,3 +517,71 @@ func TestRegister_NoBanScoreSetsCleanState(t *testing.T) {
 	require.False(t, info.IsBanned, "no banScores entry → IsBanned must be false")
 	require.Equal(t, int32(0), info.BanScore, "no banScores entry → BanScore must be 0")
 }
+
+// ---------------------------------------------------------------------------
+// Decay precision — LastDecay advances by exact multiples of DecayInterval
+// ---------------------------------------------------------------------------
+
+// TestBanDecay_LastDecayPreservesSubInterval confirms the precision fix: when
+// elapsed time is N*interval + remainder, LastDecay advances by exactly
+// N*interval, not to "now". Otherwise the remainder leaks on every call and
+// bans last longer than configured.
+func TestBanDecay_LastDecayPreservesSubInterval(t *testing.T) {
+	cfg := DefaultBanConfig()
+	cfg.DecayInterval = time.Second
+	cfg.DecayAmount = 5
+	r := NewCentralizedPeerRegistry(cfg)
+
+	// Seed an entry with a known LastDecay anchor 3.5 seconds in the past.
+	// AddBanScore will then see exactly 3 decay steps with 0.5s remainder.
+	anchor := time.Now().Add(-3500 * time.Millisecond)
+	r.banScores["peer-1"] = &banEntry{
+		Score:     100,
+		LastDecay: anchor,
+	}
+
+	r.AddBanScore("peer-1", "no-mapping", 0)
+
+	entry := r.banScores["peer-1"]
+	// Score: 100 - 3*5 = 85.
+	require.Equal(t, int32(85), entry.Score)
+
+	// LastDecay should be anchor + 3s = 0.5s ago (NOT "now"). Tolerate a few
+	// ms of wall-clock jitter from this test's own runtime.
+	expectedLastDecay := anchor.Add(3 * time.Second)
+	drift := time.Since(entry.LastDecay) - 500*time.Millisecond
+	require.Less(t, drift.Abs(), 100*time.Millisecond,
+		"LastDecay must be anchor+3s; got drift %v from expected %v", drift, expectedLastDecay)
+}
+
+// TestBanDecay_NoDriftAcrossManyCalls drives many small decay calls and asserts
+// the total ban-score loss matches (elapsed / interval) * amount, with no
+// loss from the cumulative LastDecay-bleed bug the precision fix addresses.
+func TestBanDecay_NoDriftAcrossManyCalls(t *testing.T) {
+	cfg := DefaultBanConfig()
+	cfg.DecayInterval = 10 * time.Millisecond
+	cfg.DecayAmount = 1
+	r := NewCentralizedPeerRegistry(cfg)
+
+	start := time.Now()
+	r.banScores["peer-1"] = &banEntry{
+		Score:     1000,
+		LastDecay: start,
+	}
+
+	// Tick decayBanScores 5 times across ~50ms — most calls will hit zero
+	// decaySteps (elapsed < interval) and must not advance LastDecay.
+	for i := 0; i < 5; i++ {
+		time.Sleep(11 * time.Millisecond)
+		r.decayBanScores()
+	}
+
+	entry := r.banScores["peer-1"]
+	elapsed := time.Since(start)
+	expectedSteps := int32(elapsed / cfg.DecayInterval)
+	expectedScore := int32(1000) - expectedSteps*cfg.DecayAmount
+
+	// Tolerate ±1 step worth of wall-clock jitter.
+	require.InDelta(t, float64(expectedScore), float64(entry.Score), 2.0,
+		"observed score %d; expected ~%d after %v elapsed", entry.Score, expectedScore, elapsed)
+}

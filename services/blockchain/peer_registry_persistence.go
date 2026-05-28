@@ -4,13 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"time"
 
 	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/pkg/fileformat"
 	"github.com/bsv-blockchain/teranode/stores/blob"
 	"github.com/bsv-blockchain/teranode/stores/blob/options"
+	"github.com/bsv-blockchain/teranode/ulogger"
 )
 
 // peerRegistryBlobKey is the fixed key used to address the persisted registry
@@ -72,9 +72,12 @@ func savePeerRegistry(ctx context.Context, store blob.Store, peers []*PeerInfo, 
 //
 // Two non-fatal situations are handled silently:
 //   - Key missing: returns empty state (first startup is fine).
-//   - Stored blob is corrupt JSON: logs a warning, returns empty state, and
-//     drops the bad entry so the next save will overwrite it.
-func loadPeerRegistry(ctx context.Context, store blob.Store, ttl time.Duration) ([]*PeerInfo, map[string]persistedBanEntry, error) {
+//   - Stored blob is corrupt JSON: archives the bad blob to a timestamped
+//     sidecar key (peer-registry.corrupt-<unix>) so operators can inspect it
+//     post-mortem, logs an error via the supplied logger, then returns empty
+//     state. The corrupt blob itself is then deleted so the next save can
+//     write to the primary key cleanly.
+func loadPeerRegistry(ctx context.Context, logger ulogger.Logger, store blob.Store, ttl time.Duration) ([]*PeerInfo, map[string]persistedBanEntry, error) {
 	exists, err := store.Exists(ctx, peerRegistryBlobKey, fileformat.FileTypePeerRegistry)
 	if err != nil {
 		return nil, nil, errors.NewProcessingError("check peer registry blob existence", err)
@@ -90,10 +93,20 @@ func loadPeerRegistry(ctx context.Context, store blob.Store, ttl time.Duration) 
 
 	var envelope persistedRegistry
 	if err = json.Unmarshal(data, &envelope); err != nil {
-		// Corrupt JSON in the blob store: drop the entry so the next save
-		// starts clean, then report empty state. Equivalent to the old
-		// file-based "rename .corrupted" path but without leaking a copy.
-		fmt.Fprintf(os.Stderr, "peer registry: corrupt blob dropped, starting with empty registry: %v\n", err)
+		// Corrupt JSON in the blob store. Archive the bad bytes to a sidecar
+		// key before deletion so operators have something to inspect, then
+		// surface an ERROR-level log line — silent data loss here would mean
+		// a node "successfully" started while having destroyed reputation /
+		// ban history.
+		archiveKey := []byte(fmt.Sprintf("peer-registry.corrupt-%d", time.Now().UTC().Unix()))
+		if archiveErr := store.Set(ctx, archiveKey, fileformat.FileTypePeerRegistry, data,
+			options.WithAllowOverwrite(true)); archiveErr != nil {
+			logger.Errorf("peer registry: corrupt blob detected (%v); FAILED to archive to %s: %v; original will be deleted",
+				err, archiveKey, archiveErr)
+		} else {
+			logger.Errorf("peer registry: corrupt blob detected (%v); archived to %s for forensics; starting with empty registry",
+				err, archiveKey)
+		}
 		_ = store.Del(ctx, peerRegistryBlobKey, fileformat.FileTypePeerRegistry)
 		return []*PeerInfo{}, nil, nil
 	}
@@ -130,6 +143,14 @@ func (r *CentralizedPeerRegistry) Save(ctx context.Context, store blob.Store) er
 	peers := make([]*PeerInfo, 0, len(r.peers))
 	for _, p := range r.peers {
 		peerCopy := *p
+		// Deep-copy BlockHash so the snapshot doesn't share the underlying
+		// [32]byte with the live entry. Mirrors Register's pattern and
+		// guarantees no aliasing even if future code starts mutating the
+		// array in place rather than swapping the pointer.
+		if p.BlockHash != nil {
+			hashCopy := *p.BlockHash
+			peerCopy.BlockHash = &hashCopy
+		}
 		peers = append(peers, &peerCopy)
 	}
 	bans := make(map[string]persistedBanEntry, len(r.banScores))
@@ -158,7 +179,7 @@ func (r *CentralizedPeerRegistry) Load(ctx context.Context, store blob.Store, tt
 		return nil
 	}
 
-	peers, bans, err := loadPeerRegistry(ctx, store, ttl)
+	peers, bans, err := loadPeerRegistry(ctx, r.log(), store, ttl)
 	if err != nil {
 		return err
 	}

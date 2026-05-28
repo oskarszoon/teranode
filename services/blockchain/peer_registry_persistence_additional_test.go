@@ -3,6 +3,7 @@ package blockchain
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	"github.com/bsv-blockchain/teranode/pkg/fileformat"
 	"github.com/bsv-blockchain/teranode/services/blockchain/blockchain_api"
+	"github.com/bsv-blockchain/teranode/ulogger"
 	"github.com/stretchr/testify/require"
 )
 
@@ -201,7 +203,7 @@ func TestLoadPeerRegistry_AllExpired(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, store.Set(ctx, peerRegistryBlobKey, fileformat.FileTypePeerRegistry, data))
 
-	loaded, _, err := loadPeerRegistry(ctx, store, 24*time.Hour)
+	loaded, _, err := loadPeerRegistry(ctx, ulogger.TestLogger{}, store, 24*time.Hour)
 	require.NoError(t, err)
 	require.Empty(t, loaded)
 }
@@ -267,6 +269,44 @@ func TestPersistence_CorruptBlobDroppedAndRegistryStartsEmpty(t *testing.T) {
 	exists, err := store.Exists(ctx, peerRegistryBlobKey, fileformat.FileTypePeerRegistry)
 	require.NoError(t, err)
 	require.False(t, exists)
+}
+
+// TestPersistence_CorruptBlobArchivedToSidecar verifies that a corrupt registry
+// blob isn't lost outright — Load copies the bytes to a timestamped sidecar
+// key (peer-registry.corrupt-<unix>) so operators can debug post-mortem.
+func TestPersistence_CorruptBlobArchivedToSidecar(t *testing.T) {
+	store := newTestBlobStore(t)
+	ctx := context.Background()
+
+	corruptPayload := []byte("not valid json {{{")
+	require.NoError(t, store.Set(ctx, peerRegistryBlobKey, fileformat.FileTypePeerRegistry, corruptPayload))
+
+	beforeTs := time.Now().UTC().Unix()
+	r := NewCentralizedPeerRegistry(DefaultBanConfig())
+	require.NoError(t, r.Load(ctx, store, 24*time.Hour))
+	afterTs := time.Now().UTC().Unix()
+
+	// Primary key is gone.
+	exists, err := store.Exists(ctx, peerRegistryBlobKey, fileformat.FileTypePeerRegistry)
+	require.NoError(t, err)
+	require.False(t, exists, "primary key must be deleted")
+
+	// Sidecar key must exist with the same payload. The unix timestamp in the
+	// sidecar key falls within the window of the Load call.
+	var found bool
+	for ts := beforeTs; ts <= afterTs; ts++ {
+		key := []byte(fmt.Sprintf("peer-registry.corrupt-%d", ts))
+		ok, err := store.Exists(ctx, key, fileformat.FileTypePeerRegistry)
+		require.NoError(t, err)
+		if ok {
+			archived, err := store.Get(ctx, key, fileformat.FileTypePeerRegistry)
+			require.NoError(t, err)
+			require.Equal(t, corruptPayload, archived, "sidecar must contain the original bytes verbatim")
+			found = true
+			break
+		}
+	}
+	require.True(t, found, "expected sidecar key peer-registry.corrupt-<unix> to be present")
 }
 
 func TestPersistence_LoadAnchorsLastDecayWhenMissing(t *testing.T) {
