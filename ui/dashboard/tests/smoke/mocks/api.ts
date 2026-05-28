@@ -3,6 +3,8 @@ import blockchainInfo from './fixtures/blockchain-info.json' with { type: 'json'
 import blockstats from './fixtures/blockstats.json' with { type: 'json' }
 import peers from './fixtures/peers.json' with { type: 'json' }
 import settings from './fixtures/settings.json' with { type: 'json' }
+import blocks from './fixtures/blocks.json' with { type: 'json' }
+import blockDetail from './fixtures/block-detail.json' with { type: 'json' }
 
 type MockOptions = {
   authenticated?: boolean
@@ -84,6 +86,38 @@ export async function installApiMocks(page: Page, opts: MockOptions = {}): Promi
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({ events: [] }),
+    }),
+  )
+
+  // /viewer blocks list. Regex to avoid matching /blockstats. Matches
+  // /api/blocks and /api/<segment>/blocks with optional query string.
+  await page.route(/\/api\/(?:[^/?#]+\/)?blocks(?:\?|$)/, (route: Route) =>
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(blocks) }),
+  )
+
+  // /viewer/block detail page fetches three endpoints. Return the same block
+  // body for /block/<hash>/json and /header/<hash>/json (the page merges them).
+  await page.route(/\/api\/(?:[^/?#]+\/)?(?:block|header)\/[a-fA-F0-9]+\/json(?:\?|$)/, (route: Route) =>
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(blockDetail) }),
+  )
+
+  // /viewer/block subtrees pagination — empty list, valid pagination shape.
+  // Note: server response is unwrapped; the api client wraps it as
+  // `{ok: true, data: <body>}` before handing back to the caller.
+  await page.route(/\/api\/(?:[^/?#]+\/)?block\/[a-fA-F0-9]+\/subtrees\/json(?:\?|$)/, (route: Route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ data: [], pagination: { limit: 20, offset: 0, totalRecords: 0 } }),
+    }),
+  )
+
+  // /viewer/block "latest block" lookup. Returns a raw array — client wraps it.
+  await page.route(/\/api\/(?:[^/?#]+\/)?lastblocks(?:\?|$)/, (route: Route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify([blockDetail]),
     }),
   )
 }

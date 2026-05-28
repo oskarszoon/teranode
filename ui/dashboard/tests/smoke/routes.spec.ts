@@ -49,3 +49,29 @@ for (const route of ROUTES) {
     })
   })
 }
+
+// Click-through smoke: /viewer renders a block list, clicking a hash navigates
+// to /viewer/block/?hash=<hash> and the detail page renders without errors.
+// Catches regressions in:
+//   - blocks-list fetch + table population
+//   - block-detail page mount + 3-endpoint compose (block + header + lastblocks)
+//   - URL/router behaviour for the /viewer/[type] dynamic route
+test.describe('smoke: /viewer click-through to block detail', () => {
+  test('opens block detail when first block hash is clicked', async ({ smokePage, consoleErrors }) => {
+    await smokePage.goto('/viewer')
+    await expect(smokePage.locator('[data-testid="page-root"]')).toBeVisible()
+
+    // First block hash link in the blocks table.
+    const firstBlockLink = smokePage.locator('a[href^="/viewer/block/?hash="]').first()
+    await expect(firstBlockLink).toBeVisible()
+    await firstBlockLink.click()
+
+    await smokePage.waitForURL(/\/viewer\/block\/\?hash=[a-fA-F0-9]+/)
+
+    // Detail page is wrapped in its own data-testid="page-root".
+    await expect(smokePage.locator('[data-testid="page-root"]')).toBeVisible()
+
+    await smokePage.waitForTimeout(1000)
+    expect(consoleErrors, `console errors on /viewer click-through:\n${consoleErrors.join('\n')}`).toHaveLength(0)
+  })
+})
