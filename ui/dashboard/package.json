@@ -2,6 +2,9 @@
   "name": "dashboard",
   "version": "0.0.1",
   "private": true,
+  "engines": {
+    "node": ">=20.19.0"
+  },
   "scripts": {
     "dev": "vite dev --open",
     "build": "rm -rf build/_app/immutable && vite build && touch build/.gitkeep",
