@@ -1,8 +1,8 @@
 import type { Page, Route } from '@playwright/test'
-import blockchainInfo from './fixtures/blockchain-info.json'
-import blockstats from './fixtures/blockstats.json'
-import peers from './fixtures/peers.json'
-import settings from './fixtures/settings.json'
+import blockchainInfo from './fixtures/blockchain-info.json' with { type: 'json' }
+import blockstats from './fixtures/blockstats.json' with { type: 'json' }
+import peers from './fixtures/peers.json' with { type: 'json' }
+import settings from './fixtures/settings.json' with { type: 'json' }
 
 type MockOptions = {
   authenticated?: boolean
@@ -12,6 +12,12 @@ const EMPTY_OK = { ok: true, data: [] }
 
 export async function installApiMocks(page: Page, opts: MockOptions = {}): Promise<void> {
   const authenticated = opts.authenticated ?? true
+
+  // Catch-all for /api/* requests so nothing hangs. Registered FIRST so the
+  // specific routes below take precedence (Playwright matches handlers LIFO).
+  await page.route('**/api/**', (route: Route) =>
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(EMPTY_OK) }),
+  )
 
   await page.route('**/api/auth/check', (route: Route) =>
     route.fulfill({
@@ -37,16 +43,11 @@ export async function installApiMocks(page: Page, opts: MockOptions = {}): Promi
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(settings) }),
   )
 
-  await page.route('**/wsconfig', (route: Route) =>
+  await page.route('**/api/config/websocket', (route: Route) =>
     route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({ url: 'ws://localhost:4173/ws-mock' }),
+      body: JSON.stringify({ websocketUrl: 'ws://localhost:4173/ws-mock' }),
     }),
-  )
-
-  // Catch-all for any other /api/* request so nothing hangs.
-  await page.route('**/api/**', (route: Route) =>
-    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(EMPTY_OK) }),
   )
 }
