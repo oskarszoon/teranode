@@ -93,7 +93,7 @@
 </script>
 
 <PageWithMenu>
-  <div class="content">
+  <div class="content" data-testid="page-root">
     <div class="fork-nav">
       <Button
         size="small"

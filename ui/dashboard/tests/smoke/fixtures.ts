@@ -9,6 +9,9 @@ const CONSOLE_ALLOWLIST: string[] = [
   '[vite] hot updated',
   'echarts',
   'Download the React DevTools',
+  // Browser-emitted network log when /api/auth/check returns 401 on
+  // unauthenticated routes (e.g. /login). Expected behaviour, not a bug.
+  'Failed to load resource: the server responded with a status of 401 (Unauthorized)',
 ]
 
 type SmokeFixtures = {

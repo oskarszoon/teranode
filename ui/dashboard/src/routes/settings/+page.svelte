@@ -228,7 +228,7 @@
 </script>
 
 <PageWithMenu>
-  <div class="settings-container">
+  <div class="settings-container" data-testid="page-root">
     <header class="settings-header">
       <div class="header-left">
         <h1>{t('page.settings.title', 'Settings Reference')}</h1>

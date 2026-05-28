@@ -5,7 +5,9 @@
 </script>
 
 <PageWithMenu>
-  <BlocksTableCard />
+  <div data-testid="page-root">
+    <BlocksTableCard />
+  </div>
 </PageWithMenu>
 
 <style>

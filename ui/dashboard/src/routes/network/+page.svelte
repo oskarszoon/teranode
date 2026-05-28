@@ -321,10 +321,11 @@
 </script>
 
 <PageWithMenu>
-  <ConnectedNodesCard 
+  <div data-testid="page-root">
+  <ConnectedNodesCard
     data={paginatedNodes}
     allData={allNodes}
-    {connected} 
+    {connected}
     page={currentPage}
     pageSize={currentPageSize}
     {sortColumn}
@@ -332,4 +333,5 @@
     on:pagechange={onPageChange}
     on:sort={onSort}
   />
+  </div>
 </PageWithMenu>

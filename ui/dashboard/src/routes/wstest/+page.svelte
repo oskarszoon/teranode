@@ -121,7 +121,7 @@
   })
 </script>
 
-<div class="container">
+<div class="container" data-testid="page-root">
   <Card>
     <div slot="title">
       <Typo variant="title" size="h4" value="WebSocket Test Tool" />

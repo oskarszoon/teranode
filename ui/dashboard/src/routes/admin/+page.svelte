@@ -630,7 +630,7 @@
 </script>
 
 <PageWithMenu>
-  <div class="admin-container">
+  <div class="admin-container" data-testid="page-root">
     <header class="admin-header">
       <h1>{t('admin.title', 'Admin Dashboard')}</h1>
       <div class="header-actions">

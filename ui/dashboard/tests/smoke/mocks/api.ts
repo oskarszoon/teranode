@@ -27,18 +27,34 @@ export async function installApiMocks(page: Page, opts: MockOptions = {}): Promi
     }),
   )
 
+  // Asset HTTP API requests in prod/preview hit http://<host>:8090/api/v1/<path>,
+  // while dev/auth requests stay on the same origin via the SvelteKit proxy
+  // mounted at /api/<path>. We anchor with /api/ to avoid matching the SPA's
+  // own page routes (e.g. /peers, /settings) and use a wildcard segment for v1.
+  await page.route('**/api/**/blockchain/info', (route: Route) =>
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(blockchainInfo) }),
+  )
   await page.route('**/api/blockchain/info', (route: Route) =>
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(blockchainInfo) }),
   )
 
+  await page.route('**/api/**/blockstats**', (route: Route) =>
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(blockstats) }),
+  )
   await page.route('**/api/blockstats**', (route: Route) =>
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(blockstats) }),
   )
 
+  await page.route('**/api/**/peers**', (route: Route) =>
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(peers) }),
+  )
   await page.route('**/api/peers**', (route: Route) =>
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(peers) }),
   )
 
+  await page.route('**/api/**/settings**', (route: Route) =>
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(settings) }),
+  )
   await page.route('**/api/settings**', (route: Route) =>
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(settings) }),
   )
@@ -48,6 +64,26 @@ export async function installApiMocks(page: Page, opts: MockOptions = {}): Promi
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({ websocketUrl: 'ws://localhost:4173/ws-mock' }),
+    }),
+  )
+
+  // /ancestors expects either { block_locator: string[] } or a bare array.
+  // Production URL is /api/v1/block_locator; dev proxy mounts at
+  // /api/blockchain/locator. Match both.
+  const locatorBody = JSON.stringify({ block_locator: [] })
+  await page.route('**/api/**/block_locator', (route: Route) =>
+    route.fulfill({ status: 200, contentType: 'application/json', body: locatorBody }),
+  )
+  await page.route('**/api/blockchain/locator', (route: Route) =>
+    route.fulfill({ status: 200, contentType: 'application/json', body: locatorBody }),
+  )
+
+  // /admin reads { events: [...] } from /api/v1/fsm/events on the asset host.
+  await page.route('**/api/**/fsm/events', (route: Route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ events: [] }),
     }),
   )
 }
