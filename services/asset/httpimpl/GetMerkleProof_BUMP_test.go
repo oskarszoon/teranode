@@ -11,6 +11,7 @@ import (
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	"github.com/bsv-blockchain/go-subtree"
 	"github.com/bsv-blockchain/teranode/model"
+	"github.com/bsv-blockchain/teranode/services/blockchain"
 	"github.com/bsv-blockchain/teranode/settings"
 	"github.com/bsv-blockchain/teranode/stores/utxo/meta"
 	"github.com/bsv-blockchain/teranode/ulogger"
@@ -106,6 +107,10 @@ func TestGetMerkleProofBUMPFormats(t *testing.T) {
 		mockRepo.On("GetSubtree", mock.Anything, subtreeHash).Return(mockSubtree, nil)
 		mockRepo.On("GetBlockHeader", mock.Anything, mock.AnythingOfType("*chainhash.Hash")).Return(mockBlockHeader, mockBlockHeaderMeta, nil)
 
+		bcMock := &blockchain.Mock{}
+		bcMock.On("CheckBlockIsInCurrentChain", mock.Anything, mock.Anything).Return(true, nil)
+		mockRepo.On("GetBlockchainClient").Return(bcMock)
+
 		// Create request
 		e := echo.New()
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/merkle_proof/"+txHashStr+"/json", nil)
@@ -148,6 +153,10 @@ func TestGetMerkleProofBUMPFormats(t *testing.T) {
 		mockRepo.On("GetBlockByID", mock.Anything, uint64(1)).Return(mockBlock, nil)
 		mockRepo.On("GetSubtree", mock.Anything, subtreeHash).Return(mockSubtree, nil)
 		mockRepo.On("GetBlockHeader", mock.Anything, mock.AnythingOfType("*chainhash.Hash")).Return(mockBlockHeader, mockBlockHeaderMeta, nil)
+
+		bcMock := &blockchain.Mock{}
+		bcMock.On("CheckBlockIsInCurrentChain", mock.Anything, mock.Anything).Return(true, nil)
+		mockRepo.On("GetBlockchainClient").Return(bcMock)
 
 		// Create request
 		e := echo.New()
@@ -195,6 +204,10 @@ func TestGetMerkleProofBUMPFormats(t *testing.T) {
 		mockRepo.On("GetSubtree", mock.Anything, subtreeHash).Return(mockSubtree, nil)
 		mockRepo.On("GetBlockHeader", mock.Anything, mock.AnythingOfType("*chainhash.Hash")).Return(mockBlockHeader, mockBlockHeaderMeta, nil)
 
+		bcMock := &blockchain.Mock{}
+		bcMock.On("CheckBlockIsInCurrentChain", mock.Anything, mock.Anything).Return(true, nil)
+		mockRepo.On("GetBlockchainClient").Return(bcMock)
+
 		// Create request
 		e := echo.New()
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/merkle_proof/"+txHashStr, nil)
@@ -239,6 +252,10 @@ func TestGetMerkleProofBUMPFormats(t *testing.T) {
 		mockRepo.On("GetBlockByID", mock.Anything, uint64(1)).Return(mockBlock, nil)
 		mockRepo.On("GetSubtree", mock.Anything, subtreeHash).Return(mockSubtree, nil)
 		mockRepo.On("GetBlockHeader", mock.Anything, mock.AnythingOfType("*chainhash.Hash")).Return(mockBlockHeader, mockBlockHeaderMeta, nil)
+
+		bcMock := &blockchain.Mock{}
+		bcMock.On("CheckBlockIsInCurrentChain", mock.Anything, mock.Anything).Return(true, nil)
+		mockRepo.On("GetBlockchainClient").Return(bcMock)
 
 		// Get JSON format
 		e := echo.New()

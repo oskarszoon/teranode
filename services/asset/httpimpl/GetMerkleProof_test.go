@@ -237,6 +237,10 @@ func TestGetMerkleProof(t *testing.T) {
 		mockRepo.On("GetSubtree", mock.Anything, subtreeHash).Return(mockSubtree, nil)
 		mockRepo.On("GetBlockHeader", mock.Anything, mock.AnythingOfType("*chainhash.Hash")).Return(mockBlockHeader, mockBlockHeaderMeta, nil)
 
+		bcMock := &blockchain.Mock{}
+		bcMock.On("CheckBlockIsInCurrentChain", mock.Anything, mock.Anything).Return(true, nil)
+		mockRepo.On("GetBlockchainClient").Return(bcMock)
+
 		// Create request
 		e := echo.New()
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/merkle_proof/"+txHashStr+"/json", nil)
@@ -469,6 +473,10 @@ func TestGetMerkleProof(t *testing.T) {
 		mockRepo.On("GetSubtree", mock.Anything, subtreeHash).Return(mockSubtree, nil)
 		mockRepo.On("GetBlockHeader", mock.Anything, mock.AnythingOfType("*chainhash.Hash")).Return(mockBlockHeader, mockBlockHeaderMeta, nil)
 
+		bcMock := &blockchain.Mock{}
+		bcMock.On("CheckBlockIsInCurrentChain", mock.Anything, mock.Anything).Return(true, nil)
+		mockRepo.On("GetBlockchainClient").Return(bcMock)
+
 		// Execute handler with binary mode
 		handler := h.GetMerkleProof(BINARY_STREAM)
 		err := handler(c)
@@ -479,6 +487,108 @@ func TestGetMerkleProof(t *testing.T) {
 		assert.Equal(t, "application/octet-stream", rec.Header().Get("Content-Type"))
 		assert.NotEmpty(t, rec.Body.Bytes())
 	})
+}
+
+func TestGetMerkleProof_OrphanOnly_Returns404(t *testing.T) {
+	initPrometheusMetrics()
+	mockRepo := &MockRepositoryForMerkleProof{}
+
+	// Tx exists, but only in an orphan block (ID=42).
+	txHash, _ := chainhash.NewHashFromStr("1111111111111111111111111111111111111111111111111111111111111111")
+	mockRepo.On("GetTxMeta", mock.Anything, mock.Anything).Return(&meta.Data{
+		BlockIDs:     []uint32{42},
+		BlockHeights: []uint32{100},
+		SubtreeIdxs:  []int{0},
+	}, nil)
+	// Subtree fallback should NOT be attempted; mark Maybe() so testify doesn't fail.
+	mockRepo.On("FindBlocksContainingSubtree", mock.Anything, mock.Anything).Return(
+		[]uint32{}, []uint32{}, []int{}, errors.NewProcessingError("should not be called"),
+	).Maybe()
+
+	bcMock := &blockchain.Mock{}
+	bcMock.On("CheckBlockIsInCurrentChain", mock.Anything, []uint32{42}).Return(false, nil)
+	mockRepo.On("GetBlockchainClient").Return(bcMock)
+
+	httpServer := &HTTP{
+		logger:     ulogger.TestLogger{},
+		settings:   &settings.Settings{},
+		repository: mockRepo,
+	}
+	e := echo.New()
+	req, _ := http.NewRequest("GET", "/api/v1/merkle_proof/"+txHash.String()+"/json", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetPath("/api/v1/merkle_proof/:hash/json")
+	c.SetParamNames("hash")
+	c.SetParamValues(txHash.String())
+
+	err := httpServer.GetMerkleProof(JSON)(c)
+	echoErr := &echo.HTTPError{}
+	require.True(t, errors.As(err, &echoErr))
+	assert.Equal(t, http.StatusNotFound, echoErr.Code)
+	assert.Contains(t, echoErr.Message.(string), "not in main chain")
+}
+
+func TestGetMerkleProof_ForkPlusMain_ReturnsMainChainProof(t *testing.T) {
+	initPrometheusMetrics()
+	mockRepo := &MockRepositoryForMerkleProof{}
+
+	coinbaseHash, _ := chainhash.NewHashFromStr("abc1234567890123456789012345678901234567890123456789012345678901")
+	txHash, _ := chainhash.NewHashFromStr("1111111111111111111111111111111111111111111111111111111111111111")
+
+	st, err := subtree.NewTreeByLeafCount(2)
+	require.NoError(t, err)
+	st.Nodes = []subtree.Node{
+		{Hash: *coinbaseHash},
+		{Hash: *txHash},
+	}
+	subtreeRoot := st.RootHash()
+
+	mainBlock := &model.Block{
+		Header: &model.BlockHeader{
+			HashPrevBlock:  &chainhash.Hash{},
+			HashMerkleRoot: subtreeRoot,
+		},
+		Subtrees: []*chainhash.Hash{subtreeRoot},
+	}
+
+	mockRepo.On("GetTxMeta", mock.Anything, mock.Anything).Return(&meta.Data{
+		BlockIDs:     []uint32{42, 99}, // BlockIDs[0] is the orphan — must not be picked
+		BlockHeights: []uint32{100, 101},
+		SubtreeIdxs:  []int{0, 0},
+	}, nil)
+	mockRepo.On("GetBlockByID", mock.Anything, uint64(99)).Return(mainBlock, nil)
+	mockRepo.On("GetSubtree", mock.Anything, mock.Anything).Return(st, nil)
+	mockRepo.On("GetBlockHeader", mock.Anything, mock.Anything).Return(mainBlock.Header, &model.BlockHeaderMeta{}, nil)
+
+	bcMock := &blockchain.Mock{}
+	bcMock.On("CheckBlockIsInCurrentChain", mock.Anything, []uint32{42}).Return(false, nil)
+	bcMock.On("CheckBlockIsInCurrentChain", mock.Anything, []uint32{99}).Return(true, nil)
+	mockRepo.On("GetBlockchainClient").Return(bcMock)
+
+	httpServer := &HTTP{
+		logger:     ulogger.TestLogger{},
+		settings:   &settings.Settings{},
+		repository: mockRepo,
+	}
+	e := echo.New()
+	req, _ := http.NewRequest("GET", "/api/v1/merkle_proof/"+txHash.String()+"/json", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetPath("/api/v1/merkle_proof/:hash/json")
+	c.SetParamNames("hash")
+	c.SetParamValues(txHash.String())
+
+	err = httpServer.GetMerkleProof(JSON)(c)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var response map[string]interface{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+	assert.Equal(t, float64(101), response["blockHeight"], "must return main-chain block height (101), not orphan (100)")
+
+	bcMock.AssertCalled(t, "CheckBlockIsInCurrentChain", mock.Anything, []uint32{42})
+	bcMock.AssertCalled(t, "CheckBlockIsInCurrentChain", mock.Anything, []uint32{99})
 }
 
 // TestMerkleProofAdapter tests the adapter that allows using merkleproof package with the repository
@@ -639,7 +749,8 @@ func (m *MockRepositoryForMerkleProof) GetBlockLocator(ctx context.Context, bloc
 }
 
 func (m *MockRepositoryForMerkleProof) GetBlockchainClient() blockchain.ClientI {
-	return nil
+	args := m.Called()
+	return args.Get(0).(blockchain.ClientI)
 }
 
 func (m *MockRepositoryForMerkleProof) GetBlockvalidationClient() blockvalidation.Interface {
