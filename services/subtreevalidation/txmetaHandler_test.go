@@ -20,7 +20,6 @@ import (
 	"github.com/bsv-blockchain/teranode/util/kafka"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
-	"github.com/stretchr/testify/require"
 )
 
 func TestMain(m *testing.M) {
@@ -83,6 +82,21 @@ func (m *mockCache) Delete(ctx context.Context, hash *chainhash.Hash) error {
 
 func (m *mockCache) SetCacheFromBytes(key, txMetaBytes []byte) error {
 	args := m.Called(key, txMetaBytes)
+	return args.Error(0)
+}
+
+func (m *mockCache) SetCacheMulti(keys, values [][]byte) error {
+	args := m.Called(keys, values)
+	return args.Error(0)
+}
+
+func (m *mockCache) SetCacheMultiSequential(keys, values [][]byte) error {
+	args := m.Called(keys, values)
+	return args.Error(0)
+}
+
+func (m *mockCache) SetCacheMultiSequentialWithHashes(keys, values [][]byte, hashes []uint64) error {
+	args := m.Called(keys, values, hashes)
 	return args.Error(0)
 }
 
@@ -202,9 +216,9 @@ func createKafkaMessage(t *testing.T, delete bool, content []byte) *kafka.KafkaM
 	t.Helper()
 
 	hash := chainhash.Hash{1, 2, 3}
-	action := txmetaActionADD
+	action := txmetacache.WireActionADD
 	if delete {
-		action = txmetaActionDELETE
+		action = txmetacache.WireActionDELETE
 	}
 
 	// Calculate total size: 4 (count) + 32 (hash) + 1 (action) + 4 (length) + len(content)
@@ -246,7 +260,7 @@ func createKafkaMessageForHash(t *testing.T, hash chainhash.Hash, action byte, c
 	t.Helper()
 
 	contentLen := uint32(len(content))
-	if action == txmetaActionDELETE {
+	if action == txmetacache.WireActionDELETE {
 		contentLen = 0
 	}
 
@@ -309,14 +323,14 @@ func TestServer_txmetaHandler(t *testing.T) {
 		{
 			name: "successful set operation",
 			setupMocks: func(l *mockLogger, c *mockCache) {
-				c.On("SetCacheFromBytes", mock.Anything, mock.Anything).Return(nil)
+				c.On("SetCacheMultiSequential", mock.Anything, mock.Anything).Return(nil)
 			},
 			input: createKafkaMessage(t, false, []byte("test data")),
 		},
 		{
 			name: "failed set operation logs debug",
 			setupMocks: func(l *mockLogger, c *mockCache) {
-				c.On("SetCacheFromBytes", mock.Anything, mock.Anything).Return(errors.ErrProcessing)
+				c.On("SetCacheMultiSequential", mock.Anything, mock.Anything).Return(errors.ErrProcessing)
 				l.On("Debugf", mock.Anything, mock.Anything).Return()
 			},
 			input: createKafkaMessage(t, false, []byte("test data")),
@@ -356,7 +370,7 @@ func TestServer_txmetaHandler_PreservesPerKeyOrdering(t *testing.T) {
 		operations  []string
 	)
 
-	mockCache.On("SetCacheFromBytes", mock.Anything, mock.Anything).Return(nil).Run(func(args mock.Arguments) {
+	mockCache.On("SetCacheMultiSequential", mock.Anything, mock.Anything).Return(nil).Run(func(args mock.Arguments) {
 		operationMu.Lock()
 		defer operationMu.Unlock()
 		operations = append(operations, "add")
@@ -374,8 +388,8 @@ func TestServer_txmetaHandler_PreservesPerKeyOrdering(t *testing.T) {
 	}
 
 	hash := chainhash.Hash{42}
-	addMessage := createKafkaMessageForHash(t, hash, txmetaActionADD, []byte("payload"))
-	deleteMessage := createKafkaMessageForHash(t, hash, txmetaActionDELETE, nil)
+	addMessage := createKafkaMessageForHash(t, hash, txmetacache.WireActionADD, []byte("payload"))
+	deleteMessage := createKafkaMessageForHash(t, hash, txmetacache.WireActionDELETE, nil)
 
 	err := server.txmetaHandler(context.Background(), addMessage)
 	assert.NoError(t, err)
@@ -394,179 +408,223 @@ func TestServer_txmetaHandler_PreservesPerKeyOrdering(t *testing.T) {
 	assert.Equal(t, []string{"add", "delete"}, operations)
 }
 
-// TestServer_txmetaHandler_CaughtUpModeDropsOnFullQueue verifies that once the
-// caught-up latch is set, a full shard queue causes the batch to be silently
-// abandoned (no error returned to the kafka consumer) so the failure mode is
-// logged at Warn level instead of Error.
-func TestServer_txmetaHandler_CaughtUpModeDropsOnFullQueue(t *testing.T) {
+// TestServer_txmetaHandler_V2_Parses verifies the receiver correctly handles
+// the v2 wire format (magic byte 0xFF, 8-byte hash per entry).
+func TestServer_txmetaHandler_V2_Parses(t *testing.T) {
+	mLogger := &mockLogger{}
+	mCache := &mockCache{}
+	mCache.On("SetCacheMultiSequentialWithHashes", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+
 	server := &Server{
-		logger: ulogger.TestLogger{},
-	}
-	server.txmetaCaughtUp.Store(true)
-
-	// Pretend workers are already initialized; an unbuffered channel with no
-	// reader is always "full" for a non-blocking send.
-	server.txmetaWorkerInitOnce.Do(func() {})
-	server.txmetaWorkerQueues = []chan txmetaWorkItem{
-		make(chan txmetaWorkItem),
+		logger:    mLogger,
+		utxoStore: mCache,
 	}
 
-	hash := chainhash.Hash{0}
-	message := createKafkaMessageForHash(t, hash, txmetaActionADD, []byte("payload"))
+	payload := []byte("test-meta")
+	totalSize := 8 + 8 + 32 + 1 + 4 + len(payload)
+	data := make([]byte, totalSize)
+	data[0] = txmetacache.WireV2Magic
+	data[1] = txmetacache.WireV2Version
+	binary.LittleEndian.PutUint32(data[4:], 1)
 
-	err := server.txmetaHandler(context.Background(), message)
+	off := 8
+	binary.LittleEndian.PutUint64(data[off:], 0xCAFEBABE)
+	off += 8
+	hash := chainhash.Hash{42}
+	copy(data[off:], hash[:])
+	off += 32
+	data[off] = txmetacache.WireActionADD
+	off++
+	binary.LittleEndian.PutUint32(data[off:], uint32(len(payload)))
+	off += 4
+	copy(data[off:], payload)
+
+	err := server.txmetaHandler(context.Background(), &kafka.KafkaMessage{Value: data})
 	assert.NoError(t, err)
+	mCache.AssertExpectations(t)
 }
 
-// TestServer_txmetaHandler_StartupModeBlocksUntilDrained verifies the startup
-// mode applies backpressure: when the shard queue is full and the latch is not
-// set, the handler waits for the worker to drain instead of dropping.
-func TestServer_txmetaHandler_StartupModeBlocksUntilDrained(t *testing.T) {
-	server := &Server{
-		logger: ulogger.TestLogger{},
-	}
-	// Latch defaults to false (startup mode).
+// TestServer_txmetaHandler_V2Shaped_UnknownVersion_FallsBackToV1 confirms
+// that a v2-shaped message with an unknown sub-version is treated as v1
+// (rather than dropped silently), so a legitimate v1 message with a count
+// whose LE low byte is 0xFF is never misclassified. The 8-byte buffer is
+// too small to hold a single v1 entry, so the v1 path logs a truncation
+// error and acks — but crucially it does NOT call the v2 dispatch path.
+func TestServer_txmetaHandler_V2Shaped_UnknownVersion_FallsBackToV1(t *testing.T) {
+	mLogger := &mockLogger{}
+	mLogger.On("Errorf", mock.Anything, mock.Anything).Return()
+	mCache := &mockCache{}
 
-	server.txmetaWorkerInitOnce.Do(func() {})
-	ch := make(chan txmetaWorkItem, 1)
-	server.txmetaWorkerQueues = []chan txmetaWorkItem{ch}
+	server := &Server{logger: mLogger, utxoStore: mCache}
 
-	// Pre-fill the queue. Any further send blocks until a reader appears.
-	ch <- txmetaWorkItem{}
+	data := make([]byte, 8)
+	data[0] = txmetacache.WireV2Magic
+	data[1] = 0x99
 
-	// Drain a single item after a short delay; this should unblock the handler.
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		<-ch // drain the prefill
-	}()
-
-	hash := chainhash.Hash{0}
-	message := createKafkaMessageForHash(t, hash, txmetaActionADD, []byte("payload"))
-
-	start := time.Now()
-	err := server.txmetaHandler(context.Background(), message)
-	elapsed := time.Since(start)
-
+	err := server.txmetaHandler(context.Background(), &kafka.KafkaMessage{Value: data})
 	assert.NoError(t, err)
-	assert.GreaterOrEqual(t, elapsed, 40*time.Millisecond, "handler should have blocked until drained")
-	// The new item should now be sitting in the queue.
-	assert.Len(t, ch, 1)
+	// Must NOT take the v2 dispatch path — the v2-shaped-but-invalid
+	// header must fall through to v1 parsing.
+	mCache.AssertNotCalled(t, "SetCacheMultiSequentialWithHashes",
+		mock.Anything, mock.Anything, mock.Anything)
 }
 
-// TestServer_txmetaHandler_StartupModeUnblocksOnContextCancel verifies that a
-// startup-mode blocking send unblocks when the context is cancelled, so the
-// service shutdown is not blocked by a stuck worker.
-func TestServer_txmetaHandler_StartupModeUnblocksOnContextCancel(t *testing.T) {
-	server := &Server{
-		logger: ulogger.TestLogger{},
-	}
-
-	server.txmetaWorkerInitOnce.Do(func() {})
-	ch := make(chan txmetaWorkItem) // unbuffered, no reader -> always blocks
-	server.txmetaWorkerQueues = []chan txmetaWorkItem{ch}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		time.Sleep(20 * time.Millisecond)
-		cancel()
-	}()
-
-	hash := chainhash.Hash{0}
-	message := createKafkaMessageForHash(t, hash, txmetaActionADD, []byte("payload"))
-
-	err := server.txmetaHandler(ctx, message)
-	assert.Error(t, err)
-	assert.True(t, errors.Is(err, context.Canceled))
-}
-
-// TestServer_txmetaHandler_LatchFlipsAtHighWaterMark verifies that observing a
-// message at the partition tail (msg.Offset+1 == HighWaterMark) flips the
-// caught-up latch.
-func TestServer_txmetaHandler_LatchFlipsAtHighWaterMark(t *testing.T) {
-	mockLogger := &mockLogger{}
-	mockCache := &mockCache{}
-	mockCache.On("SetCacheFromBytes", mock.Anything, mock.Anything).Return(nil)
-	mockLogger.On("Infof", mock.Anything, mock.Anything).Return()
+// TestServer_txmetaHandler_V2_MixedAddDelete verifies the receiver handles a
+// v2 message containing both ADDs and DELETEs in any order, mirroring what
+// the validator's serializeTxMetaBatchV2 can emit when a partition has a
+// mixed batch.
+func TestServer_txmetaHandler_V2_MixedAddDelete(t *testing.T) {
+	mLogger := &mockLogger{}
+	mCache := &mockCache{}
+	// Two ADDs (single SetCacheMultiSequential call) + one DELETE.
+	mCache.On("SetCacheMultiSequentialWithHashes", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	mCache.On("Delete", mock.Anything, mock.AnythingOfType("*chainhash.Hash")).Return(nil)
 
 	server := &Server{
-		logger:    mockLogger,
-		utxoStore: mockCache,
+		logger:    mLogger,
+		utxoStore: mCache,
 	}
 
-	hash := chainhash.Hash{7}
-	msg := createKafkaMessageForHash(t, hash, txmetaActionADD, []byte("payload"))
-	msg.Topic = "txmeta"
-	msg.Partition = 0
-	msg.Offset = 99
-	msg.HighWaterMark = 100 // Offset+1 == HWM => tail
+	hashes := []chainhash.Hash{{1}, {2}, {3}}
+	payloads := [][]byte{[]byte("a"), nil, []byte("ccc")}
+	actions := []byte{txmetacache.WireActionADD, txmetacache.WireActionDELETE, txmetacache.WireActionADD}
+	pseudoHashes := []uint64{0x11, 0x22, 0x33}
 
-	require.False(t, server.txmetaCaughtUp.Load())
+	size := 8 // header
+	for i := range hashes {
+		size += 8 + 32 + 1 + 4 + len(payloads[i])
+	}
+	data := make([]byte, size)
+	data[0] = txmetacache.WireV2Magic
+	data[1] = txmetacache.WireV2Version
+	binary.LittleEndian.PutUint32(data[4:], uint32(len(hashes)))
+	off := 8
 
-	err := server.txmetaHandler(context.Background(), msg)
+	for i := range hashes {
+		binary.LittleEndian.PutUint64(data[off:], pseudoHashes[i])
+		off += 8
+		copy(data[off:], hashes[i][:])
+		off += 32
+		data[off] = actions[i]
+		off++
+		binary.LittleEndian.PutUint32(data[off:], uint32(len(payloads[i])))
+		off += 4
+		copy(data[off:], payloads[i])
+		off += len(payloads[i])
+	}
+
+	err := server.txmetaHandler(context.Background(), &kafka.KafkaMessage{Value: data})
 	assert.NoError(t, err)
-
-	assert.Eventually(t, func() bool {
-		return server.txmetaCaughtUp.Load()
-	}, 2*time.Second, 10*time.Millisecond, "latch should flip on tail message")
+	mCache.AssertExpectations(t)
 }
 
-// TestServer_txmetaHandler_LatchIgnoredWhenHighWaterMarkUnset verifies that an
-// unpopulated HighWaterMark (zero value) does NOT prematurely flip the latch.
-// This protects callers that wire a KafkaMessage by hand without HWM info.
-func TestServer_txmetaHandler_LatchIgnoredWhenHighWaterMarkUnset(t *testing.T) {
-	mockLogger := &mockLogger{}
-	mockCache := &mockCache{}
-	mockCache.On("SetCacheFromBytes", mock.Anything, mock.Anything).Return(nil)
+// buildV1TxmetaMessage builds a v1-format batch message with the requested
+// number of entries: one ADD followed by (count-1) DELETEs. Used to exercise
+// the v1/v2 discriminator collision cases below.
+func buildV1TxmetaMessage(t *testing.T, count int, addHash chainhash.Hash, addPayload []byte) []byte {
+	t.Helper()
 
-	server := &Server{
-		logger:    mockLogger,
-		utxoStore: mockCache,
+	size := 4 + 32 + 1 + 4 + len(addPayload) + (count-1)*(32+1+4)
+	buf := make([]byte, 0, size)
+
+	hdr := make([]byte, 4)
+	binary.LittleEndian.PutUint32(hdr, uint32(count))
+	buf = append(buf, hdr...)
+
+	// ADD entry.
+	buf = append(buf, addHash[:]...)
+	buf = append(buf, txmetacache.WireActionADD)
+	lenBuf := make([]byte, 4)
+	binary.LittleEndian.PutUint32(lenBuf, uint32(len(addPayload)))
+	buf = append(buf, lenBuf...)
+	buf = append(buf, addPayload...)
+
+	// DELETE entries.
+	deleteHash := chainhash.Hash{99}
+	for i := 0; i < count-1; i++ {
+		buf = append(buf, deleteHash[:]...)
+		buf = append(buf, txmetacache.WireActionDELETE)
+		buf = append(buf, 0, 0, 0, 0)
 	}
 
-	hash := chainhash.Hash{7}
-	msg := createKafkaMessageForHash(t, hash, txmetaActionADD, []byte("payload"))
-	msg.Offset = 0
-	msg.HighWaterMark = 0 // unset
+	return buf
+}
 
-	err := server.txmetaHandler(context.Background(), msg)
+// TestServer_txmetaHandler_V1_ImplausibleEntryCount_IsRejected verifies
+// that a v1 message claiming far more entries than the buffer can hold is
+// logged and acked rather than triggering an oversized pre-loop allocation.
+// The wire claims max-uint32 entries (~4B) with only enough buffer for a
+// few; without the plausibility bound, the pool would try to allocate
+// ~128GB for keysBuf alone.
+func TestServer_txmetaHandler_V1_ImplausibleEntryCount_IsRejected(t *testing.T) {
+	mLogger := &mockLogger{}
+	mLogger.On("Errorf", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return()
+	mCache := &mockCache{}
+
+	server := &Server{logger: mLogger, utxoStore: mCache}
+
+	// 4-byte header claiming 0xFFFFFFFE entries (just under max-uint32,
+	// chosen so the first byte is 0xFE — not a v2 magic alias — to force
+	// the v1 detection path), with no entry payload at all.
+	data := make([]byte, 4)
+	binary.LittleEndian.PutUint32(data, 0xFFFFFFFE)
+
+	err := server.txmetaHandler(context.Background(), &kafka.KafkaMessage{Value: data})
 	assert.NoError(t, err)
-
-	// Give the worker a moment in case the latch were going to flip async.
-	time.Sleep(20 * time.Millisecond)
-	assert.False(t, server.txmetaCaughtUp.Load(), "latch must not flip when HWM is unset")
+	// Neither dispatch path should be reached — the message is rejected
+	// before any entries are parsed.
+	mCache.AssertNotCalled(t, "SetCacheMultiSequential", mock.Anything, mock.Anything)
+	mCache.AssertNotCalled(t, "SetCacheMultiSequentialWithHashes",
+		mock.Anything, mock.Anything, mock.Anything)
+	mLogger.AssertCalled(t, "Errorf",
+		mock.Anything, mock.Anything, mock.Anything, mock.Anything)
 }
 
-// TestServer_txmetaHandler_LatchIsOneWay verifies that once the latch is set,
-// subsequent messages that look like they are lagging (Offset+1 < HWM) do not
-// revert the latch.
-func TestServer_txmetaHandler_LatchIsOneWay(t *testing.T) {
-	mockLogger := &mockLogger{}
-	mockCache := &mockCache{}
-	mockCache.On("SetCacheFromBytes", mock.Anything, mock.Anything).Return(nil)
-	mockLogger.On("Infof", mock.Anything, mock.Anything).Return()
-
-	server := &Server{
-		logger:    mockLogger,
-		utxoStore: mockCache,
+// TestServer_txmetaHandler_V1_CollidesWithV2Magic verifies that v1 messages
+// whose entry count has a low byte of 0xFF (counts 255, 511, 767, ...) are
+// still parsed as v1 instead of being misclassified as v2 and dropped/garbled.
+func TestServer_txmetaHandler_V1_CollidesWithV2Magic(t *testing.T) {
+	cases := []struct {
+		name         string
+		count        int
+		headerPrefix []byte
+	}{
+		{
+			name:         "count 255 (LE low byte 0xFF, version byte 0x00)",
+			count:        255,
+			headerPrefix: []byte{0xFF, 0x00, 0x00, 0x00},
+		},
+		{
+			name:         "count 767 (full v2 header alias 0xFF 0x02 0x00 0x00)",
+			count:        767,
+			headerPrefix: []byte{0xFF, 0x02, 0x00, 0x00},
+		},
 	}
 
-	hash := chainhash.Hash{9}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mLogger := &mockLogger{}
+			mLogger.On("Errorf", mock.Anything, mock.Anything).Maybe().Return()
+			mCache := &mockCache{}
+			// Must take the v1-shaped Set path (no on-wire xxhash).
+			// SetCacheMultiSequential takes (keys, values); WithHashes takes (keys, values, hashes).
+			mCache.On("SetCacheMultiSequential", mock.Anything, mock.Anything).Return(nil)
+			mCache.On("Delete", mock.Anything, mock.AnythingOfType("*chainhash.Hash")).Return(nil).Maybe()
 
-	// First message at the tail -> flips latch.
-	first := createKafkaMessageForHash(t, hash, txmetaActionADD, []byte("a"))
-	first.Offset = 10
-	first.HighWaterMark = 11
-	require.NoError(t, server.txmetaHandler(context.Background(), first))
+			server := &Server{logger: mLogger, utxoStore: mCache}
 
-	assert.Eventually(t, func() bool {
-		return server.txmetaCaughtUp.Load()
-	}, 2*time.Second, 10*time.Millisecond)
+			addHash := chainhash.Hash{1, 2, 3}
+			payload := []byte("v1-payload")
+			data := buildV1TxmetaMessage(t, tc.count, addHash, payload)
+			assert.Equal(t, tc.headerPrefix, data[:4],
+				"v1 length-prefix must alias the v2 header bytes for this regression")
 
-	// Second message lagging far behind a moved-on HWM. Latch must remain set.
-	second := createKafkaMessageForHash(t, hash, txmetaActionADD, []byte("b"))
-	second.Offset = 12
-	second.HighWaterMark = 5000
-	require.NoError(t, server.txmetaHandler(context.Background(), second))
-
-	assert.True(t, server.txmetaCaughtUp.Load(), "latch is one-way; must not revert")
+			err := server.txmetaHandler(context.Background(), &kafka.KafkaMessage{Value: data})
+			assert.NoError(t, err)
+			mCache.AssertCalled(t, "SetCacheMultiSequential",
+				mock.Anything, mock.Anything)
+			mCache.AssertNotCalled(t, "SetCacheMultiSequentialWithHashes",
+				mock.Anything, mock.Anything, mock.Anything)
+		})
+	}
 }

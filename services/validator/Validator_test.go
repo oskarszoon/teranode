@@ -46,6 +46,7 @@ import (
 	"github.com/bsv-blockchain/teranode/services/validator/validator_api"
 	"github.com/bsv-blockchain/teranode/settings"
 	"github.com/bsv-blockchain/teranode/stores/blob/memory"
+	"github.com/bsv-blockchain/teranode/stores/txmetacache"
 	utxostore "github.com/bsv-blockchain/teranode/stores/utxo"
 	teranode_aerospike "github.com/bsv-blockchain/teranode/stores/utxo/aerospike"
 	"github.com/bsv-blockchain/teranode/stores/utxo/meta"
@@ -59,6 +60,7 @@ import (
 	"github.com/bsv-blockchain/teranode/util/test"
 	"github.com/bsv-blockchain/teranode/util/tracing"
 	aeroTest "github.com/bsv-blockchain/testcontainers-aerospike-go"
+	"github.com/cespare/xxhash/v2"
 	"github.com/ordishs/gocore"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -1349,7 +1351,7 @@ func Test_serializeTxMetaBatch(t *testing.T) {
 				assert.Equal(t, byte(32), hash[31])
 
 				action := data[36]
-				assert.Equal(t, txmetaActionADD, action)
+				assert.Equal(t, txmetacache.WireActionADD, action)
 
 				contentLen := binary.LittleEndian.Uint32(data[37:41])
 				assert.Equal(t, uint32(12), contentLen)
@@ -1374,7 +1376,7 @@ func Test_serializeTxMetaBatch(t *testing.T) {
 				assert.Equal(t, uint32(1), count)
 
 				action := data[36]
-				assert.Equal(t, txmetaActionDELETE, action)
+				assert.Equal(t, txmetacache.WireActionDELETE, action)
 
 				contentLen := binary.LittleEndian.Uint32(data[37:41])
 				assert.Equal(t, uint32(0), contentLen)
@@ -1406,7 +1408,7 @@ func Test_serializeTxMetaBatch(t *testing.T) {
 				// offset 4: hash (32), then action (1), then length (4), then content (3)
 				offset := 4
 				assert.Equal(t, byte(1), data[offset], "first entry hash[0]")
-				assert.Equal(t, txmetaActionADD, data[offset+32], "first entry action")
+				assert.Equal(t, txmetacache.WireActionADD, data[offset+32], "first entry action")
 				len1 := binary.LittleEndian.Uint32(data[offset+33 : offset+37])
 				assert.Equal(t, uint32(3), len1, "first entry content length")
 				assert.Equal(t, "one", string(data[offset+37:offset+40]), "first entry content")
@@ -1414,14 +1416,14 @@ func Test_serializeTxMetaBatch(t *testing.T) {
 				// Second entry: DELETE (starts at offset 4 + 32 + 1 + 4 + 3 = 44)
 				offset = 44
 				assert.Equal(t, byte(2), data[offset], "second entry hash[0]")
-				assert.Equal(t, txmetaActionDELETE, data[offset+32], "second entry action")
+				assert.Equal(t, txmetacache.WireActionDELETE, data[offset+32], "second entry action")
 				len2 := binary.LittleEndian.Uint32(data[offset+33 : offset+37])
 				assert.Equal(t, uint32(0), len2, "second entry content length")
 
 				// Third entry: ADD with "three" (starts at offset 44 + 32 + 1 + 4 + 0 = 81)
 				offset = 81
 				assert.Equal(t, byte(3), data[offset], "third entry hash[0]")
-				assert.Equal(t, txmetaActionADD, data[offset+32], "third entry action")
+				assert.Equal(t, txmetacache.WireActionADD, data[offset+32], "third entry action")
 				len3 := binary.LittleEndian.Uint32(data[offset+33 : offset+37])
 				assert.Equal(t, uint32(5), len3, "third entry content length")
 				assert.Equal(t, "three", string(data[offset+37:offset+42]), "third entry content")
@@ -1481,14 +1483,142 @@ func Test_serializeTxMetaBatch_RoundTrip(t *testing.T) {
 		// Verify against original batch
 		assert.Equal(t, batch[i].hash[:], parsedHash[:], "hash mismatch at entry %d", i)
 		if batch[i].isDelete {
-			assert.Equal(t, txmetaActionDELETE, action, "action mismatch at entry %d", i)
+			assert.Equal(t, txmetacache.WireActionDELETE, action, "action mismatch at entry %d", i)
 			assert.Equal(t, uint32(0), contentLen, "delete should have 0 content length")
 		} else {
-			assert.Equal(t, txmetaActionADD, action, "action mismatch at entry %d", i)
+			assert.Equal(t, txmetacache.WireActionADD, action, "action mismatch at entry %d", i)
 			assert.Equal(t, batch[i].metaBytes, content, "content mismatch at entry %d", i)
 		}
 	}
 }
+
+// Test_serializeTxMetaBatchV2 verifies the byte layout of the v2 wire format
+// against the spec documented on serializeTxMetaBatchV2 and the symmetric
+// parser in services/subtreevalidation/txmetaHandler.go.
+func Test_serializeTxMetaBatchV2(t *testing.T) {
+	h1 := chainhash.Hash{}
+	copy(h1[:], bytes.Repeat([]byte{0xAA}, 32))
+	h2 := chainhash.Hash{}
+	copy(h2[:], bytes.Repeat([]byte{0xBB}, 32))
+
+	items := []txmetaItemWithHash{
+		{item: &txmetaBatchItem{hash: &h1, metaBytes: []byte("meta-1"), isDelete: false}, h: 0xDEADBEEFCAFEBABE},
+		{item: &txmetaBatchItem{hash: &h2, isDelete: true}, h: 0x0102030405060708},
+	}
+
+	data := serializeTxMetaBatchV2(items)
+
+	assert.Equal(t, byte(0xFF), data[0], "magic byte")
+	assert.Equal(t, byte(0x02), data[1], "version byte")
+	assert.Equal(t, byte(0x00), data[2], "reserved")
+	assert.Equal(t, byte(0x00), data[3], "reserved")
+	assert.Equal(t, uint32(2), binary.LittleEndian.Uint32(data[4:]), "entry count")
+
+	// Entry 1 (ADD).
+	off := 8
+	assert.Equal(t, uint64(0xDEADBEEFCAFEBABE), binary.LittleEndian.Uint64(data[off:]), "entry 1 xxhash")
+	off += 8
+	assert.Equal(t, h1[:], data[off:off+32], "entry 1 hash")
+	off += 32
+	assert.Equal(t, txmetacache.WireActionADD, data[off], "entry 1 action")
+	off++
+	assert.Equal(t, uint32(6), binary.LittleEndian.Uint32(data[off:]), "entry 1 content length")
+	off += 4
+	assert.Equal(t, []byte("meta-1"), data[off:off+6], "entry 1 content")
+	off += 6
+
+	// Entry 2 (DELETE).
+	assert.Equal(t, uint64(0x0102030405060708), binary.LittleEndian.Uint64(data[off:]), "entry 2 xxhash")
+	off += 8
+	assert.Equal(t, h2[:], data[off:off+32], "entry 2 hash")
+	off += 32
+	assert.Equal(t, txmetacache.WireActionDELETE, data[off], "entry 2 action")
+	off++
+	assert.Equal(t, uint32(0), binary.LittleEndian.Uint32(data[off:]), "entry 2 content length (DELETE => 0)")
+	off += 4
+
+	assert.Equal(t, len(data), off, "no trailing bytes")
+}
+
+// Test_sendTxMetaBatchV2_PartitionRouting verifies items are placed on the
+// partition derived from xxhash(hash) according to the documented rule:
+//
+//	partition = (xxhash(hash) % BucketsCount) / (BucketsCount / NumPartitions)
+//
+// Items whose hashes land in the same partition's bucket range must share a
+// single Kafka record; items in different ranges must be split.
+func Test_sendTxMetaBatchV2_PartitionRouting(t *testing.T) {
+	// Pick a numPartitions that divides BucketsCount under every build tag.
+	// Production builds run BucketsCount=8192 so 32 partitions is realistic;
+	// the testtxmetacache build tag uses BucketsCount=8 so we cap at that to
+	// keep bucketsPerPartition >= 1 and avoid divide-by-zero in the routing
+	// math. Cap value is 2 (the minimum needed to verify two-record output).
+	numPartitions := 32
+	if numPartitions > txmetacache.BucketsCount {
+		numPartitions = txmetacache.BucketsCount
+	}
+	if numPartitions < 2 {
+		t.Skipf("BucketsCount=%d too small to verify partition routing", txmetacache.BucketsCount)
+	}
+	bucketsPerPartition := txmetacache.BucketsCount / numPartitions
+
+	// Find two hashes whose xxhash lands in different partitions.
+	var h1, h2 chainhash.Hash
+	var p1, p2 = -1, -1
+	for seed := uint64(0); ; seed++ {
+		var h chainhash.Hash
+		binary.LittleEndian.PutUint64(h[:], seed)
+		bucket := int(xxhash.Sum64(h[:]) % uint64(txmetacache.BucketsCount))
+		p := bucket / bucketsPerPartition
+		if p1 < 0 {
+			h1 = h
+			p1 = p
+			continue
+		}
+		if p != p1 {
+			h2 = h
+			p2 = p
+			break
+		}
+	}
+
+	captured := make(map[int32]*kafka.Message)
+	publish := func(m *kafka.Message) {
+		captured[m.Partition] = m
+	}
+
+	v := &Validator{
+		settings: &settings.Settings{
+			Validator: settings.ValidatorSettings{
+				TxMetaWireFormat:    "v2",
+				TxMetaNumPartitions: numPartitions,
+			},
+		},
+		txmetaKafkaProducerClient: &fakeAsyncProducer{publish: publish},
+	}
+
+	batch := []*txmetaBatchItem{
+		{hash: &h1, metaBytes: []byte("a"), isDelete: false},
+		{hash: &h2, metaBytes: []byte("b"), isDelete: false},
+	}
+	v.sendTxMetaBatchV2(batch)
+
+	require.Len(t, captured, 2, "expected one Kafka record per non-empty partition")
+	assert.Contains(t, captured, int32(p1))                                            //nolint:gosec // p1<NumPartitions
+	assert.Contains(t, captured, int32(p2))                                            //nolint:gosec // p2<NumPartitions
+	assert.Equal(t, byte(0xFF), captured[int32(p1)].Value[0], "v2 magic byte present") //nolint:gosec
+	assert.Equal(t, byte(0xFF), captured[int32(p2)].Value[0], "v2 magic byte present") //nolint:gosec
+}
+
+// fakeAsyncProducer is a no-op KafkaAsyncProducerI used by the partition
+// routing test to capture published messages without spinning up a real
+// producer or broker. Only Publish is exercised.
+type fakeAsyncProducer struct {
+	kafka.KafkaAsyncProducerI
+	publish func(*kafka.Message)
+}
+
+func (f *fakeAsyncProducer) Publish(m *kafka.Message) { f.publish(m) }
 
 func TestGetUtxoBlockHeightAndExtendForParentTx_NilValidationOptions(t *testing.T) {
 	ctx := context.Background()
@@ -1575,15 +1705,29 @@ func (c *CorruptMetaUtxoStore) Create(ctx context.Context, tx *bt.Tx, blockHeigh
 		return nil, err
 	}
 
-	// Corrupt TxInpoints: add an extra parent hash without a corresponding Idxs entry.
-	// This causes TxInpoints.Serialize() to return ErrParentTxHashesMismatch,
-	// which makes MetaBytes() fail inside sendTxMetaToKafka.
-	metaData.TxInpoints.ParentTxHashes = append(metaData.TxInpoints.ParentTxHashes, chainhash.Hash{0xDE, 0xAD})
+	// Corrupt TxInpoints: append extra parent hashes so that ParentTxHashes is
+	// strictly longer than the internal packed vout layout (one count + per-parent
+	// vouts). go-subtree v1.4.1's Serialize fails fast with ErrParentTxHashesMismatch
+	// when len(voutIdxs) < len(ParentTxHashes); v1.3.x checked an exact equality,
+	// so a single appended hash used to suffice. Adding three keeps the test
+	// portable across both checks.
+	metaData.TxInpoints.ParentTxHashes = append(
+		metaData.TxInpoints.ParentTxHashes,
+		chainhash.Hash{0xDE, 0xAD},
+		chainhash.Hash{0xBE, 0xEF},
+		chainhash.Hash{0xCA, 0xFE},
+	)
+
 	return metaData, nil
 }
 
 func TestValidator_TwoPhaseCommitCompletesAfterTxMetaSerializationFailure(t *testing.T) {
 	tracing.SetupMockTracer()
+	// sendTxMetaToKafka records to prometheusValidatorSendToBlockValidationKafka,
+	// which is registered lazily via sync.Once in initPrometheusMetrics. Without
+	// this call the histogram is nil and .Observe panics when the test is the
+	// first (or only) Validator test in the run.
+	initPrometheusMetrics()
 
 	ctx := context.Background()
 	logger := ulogger.NewErrorTestLogger(t)

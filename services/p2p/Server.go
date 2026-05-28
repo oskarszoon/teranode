@@ -138,6 +138,8 @@ type Server struct {
 	peerMapCleanupTicker *time.Ticker  // Ticker for periodic cleanup of peer maps
 	peerMapMaxSize       int           // Maximum number of entries in peer maps
 	peerMapTTL           time.Duration // Time-to-live for peer map entries
+
+	invalidPolicyWarnOnce sync.Once // Emits the invalid-fee-policy warning at most once per process to avoid log spam
 }
 
 // NewServer creates a new P2P server instance with the provided configuration and dependencies.
@@ -331,6 +333,11 @@ func NewServer(
 	if err != nil {
 		return nil, errors.NewServiceError("failed to unmarshal key", err)
 	}
+
+	// Set the HTTP request signer so all outgoing peer HTTP requests (block/subtree fetches)
+	// include authentication headers for rate limit exemption on the receiving asset service.
+	util.SetHTTPRequestSigner(util.NewEd25519RequestSigner(privKey))
+
 	// In silent mode, DHT is disabled entirely so the node is not discoverable via DHT.
 	dhtMode := tSettings.P2P.DHTMode
 	if listenMode == settings.ListenModeSilent {
@@ -1000,6 +1007,7 @@ func (s *Server) handleNodeStatusTopic(_ context.Context, m []byte, peerID strin
 		SyncPeerBlockHash:   nodeStatusMessage.SyncPeerBlockHash,
 		SyncConnectedAt:     nodeStatusMessage.SyncConnectedAt,
 		MinMiningTxFee:      nodeStatusMessage.MinMiningTxFee,
+		FeePolicy:           nodeStatusMessage.FeePolicy,
 		ConnectedPeersCount: nodeStatusMessage.ConnectedPeersCount,
 		Storage:             nodeStatusMessage.Storage,
 	}:
@@ -1260,10 +1268,23 @@ func (s *Server) getNodeStatusMessage(ctx context.Context) *notificationMsg {
 	// Get minimum mining transaction fee from settings
 	// Use a pointer to distinguish between nil (unknown) and 0 (no fee)
 	var minMiningTxFee *float64
+	var feePolicy *FeePolicy
 	if s.settings != nil && s.settings.Policy != nil {
-		fee := s.settings.Policy.GetMinMiningTxFee()
-		minMiningTxFee = &fee
-		s.logger.Debugf("[getNodeStatusMessage] MinMiningTxFee from settings: %f", fee)
+		feePolicy = policyFromSettings(s.settings.Policy)
+		if feePolicy != nil {
+			// Keep legacy and new fields consistent: only advertise the
+			// scalar fee when the full policy is valid.
+			fee := s.settings.Policy.GetMinMiningTxFee()
+			minMiningTxFee = &fee
+			s.logger.Debugf("[getNodeStatusMessage] MinMiningTxFee from settings: %f", fee)
+		} else {
+			// Warn once per process — this is published every status tick (~10s),
+			// so without the gate a bad config would spam the logs.
+			s.invalidPolicyWarnOnce.Do(func() {
+				s.logger.Warnf("[getNodeStatusMessage] policy settings invalid (NaN/Inf, negative, or out of uint64 range); omitting fee fields from node_status until config is corrected")
+			})
+			s.logger.Debugf("[getNodeStatusMessage] policy still invalid; fee fields remain omitted")
+		}
 	} else {
 		// For our own node, we always know the fee (even if it's 0)
 		// Only leave nil for messages from other peers
@@ -1343,6 +1364,7 @@ func (s *Server) getNodeStatusMessage(ctx context.Context) *notificationMsg {
 		SyncPeerBlockHash:   syncPeerBlockHash,
 		SyncConnectedAt:     syncConnectedAt,
 		MinMiningTxFee:      minMiningTxFee,
+		FeePolicy:           feePolicy,
 		ConnectedPeersCount: connectedPeersCount,
 		Storage:             storage,
 	}
@@ -1379,6 +1401,7 @@ func (s *Server) handleNodeStatusNotification(ctx context.Context) error {
 		SyncPeerBlockHash:   msg.SyncPeerBlockHash,
 		SyncConnectedAt:     msg.SyncConnectedAt,
 		MinMiningTxFee:      msg.MinMiningTxFee,
+		FeePolicy:           msg.FeePolicy,
 		ConnectedPeersCount: msg.ConnectedPeersCount,
 		Storage:             msg.Storage,
 	}

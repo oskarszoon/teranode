@@ -1667,12 +1667,32 @@ func (stp *SubtreeProcessor) GetChainedSubtrees() []*subtreepkg.Subtree {
 	return <-response
 }
 
-func (stp *SubtreeProcessor) GetSubtreeHashes() []chainhash.Hash {
-	response := make(chan []chainhash.Hash)
+func (stp *SubtreeProcessor) GetSubtreeHashes(ctx context.Context) []chainhash.Hash {
+	// response is buffered size 1 so that even if this function returns
+	// early (because ctx cancelled before the main loop responded), the
+	// main loop's send at line 707 — `getSubtreeHashesChan <- subtreeHashes`
+	// in Start.func1 — never blocks. Combined with the ctx-aware select
+	// on the request send below, this eliminates the goroutine leak that
+	// previously kept ~one parked goroutine per GetBlockAssemblyState RPC
+	// every time the SubtreeProcessor main loop was busy (e.g. inside
+	// moveForwardBlock).
+	response := make(chan []chainhash.Hash, 1)
 
-	stp.getSubtreeHashesChan <- response
+	select {
+	case stp.getSubtreeHashesChan <- response:
+	case <-ctx.Done():
+		return nil
+	}
 
-	return <-response
+	select {
+	case r := <-response:
+		return r
+	case <-ctx.Done():
+		// Main loop will still write into the buffered response channel
+		// when it gets there; the buffer absorbs the write so the main
+		// loop doesn't block. Nothing leaks.
+		return nil
+	}
 }
 
 func (stp *SubtreeProcessor) GetTransactionHashes() []chainhash.Hash {
@@ -4390,20 +4410,45 @@ func (stp *SubtreeProcessor) DrainQueue(dropHashes map[chainhash.Hash]struct{}) 
 // Returns:
 //   - error: Any error encountered during processing
 func (stp *SubtreeProcessor) dequeueDuringBlockMovement(transactionMap *SplitSwissMap, losingTxHashesMap txmap.TxMap, conflictingHashes map[chainhash.Hash]struct{}, skipNotification bool) (err error) {
+	// Bound the drain by two complementary cutoffs:
+	//
+	//  1. Time: validFromMillis = clock.Now() at function entry (or
+	//     clock.Now() - DoubleSpendWindow when that filter is enabled).
+	//     The queue filter at queue.go:96 holds back any batch whose
+	//     enqueue timestamp is >= this value, so we only drain batches
+	//     that existed before this moment. Batches arriving during the
+	//     drain stay queued and roll forward to the next state-transition
+	//     cycle. By design AddTxBatchColumnar (the gRPC ingest path) does
+	//     not backpressure, so this time cap is what stops the loop from
+	//     chasing ingest.
+	//
+	//  2. Items: queueLength snapshotted at entry, compared against items
+	//     drained. Belt-and-braces — if clock granularity ever caused the
+	//     time filter to admit slightly more than expected, this caps
+	//     total work at the snapshot.
+	//
+	// Previous form left validFromMillis=0 when DoubleSpendWindow=0,
+	// which disables the queue filter entirely (queue.go:96 short-circuits
+	// on `validFromMillis > 0`). And the items-bound compared
+	// `nrBatchesProcessed` to `queueLength`, but queue.length() returns
+	// total *items* (queue.go:71 / 75 add len(nodes)), not batches. With
+	// ~1k items/batch and ingest at line-rate, neither bound fired — the
+	// scaling-2 pod sat for 35+ minutes at 558 GB RSS inside this loop.
 	queueLength := stp.queue.length()
 	if queueLength > 0 {
-		nrBatchesProcessed := int64(0)
-		// Match the Start-loop zero-guard at the default-case dequeue
-		// (line 810-813): a zero DoubleSpendWindow disables the queue
-		// filter entirely. Without this guard, the drain computes
-		// Now().UnixMilli() and the queue filter at queue.go:96 holds
-		// back same-millisecond batches under the default config.
-		validFromMillis := int64(0)
+		itemsProcessed := int64(0)
+		// Take a single clock sample so both the zero-window and
+		// non-zero-window branches anchor on the same moment — the
+		// "function entry" semantic the docstring describes. Calling
+		// stp.clock.Now() twice would let the second call admit batches
+		// enqueued in the gap between the two samples.
+		now := stp.clock.Now()
+		validFromMillis := now.UnixMilli()
 		if stp.settings.BlockAssembly.DoubleSpendWindow > 0 {
-			validFromMillis = stp.clock.Now().Add(-stp.settings.BlockAssembly.DoubleSpendWindow).UnixMilli()
+			validFromMillis = now.Add(-stp.settings.BlockAssembly.DoubleSpendWindow).UnixMilli()
 		}
 
-		for {
+		for itemsProcessed < queueLength {
 			batch, found := stp.queue.dequeueBatch(validFromMillis)
 			if !found {
 				break
@@ -4442,12 +4487,8 @@ func (stp *SubtreeProcessor) dequeueDuringBlockMovement(transactionMap *SplitSwi
 				_ = stp.addNode(node, txInpoints, skipNotification)
 			}
 
+			itemsProcessed += int64(len(batch.nodes))
 			prometheusSubtreeProcessorDequeuedTxs.Add(float64(len(batch.nodes)))
-
-			nrBatchesProcessed++
-			if nrBatchesProcessed > queueLength {
-				break
-			}
 		}
 	}
 
@@ -4687,11 +4728,19 @@ func (stp *SubtreeProcessor) processRemainderTxHashes(ctx context.Context, chain
 			return errors.NewProcessingError("[processRemainderTxHashes] parallel error", err)
 		}
 
+		// Compact flatNodes down to kept-only, preserving input order. The
+		// sequential subtree-builder this replaces only invoked addNodePreValidated
+		// when wasInserted[idx] was true, so leaf order in the resulting subtrees
+		// is unchanged.
+		kept := flatNodes[:0]
 		for idx, node := range flatNodes {
-			if !wasInserted[idx] {
-				continue
+			if wasInserted[idx] {
+				kept = append(kept, node)
 			}
-			_ = stp.addNodePreValidated(node, skipNotification)
+		}
+
+		if err := stp.parallelBuildRemainderSubtrees(ctx, kept, skipNotification); err != nil {
+			return errors.NewProcessingError("[processRemainderTxHashes] parallel build error", err)
 		}
 	} else {
 		// Sequential path for small remainder sets (existing behavior)
@@ -4705,6 +4754,213 @@ func (stp *SubtreeProcessor) processRemainderTxHashes(ctx context.Context, chain
 				_ = stp.addNode(node, parents, skipNotification)
 			}
 		}
+	}
+
+	return nil
+}
+
+// parallelBuildRemainderSubtrees fills the existing currentSubtree and any
+// subsequent fresh subtrees from `kept` in parallel, then sequentially applies
+// the per-completed-subtree side effects (chain append, channel send, mining
+// data refresh) in input order.
+//
+// Order invariants preserved against the sequential builder it replaces:
+//   - Leaf order within each subtree is the same (chunks are contiguous slices
+//     of kept[]).
+//   - The sequence of subtrees appended to stp.chainedSubtrees is the same.
+//   - newSubtreeChan sends, subtreeNodeCounts ring updates, subtreesInBlock
+//     increments, and updatePrecomputedMiningData calls happen in the same
+//     order, one per completed subtree.
+//
+// Concurrency: every chunk has a unique destination subtree, so the parallel
+// goroutines never write to shared state. Channel sends, slice appends, and
+// counter mutations stay on the SubtreeProcessor.Start goroutine — the same
+// thread that owns chainedSubtrees writes in the rest of the file.
+//
+// On a 96-core pod processing a 56 M-node remainder (block height 307 on
+// scaling-2), the sequential variant cost 42.6 s on a single core because each
+// of the ~57 1 M-leaf subtree completions forced a serial RootHash() merkle
+// build inside the per-node loop. Building all of them in parallel collapses
+// that to ~max(per-subtree wall time) ≈ 1 s.
+//
+// ctx is propagated into the errgroup so a moveForwardBlock cancellation
+// (shutdown, reorg abort) terminates pending workers promptly; running workers
+// finish their current chunk (≤ leafCount inserts, bounded ≤ 100 ms) before
+// the next gCtx-aware sibling returns.
+func (stp *SubtreeProcessor) parallelBuildRemainderSubtrees(ctx context.Context, kept []subtreepkg.Node, skipNotification bool) error {
+	if len(kept) == 0 {
+		return nil
+	}
+
+	currentSubtree := stp.currentSubtree.Load()
+	if currentSubtree == nil {
+		return errors.NewProcessingError("[parallelBuildRemainderSubtrees] currentSubtree is nil")
+	}
+
+	leafCount := currentSubtree.Size()
+	existingFill := currentSubtree.Length()
+	firstChunkCap := leafCount - existingFill
+
+	if firstChunkCap <= 0 {
+		return errors.NewProcessingError("[parallelBuildRemainderSubtrees] currentSubtree already full (length %d, cap %d)", existingFill, leafCount)
+	}
+
+	// Pre-compute deterministic chunk boundaries. chunk 0 fills the rest of
+	// the pre-existing currentSubtree (slot 0 already holds the coinbase
+	// placeholder set up in resetSubtreeState). chunks 1..N-1 are fresh
+	// leafCount-sized batches. The final chunk may be partial — it becomes the
+	// new open currentSubtree.
+	type buildChunk struct {
+		subtree *subtreepkg.Subtree
+		nodes   []subtreepkg.Node
+	}
+
+	chunks := make([]buildChunk, 0, len(kept)/leafCount+2)
+
+	pos := 0
+	firstLen := firstChunkCap
+	if firstLen > len(kept) {
+		firstLen = len(kept)
+	}
+	chunks = append(chunks, buildChunk{subtree: currentSubtree, nodes: kept[pos : pos+firstLen]})
+	pos += firstLen
+
+	for pos < len(kept) {
+		take := leafCount
+		if take > len(kept)-pos {
+			take = len(kept) - pos
+		}
+
+		st, err := stp.newSubtree(leafCount)
+		if err != nil {
+			return errors.NewProcessingError("[parallelBuildRemainderSubtrees] error allocating new subtree", err)
+		}
+
+		chunks = append(chunks, buildChunk{subtree: st, nodes: kept[pos : pos+take]})
+		pos += take
+	}
+
+	// Identify which chunks finished filling their subtree (and therefore
+	// need RootHash() forced + the full processCompleteSubtree side-effect
+	// chain). The last chunk completes only when it filled exactly to capacity.
+	fullCount := len(chunks) - 1
+	last := chunks[len(chunks)-1]
+	if last.subtree.Length()+len(last.nodes) == leafCount {
+		fullCount = len(chunks)
+	}
+
+	// Parallel leaf insertion + eager merkle build. Each goroutine owns its
+	// destination subtree, so AddSubtreeNodeWithoutLock is safe; merkle build
+	// inside the worker amortises the cost across cores.
+	//
+	// errgroup carries the caller's ctx: once it is cancelled (shutdown, reorg
+	// abort), workers that have not yet started exit immediately, and running
+	// workers complete their bounded ≤ leafCount-leaf chunk before the next
+	// scheduled worker sees the cancellation and returns. We do not poll ctx
+	// inside the leaf-insert loop — at ~100 ns per leaf, the worst case is one
+	// chunk's ~100 ms of post-cancel work, which is below the typical block-
+	// movement wall-time floor.
+	g, gCtx := errgroup.WithContext(ctx)
+	util.SafeSetLimit(g, stp.settings.BlockAssembly.ProcessRemainderTxHashesConcurrency)
+
+	for i := range chunks {
+		i := i
+		g.Go(func() error {
+			if err := gCtx.Err(); err != nil {
+				return err
+			}
+
+			c := chunks[i]
+			for j := range c.nodes {
+				if err := c.subtree.AddSubtreeNodeWithoutLock(c.nodes[j]); err != nil {
+					return errors.NewProcessingError("[parallelBuildRemainderSubtrees] chunk %d AddSubtreeNodeWithoutLock", i, err)
+				}
+			}
+
+			if i < fullCount {
+				// Force merkle materialisation inside the worker. Without this
+				// the first reader (typically the sequential side-effect pass
+				// below, via oldSubtree.RootHash()) would serialise the work
+				// back onto one core and undo the parallel win.
+				_ = c.subtree.RootHash()
+			}
+
+			return nil
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		return err
+	}
+
+	// Sequential side-effect pass, one per completed subtree, in input order.
+	// Mirrors processCompleteSubtree minus the inline newSubtree allocation
+	// (already done above when the chunk was created) and minus the inline
+	// stp.currentSubtree.Store flip (deferred to a single Store at the end).
+	for i := 0; i < fullCount; i++ {
+		oldSubtree := chunks[i].subtree
+		oldSubtreeHash := oldSubtree.RootHash()
+
+		if !skipNotification {
+			stp.logger.Debugf("[%s] append subtree", oldSubtreeHash.String())
+		}
+
+		actualNodeCount := len(oldSubtree.Nodes)
+		if actualNodeCount > 0 {
+			stp.subtreeNodeCounts.Value = actualNodeCount
+			stp.subtreeNodeCounts = stp.subtreeNodeCounts.Next()
+		}
+
+		chainedIdx := len(stp.chainedSubtrees)
+		stp.chainedSubtrees = append(stp.chainedSubtrees, oldSubtree)
+		stp.chainedSubtreeCount.Add(1)
+		stp.chainedSubtreesTotalSize.Add(oldSubtree.SizeInBytes)
+
+		if stp.diskTxMap != nil {
+			idx := int16(chainedIdx + 1)
+			for _, node := range oldSubtree.Nodes {
+				_ = stp.diskTxMap.UpdateSubtreeIndex(node.Hash, idx)
+			}
+		}
+
+		stp.subtreesInBlock++
+
+		errCh := make(chan error)
+
+		stp.newSubtreeChan <- NewSubtreeRequest{
+			Subtree:           oldSubtree,
+			ParentTxMap:       stp.currentTxMap,
+			DeletedTxs:        stp.deletedTxs,
+			SkipNotification:  skipNotification,
+			ErrChan:           errCh,
+			OnStorageComplete: func() { stp.cleanupDeletedTxs(oldSubtree) },
+		}
+
+		go func(hash *chainhash.Hash) {
+			if err := <-errCh; err != nil {
+				stp.logger.Errorf("[%s] error sending subtree to newSubtreeChan: %v", hash.String(), err)
+			}
+		}(oldSubtreeHash)
+
+		if !skipNotification {
+			stp.resetAnnouncementTicker()
+		}
+
+		stp.updatePrecomputedMiningData()
+	}
+
+	// Install the open subtree as the new currentSubtree. If every chunk
+	// completed (the kept-count was an exact multiple of leafCount minus the
+	// first chunk's free slots), allocate a fresh empty subtree so the
+	// post-moveForward code path always has somewhere to add new tx.
+	if fullCount < len(chunks) {
+		stp.currentSubtree.Store(chunks[fullCount].subtree)
+	} else {
+		newST, err := stp.newSubtree(leafCount)
+		if err != nil {
+			return errors.NewProcessingError("[parallelBuildRemainderSubtrees] error allocating trailing open subtree", err)
+		}
+		stp.currentSubtree.Store(newST)
 	}
 
 	return nil
@@ -5019,10 +5275,30 @@ func (stp *SubtreeProcessor) CreateTransactionMap(ctx context.Context, blockSubt
 			// Calculate expected bucket size with better distribution
 			nBuckets := transactionMap.Buckets()
 
-			txHashBuckets := make(map[uint16][]chainhash.Hash, nBuckets)
-			for i := uint16(0); i < nBuckets; i++ {
-				txHashBuckets[i] = make([]chainhash.Hash, 0, 512)
+			// Estimate per-bucket fill from the block-level hint so we only
+			// pre-allocate when the amortized cost is worth paying. The old
+			// unconditional `make([]chainhash.Hash, 0, 512)` per bucket cost
+			// 16 MiB per subtree (1024 buckets × 512 × 32 B) — almost entirely
+			// wasted on early-mainnet legacy catchup where each block has
+			// 1–2 transactions and 99.9% of buckets stay empty.
+			expectedPerBucket := 0
+			if estimatedTxCount > 0 && totalSubtreesInBlock > 0 {
+				expectedPerSubtree := (int(estimatedTxCount) + totalSubtreesInBlock - 1) / totalSubtreesInBlock
+				expectedPerBucket = expectedPerSubtree / int(nBuckets)
 			}
+
+			txHashBuckets := make(map[uint16][]chainhash.Hash, nBuckets)
+			if expectedPerBucket > 4 {
+				// Big-block path: buckets will be meaningfully filled, so
+				// pre-allocate exact size and skip the append-grow doublings.
+				for i := uint16(0); i < nBuckets; i++ {
+					txHashBuckets[i] = make([]chainhash.Hash, 0, expectedPerBucket)
+				}
+			}
+			// else: leave map empty. append-to-nil-slice in the deserializer
+			// handles per-bucket lazy creation. Saves 16 MiB / subtree on
+			// the small-block legacy-catchup hot path; for any block with
+			// >~4k txs the predicate above kicks back in.
 
 			conflictingNodes := make([]chainhash.Hash, 0, 32)
 

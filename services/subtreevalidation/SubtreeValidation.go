@@ -99,22 +99,12 @@ func (u *Server) SetSubtreeExists(_ *chainhash.Hash) error {
 }
 
 // GetSubtreeExists checks if a subtree exists in the local storage.
-//
-// This method queries the local storage to determine whether a specific subtree
-// has already been processed and stored. It's used to optimize processing by
-// avoiding duplicate work on subtrees that have already been validated.
-//
-// Parameters:
-//   - ctx: Context for cancellation and request-scoped values
-//   - subtreeHash: The hash identifier of the subtree to check
-//
-// Returns:
-//   - bool: Always false in the current implementation
-//   - error: Always nil in the current implementation
-//
-// TODO: Implement actual local storage lookup for subtree existence.
-func (u *Server) GetSubtreeExists(_ context.Context, _ *chainhash.Hash) (bool, error) {
-	return false, nil
+func (u *Server) GetSubtreeExists(ctx context.Context, hash *chainhash.Hash) (bool, error) {
+	if u.subtreeStore == nil {
+		return false, nil
+	}
+
+	return u.subtreeStore.Exists(ctx, hash[:], fileformat.FileTypeSubtree)
 }
 
 // txMetaCacheOps defines the interface for transaction metadata cache operations.
@@ -142,6 +132,17 @@ type txMetaCacheOps interface {
 	// a single Kafka message containing many entries acquires each touched bucket lock once
 	// instead of once per entry. Critical for txmetaHandler throughput under heavy load.
 	SetCacheMulti(keys [][]byte, values [][]byte) error
+
+	// SetCacheMultiSequential is the partition-aware twin of SetCacheMulti: writes
+	// all keys on the caller's goroutine without errgroup fan-out. The txmeta
+	// handler uses this because it already has parallelism via per-partition
+	// Kafka consumer goroutines, so the inner cache fan-out is pure overhead.
+	SetCacheMultiSequential(keys [][]byte, values [][]byte) error
+
+	// SetCacheMultiSequentialWithHashes is SetCacheMultiSequential with caller-
+	// supplied xxhash values, so the receiver can pass the on-wire v2 hash
+	// straight through without recomputing. hashes[i] MUST equal xxhash.Sum64(keys[i]).
+	SetCacheMultiSequentialWithHashes(keys [][]byte, values [][]byte, hashes []uint64) error
 }
 
 // SetTxMetaCacheFromBytes stores raw transaction metadata bytes in the cache.
@@ -169,22 +170,43 @@ func (u *Server) SetTxMetaCacheFromBytes(_ context.Context, key, txMetaBytes []b
 	return nil
 }
 
-// SetTxMetaCacheMulti stores multiple transaction metadata entries in the cache in a single call.
-//
-// Reserved for a future batched fan-out optimisation of the Kafka txmeta handler: the
-// intent is that a single Kafka message containing N ADD entries can be applied as one
-// SetCacheMulti call, letting the underlying cache acquire each touched per-bucket lock
-// once per call instead of once per entry. The current txmetaHandler is sharded across
-// 256 hash-byte worker goroutines and applies entries one at a time via
-// SetTxMetaCacheFromBytes — it does NOT call this method yet. Kept on the interface so
-// alternative cache implementations can implement the fan-out today and the handler can
-// be migrated later without an interface change.
+// SetTxMetaCacheMulti stores multiple transaction metadata entries in the cache in a single
+// call. The txmeta Kafka handler invokes this once per shard-batch, so the underlying cache
+// acquires each touched per-bucket lock once per shard-batch instead of once per entry.
+// Returns nil if the underlying store does not implement txMetaCacheOps.
 func (u *Server) SetTxMetaCacheMulti(_ context.Context, keys [][]byte, values [][]byte) error {
 	if len(keys) == 0 {
 		return nil
 	}
 	if cache, ok := u.utxoStore.(txMetaCacheOps); ok {
 		return cache.SetCacheMulti(keys, values)
+	}
+	return nil
+}
+
+// SetTxMetaCacheMultiSequential stores multiple txmeta entries via the cache's
+// sequential write path (no errgroup fan-out). Used by the Kafka txmeta
+// handler, which is itself running on a per-partition goroutine — pushing
+// parallelism inside the cache call would just thrash the scheduler.
+func (u *Server) SetTxMetaCacheMultiSequential(_ context.Context, keys [][]byte, values [][]byte) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	if cache, ok := u.utxoStore.(txMetaCacheOps); ok {
+		return cache.SetCacheMultiSequential(keys, values)
+	}
+	return nil
+}
+
+// SetTxMetaCacheMultiSequentialWithHashes stores entries using caller-supplied
+// xxhash values. Used by the v2 txmeta handler to skip re-hashing on receive.
+// Returns nil if the underlying store does not implement txMetaCacheOps.
+func (u *Server) SetTxMetaCacheMultiSequentialWithHashes(_ context.Context, keys [][]byte, values [][]byte, hashes []uint64) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	if cache, ok := u.utxoStore.(txMetaCacheOps); ok {
+		return cache.SetCacheMultiSequentialWithHashes(keys, values, hashes)
 	}
 	return nil
 }
@@ -311,6 +333,13 @@ func (u *Server) getMissingTransactionsBatch(ctx context.Context, subtreeHash ch
 
 // readTxFromReader reads and validates a single transaction from an io.ReadCloser.
 // It includes panic recovery for handling potential runtime errors from the go-bt library.
+//
+// Stays on the standard tx.ReadFrom path (no arena). The returned *bt.Tx is
+// consumed by the caller after this function returns, so script bytes must be
+// heap-owned — an arena allocated here would have to be Put before return, at
+// which point the script slices would alias soon-to-be-reused arena memory.
+// The arena variant is reserved for the bulk subtree-stream decode where the
+// entire batch of txs is consumed before the arena is returned to the pool.
 //
 // Parameters:
 //   - body: ReadCloser containing the transaction data
@@ -929,14 +958,26 @@ func (u *Server) getSubtreeTxHashes(spanCtx context.Context, stat *gocore.Stat, 
 
 	txHashes := make([]chainhash.Hash, 0, u.settings.BlockAssembly.InitialMerkleItemsPerSubtree)
 
-	// check whether we have a subtreeToCheck file and use that instead of doing a network request
-	subtreeToCheckBytes, err := u.subtreeStore.Get(spanCtx, subtreeHash[:], fileformat.FileTypeSubtreeToCheck)
-	if err == nil && subtreeToCheckBytes != nil {
-		u.logger.Debugf("[getSubtreeTxHashes][%s] found subtreeToCheck file in store, using it instead of network request", subtreeHash.String())
+	// Use the local subtree file (under either FileTypeSubtreeToCheck or
+	// FileTypeSubtree) instead of a network request — see findLocalSubtreeFile.
+	localFileType, localExists, err := u.findLocalSubtreeFile(spanCtx, *subtreeHash)
+	if err != nil {
+		return nil, errors.NewStorageError("[getSubtreeTxHashes][%s] failed to check local subtree store", subtreeHash.String(), err)
+	}
+	if localExists {
+		localBytes, getErr := u.subtreeStore.Get(spanCtx, subtreeHash[:], localFileType)
+		if getErr != nil {
+			return nil, errors.NewStorageError("[getSubtreeTxHashes][%s] failed to read local subtree (%s)", subtreeHash.String(), localFileType.String(), getErr)
+		}
+		if localBytes == nil {
+			return nil, errors.NewStorageError("[getSubtreeTxHashes][%s] local subtree (%s) returned nil bytes despite Exists=true", subtreeHash.String(), localFileType.String())
+		}
 
-		subtree, err := subtreepkg.NewSubtreeFromBytes(subtreeToCheckBytes)
+		u.logger.Debugf("[getSubtreeTxHashes][%s] found local subtree file in store (%s), using it instead of network request", subtreeHash.String(), localFileType.String())
+
+		subtree, err := subtreepkg.NewSubtreeFromBytes(localBytes)
 		if err != nil {
-			return nil, errors.NewProcessingError("[getSubtreeTxHashes][%s] failed to create subtree from subtreeToCheck bytes", subtreeHash.String(), err)
+			return nil, errors.NewProcessingError("[getSubtreeTxHashes][%s] failed to create subtree from local bytes", subtreeHash.String(), err)
 		}
 
 		// return the transaction hashes from the subtree
@@ -951,9 +992,11 @@ func (u *Server) getSubtreeTxHashes(spanCtx context.Context, stat *gocore.Stat, 
 	url := fmt.Sprintf("%s/subtree/%s", baseURL, subtreeHash.String())
 	u.logger.Debugf("[getSubtreeTxHashes][%s] getting subtree from %s", subtreeHash.String(), url)
 
-	// Bound the body at the policy cap (MaximumMerkleItemsPerSubtree * HashSize). A peer that
+	// Bound the body at the receive-side policy cap (MaxIncomingSubtreeBytes). A peer that
 	// streams more than this is malicious — fail fast rather than ReadAll into memory.
-	maxSubtreeBytes := int64(u.settings.BlockAssembly.MaximumMerkleItemsPerSubtree) * int64(chainhash.HashSize)
+	// This must be independent of local BlockAssembly.MaximumMerkleItemsPerSubtree, which
+	// only controls what *this node* assembles; peers may legitimately produce larger subtrees.
+	maxSubtreeBytes := u.settings.SubtreeValidation.MaxIncomingSubtreeBytes
 
 	// TODO add the metric for how long this takes
 	// body, err := util.DoHTTPRequestBodyReader(spanCtx, url)
