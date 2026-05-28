@@ -143,6 +143,19 @@ func (h *HTTP) GetTransactionMeta(mode ReadMode) func(c echo.Context) error {
 			}
 		}
 
+		mainChainIndex := -1
+		for i, blockID := range meta.BlockIDs {
+			onChain, err := h.repository.GetBlockchainClient().CheckBlockIsInCurrentChain(ctx, []uint32{blockID})
+			if err != nil {
+				h.logger.Warnf("Failed main-chain check for block %d: %v", blockID, err)
+				continue
+			}
+			if onChain {
+				mainChainIndex = i
+				break
+			}
+		}
+
 		// Create enhanced response with block hashes and subtree hashes
 		response := map[string]interface{}{
 			"tx":             meta.Tx,
@@ -152,6 +165,7 @@ func (h *HTTP) GetTransactionMeta(mode ReadMode) func(c echo.Context) error {
 			"blockHeights":   meta.BlockHeights,
 			"subtreeIdxs":    meta.SubtreeIdxs,
 			"subtreeHashes":  subtreeHashes,
+			"mainChainIndex": mainChainIndex,
 			"fee":            meta.Fee,
 			"sizeInBytes":    meta.SizeInBytes,
 			"isCoinbase":     meta.IsCoinbase,
