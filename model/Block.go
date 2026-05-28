@@ -966,11 +966,12 @@ func (b *Block) checkParentExistsOnChain(gCtx context.Context, logger ulogger.Lo
 		return oldBlockIDs, nil
 	}
 
-	// Safe to index [0] without main-chain filter: the restore path appends
-	// GenesisBlockID FIRST, and any subsequent real confirmations are appended
-	// after. Genesis cannot be in a fork, so BlockIDs[0] == GenesisBlockID
-	// uniquely identifies a restored tx.
 	if len(parentTxMeta.BlockIDs) > 0 && parentTxMeta.BlockIDs[0] == GenesisBlockID {
+		// Safe to index [0] without a main-chain filter: the restore path appends
+		// GenesisBlockID FIRST, and any subsequent real confirmations are appended
+		// after. Genesis cannot be in a fork, so BlockIDs[0] == GenesisBlockID
+		// uniquely identifies a tx imported from a restore and known to be on a
+		// valid chain. See #967.
 		return oldBlockIDs, nil
 	}
 
