@@ -466,3 +466,54 @@ func TestBanStartBanDecay_ContextCancellation(t *testing.T) {
 	require.Equal(t, scoreAfterCancel.BanScore, scoreAfterWait.BanScore,
 		"score should stop decaying after context cancellation")
 }
+
+// ---------------------------------------------------------------------------
+// Register reconciliation against surviving ban state
+// ---------------------------------------------------------------------------
+
+// TestRegister_ReconcilesSurvivingBanState confirms that a fresh Register call
+// for a peer that was previously banned and then evicted from the in-memory
+// peer map (TTL eviction, restart, cleanup) re-applies the persisted
+// IsBanned/BanScore from banScores onto the new PeerInfo. Without this,
+// catchup paths could reconnect to a peer the operator already banned.
+func TestRegister_ReconcilesSurvivingBanState(t *testing.T) {
+	cfg := DefaultBanConfig()
+	r := NewCentralizedPeerRegistry(cfg)
+
+	r.Register(&PeerInfo{ID: "peer-1"})
+	// "spam" is 50; threshold is 100 → two hits to cross.
+	_, _ = r.AddBanScore("peer-1", "spam", 0)
+	_, banned := r.AddBanScore("peer-1", "spam", 0)
+	require.True(t, banned)
+
+	// Remove the peer record while leaving banScores intact (the documented
+	// contract of Remove). banScores must outlive the in-memory peer entry.
+	r.Remove("peer-1")
+	_, ok := r.Get("peer-1")
+	require.False(t, ok, "peer should be gone after Remove")
+	require.True(t, r.IsBannedPeer("peer-1"), "ban must survive Remove")
+
+	// Caller deliberately passes IsBanned=false / BanScore=0 to simulate a
+	// catchup path that has no record of the prior ban. Register must trust
+	// banScores over the caller's claims.
+	r.Register(&PeerInfo{ID: "peer-1", IsBanned: false, BanScore: 0})
+	info, ok := r.Get("peer-1")
+	require.True(t, ok)
+	require.True(t, info.IsBanned, "Register must reconcile IsBanned from banScores")
+	require.Greater(t, info.BanScore, int32(0), "Register must reconcile BanScore from banScores")
+}
+
+// TestRegister_NoBanScoreSetsCleanState confirms the negative path: a peer
+// with no banScores entry registers with IsBanned=false / BanScore=0 even if
+// the caller passed stale truthy values.
+func TestRegister_NoBanScoreSetsCleanState(t *testing.T) {
+	r := NewCentralizedPeerRegistry(DefaultBanConfig())
+
+	// Caller is wrong/stale — should be ignored in favour of banScores (which
+	// has no entry for this peer).
+	r.Register(&PeerInfo{ID: "peer-1", IsBanned: true, BanScore: 99})
+	info, ok := r.Get("peer-1")
+	require.True(t, ok)
+	require.False(t, info.IsBanned, "no banScores entry → IsBanned must be false")
+	require.Equal(t, int32(0), info.BanScore, "no banScores entry → BanScore must be 0")
+}

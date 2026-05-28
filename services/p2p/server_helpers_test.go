@@ -376,3 +376,31 @@ func TestValidateDataHubURL(t *testing.T) {
 		})
 	}
 }
+
+// TestCleanupPeerMaps_EvictsExpiredReputationEntries confirms that the
+// reputationCache populated by shouldSkipUnhealthyPeer does not grow without
+// bound — cleanupPeerMaps must sweep entries whose expiresAt has passed.
+func TestCleanupPeerMaps_EvictsExpiredReputationEntries(t *testing.T) {
+	s := &Server{
+		logger:         ulogger.TestLogger{},
+		peerMapTTL:     time.Minute,
+		peerMapMaxSize: 100,
+	}
+
+	now := time.Now()
+	s.reputationCache.Store("expired-peer", reputationCacheEntry{
+		score:     75.0,
+		expiresAt: now.Add(-time.Second),
+	})
+	s.reputationCache.Store("fresh-peer", reputationCacheEntry{
+		score:     75.0,
+		expiresAt: now.Add(reputationCacheTTL),
+	})
+
+	s.cleanupPeerMaps()
+
+	_, expiredStillThere := s.reputationCache.Load("expired-peer")
+	assert.False(t, expiredStillThere, "expired reputationCache entry must be evicted")
+	_, freshStillThere := s.reputationCache.Load("fresh-peer")
+	assert.True(t, freshStillThere, "fresh reputationCache entry must survive cleanup")
+}

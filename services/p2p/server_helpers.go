@@ -824,10 +824,26 @@ func (s *Server) cleanupPeerMaps() {
 		s.subtreePeerMap.Delete(key)
 	}
 
+	// Evict expired reputationCache entries. shouldSkipUnhealthyPeer only ever
+	// inserts; without this sweep the map would grow once per unique peer ID
+	// the node has ever processed gossip from.
+	var reputationKeysToDelete []string
+	s.reputationCache.Range(func(key, value interface{}) bool {
+		if entry, ok := value.(reputationCacheEntry); ok {
+			if now.After(entry.expiresAt) {
+				reputationKeysToDelete = append(reputationKeysToDelete, key.(string))
+			}
+		}
+		return true
+	})
+	for _, key := range reputationKeysToDelete {
+		s.reputationCache.Delete(key)
+	}
+
 	// Log cleanup stats
-	if len(blockKeysToDelete) > 0 || len(subtreeKeysToDelete) > 0 {
-		s.logger.Infof("[cleanupPeerMaps] removed %d expired block entries and %d expired subtree entries",
-			len(blockKeysToDelete), len(subtreeKeysToDelete))
+	if len(blockKeysToDelete) > 0 || len(subtreeKeysToDelete) > 0 || len(reputationKeysToDelete) > 0 {
+		s.logger.Infof("[cleanupPeerMaps] removed %d expired block entries, %d expired subtree entries, %d expired reputation entries",
+			len(blockKeysToDelete), len(subtreeKeysToDelete), len(reputationKeysToDelete))
 	}
 
 	// Second pass: enforce size limits if needed

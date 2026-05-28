@@ -184,6 +184,18 @@ func (r *CentralizedPeerRegistry) Register(info *PeerInfo) {
 		entry.LastSeen = now
 		entry.LastMessageTime = now
 		entry.ReputationScore = 50.0
+		// Reconcile against persisted ban state: a peer can be evicted from the
+		// in-memory peer map (TTL/restart/Cleanup) while its banScore entry
+		// outlives the eviction. When the same peer reattaches, the caller has
+		// no way to know it was banned — so trust banScores, not the
+		// caller-supplied IsBanned/BanScore fields.
+		if banned, ok := r.banScores[info.ID]; ok {
+			entry.IsBanned = banned.Banned
+			entry.BanScore = banned.Score
+		} else {
+			entry.IsBanned = false
+			entry.BanScore = 0
+		}
 		r.peers[info.ID] = &entry
 		return
 	}
