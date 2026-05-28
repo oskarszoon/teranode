@@ -361,3 +361,79 @@ func TestDAHEvictedBless_MainChainGated(t *testing.T) {
 		})
 	}
 }
+
+// TestCoinbaseMaturity_UsesMainChainHeight is a focused regression for #964
+// specific to the coinbase-maturity consensus rule (100-block lock).
+//
+// Scenario:
+//   - A parent observed in both an orphan block (height H_orphan) and a
+//     main-chain block (height H_main), with a wide gap between them.
+//   - getUtxoBlockHeightsAndExtendTx must return H_main, not H_orphan.
+//
+// The downstream maturity check (in TxValidator) consumes the height returned
+// here; pinning the input value to the main-chain height is the #964 protection.
+// Without the fix, pickMainChainHeight selection of BlockHeights[0] could shift
+// the boundary by (H_main - H_orphan).
+func TestCoinbaseMaturity_UsesMainChainHeight(t *testing.T) {
+	tracing.SetupMockTracer()
+
+	ctx := context.Background()
+	logger := ulogger.NewErrorTestLogger(t)
+	tSettings := test.CreateBaseTestSettings(t)
+
+	storeURL, err := url.Parse("sqlitememory:///forksafe_coinbase_maturity")
+	require.NoError(t, err)
+	utxoStore, err := sql.New(ctx, logger, tSettings, storeURL)
+	require.NoError(t, err)
+
+	parentTx := utxofixtures.ParentTx
+	_, err = utxoStore.Create(ctx, parentTx, 100)
+	require.NoError(t, err)
+
+	const (
+		orphanBlockID uint32 = 10
+		mainBlockID   uint32 = 11
+		orphanHeight  uint32 = 200
+		mainHeight    uint32 = 250 // 50-block gap — large enough to make boundary shift obvious
+	)
+
+	_, err = utxoStore.SetMinedMulti(ctx, []*chainhash.Hash{parentTx.TxIDChainHash()}, utxostore.MinedBlockInfo{
+		BlockID:     orphanBlockID,
+		BlockHeight: orphanHeight,
+		SubtreeIdx:  0,
+	})
+	require.NoError(t, err)
+	_, err = utxoStore.SetMinedMulti(ctx, []*chainhash.Hash{parentTx.TxIDChainHash()}, utxostore.MinedBlockInfo{
+		BlockID:     mainBlockID,
+		BlockHeight: mainHeight,
+		SubtreeIdx:  0,
+	})
+	require.NoError(t, err)
+
+	m := &blockchain.Mock{}
+	// SQL store returns BlockIDs ordered by block_id ASC, so the helper iterates
+	// orphan (id 10) first, then main (id 11). Both mocks hit exactly once.
+	m.On("CheckBlockIsInCurrentChain", mock.Anything, []uint32{orphanBlockID}).Return(false, nil).Once()
+	m.On("CheckBlockIsInCurrentChain", mock.Anything, []uint32{mainBlockID}).Return(true, nil).Once()
+
+	v := &Validator{
+		logger:           logger,
+		settings:         tSettings,
+		utxoStore:        utxoStore,
+		blockchainClient: m,
+	}
+
+	childTx := utxofixtures.Tx
+
+	heights, err := v.getUtxoBlockHeightsAndExtendTx(ctx, childTx, childTx.TxIDChainHash().String(), &Options{})
+	require.NoError(t, err)
+	require.NotEmpty(t, heights)
+
+	// Critical assertion: the height fed to the downstream maturity check is
+	// the main-chain block height (250), not the orphan's (200). Pre-fix code
+	// returned BlockHeights[0] = 200, shifting the boundary by 50 blocks.
+	for i, h := range heights {
+		require.Equal(t, mainHeight, h, "input %d: maturity check would use wrong height (%d) instead of main-chain height (%d)", i, h, mainHeight)
+	}
+	m.AssertExpectations(t)
+}
