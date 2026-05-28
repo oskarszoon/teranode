@@ -483,6 +483,85 @@ func TestGenerateBlockMerkleProof(t *testing.T) {
 	})
 }
 
+func TestConstructMerkleProof_MainChainFilter(t *testing.T) {
+	coinbaseHash, _ := chainhash.NewHashFromStr("abc1234567890123456789012345678901234567890123456789012345678901")
+	txHash, _ := chainhash.NewHashFromStr("1111111111111111111111111111111111111111111111111111111111111111")
+
+	st, err := subtree.NewTreeByLeafCount(2)
+	require.NoError(t, err)
+	st.Nodes = []subtree.Node{
+		{Hash: *coinbaseHash},
+		{Hash: *txHash},
+	}
+	subtreeRoot := st.RootHash()
+
+	block := &model.Block{
+		Subtrees: []*chainhash.Hash{subtreeRoot},
+	}
+	blockHeader := &model.BlockHeader{
+		HashMerkleRoot: subtreeRoot,
+	}
+
+	t.Run("tx in fork+main returns main-chain proof", func(t *testing.T) {
+		// BlockIDs[0]=42 is the fork (orphan); BlockIDs[1]=99 is the main-chain winner.
+		mock := &MockMerkleProofConstructor{
+			txMeta: &TxMetaData{
+				BlockIDs:     []uint32{42, 99},
+				BlockHeights: []uint32{100, 101},
+				SubtreeIdxs:  []int{0, 0},
+			},
+			block:       block,
+			blockHeader: blockHeader,
+			subtrees:    map[string]*subtree.Subtree{subtreeRoot.String(): st},
+			mainChainBlockIDs: map[uint32]bool{
+				42: false,
+				99: true,
+			},
+		}
+
+		proof, err := ConstructMerkleProof(txHash, mock)
+		require.NoError(t, err)
+		require.NotNil(t, proof)
+		assert.Equal(t, uint32(101), proof.BlockHeight, "must pick the main-chain entry, not BlockIDs[0]")
+	})
+
+	t.Run("tx only in orphan returns not-found", func(t *testing.T) {
+		mock := &MockMerkleProofConstructor{
+			txMeta: &TxMetaData{
+				BlockIDs:     []uint32{42},
+				BlockHeights: []uint32{100},
+				SubtreeIdxs:  []int{0},
+			},
+			block:       block,
+			blockHeader: blockHeader,
+			subtrees:    map[string]*subtree.Subtree{subtreeRoot.String(): st},
+			mainChainBlockIDs: map[uint32]bool{
+				42: false,
+			},
+		}
+
+		proof, err := ConstructMerkleProof(txHash, mock)
+		assert.Nil(t, proof)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not in main chain")
+	})
+
+	t.Run("malformed parallel arrays returns processing error", func(t *testing.T) {
+		mock := &MockMerkleProofConstructor{
+			txMeta: &TxMetaData{
+				BlockIDs:     []uint32{42, 99},
+				BlockHeights: []uint32{100}, // length mismatch
+				SubtreeIdxs:  []int{0, 0},
+			},
+		}
+
+		proof, err := ConstructMerkleProof(txHash, mock)
+		assert.Nil(t, proof)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "parallel arrays")
+	})
+}
+
 func TestMerkleProofWithRealTransaction(t *testing.T) {
 	t.Run("construct and verify proof for real transaction", func(t *testing.T) {
 		// Create simple test transactions using hashes instead of parsing invalid hex

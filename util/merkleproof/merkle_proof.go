@@ -115,10 +115,32 @@ func ConstructMerkleProof(txID *chainhash.Hash, repo MerkleProofConstructor) (*M
 		return nil, terr.NewProcessingError("transaction not in any block")
 	}
 
-	// Use the first block containing the transaction
-	blockID := txMeta.BlockIDs[0]
-	blockHeight := txMeta.BlockHeights[0]
-	subtreeIdx := txMeta.SubtreeIdxs[0]
+	// Guard against malformed parallel arrays before iteration.
+	if len(txMeta.BlockHeights) != len(txMeta.BlockIDs) || len(txMeta.SubtreeIdxs) != len(txMeta.BlockIDs) {
+		return nil, terr.NewProcessingError("malformed tx meta: parallel arrays length mismatch")
+	}
+
+	// Find the entry that is on the current main chain. If a tx appears in a fork
+	// plus the main chain, the main-chain entry is the only one a client can verify
+	// against a header it knows about.
+	mainChainIdx := -1
+	for i, id := range txMeta.BlockIDs {
+		onChain, err := repo.IsBlockOnMainChain(id)
+		if err != nil {
+			return nil, terr.NewProcessingError("failed to check main chain", err)
+		}
+		if onChain {
+			mainChainIdx = i
+			break
+		}
+	}
+	if mainChainIdx == -1 {
+		return nil, terr.NewTxNotFoundError("transaction not in main chain")
+	}
+
+	blockID := txMeta.BlockIDs[mainChainIdx]
+	blockHeight := txMeta.BlockHeights[mainChainIdx]
+	subtreeIdx := txMeta.SubtreeIdxs[mainChainIdx]
 
 	// Get block data using block ID instead of height for better performance
 	block, err := repo.GetBlockByID(uint64(blockID))
