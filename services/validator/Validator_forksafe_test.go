@@ -295,3 +295,69 @@ func TestGetUtxoBlockHeightAndExtendForParentTx_AllOrphanFallback(t *testing.T) 
 	}
 	m.AssertExpectations(t)
 }
+
+// TestDAHEvictedBless_MainChainGated verifies the #965 fix: DAH-evicted parent
+// must only be blessed if at least one BlockID is on the current main chain.
+//
+// Drives the bless decision directly via pickMainChainHeight (which Site 2 wraps).
+// The site 2 call-site combines pickMainChainHeight's "found" with the existing
+// conflicting/locked checks; this test pins the chain-check gate's behavior.
+func TestDAHEvictedBless_MainChainGated(t *testing.T) {
+	tracing.SetupMockTracer()
+
+	cases := []struct {
+		name        string
+		blockIDs    []uint32
+		heights     []uint32
+		mainIDs     map[uint32]bool // id → onMainChain
+		expectBless bool
+	}{
+		{
+			name:        "single main-chain block blesses",
+			blockIDs:    []uint32{11},
+			heights:     []uint32{111},
+			mainIDs:     map[uint32]bool{11: true},
+			expectBless: true,
+		},
+		{
+			name:        "single orphan block refuses bless",
+			blockIDs:    []uint32{10},
+			heights:     []uint32{110},
+			mainIDs:     map[uint32]bool{10: false},
+			expectBless: false,
+		},
+		{
+			name:        "mixed orphan plus main blesses",
+			blockIDs:    []uint32{10, 11},
+			heights:     []uint32{110, 111},
+			mainIDs:     map[uint32]bool{10: false, 11: true},
+			expectBless: true,
+		},
+	}
+
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			ctx := context.Background()
+
+			m := &blockchain.Mock{}
+			for id, onMain := range c.mainIDs {
+				m.On("CheckBlockIsInCurrentChain", mock.Anything, []uint32{id}).Return(onMain, nil).Once()
+			}
+
+			v := &Validator{
+				logger:           ulogger.TestLogger{},
+				blockchainClient: m,
+			}
+
+			txMeta := &meta.Data{
+				BlockIDs:     c.blockIDs,
+				BlockHeights: c.heights,
+			}
+			_, onMainChain, chainErr := v.pickMainChainHeight(ctx, txMeta)
+			require.NoError(t, chainErr)
+			require.Equal(t, c.expectBless, onMainChain)
+			m.AssertExpectations(t)
+		})
+	}
+}

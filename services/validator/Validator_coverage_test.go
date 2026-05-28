@@ -12,6 +12,7 @@ import (
 	bec "github.com/bsv-blockchain/go-sdk/primitives/ec"
 	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/services/blockassembly"
+	"github.com/bsv-blockchain/teranode/services/blockchain"
 	"github.com/bsv-blockchain/teranode/stores/utxo"
 	"github.com/bsv-blockchain/teranode/stores/utxo/meta"
 	"github.com/bsv-blockchain/teranode/stores/utxo/nullstore"
@@ -760,7 +761,12 @@ func TestValidator_ValidateInternal_TxNotFoundError_ExistingTx(t *testing.T) {
 	mockStore := &utxo.MockUtxostore{}
 	settings := test.CreateBaseTestSettings(t)
 
-	validator, err := New(ctx, logger, settings, mockStore, nil, nil, nil, nil)
+	// Blockchain mock: #965 bless path requires confirming a BlockID is on the main chain.
+	// First BlockID (1) returns true so pickMainChainHeight short-circuits.
+	blockchainMock := &blockchain.Mock{}
+	blockchainMock.On("CheckBlockIsInCurrentChain", mock.Anything, []uint32{uint32(1)}).Return(true, nil).Once()
+
+	validator, err := New(ctx, logger, settings, mockStore, nil, nil, nil, blockchainMock)
 	require.NoError(t, err)
 	v := validator.(*Validator)
 
@@ -786,7 +792,8 @@ func TestValidator_ValidateInternal_TxNotFoundError_ExistingTx(t *testing.T) {
 	mockStore.On("Spend", mock.Anything, tx, mock.Anything, mock.Anything).Return([]*utxo.Spend{}, errors.NewTxNotFoundError("tx not found"))
 
 	// Mock GetMeta to return existing tx already mined and not flagged — legitimate DAH-evicted-parent case.
-	existingMeta := &meta.Data{Tx: tx, BlockIDs: []uint32{1, 2}}
+	// BlockHeights aligned with BlockIDs (invariant required by pickMainChainHeight).
+	existingMeta := &meta.Data{Tx: tx, BlockIDs: []uint32{1, 2}, BlockHeights: []uint32{101, 102}}
 	mockStore.On("GetMeta", mock.Anything, mock.Anything, mock.Anything).
 		Run(func(args mock.Arguments) {
 			data := args.Get(2).(*meta.Data)
@@ -801,6 +808,7 @@ func TestValidator_ValidateInternal_TxNotFoundError_ExistingTx(t *testing.T) {
 	assert.NotNil(t, txMetaData)
 	assert.Equal(t, []uint32{1, 2}, txMetaData.BlockIDs)
 	mockStore.AssertExpectations(t)
+	blockchainMock.AssertExpectations(t)
 }
 
 // TestValidate_TxNotFoundShortcut verifies that when spendUtxos returns ErrTxNotFound (parent missing),
@@ -824,13 +832,22 @@ func TestValidate_TxNotFoundShortcut(t *testing.T) {
 		return tx, coinbaseTx
 	}
 
-	setupValidator := func(t *testing.T, tx *bt.Tx, coinbaseTx *bt.Tx, getMetaResult *meta.Data, getMetaErr error) (*Validator, *utxo.MockUtxostore) {
+	// setupValidator wires a Validator over MockUtxostore. blockchainMock is optional —
+	// only needed when the test expects the #965 bless path (BlockIDs non-empty AND
+	// not conflicting AND not locked) to be exercised, since pickMainChainHeight calls
+	// v.blockchainClient.CheckBlockIsInCurrentChain.
+	setupValidator := func(t *testing.T, tx *bt.Tx, coinbaseTx *bt.Tx, getMetaResult *meta.Data, getMetaErr error, blockchainMock *blockchain.Mock) (*Validator, *utxo.MockUtxostore) {
 		ctx := context.Background()
 		logger := ulogger.TestLogger{}
 		mockStore := &utxo.MockUtxostore{}
 		settings := test.CreateBaseTestSettings(t)
 
-		validator, err := New(ctx, logger, settings, mockStore, nil, nil, nil, nil)
+		var blockchainClient blockchain.ClientI
+		if blockchainMock != nil {
+			blockchainClient = blockchainMock
+		}
+
+		validator, err := New(ctx, logger, settings, mockStore, nil, nil, nil, blockchainClient)
 		require.NoError(t, err)
 		v := validator.(*Validator)
 
@@ -854,8 +871,12 @@ func TestValidate_TxNotFoundShortcut(t *testing.T) {
 
 	t.Run("shortcut allowed when mined and not flagged", func(t *testing.T) {
 		tx, coinbaseTx := makeTxAndParent(t)
-		existingMeta := &meta.Data{Tx: tx, BlockIDs: []uint32{1, 2}, Conflicting: false, Locked: false}
-		v, mockStore := setupValidator(t, tx, coinbaseTx, existingMeta, nil)
+		// BlockHeights aligned with BlockIDs (invariant required by pickMainChainHeight).
+		existingMeta := &meta.Data{Tx: tx, BlockIDs: []uint32{1, 2}, BlockHeights: []uint32{101, 102}, Conflicting: false, Locked: false}
+		// #965: bless requires the first matched BlockID to be on main chain. Short-circuits on id 1.
+		blockchainMock := &blockchain.Mock{}
+		blockchainMock.On("CheckBlockIsInCurrentChain", mock.Anything, []uint32{uint32(1)}).Return(true, nil).Once()
+		v, mockStore := setupValidator(t, tx, coinbaseTx, existingMeta, nil, blockchainMock)
 
 		txMetaData, err := v.validateInternal(context.Background(), tx, 100, &Options{})
 
@@ -863,12 +884,14 @@ func TestValidate_TxNotFoundShortcut(t *testing.T) {
 		require.NotNil(t, txMetaData)
 		require.Equal(t, []uint32{1, 2}, txMetaData.BlockIDs)
 		mockStore.AssertExpectations(t)
+		blockchainMock.AssertExpectations(t)
 	})
 
 	t.Run("shortcut denied when not yet mined (BlockIDs empty)", func(t *testing.T) {
 		tx, coinbaseTx := makeTxAndParent(t)
 		notYetMined := &meta.Data{Tx: tx, BlockIDs: nil, Conflicting: false, Locked: false}
-		v, mockStore := setupValidator(t, tx, coinbaseTx, notYetMined, nil)
+		// No blockchain mock: len(BlockIDs)==0 short-circuits before pickMainChainHeight.
+		v, mockStore := setupValidator(t, tx, coinbaseTx, notYetMined, nil, nil)
 
 		txMetaData, err := v.validateInternal(context.Background(), tx, 100, &Options{})
 
@@ -882,7 +905,8 @@ func TestValidate_TxNotFoundShortcut(t *testing.T) {
 	t.Run("shortcut denied when conflicting", func(t *testing.T) {
 		tx, coinbaseTx := makeTxAndParent(t)
 		conflicting := &meta.Data{Tx: tx, BlockIDs: []uint32{1}, Conflicting: true, Locked: false}
-		v, mockStore := setupValidator(t, tx, coinbaseTx, conflicting, nil)
+		// No blockchain mock: Conflicting=true short-circuits before pickMainChainHeight.
+		v, mockStore := setupValidator(t, tx, coinbaseTx, conflicting, nil, nil)
 
 		txMetaData, err := v.validateInternal(context.Background(), tx, 100, &Options{})
 
@@ -896,7 +920,8 @@ func TestValidate_TxNotFoundShortcut(t *testing.T) {
 	t.Run("shortcut denied when locked", func(t *testing.T) {
 		tx, coinbaseTx := makeTxAndParent(t)
 		locked := &meta.Data{Tx: tx, BlockIDs: []uint32{1}, Conflicting: false, Locked: true}
-		v, mockStore := setupValidator(t, tx, coinbaseTx, locked, nil)
+		// No blockchain mock: Locked=true short-circuits before pickMainChainHeight.
+		v, mockStore := setupValidator(t, tx, coinbaseTx, locked, nil, nil)
 
 		txMetaData, err := v.validateInternal(context.Background(), tx, 100, &Options{})
 
@@ -909,7 +934,8 @@ func TestValidate_TxNotFoundShortcut(t *testing.T) {
 
 	t.Run("shortcut denied when GetMeta itself fails", func(t *testing.T) {
 		tx, coinbaseTx := makeTxAndParent(t)
-		v, mockStore := setupValidator(t, tx, coinbaseTx, nil, errors.NewTxNotFoundError("meta not found"))
+		// No blockchain mock: GetMeta failure short-circuits before pickMainChainHeight.
+		v, mockStore := setupValidator(t, tx, coinbaseTx, nil, errors.NewTxNotFoundError("meta not found"), nil)
 
 		txMetaData, err := v.validateInternal(context.Background(), tx, 100, &Options{})
 
@@ -918,6 +944,46 @@ func TestValidate_TxNotFoundShortcut(t *testing.T) {
 		require.True(t, errors.Is(err, errors.ErrTxNotFound), "expected wrapped ErrTxNotFound, got: %v", err)
 		require.Contains(t, err.Error(), "error spending utxos")
 		mockStore.AssertExpectations(t)
+	})
+
+	// #965: wired-through assertion — when BlockIDs are non-empty but all are off main chain,
+	// the bless path must fall through to surfacing ErrTxNotFound. This exercises the new
+	// pickMainChainHeight gate inside validateInternal.
+	t.Run("shortcut denied when all BlockIDs are off main chain", func(t *testing.T) {
+		tx, coinbaseTx := makeTxAndParent(t)
+		orphanOnly := &meta.Data{Tx: tx, BlockIDs: []uint32{7, 8}, BlockHeights: []uint32{107, 108}, Conflicting: false, Locked: false}
+		blockchainMock := &blockchain.Mock{}
+		blockchainMock.On("CheckBlockIsInCurrentChain", mock.Anything, []uint32{uint32(7)}).Return(false, nil).Once()
+		blockchainMock.On("CheckBlockIsInCurrentChain", mock.Anything, []uint32{uint32(8)}).Return(false, nil).Once()
+		v, mockStore := setupValidator(t, tx, coinbaseTx, orphanOnly, nil, blockchainMock)
+
+		txMetaData, err := v.validateInternal(context.Background(), tx, 100, &Options{})
+
+		require.Error(t, err)
+		require.Nil(t, txMetaData)
+		require.True(t, errors.Is(err, errors.ErrTxNotFound), "expected wrapped ErrTxNotFound, got: %v", err)
+		require.Contains(t, err.Error(), "error spending utxos")
+		mockStore.AssertExpectations(t)
+		blockchainMock.AssertExpectations(t)
+	})
+
+	// #965: wired-through assertion — when the blockchain client errors during the bless chain
+	// check, the bless must fall through to surfacing ErrTxNotFound (conservative on transport failure).
+	t.Run("shortcut denied when chain check errors", func(t *testing.T) {
+		tx, coinbaseTx := makeTxAndParent(t)
+		mined := &meta.Data{Tx: tx, BlockIDs: []uint32{9}, BlockHeights: []uint32{109}, Conflicting: false, Locked: false}
+		blockchainMock := &blockchain.Mock{}
+		blockchainMock.On("CheckBlockIsInCurrentChain", mock.Anything, []uint32{uint32(9)}).Return(false, errors.NewProcessingError("client unreachable")).Once()
+		v, mockStore := setupValidator(t, tx, coinbaseTx, mined, nil, blockchainMock)
+
+		txMetaData, err := v.validateInternal(context.Background(), tx, 100, &Options{})
+
+		require.Error(t, err)
+		require.Nil(t, txMetaData)
+		require.True(t, errors.Is(err, errors.ErrTxNotFound), "expected wrapped ErrTxNotFound, got: %v", err)
+		require.Contains(t, err.Error(), "error spending utxos")
+		mockStore.AssertExpectations(t)
+		blockchainMock.AssertExpectations(t)
 	})
 }
 

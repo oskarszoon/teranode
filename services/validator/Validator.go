@@ -650,15 +650,29 @@ func (v *Validator) validateInternal(ctx context.Context, tx *bt.Tx, blockHeight
 			// long after the child was mined. Only short-circuit if the stored metadata confirms prior full validation:
 			//   - tx has been included in at least one block (BlockIDs non-empty), AND
 			//   - tx is NOT marked conflicting, AND
-			//   - tx is NOT locked
+			//   - tx is NOT locked, AND
+			//   - at least one BlockID is on the current main chain (fork-safety, #965).
 			// Otherwise, surface the original ErrTxNotFound — a "tx exists in store" alone is not proof of validation
 			// (a re-org or DAH window could expose a stale or mid-flight record).
+			//
+			// Consensus: blessing a parent whose BlockIDs are all orphans would let the child propagate a
+			// non-canonical parent. The chain check below pins this to the main chain.
 			txMetaData = &meta.Data{}
 			if metaErr := v.utxoStore.GetMeta(decoupledCtx, tx.TxIDChainHash(), txMetaData); metaErr == nil {
 				if len(txMetaData.BlockIDs) > 0 && !txMetaData.Conflicting && !txMetaData.Locked {
-					v.logger.Warnf("[Validate][%s] parent tx DAH-evicted, child already mined and not conflicting/locked, assuming blessed (BlockIDs=%v)", txID, txMetaData.BlockIDs)
+					_, onMainChain, chainErr := v.pickMainChainHeight(decoupledCtx, txMetaData)
+					if chainErr != nil {
+						v.logger.Errorf("[Validate][%s] DAH-evicted bless: chain check failed: %v", txID, chainErr)
+						// Chain-check failure is logged only (not propagated). The outer flow already
+						// has an ErrTxNotFound from the spend path; surfacing the chain-check error
+						// here would mask the real cause. Fall through to that original error path.
+					} else if onMainChain {
+						v.logger.Warnf("[Validate][%s] parent tx DAH-evicted, child already mined and not conflicting/locked, main-chain confirmed, assuming blessed (BlockIDs=%v)", txID, txMetaData.BlockIDs)
 
-					return txMetaData, nil
+						return txMetaData, nil
+					} else {
+						v.logger.Warnf("[Validate][%s] DAH-evicted parent BlockIDs all off main chain, refusing bless (BlockIDs=%v)", txID, txMetaData.BlockIDs)
+					}
 				}
 			}
 		}
