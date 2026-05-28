@@ -93,6 +93,9 @@ type LegacyMerkleProofResponse struct {
 //     Returned when the hash doesn't exist as a transaction or subtree
 //     Example: {"message": "hash not found as transaction or subtree"}
 //
+//     Returned when the hash is a known transaction but exists only in orphan blocks
+//     Example: {"message": "transaction not in main chain"}
+//
 //   - 500 Internal Server Error:
 //     Returned for various internal errors:
 //
@@ -173,14 +176,14 @@ func (h *HTTP) GetMerkleProof(mode ReadMode) func(c echo.Context) error {
 		// First, try as transaction hash
 		proof, err = merkleproof.ConstructMerkleProof(txHash, adapter)
 		if err != nil {
-			errStr := err.Error()
-
 			// Orphan-only existence is a definitive answer for a tx hash: do NOT fall
 			// back to the subtree path (the hash is known to be a tx).
-			if strings.Contains(errStr, "not in main chain") {
+			if errors.Is(err, errors.ErrTxNotFound) {
 				prometheusAssetHTTPGetMerkleProof.WithLabelValues("NotFound", "404").Inc()
 				return echo.NewHTTPError(http.StatusNotFound, "transaction not in main chain")
 			}
+
+			errStr := err.Error()
 
 			// If transaction not found, try as subtree hash
 			if strings.Contains(errStr, "not in any block") || strings.Contains(errStr, "not found") {

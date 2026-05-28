@@ -500,10 +500,6 @@ func TestGetMerkleProof_OrphanOnly_Returns404(t *testing.T) {
 		BlockHeights: []uint32{100},
 		SubtreeIdxs:  []int{0},
 	}, nil)
-	// Subtree fallback should NOT be attempted; mark Maybe() so testify doesn't fail.
-	mockRepo.On("FindBlocksContainingSubtree", mock.Anything, mock.Anything).Return(
-		[]uint32{}, []uint32{}, []int{}, errors.NewProcessingError("should not be called"),
-	).Maybe()
 
 	bcMock := &blockchain.Mock{}
 	bcMock.On("CheckBlockIsInCurrentChain", mock.Anything, []uint32{42}).Return(false, nil)
@@ -527,6 +523,8 @@ func TestGetMerkleProof_OrphanOnly_Returns404(t *testing.T) {
 	require.True(t, errors.As(err, &echoErr))
 	assert.Equal(t, http.StatusNotFound, echoErr.Code)
 	assert.Contains(t, echoErr.Message.(string), "not in main chain")
+
+	mockRepo.AssertNotCalled(t, "FindBlocksContainingSubtree", mock.Anything, mock.Anything)
 }
 
 func TestGetMerkleProof_ForkPlusMain_ReturnsMainChainProof(t *testing.T) {
