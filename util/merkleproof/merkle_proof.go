@@ -83,6 +83,10 @@ type MerkleProofConstructor interface {
 	// FindBlocksContainingSubtree finds all blocks that contain the specified subtree
 	// Returns arrays of block IDs, block heights and corresponding subtree indices
 	FindBlocksContainingSubtree(subtreeHash *chainhash.Hash) ([]uint32, []uint32, []int, error)
+
+	// IsBlockOnMainChain reports whether the given internal block ID is part of
+	// the current best chain.
+	IsBlockOnMainChain(blockID uint32) (bool, error)
 }
 
 // ConstructMerkleProof constructs a complete merkle proof for a given transaction.

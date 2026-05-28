@@ -12,10 +12,11 @@ import (
 
 // MockMerkleProofConstructor is a mock implementation of MerkleProofConstructor for testing
 type MockMerkleProofConstructor struct {
-	txMeta      *TxMetaData
-	block       *model.Block
-	blockHeader *model.BlockHeader
-	subtrees    map[string]*subtree.Subtree
+	txMeta            *TxMetaData
+	block             *model.Block
+	blockHeader       *model.BlockHeader
+	subtrees          map[string]*subtree.Subtree
+	mainChainBlockIDs map[uint32]bool
 }
 
 func (m *MockMerkleProofConstructor) GetTxMeta(txHash *chainhash.Hash) (*TxMetaData, error) {
@@ -40,6 +41,15 @@ func (m *MockMerkleProofConstructor) GetSubtree(subtreeHash *chainhash.Hash) (*s
 func (m *MockMerkleProofConstructor) FindBlocksContainingSubtree(subtreeHash *chainhash.Hash) ([]uint32, []uint32, []int, error) {
 	// Return mock data for testing
 	return []uint32{1}, []uint32{100}, []int{0}, nil
+}
+
+func (m *MockMerkleProofConstructor) IsBlockOnMainChain(blockID uint32) (bool, error) {
+	if m.mainChainBlockIDs == nil {
+		// Default: all block IDs are on main chain. Preserves behaviour for existing tests
+		// that don't care about main-chain filtering.
+		return true, nil
+	}
+	return m.mainChainBlockIDs[blockID], nil
 }
 
 func TestConstructMerkleProof(t *testing.T) {
