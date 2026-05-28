@@ -1,0 +1,9 @@
+{
+  "ok": true,
+  "data": {
+    "first_block_time": 1699000000,
+    "last_block_time": 1700000000,
+    "tx_count": 1000,
+    "chain_work": "0x1000000"
+  }
+}
