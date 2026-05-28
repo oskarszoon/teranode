@@ -99,6 +99,9 @@ type MerkleProofConstructor interface {
 // Returns:
 //   - *MerkleProof: Complete merkle proof structure
 //   - error: Any error encountered during proof construction
+//
+// Only main-chain entries are considered; transactions found exclusively in orphan
+// blocks return a TxNotFoundError so clients don't receive unverifiable proofs.
 func ConstructMerkleProof(txID *chainhash.Hash, repo MerkleProofConstructor) (*MerkleProof, error) {
 	if txID == nil {
 		return nil, terr.NewInvalidArgumentError("transaction ID cannot be nil")
@@ -123,6 +126,9 @@ func ConstructMerkleProof(txID *chainhash.Hash, repo MerkleProofConstructor) (*M
 	// Find the entry that is on the current main chain. If a tx appears in a fork
 	// plus the main chain, the main-chain entry is the only one a client can verify
 	// against a header it knows about.
+	// Best-effort: a reorg between this main-chain check and the GetBlockByID
+	// call below could return a proof against a re-orphaned block. SPV clients
+	// should re-fetch on header divergence.
 	mainChainIdx := -1
 	for i, id := range txMeta.BlockIDs {
 		onChain, err := repo.IsBlockOnMainChain(id)

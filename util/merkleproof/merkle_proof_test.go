@@ -560,6 +560,29 @@ func TestConstructMerkleProof_MainChainFilter(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "parallel arrays")
 	})
+
+	t.Run("tx in main-only block returns proof via explicit mock", func(t *testing.T) {
+		// Regression: exercise the new main-chain loop with an explicitly-on-chain
+		// mock entry, not relying on the nil-default = true behaviour.
+		mock := &MockMerkleProofConstructor{
+			txMeta: &TxMetaData{
+				BlockIDs:     []uint32{99},
+				BlockHeights: []uint32{101},
+				SubtreeIdxs:  []int{0},
+			},
+			block:       block,
+			blockHeader: blockHeader,
+			subtrees:    map[string]*subtree.Subtree{subtreeRoot.String(): st},
+			mainChainBlockIDs: map[uint32]bool{
+				99: true,
+			},
+		}
+
+		proof, err := ConstructMerkleProof(txHash, mock)
+		require.NoError(t, err)
+		require.NotNil(t, proof)
+		assert.Equal(t, uint32(101), proof.BlockHeight)
+	})
 }
 
 func TestMerkleProofWithRealTransaction(t *testing.T) {
