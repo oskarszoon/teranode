@@ -160,9 +160,20 @@ func (h *HTTP) GetTransactionMeta(mode ReadMode) func(c echo.Context) error {
 
 		// Per-block check (not batched) because we need the index of the main-chain
 		// entry, which CheckBlockIsInCurrentChain's batched form does not expose.
+		// Backed by mainChainCache to avoid a gRPC round-trip per request when wired
+		// (production path); falls back to direct gRPC when the cache is unavailable
+		// (e.g. unit tests that construct HTTP without going through New()).
 		mainChainIndex := -1
 		for i, blockID := range meta.BlockIDs {
-			onChain, err := h.repository.GetBlockchainClient().CheckBlockIsInCurrentChain(ctx, []uint32{blockID})
+			var (
+				onChain bool
+				err     error
+			)
+			if h.mainChainCache != nil {
+				onChain, err = h.mainChainCache.IsOnMainChain(ctx, blockID)
+			} else {
+				onChain, err = h.repository.GetBlockchainClient().CheckBlockIsInCurrentChain(ctx, []uint32{blockID})
+			}
 			if err != nil {
 				// Best-effort: tolerate transient blockchain client errors here. mainChainIndex
 				// stays -1 if no main-chain entry is found; matches the GetBlockByID loop above

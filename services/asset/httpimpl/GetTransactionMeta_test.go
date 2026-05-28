@@ -12,6 +12,7 @@ import (
 	"github.com/bsv-blockchain/teranode/model"
 	"github.com/bsv-blockchain/teranode/services/blockchain"
 	"github.com/bsv-blockchain/teranode/stores/utxo/meta"
+	"github.com/bsv-blockchain/teranode/ulogger"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -59,7 +60,8 @@ func TestGetTransactionMeta(t *testing.T) {
 		bcMock.On("CheckBlockIsInCurrentChain", mock.Anything, []uint32{1}).Return(false, nil)
 		bcMock.On("CheckBlockIsInCurrentChain", mock.Anything, []uint32{2}).Return(true, nil)
 		bcMock.On("CheckBlockIsInCurrentChain", mock.Anything, []uint32{3}).Return(false, nil).Maybe()
-		mockRepo.On("GetBlockchainClient").Return(bcMock)
+		mockRepo.On("GetBlockchainClient").Return(bcMock).Maybe()
+		httpServer.mainChainCache = newMainChainCache(bcMock, ulogger.TestLogger{})
 
 		// Mock GetBlockByID calls for each block ID
 		// Create blocks with proper headers and subtrees
@@ -243,7 +245,8 @@ func TestGetTransactionMeta(t *testing.T) {
 
 		bcMock := &blockchain.Mock{}
 		bcMock.On("CheckBlockIsInCurrentChain", mock.Anything, mock.Anything).Return(false, nil).Maybe()
-		mockRepo.On("GetBlockchainClient").Return(bcMock)
+		mockRepo.On("GetBlockchainClient").Return(bcMock).Maybe()
+		httpServer.mainChainCache = newMainChainCache(bcMock, ulogger.TestLogger{})
 
 		// set echo context
 		echoContext.SetPath("/tx/meta/:hash")
@@ -298,7 +301,8 @@ func TestGetTransactionMeta(t *testing.T) {
 
 		bcMock := &blockchain.Mock{}
 		bcMock.On("CheckBlockIsInCurrentChain", mock.Anything, []uint32{42}).Return(false, nil)
-		mockRepo.On("GetBlockchainClient").Return(bcMock)
+		mockRepo.On("GetBlockchainClient").Return(bcMock).Maybe()
+		httpServer.mainChainCache = newMainChainCache(bcMock, ulogger.TestLogger{})
 
 		echoContext.SetPath("/tx/meta/:hash")
 		echoContext.SetParamNames("hash")
@@ -330,6 +334,7 @@ func TestGetTransactionMeta(t *testing.T) {
 
 		bcMock := &blockchain.Mock{}
 		mockRepo.On("GetBlockchainClient").Return(bcMock).Maybe() // loop runs zero times
+		httpServer.mainChainCache = newMainChainCache(bcMock, ulogger.TestLogger{})
 
 		echoContext.SetPath("/tx/meta/:hash")
 		echoContext.SetParamNames("hash")
@@ -367,7 +372,8 @@ func TestGetTransactionMeta(t *testing.T) {
 		bcMock := &blockchain.Mock{}
 		bcMock.On("CheckBlockIsInCurrentChain", mock.Anything, mock.Anything).
 			Return(false, errors.NewProcessingError("blockchain transient error"))
-		mockRepo.On("GetBlockchainClient").Return(bcMock)
+		mockRepo.On("GetBlockchainClient").Return(bcMock).Maybe()
+		httpServer.mainChainCache = newMainChainCache(bcMock, ulogger.TestLogger{})
 
 		echoContext.SetPath("/tx/meta/:hash")
 		echoContext.SetParamNames("hash")

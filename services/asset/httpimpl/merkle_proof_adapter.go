@@ -12,15 +12,18 @@ import (
 
 // merkleProofAdapter adapts the repository.Interface to implement merkleproof.MerkleProofConstructor
 type merkleProofAdapter struct {
-	ctx  context.Context
-	repo repository.Interface
+	ctx   context.Context
+	repo  repository.Interface
+	cache *mainChainCache
 }
 
-// newMerkleProofAdapter creates a new adapter that allows the repository to be used with merkleproof functions
-func newMerkleProofAdapter(ctx context.Context, repo repository.Interface) *merkleProofAdapter {
+// newMerkleProofAdapter creates a new adapter that allows the repository to be used with merkleproof functions.
+// The optional cache short-circuits the per-request CheckBlockIsInCurrentChain gRPC call.
+func newMerkleProofAdapter(ctx context.Context, repo repository.Interface, cache *mainChainCache) *merkleProofAdapter {
 	return &merkleProofAdapter{
-		ctx:  ctx,
-		repo: repo,
+		ctx:   ctx,
+		repo:  repo,
+		cache: cache,
 	}
 }
 
@@ -62,6 +65,12 @@ func (a *merkleProofAdapter) FindBlocksContainingSubtree(subtreeHash *chainhash.
 }
 
 // IsBlockOnMainChain reports whether the given internal block ID is part of the current best chain.
+// Uses the in-process cache when available to avoid a gRPC round-trip per request;
+// falls back to a direct CheckBlockIsInCurrentChain call when no cache is wired in
+// (e.g. unit tests that construct the adapter directly).
 func (a *merkleProofAdapter) IsBlockOnMainChain(blockID uint32) (bool, error) {
+	if a.cache != nil {
+		return a.cache.IsOnMainChain(a.ctx, blockID)
+	}
 	return a.repo.GetBlockchainClient().CheckBlockIsInCurrentChain(a.ctx, []uint32{blockID})
 }

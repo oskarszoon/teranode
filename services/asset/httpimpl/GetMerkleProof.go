@@ -167,7 +167,7 @@ func (h *HTTP) GetMerkleProof(mode ReadMode) func(c echo.Context) error {
 		}
 
 		// Create adapter to use merkleproof helper functions
-		adapter := newMerkleProofAdapter(ctx, h.repository)
+		adapter := newMerkleProofAdapter(ctx, h.repository, h.mainChainCache)
 
 		// Try to construct merkle proof - first as transaction, then as subtree
 		var proof *merkleproof.MerkleProof
