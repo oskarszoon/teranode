@@ -65,6 +65,9 @@ func (c *mainChainCache) consume(ctx context.Context, sub <-chan *blockchain_api
 			return
 		case n, ok := <-sub:
 			if !ok {
+				// Channel closed unexpectedly; without a live subscription the cache
+				// will never invalidate on reorgs. Log loudly so this is visible.
+				c.logger.Warnf("[Asset] mainchain cache subscription closed unexpectedly; stopping invalidator")
 				return
 			}
 			if n == nil {

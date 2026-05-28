@@ -587,8 +587,11 @@ func (h *HTTP) Start(ctx context.Context, addr string) error {
 	}
 	if h.mainChainCache != nil {
 		if err := h.mainChainCache.Start(ctx); err != nil {
-			// Non-fatal: lookups fall back to direct gRPC at the call sites.
-			h.logger.Warnf("[Asset] failed to start main-chain cache (per-block fallback in use): %v", err)
+			// Non-fatal: nil the cache so call sites fall back to direct gRPC.
+			// Leaving it non-nil would serve stale data forever — consume() never
+			// started, so no invalidation will ever fire.
+			h.logger.Warnf("[Asset] failed to start main-chain cache, falling back to direct gRPC: %v", err)
+			h.mainChainCache = nil
 		}
 	}
 

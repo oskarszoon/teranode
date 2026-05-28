@@ -243,7 +243,15 @@ func ConstructSubtreeMerkleProof(subtreeHash *chainhash.Hash, repo MerkleProofCo
 		return nil, terr.NewInvalidArgumentError("subtree hash cannot be nil")
 	}
 
-	// Find blocks containing this subtree
+	// Find blocks containing this subtree.
+	//
+	// CONTRACT: FindBlocksContainingSubtree MUST return only blocks on the current
+	// best chain. The SQL implementation at
+	// stores/blockchain/sql/FindBlocksContainingSubtree.go filters with
+	// "WHERE b.on_main_chain = true"; if that gate is ever removed, orphan-anchored
+	// subtree proofs leak silently. The merkleproof-layer regression test
+	// TestConstructSubtreeMerkleProof_OrphanOnlySubtree_NotFound pins the
+	// empty-result → not-found behaviour, but cannot validate the SQL gate itself.
 	blockIDs, blockHeights, subtreeIndices, err := repo.FindBlocksContainingSubtree(subtreeHash)
 	if err != nil {
 		return nil, terr.NewProcessingError("failed to find blocks containing subtree", err)
