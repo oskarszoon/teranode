@@ -911,10 +911,12 @@ func Test_getUtxoBlockHeights(t *testing.T) {
 
 	t.Run("mined parent txs", func(t *testing.T) {
 		mockUtxoStore := utxostore.MockUtxostore{}
+		mockBlockchain := &blockchain.Mock{}
 
 		v := &Validator{
-			settings:  tSettings,
-			utxoStore: &mockUtxoStore,
+			settings:         tSettings,
+			utxoStore:        &mockUtxoStore,
+			blockchainClient: mockBlockchain,
 		}
 
 		mockUtxoStore.On("GetBlockState").Return(utxostore.BlockState{Height: 1000, MedianTime: 1000000000})
@@ -922,6 +924,7 @@ func Test_getUtxoBlockHeights(t *testing.T) {
 		mockUtxoStore.On("Get", mock.Anything, mock.MatchedBy(func(hash *chainhash.Hash) bool {
 			return hash.String() == "10031ea0997a461d4e09157c6f9d15ff09e61f73aebd9e7f821e4c77c8251afe"
 		}), mock.Anything).Return(&meta.Data{
+			BlockIDs:     []uint32{1, 2},
 			BlockHeights: []uint32{125, 126},
 		}, nil).Once()
 
@@ -934,8 +937,14 @@ func Test_getUtxoBlockHeights(t *testing.T) {
 		mockUtxoStore.On("Get", mock.Anything, mock.MatchedBy(func(hash *chainhash.Hash) bool {
 			return hash.String() == "928ed84cd4c48beb0d3494ccc17cc1e06b1473f9dc118db9bb56972395ede461"
 		}), mock.Anything).Return(&meta.Data{
+			BlockIDs:     []uint32{3, 4},
 			BlockHeights: []uint32{768, 769},
 		}, nil).Once()
+
+		// First BlockID for each parent is on the main chain; pickMainChainHeight
+		// short-circuits on the first hit, so each id is checked exactly once.
+		mockBlockchain.On("CheckBlockIsInCurrentChain", mock.Anything, []uint32{uint32(1)}).Return(true, nil).Once()
+		mockBlockchain.On("CheckBlockIsInCurrentChain", mock.Anything, []uint32{uint32(3)}).Return(true, nil).Once()
 
 		utxoHashes, err := v.getUtxoBlockHeightsAndExtendTx(ctx, tx, tx.TxID(), NewDefaultOptions())
 		require.NoError(t, err)
@@ -945,14 +954,17 @@ func Test_getUtxoBlockHeights(t *testing.T) {
 		if !reflect.DeepEqual(utxoHashes, expected) {
 			t.Errorf("getUtxoBlockHeightsAndExtendTx() got = %v, want %v", utxoHashes, expected)
 		}
+		mockBlockchain.AssertExpectations(t)
 	})
 
 	t.Run("non extended mined parent txs", func(t *testing.T) {
 		mockUtxoStore := utxostore.MockUtxostore{}
+		mockBlockchain := &blockchain.Mock{}
 
 		v := &Validator{
-			settings:  tSettings,
-			utxoStore: &mockUtxoStore,
+			settings:         tSettings,
+			utxoStore:        &mockUtxoStore,
+			blockchainClient: mockBlockchain,
 		}
 
 		expectedOutputs := make(map[string][]*bt.Output)
@@ -980,6 +992,7 @@ func Test_getUtxoBlockHeights(t *testing.T) {
 		mockUtxoStore.On("Get", mock.Anything, mock.MatchedBy(func(hash *chainhash.Hash) bool {
 			return hash.String() == "10031ea0997a461d4e09157c6f9d15ff09e61f73aebd9e7f821e4c77c8251afe"
 		}), mock.Anything).Return(&meta.Data{
+			BlockIDs:     []uint32{1, 2},
 			BlockHeights: []uint32{125, 126},
 			Tx: &bt.Tx{
 				Outputs: expectedOutputs["10031ea0997a461d4e09157c6f9d15ff09e61f73aebd9e7f821e4c77c8251afe"],
@@ -998,11 +1011,17 @@ func Test_getUtxoBlockHeights(t *testing.T) {
 		mockUtxoStore.On("Get", mock.Anything, mock.MatchedBy(func(hash *chainhash.Hash) bool {
 			return hash.String() == "928ed84cd4c48beb0d3494ccc17cc1e06b1473f9dc118db9bb56972395ede461"
 		}), mock.Anything).Return(&meta.Data{
+			BlockIDs:     []uint32{3, 4},
 			BlockHeights: []uint32{768, 769},
 			Tx: &bt.Tx{
 				Outputs: expectedOutputs["928ed84cd4c48beb0d3494ccc17cc1e06b1473f9dc118db9bb56972395ede461"],
 			},
 		}, nil).Once()
+
+		// First BlockID for each parent is on the main chain; pickMainChainHeight
+		// short-circuits on the first hit, so each id is checked exactly once.
+		mockBlockchain.On("CheckBlockIsInCurrentChain", mock.Anything, []uint32{uint32(1)}).Return(true, nil).Once()
+		mockBlockchain.On("CheckBlockIsInCurrentChain", mock.Anything, []uint32{uint32(3)}).Return(true, nil).Once()
 
 		utxoHashes, err := v.getUtxoBlockHeightsAndExtendTx(ctx, txNonExtended, txNonExtended.TxID(), NewDefaultOptions())
 		require.NoError(t, err)
@@ -1012,6 +1031,7 @@ func Test_getUtxoBlockHeights(t *testing.T) {
 		if !reflect.DeepEqual(utxoHashes, expected) {
 			t.Errorf("getUtxoBlockHeightsAndExtendTx() got = %v, want %v", utxoHashes, expected)
 		}
+		mockBlockchain.AssertExpectations(t)
 
 		for i, input := range txNonExtended.Inputs {
 			if input.PreviousTxSatoshis != expectedOutputs[txNonExtended.Inputs[i].PreviousTxIDChainHash().String()][0].Satoshis {
@@ -1634,11 +1654,17 @@ func TestGetUtxoBlockHeightAndExtendForParentTx_NilValidationOptions(t *testing.
 	mockUtxoStore := utxostore.MockUtxostore{}
 	mockUtxoStore.On("GetBlockState").Return(utxostore.BlockState{Height: 1000, MedianTime: 1000000000})
 	mockUtxoStore.On("Get", mock.Anything, mock.Anything, mock.Anything).Return(&meta.Data{
+		BlockIDs:     []uint32{42},
 		BlockHeights: []uint32{999},
 	}, nil)
 
+	// Mock blockchain client to return that block 42 is on the main chain.
+	mockBlockchain := &blockchain.Mock{}
+	mockBlockchain.On("CheckBlockIsInCurrentChain", mock.Anything, []uint32{uint32(42)}).Return(true, nil).Once()
+
 	v := &Validator{
-		utxoStore: &mockUtxoStore,
+		utxoStore:        &mockUtxoStore,
+		blockchainClient: mockBlockchain,
 	}
 
 	utxoHeights := make([]uint32, 1)
@@ -1649,6 +1675,7 @@ func TestGetUtxoBlockHeightAndExtendForParentTx_NilValidationOptions(t *testing.
 	// Should complete successfully without panic
 	require.NoError(t, err)
 	assert.Equal(t, uint32(999), utxoHeights[0])
+	mockBlockchain.AssertExpectations(t)
 }
 
 func TestGetUtxoBlockHeightAndExtendForParentTx_WithParentMetadata(t *testing.T) {

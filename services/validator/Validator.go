@@ -882,8 +882,21 @@ func (v *Validator) getUtxoBlockHeightAndExtendForParentTx(gCtx context.Context,
 			utxoHeights[idx] = blockState.Height + 1
 		}
 	} else {
+		height, found, err := v.pickMainChainHeight(gCtx, txMeta)
+		if err != nil {
+			return errors.NewProcessingError("error checking main-chain membership for parent %s", parentTxHash.String(), err)
+		}
+		if !found {
+			// Parent observed only in orphan blocks. Treat like unmined: next-block height.
+			// Matches the len(BlockHeights)==0 branch above for consistency.
+			// Consensus: this height feeds coinbase maturity (100-block rule) and nLockTime
+			// checks downstream — accepting an orphan's height could let a too-young coinbase
+			// pass validation.
+			blockState := v.utxoStore.GetBlockState()
+			height = blockState.Height + 1
+		}
 		for _, idx := range idxs {
-			utxoHeights[idx] = txMeta.BlockHeights[0]
+			utxoHeights[idx] = height
 		}
 	}
 
