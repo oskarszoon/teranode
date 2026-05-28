@@ -29,19 +29,34 @@ import (
 //	Content-Type: application/json
 //	Body: Transaction metadata:
 //	  {
-//	    "tx": {                       // Complete transaction data
-//	      // see bt.Tx structure
+//	    "tx": {                       // Complete transaction data (see bt.Tx)
+//	      // ...
 //	    },
 //	    "parentTxHashes": [           // Array of parent transaction hashes
 //	      "<hash>", ...
 //	    ],
-//	    "blockIDs": [                 // Array of block IDs containing this transaction
+//	    "blockIDs": [                 // Internal block IDs containing this tx
 //	      <uint32>, ...
 //	    ],
-//	    "fee": <uint64>,             // Transaction fee in satoshis
-//	    "sizeInBytes": <uint64>,     // Transaction size in bytes
-//	    "isCoinbase": <boolean>,     // Whether this is a coinbase transaction
-//	    "lockTime": <uint32>         // Transaction lock time
+//	    "blockHashes": [              // Block hash for each entry
+//	      "<hex>", ...
+//	    ],
+//	    "blockHeights": [             // Block height for each entry
+//	      <uint32>, ...
+//	    ],
+//	    "subtreeIdxs": [              // Subtree index within each block
+//	      <int>, ...
+//	    ],
+//	    "subtreeHashes": [            // Subtree hash for each entry
+//	      "<hex>", ...
+//	    ],
+//	    "mainChainIndex": <int>,      // Index into the parallel arrays for
+//	                                   // the main-chain entry, or -1 if the
+//	                                   // tx is only in orphans / mempool
+//	    "fee": <uint64>,              // Transaction fee in satoshis
+//	    "sizeInBytes": <uint64>,      // Transaction size in bytes
+//	    "isCoinbase": <boolean>,      // Whether this is a coinbase transaction
+//	    "lockTime": <uint32>          // Transaction lock time
 //	  }
 //
 // Error Responses:
@@ -143,10 +158,15 @@ func (h *HTTP) GetTransactionMeta(mode ReadMode) func(c echo.Context) error {
 			}
 		}
 
+		// Per-block check (not batched) because we need the index of the main-chain
+		// entry, which CheckBlockIsInCurrentChain's batched form does not expose.
 		mainChainIndex := -1
 		for i, blockID := range meta.BlockIDs {
 			onChain, err := h.repository.GetBlockchainClient().CheckBlockIsInCurrentChain(ctx, []uint32{blockID})
 			if err != nil {
+				// Best-effort: tolerate transient blockchain client errors here. mainChainIndex
+				// stays -1 if no main-chain entry is found; matches the GetBlockByID loop above
+				// which also swallows per-block failures rather than 500'ing the whole response.
 				h.logger.Warnf("Failed main-chain check for block %d: %v", blockID, err)
 				continue
 			}

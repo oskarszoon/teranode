@@ -342,4 +342,42 @@ func TestGetTransactionMeta(t *testing.T) {
 		require.NoError(t, json.Unmarshal(responseRecorder.Body.Bytes(), &response))
 		assert.Equal(t, float64(-1), response["mainChainIndex"])
 	})
+
+	t.Run("Blockchain error tolerated → mainChainIndex is -1, no 500", func(t *testing.T) {
+		httpServer, mockRepo, echoContext, responseRecorder := GetMockHTTP(t, nil)
+
+		mockRepo.On("GetTxMeta", mock.Anything, mock.Anything).Return(transactionMeta, nil)
+
+		subtreeHash1, _ := chainhash.NewHashFromStr("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+		block1 := &model.Block{
+			Header: &model.BlockHeader{
+				Version:        testBlockHeader.Version,
+				HashPrevBlock:  testBlockHeader.HashPrevBlock,
+				HashMerkleRoot: testBlockHeader.HashMerkleRoot,
+				Timestamp:      testBlockHeader.Timestamp,
+				Bits:           testBlockHeader.Bits,
+				Nonce:          testBlockHeader.Nonce,
+			},
+			Subtrees: []*chainhash.Hash{subtreeHash1},
+		}
+		mockRepo.On("GetBlockByID", uint64(1)).Return(block1, nil)
+		mockRepo.On("GetBlockByID", uint64(2)).Return(block1, nil)
+		mockRepo.On("GetBlockByID", uint64(3)).Return(block1, nil)
+
+		bcMock := &blockchain.Mock{}
+		bcMock.On("CheckBlockIsInCurrentChain", mock.Anything, mock.Anything).
+			Return(false, errors.NewProcessingError("blockchain transient error"))
+		mockRepo.On("GetBlockchainClient").Return(bcMock)
+
+		echoContext.SetPath("/tx/meta/:hash")
+		echoContext.SetParamNames("hash")
+		echoContext.SetParamValues("9d45ad79ad3c6baecae872c0e35022d60c3bbbd024ccce06690321ece15ea995")
+
+		require.NoError(t, httpServer.GetTransactionMeta(JSON)(echoContext))
+		assert.Equal(t, http.StatusOK, responseRecorder.Code)
+
+		var response map[string]interface{}
+		require.NoError(t, json.Unmarshal(responseRecorder.Body.Bytes(), &response))
+		assert.Equal(t, float64(-1), response["mainChainIndex"])
+	})
 }
