@@ -37,6 +37,7 @@ type Stores struct {
 	mainUtxoStore               utxostore.Store
 	mainValidatorClient         validator.Interface
 	mainBlobDeletionScheduler   options.BlobDeletionScheduler
+	mainPeerRegistryClient      blockchain.PeerRegistryClientI
 }
 
 // GetUtxoStore returns the main UTXO store instance. If the store hasn't been initialized yet,
@@ -126,14 +127,21 @@ func (d *Stores) GetBlockchainClient(ctx context.Context, logger ulogger.Logger,
 	return blockchain.NewClient(ctx, logger, appSettings, source)
 }
 
-// GetPeerRegistryClient returns a fresh client to the centralized peer registry
-// hosted by the blockchain service. Mirrors the GetBlockchainClient pattern: every
-// call creates a new connection so the source label is preserved per-caller.
-// The source parameter is currently informational; it may be threaded through to
-// the underlying gRPC dial in a follow-up.
+// GetPeerRegistryClient returns a singleton client to the centralized peer
+// registry hosted by the blockchain service. The same connection is reused
+// across all callers within a daemon process; use GetBlockchainClient when
+// you need a per-source labelled connection instead.
 func (d *Stores) GetPeerRegistryClient(ctx context.Context, _ ulogger.Logger, appSettings *settings.Settings,
 	_ string) (blockchain.PeerRegistryClientI, error) {
-	return blockchain.NewPeerRegistryClient(ctx, appSettings.BlockChain.GRPCAddress, appSettings)
+	if d.mainPeerRegistryClient != nil {
+		return d.mainPeerRegistryClient, nil
+	}
+	client, err := blockchain.NewPeerRegistryClient(ctx, appSettings.BlockChain.GRPCAddress, appSettings)
+	if err != nil {
+		return nil, err
+	}
+	d.mainPeerRegistryClient = client
+	return client, nil
 }
 
 // GetBlockAssemblyClient creates and returns a new block assembly client instance.
@@ -531,6 +539,7 @@ func (d *Stores) Cleanup() {
 	d.mainUtxoStore = nil
 	d.mainValidatorClient = nil
 	d.mainP2PClient = nil
+	d.mainPeerRegistryClient = nil
 
 	// Reset the Aerospike cleanup service singleton if it exists
 	// This prevents state leakage between test runs

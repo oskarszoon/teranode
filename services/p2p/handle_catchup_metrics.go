@@ -83,7 +83,9 @@ func (s *Server) RecordCatchupMalicious(ctx context.Context, req *p2p_api.Record
 // UpdateCatchupReputation is preserved for API compatibility but no longer
 // applies a manual reputation override; the centralized registry computes
 // reputation deterministically from interaction outcomes. The RPC remains so
-// existing consumers compile, but the call is a no-op.
+// existing consumers (legacy service) compile without changes. Remove once
+// legacy consumers are migrated to blockchain.PeerRegistryClientI in a
+// follow-up PR.
 func (s *Server) UpdateCatchupReputation(_ context.Context, _ *p2p_api.UpdateCatchupReputationRequest) (*p2p_api.UpdateCatchupReputationResponse, error) {
 	return &p2p_api.UpdateCatchupReputationResponse{Ok: true}, nil
 }

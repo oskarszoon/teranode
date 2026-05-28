@@ -193,8 +193,12 @@ func New(ctx context.Context, logger ulogger.Logger, tSettings *settings.Setting
 		AppCtx:                        ctx,
 		blocksFinalKafkaAsyncProducer: blocksFinalKafkaAsyncProducer,
 		peerRegistry: NewCentralizedPeerRegistry(BanConfig{
-			Threshold:     int32(tSettings.P2P.BanThreshold),
-			Duration:      tSettings.P2P.BanDuration,
+			Threshold: int32(tSettings.P2P.BanThreshold),
+			Duration:  tSettings.P2P.BanDuration,
+			// DecayInterval and DecayAmount intentionally use the defaults (1min / 1pt)
+			// rather than operator settings. The old BanManager used the same fixed
+			// values and no deployment has needed to tune them; exposing them as
+			// settings is deferred until there is an operator use-case.
 			DecayInterval: DefaultBanConfig().DecayInterval,
 			DecayAmount:   DefaultBanConfig().DecayAmount,
 			ReasonPoints:  DefaultBanConfig().ReasonPoints,
