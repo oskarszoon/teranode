@@ -25,13 +25,20 @@ jobs:
           node-version: '20'
           cache: 'npm'
           cache-dependency-path: ui/dashboard/package-lock.json
-      - run: npm ci
+      # --ignore-scripts: skip arbitrary postinstall scripts from deps. We
+      # don't run any install hooks ourselves (no postinstall in package.json)
+      # and Playwright fetches browsers via its own CLI below, not via install
+      # hooks. Reduces supply-chain blast radius for fork PRs.
+      - run: npm ci --ignore-scripts
       - name: Cache Playwright browsers
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.cache/ms-playwright
           key: pw-${{ runner.os }}-${{ hashFiles('ui/dashboard/package-lock.json') }}
-      - run: npx playwright install --with-deps chromium
+      # Invoke the locally-installed playwright binary directly (already
+      # resolved from package-lock.json above) instead of `npx playwright`,
+      # which could in principle fetch a different version on-demand.
+      - run: ./node_modules/.bin/playwright install --with-deps chromium
       # NOTE: `npm run check` is intentionally NOT a CI step. The legacy-mode
       # baseline carries ~33 svelte-check errors that pre-date this PR and are
       # cleared by the runes migration in a follow-up PR. Re-add this step
