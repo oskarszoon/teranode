@@ -115,7 +115,7 @@ func ConstructMerkleProof(txID *chainhash.Hash, repo MerkleProofConstructor) (*M
 
 	// Check if transaction is in any block
 	if len(txMeta.BlockIDs) == 0 || len(txMeta.BlockHeights) == 0 || len(txMeta.SubtreeIdxs) == 0 {
-		return nil, terr.NewProcessingError("transaction not in any block")
+		return nil, terr.NewNotFoundError("transaction not in any block")
 	}
 
 	// Guard against malformed parallel arrays before iteration.
@@ -251,7 +251,7 @@ func ConstructSubtreeMerkleProof(subtreeHash *chainhash.Hash, repo MerkleProofCo
 
 	// Check if subtree is in any block
 	if len(blockIDs) == 0 || len(blockHeights) == 0 || len(subtreeIndices) == 0 {
-		return nil, terr.NewProcessingError("subtree not found in any block")
+		return nil, terr.NewNotFoundError("subtree not found in any block")
 	}
 
 	// Use the first block containing the subtree

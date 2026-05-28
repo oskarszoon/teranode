@@ -3,7 +3,6 @@ package httpimpl
 
 import (
 	"net/http"
-	"strings"
 
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	"github.com/bsv-blockchain/teranode/errors"
@@ -183,14 +182,11 @@ func (h *HTTP) GetMerkleProof(mode ReadMode) func(c echo.Context) error {
 				return echo.NewHTTPError(http.StatusNotFound, "transaction not in main chain")
 			}
 
-			errStr := err.Error()
-
-			// If transaction not found, try as subtree hash
-			if strings.Contains(errStr, "not in any block") || strings.Contains(errStr, "not found") {
+			// Tx-side not-found (no block contains this tx) — try subtree fallback.
+			if errors.Is(err, errors.ErrNotFound) {
 				proof, err = merkleproof.ConstructSubtreeMerkleProof(txHash, adapter)
 				if err != nil {
-					subtreeErrStr := err.Error()
-					if strings.Contains(subtreeErrStr, "not found") {
+					if errors.Is(err, errors.ErrNotFound) || errors.Is(err, errors.ErrSubtreeNotFound) {
 						prometheusAssetHTTPGetMerkleProof.WithLabelValues("NotFound", "404").Inc()
 						return echo.NewHTTPError(http.StatusNotFound, "hash not found as transaction or subtree")
 					}
