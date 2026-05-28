@@ -909,6 +909,34 @@ func (v *Validator) getUtxoBlockHeightAndExtendForParentTx(gCtx context.Context,
 	return nil
 }
 
+// pickMainChainHeight returns the block height for the first BlockID in txMeta
+// that is on the current main chain.
+//
+// Returns:
+//   - height: BlockHeights[i] for the first i where BlockIDs[i] is on main chain
+//   - found:  true if at least one BlockID is on main chain
+//   - err:    transport error from blockchain client; nil on logical "not found"
+//
+// Contract:
+//   - txMeta must be non-nil (caller guarantees).
+//   - len(BlockIDs) == len(BlockHeights) is invariant guaranteed by write sites
+//     (stores/utxo/sql/sql.go:1519-1520 and :3679-3680, stores/utxo/aerospike).
+//     Helper does not defensively validate equality — would mask upstream bugs.
+//   - len(BlockIDs) == 0 returns (0, false, nil).
+//   - Iteration short-circuits on first main-chain hit.
+func (v *Validator) pickMainChainHeight(ctx context.Context, txMeta *meta.Data) (uint32, bool, error) {
+	for i, id := range txMeta.BlockIDs {
+		onChain, err := v.blockchainClient.CheckBlockIsInCurrentChain(ctx, []uint32{id})
+		if err != nil {
+			return 0, false, err
+		}
+		if onChain {
+			return txMeta.BlockHeights[i], true, nil
+		}
+	}
+	return 0, false, nil
+}
+
 func (v *Validator) TriggerBatcher() {
 	// Noop
 }
