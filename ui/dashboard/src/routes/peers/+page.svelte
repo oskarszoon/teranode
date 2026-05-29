@@ -857,7 +857,7 @@
           sortOrder,
         }}
         sortEnabled={true}
-        serverSort={true}
+        useServerSort={true}
         pagination={{
           page: 1,
           pageSize: -1,

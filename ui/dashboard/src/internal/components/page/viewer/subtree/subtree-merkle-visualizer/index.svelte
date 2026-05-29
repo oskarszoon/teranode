@@ -154,10 +154,10 @@
     nodes = []
     links = []
 
-    const subtreeIndex = merkleProof.subtreeIndex
-    const blockProof = merkleProof.blockProof
-    const subtreeRoot = merkleProof.subtreeRoot
-    const merkleRoot = merkleProof.merkleRoot
+    const subtreeIndex = merkleProof.subtreeIndex ?? 0
+    const blockProof = merkleProof.blockProof ?? []
+    const subtreeRoot = merkleProof.subtreeRoot ?? ''
+    const merkleRoot = merkleProof.merkleRoot ?? ''
     
     // Build complete block-level binary tree structure
     const blockLevels = blockProof.length + 1 // +1 for the subtree root level
@@ -572,11 +572,11 @@
         </div>
         <div class="info-item">
           <span class="label">Subtree Index:</span>
-          <span class="value">{merkleProof.subtreeIndex}</span>
+          <span class="value">{merkleProof.subtreeIndex ?? 0}</span>
         </div>
         <div class="info-item">
           <span class="label">Block Proof:</span>
-          <span class="value">{merkleProof.blockProof.length} levels</span>
+          <span class="value">{merkleProof.blockProof?.length ?? 0} levels</span>
         </div>
       </div>
       

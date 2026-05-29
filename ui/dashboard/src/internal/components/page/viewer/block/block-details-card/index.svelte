@@ -46,7 +46,9 @@
         // Keep cache size manageable (same limit as in p2pStore)
         if (map.size > 1000) {
           const firstKey = map.keys().next().value
-          map.delete(firstKey)
+          if (firstKey !== undefined) {
+            map.delete(firstKey)
+          }
         }
         return map
       })

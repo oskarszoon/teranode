@@ -93,7 +93,7 @@
   }
 
   // SHA256 double hash function for computing intermediate hashes
-  async function sha256Double(bytes: Uint8Array): Promise<string> {
+  async function sha256Double(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
     // Validate input
     if (!(bytes instanceof Uint8Array)) {
       throw new Error('sha256Double requires a Uint8Array input')

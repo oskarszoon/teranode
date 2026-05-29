@@ -416,17 +416,6 @@
         value: '',
       }
     },
-    best_height: (idField, item, colId) => {
-      const value = item[colId]
-      return {
-        component: RenderSpan,
-        props: {
-          value: value ? value.toLocaleString() : '-',
-          className: 'num',
-        },
-        value: '',
-      }
-    },
     best_block_hash: (idField, item, colId) => {
       const value = item[colId]
       const shortHash = value ? (value.length > 16 ? `${value.slice(0, 8)}...${value.slice(-8)}` : value) : ''

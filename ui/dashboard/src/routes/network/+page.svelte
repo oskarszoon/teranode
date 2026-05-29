@@ -238,7 +238,9 @@
       // Keep cache size manageable (only last 10 states)
       if (chainworkCache.size > 10) {
         const firstKey = chainworkCache.keys().next().value
-        chainworkCache.delete(firstKey)
+        if (firstKey !== undefined) {
+          chainworkCache.delete(firstKey)
+        }
       }
     }
     
