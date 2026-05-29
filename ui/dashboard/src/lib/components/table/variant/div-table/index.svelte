@@ -315,7 +315,7 @@
         {totalItems}
         value={paginationState}
         {hasBoundaryRight}
-        on:change={onPage}
+        onchange={onPage}
       />
     </div>
   {/if}
