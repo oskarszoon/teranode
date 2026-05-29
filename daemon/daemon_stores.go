@@ -131,7 +131,7 @@ func (d *Stores) GetBlockchainClient(ctx context.Context, logger ulogger.Logger,
 // registry hosted by the blockchain service. The same connection is reused
 // across all callers within a daemon process; use GetBlockchainClient when
 // you need a per-source labelled connection instead.
-func (d *Stores) GetPeerRegistryClient(ctx context.Context, _ ulogger.Logger, appSettings *settings.Settings,
+func (d *Stores) GetPeerRegistryClient(ctx context.Context, logger ulogger.Logger, appSettings *settings.Settings,
 	_ string) (blockchain.PeerRegistryClientI, error) {
 	if d.mainPeerRegistryClient != nil {
 		return d.mainPeerRegistryClient, nil
@@ -139,6 +139,13 @@ func (d *Stores) GetPeerRegistryClient(ctx context.Context, _ ulogger.Logger, ap
 	client, err := blockchain.NewPeerRegistryClient(ctx, appSettings.BlockChain.GRPCAddress, appSettings)
 	if err != nil {
 		return nil, err
+	}
+	// Plumb the logger so non-fatal proto-decode warnings surface via the
+	// structured logger instead of stderr. SetLogger is a no-op on the
+	// in-memory localPeerRegistryClient; here the concrete type is
+	// *PeerRegistryClient which honours it.
+	if setter, ok := client.(interface{ SetLogger(ulogger.Logger) }); ok {
+		setter.SetLogger(logger)
 	}
 	d.mainPeerRegistryClient = client
 	return client, nil

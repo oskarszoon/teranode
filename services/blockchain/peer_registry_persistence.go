@@ -98,7 +98,10 @@ func loadPeerRegistry(ctx context.Context, logger ulogger.Logger, store blob.Sto
 		// surface an ERROR-level log line — silent data loss here would mean
 		// a node "successfully" started while having destroyed reputation /
 		// ban history.
-		archiveKey := []byte(fmt.Sprintf("peer-registry.corrupt-%d", time.Now().UTC().Unix()))
+		// Nanosecond granularity so two corruption events in the same second
+		// don't collide on the sidecar key (which would clobber via
+		// WithAllowOverwrite=true). Format: peer-registry.corrupt-<unixnano>.
+		archiveKey := []byte(fmt.Sprintf("peer-registry.corrupt-%d", time.Now().UTC().UnixNano()))
 		if archiveErr := store.Set(ctx, archiveKey, fileformat.FileTypePeerRegistry, data,
 			options.WithAllowOverwrite(true)); archiveErr != nil {
 			logger.Errorf("peer registry: corrupt blob detected (%v); FAILED to archive to %s: %v; original will be deleted",
@@ -109,6 +112,16 @@ func loadPeerRegistry(ctx context.Context, logger ulogger.Logger, store blob.Sto
 		}
 		_ = store.Del(ctx, peerRegistryBlobKey, fileformat.FileTypePeerRegistry)
 		return []*PeerInfo{}, nil, nil
+	}
+
+	// Reject envelopes from a newer format than this binary understands.
+	// Silently dropping unknown fields would let a downgrade lose data — a
+	// future Version=2 might split bans into a sub-message, for example.
+	// Operators see the error and either roll forward or restore a backup.
+	if envelope.Version > persistedRegistryVersion {
+		return nil, nil, errors.NewProcessingError(
+			fmt.Sprintf("peer registry blob is version %d, this binary supports up to version %d",
+				envelope.Version, persistedRegistryVersion), nil)
 	}
 
 	cutoff := time.Now().Add(-ttl)

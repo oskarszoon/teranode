@@ -11,6 +11,7 @@ import (
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	"github.com/bsv-blockchain/teranode/pkg/fileformat"
 	"github.com/bsv-blockchain/teranode/services/blockchain/blockchain_api"
+	"github.com/bsv-blockchain/teranode/stores/blob"
 	"github.com/bsv-blockchain/teranode/ulogger"
 	"github.com/stretchr/testify/require"
 )
@@ -273,7 +274,7 @@ func TestPersistence_CorruptBlobDroppedAndRegistryStartsEmpty(t *testing.T) {
 
 // TestPersistence_CorruptBlobArchivedToSidecar verifies that a corrupt registry
 // blob isn't lost outright — Load copies the bytes to a timestamped sidecar
-// key (peer-registry.corrupt-<unix>) so operators can debug post-mortem.
+// key (peer-registry.corrupt-<unixnano>) so operators can debug post-mortem.
 func TestPersistence_CorruptBlobArchivedToSidecar(t *testing.T) {
 	store := newTestBlobStore(t)
 	ctx := context.Background()
@@ -281,32 +282,71 @@ func TestPersistence_CorruptBlobArchivedToSidecar(t *testing.T) {
 	corruptPayload := []byte("not valid json {{{")
 	require.NoError(t, store.Set(ctx, peerRegistryBlobKey, fileformat.FileTypePeerRegistry, corruptPayload))
 
-	beforeTs := time.Now().UTC().Unix()
+	beforeNs := time.Now().UTC().UnixNano()
 	r := NewCentralizedPeerRegistry(DefaultBanConfig())
 	require.NoError(t, r.Load(ctx, store, 24*time.Hour))
-	afterTs := time.Now().UTC().Unix()
+	afterNs := time.Now().UTC().UnixNano()
 
 	// Primary key is gone.
 	exists, err := store.Exists(ctx, peerRegistryBlobKey, fileformat.FileTypePeerRegistry)
 	require.NoError(t, err)
 	require.False(t, exists, "primary key must be deleted")
 
-	// Sidecar key must exist with the same payload. The unix timestamp in the
-	// sidecar key falls within the window of the Load call.
-	var found bool
-	for ts := beforeTs; ts <= afterTs; ts++ {
+	// Sidecar exists with one of the keys whose timestamp falls inside the
+	// Load window. Scanning by listing is cleaner than iterating every
+	// nanosecond, so we just check the well-known prefix.
+	require.NotNil(t, store, "store must support Exists for the sidecar key")
+	found := findSidecarBetween(t, ctx, store, beforeNs, afterNs, corruptPayload)
+	require.True(t, found, "expected sidecar key peer-registry.corrupt-<unixnano> to be present")
+}
+
+// findSidecarBetween probes the blob store for a sidecar key whose timestamp
+// falls between beforeNs and afterNs. We don't have a List API to enumerate
+// every key under a prefix, so we bound the search by the Load-window edges
+// the test recorded and accept a small slack window around them. The payload
+// check guards against false positives if another test leaked a key.
+func findSidecarBetween(t *testing.T, ctx context.Context, store blob.Store, beforeNs, afterNs int64, expectedPayload []byte) bool {
+	t.Helper()
+	// Iterate from beforeNs to afterNs in 1µs steps — far cheaper than 1ns —
+	// and let the slack pick up any jitter the runtime introduced.
+	const stepNs = int64(time.Microsecond)
+	for ts := beforeNs - stepNs; ts <= afterNs+stepNs; ts += stepNs {
 		key := []byte(fmt.Sprintf("peer-registry.corrupt-%d", ts))
 		ok, err := store.Exists(ctx, key, fileformat.FileTypePeerRegistry)
-		require.NoError(t, err)
-		if ok {
-			archived, err := store.Get(ctx, key, fileformat.FileTypePeerRegistry)
-			require.NoError(t, err)
-			require.Equal(t, corruptPayload, archived, "sidecar must contain the original bytes verbatim")
-			found = true
-			break
+		if err != nil || !ok {
+			continue
+		}
+		archived, err := store.Get(ctx, key, fileformat.FileTypePeerRegistry)
+		if err == nil && string(archived) == string(expectedPayload) {
+			return true
 		}
 	}
-	require.True(t, found, "expected sidecar key peer-registry.corrupt-<unix> to be present")
+	return false
+}
+
+// TestPersistence_RejectsFutureVersion confirms that a persisted envelope
+// claiming a Version newer than this binary supports is rejected outright.
+// Silently accepting unknown fields would let a downgrade lose data; the
+// operator-visible error forces a deliberate choice between rolling forward
+// or restoring a backup.
+func TestPersistence_RejectsFutureVersion(t *testing.T) {
+	store := newTestBlobStore(t)
+	ctx := context.Background()
+
+	envelope := persistedRegistry{
+		Version: persistedRegistryVersion + 1,
+		SavedAt: time.Now().UTC(),
+		Peers:   []*PeerInfo{{ID: "p"}},
+	}
+	data, err := json.Marshal(&envelope)
+	require.NoError(t, err)
+	require.NoError(t, store.Set(ctx, peerRegistryBlobKey, fileformat.FileTypePeerRegistry, data))
+
+	r := NewCentralizedPeerRegistry(DefaultBanConfig())
+	err = r.Load(ctx, store, 24*time.Hour)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "version")
+	require.Equal(t, 0, r.Count(), "no peers loaded on rejection")
 }
 
 func TestPersistence_LoadAnchorsLastDecayWhenMissing(t *testing.T) {

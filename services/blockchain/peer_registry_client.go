@@ -6,6 +6,7 @@ import (
 
 	"github.com/bsv-blockchain/teranode/services/blockchain/blockchain_api"
 	"github.com/bsv-blockchain/teranode/settings"
+	"github.com/bsv-blockchain/teranode/ulogger"
 	"github.com/bsv-blockchain/teranode/util"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/emptypb"
@@ -33,7 +34,7 @@ type PeerRegistryClientI interface {
 	ListPeers(ctx context.Context, transportFilter *blockchain_api.TransportType, minReputation float64, minHeight uint32, excludeBanned, sortByStorage bool) ([]*PeerInfo, error)
 
 	// AddBanScore adds penalty points to a peer and returns updated score and ban status.
-	AddBanScore(ctx context.Context, peerID string, reason string, points int32) (int32, bool, error)
+	AddBanScore(ctx context.Context, peerID string, reason string, defaultPoints int32) (int32, bool, error)
 
 	// IsPeerBanned checks if a peer is currently banned.
 	IsPeerBanned(ctx context.Context, peerID string) (bool, error)
@@ -91,6 +92,24 @@ type PeerRegistryClient struct {
 	client   blockchain_api.PeerRegistryServiceClient
 	conn     *grpc.ClientConn
 	ownsConn bool // true when this client created the connection and is responsible for closing it
+	// logger is used for non-fatal diagnostics during proto decoding (e.g.
+	// invalid BlockHash bytes in a peer message). Optional; nil fallback is
+	// handled in log().
+	logger ulogger.Logger
+}
+
+// SetLogger installs a logger for non-fatal proto-decoding diagnostics.
+// Idempotent. Safe to call multiple times before the client is used
+// concurrently; matches the CentralizedPeerRegistry.SetLogger pattern.
+func (c *PeerRegistryClient) SetLogger(l ulogger.Logger) {
+	c.logger = l
+}
+
+func (c *PeerRegistryClient) log() ulogger.Logger {
+	if c.logger != nil {
+		return c.logger
+	}
+	return ulogger.New("PeerRegistryClient")
 }
 
 // NewPeerRegistryClient connects to the blockchain service and returns a PeerRegistryClientI.
@@ -146,7 +165,7 @@ func (c *PeerRegistryClient) GetPeer(ctx context.Context, peerID string) (*PeerI
 	if resp.NotFound {
 		return nil, false, nil
 	}
-	return protoToPeerInfo(resp.Peer), true, nil
+	return protoToPeerInfo(c.log(), resp.Peer), true, nil
 }
 
 // ListPeers implements PeerRegistryClientI.
@@ -169,17 +188,17 @@ func (c *PeerRegistryClient) ListPeers(ctx context.Context, transportFilter *blo
 
 	peers := make([]*PeerInfo, 0, len(resp.Peers))
 	for _, p := range resp.Peers {
-		peers = append(peers, protoToPeerInfo(p))
+		peers = append(peers, protoToPeerInfo(c.log(), p))
 	}
 	return peers, nil
 }
 
 // AddBanScore implements PeerRegistryClientI.
-func (c *PeerRegistryClient) AddBanScore(ctx context.Context, peerID string, reason string, points int32) (int32, bool, error) {
+func (c *PeerRegistryClient) AddBanScore(ctx context.Context, peerID string, reason string, defaultPoints int32) (int32, bool, error) {
 	resp, err := c.client.AddBanScore(ctx, &blockchain_api.AddBanScoreRequest{
 		PeerId: peerID,
 		Reason: reason,
-		Points: points,
+		Points: defaultPoints,
 	})
 	if err != nil {
 		return 0, false, err
@@ -359,8 +378,8 @@ func (l *localPeerRegistryClient) ListPeers(_ context.Context, transportFilter *
 	return l.reg.List(transportFilter, minReputation, minHeight, excludeBanned, sortByStorage), nil
 }
 
-func (l *localPeerRegistryClient) AddBanScore(_ context.Context, peerID, reason string, points int32) (int32, bool, error) {
-	score, banned := l.reg.AddBanScore(peerID, reason, points)
+func (l *localPeerRegistryClient) AddBanScore(_ context.Context, peerID, reason string, defaultPoints int32) (int32, bool, error) {
+	score, banned := l.reg.AddBanScore(peerID, reason, defaultPoints)
 	return score, banned, nil
 }
 
