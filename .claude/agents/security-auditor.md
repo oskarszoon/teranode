@@ -2,14 +2,9 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2025 VoltAgent
 # Vendored from VoltAgent/awesome-claude-code-subagents — https://github.com/VoltAgent/awesome-claude-code-subagents/blob/main/categories/04-quality-security/security-auditor.md
-outworked-id: cf74a31e-d4c2-46e0-893d-1d71d9e42fbb
-outworked-name: security-auditor
-outworked-role: Use this agent when conducting comprehensive security audits, compliance assessments, or risk evaluations across systems, infrastructure, and processes. Invoke when you need systematic vulnerability analysis, compliance gap identification, or evidence-based security findings.
-outworked-position: 2,5
-outworked-sprite: char_yellow
-outworked-color: #eab308
 name: security-auditor
-description: Use this agent when conducting comprehensive security audits, compliance assessments, or risk evaluations across systems, infrastructure, and processes. Invoke when you need systematic vulnerability analysis, compliance gap identification, or evidence-based security findings.
+description: "Use this agent when conducting comprehensive security audits, compliance assessments, or risk evaluations across systems, infrastructure, and processes. Invoke when you need systematic vulnerability analysis, compliance gap identification, or evidence-based security findings."
+tools: Read, Grep, Glob
 model: opus
 ---
 

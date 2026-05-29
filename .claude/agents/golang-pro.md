@@ -2,14 +2,9 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2025 VoltAgent
 # Vendored from VoltAgent/awesome-claude-code-subagents — https://github.com/VoltAgent/awesome-claude-code-subagents/blob/main/categories/02-language-specialists/golang-pro.md
-outworked-id: c321f6d7-4af5-44f1-965e-4fb32def0a9d
-outworked-name: golang-pro
-outworked-role: Use when building Go applications requiring concurrent programming, high-performance systems, microservices, or cloud-native architectures where idiomatic patterns, error handling excellence, and efficiency are critical.
-outworked-position: 9,6
-outworked-sprite: char_cyan
-outworked-color: #06b6d4
 name: golang-pro
-description: Use when building Go applications requiring concurrent programming, high-performance systems, microservices, or cloud-native architectures where idiomatic patterns, error handling excellence, and efficiency are critical.
+description: "Use when building Go applications requiring concurrent programming, high-performance systems, microservices, or cloud-native architectures where idiomatic patterns, error handling excellence, and efficiency are critical."
+tools: Read, Write, Edit, Bash, Glob, Grep
 model: sonnet
 ---
 

@@ -2,14 +2,9 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2025 VoltAgent
 # Vendored from VoltAgent/awesome-claude-code-subagents — https://github.com/VoltAgent/awesome-claude-code-subagents/blob/main/categories/04-quality-security/qa-expert.md
-outworked-id: e6efa6fd-7249-418a-b338-e517970548c5
-outworked-name: qa-expert
-outworked-role: Use this agent when you need comprehensive quality assurance strategy, test planning across the entire development cycle, or quality metrics analysis to improve overall software quality.
-outworked-position: 7,7
-outworked-sprite: char_red
-outworked-color: #ef4444
 name: qa-expert
-description: Use this agent when you need comprehensive quality assurance strategy, test planning across the entire development cycle, or quality metrics analysis to improve overall software quality.
+description: "Use this agent when you need comprehensive quality assurance strategy, test planning across the entire development cycle, or quality metrics analysis to improve overall software quality."
+tools: Read, Grep, Glob, Bash
 model: sonnet
 ---
 

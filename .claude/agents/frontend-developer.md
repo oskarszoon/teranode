@@ -2,14 +2,9 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2025 VoltAgent
 # Vendored from VoltAgent/awesome-claude-code-subagents — https://github.com/VoltAgent/awesome-claude-code-subagents/blob/main/categories/01-core-development/frontend-developer.md
-outworked-id: bb35b92f-7cb2-4d7f-a3d5-01e9179e1dd9
-outworked-name: frontend-developer
-outworked-role: Use when building complete frontend applications across React, Vue, and Angular frameworks requiring multi-framework expertise and full-stack integration.
-outworked-position: 3,7
-outworked-sprite: char_teal
-outworked-color: #14b8a6
 name: frontend-developer
-description: Use when building complete frontend applications across React, Vue, and Angular frameworks requiring multi-framework expertise and full-stack integration.
+description: "Use when building complete frontend applications across React, Vue, and Angular frameworks requiring multi-framework expertise and full-stack integration."
+tools: Read, Write, Edit, Bash, Glob, Grep
 model: sonnet
 ---
 
