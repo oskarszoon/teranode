@@ -106,7 +106,7 @@
     {required}
     margin="-4px 0 0 0"
     interactive
-    on:click={disabled ? null : onInputParentClick}
+    onclick={disabled ? null : onInputParentClick}
   >
     <!-- svelte-ignore a11y-click-events-have-key-events -->
     <div

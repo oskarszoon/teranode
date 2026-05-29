@@ -21,7 +21,7 @@
       label={item.label}
       selected={item.selected}
       {collapsed}
-      on:click={(e) => onMenuItem(item)}
+      onclick={(e) => onMenuItem(item)}
     />
   {/each}
 </div>

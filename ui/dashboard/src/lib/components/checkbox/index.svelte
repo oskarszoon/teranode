@@ -116,7 +116,6 @@
 
 <FootnoteContainer {footnote} {error} {disabled} stretch={false}>
   <LabelContainer
-    variant="body"
     {name}
     {size}
     {disabled}
@@ -127,7 +126,7 @@
     stretch={false}
     margin="-2px 0 0 0"
     interactive
-    on:click={disabled ? null : onInputParentClick}
+    onclick={disabled ? null : onInputParentClick}
   >
     <!-- svelte-ignore a11y_click_events_have_key_events -->
     <div
