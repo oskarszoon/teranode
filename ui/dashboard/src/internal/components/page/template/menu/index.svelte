@@ -24,8 +24,8 @@
     goto('/')
   }
 
-  function onMenuItem(e) {
-    const { item, type } = e.detail
+  function onMenuItem(detail) {
+    const { item, type } = detail
 
     if (type === 'page-links') {
       goto(item.path)
@@ -52,9 +52,7 @@
     showMenu = !showMenu
   }
 
-  function onDrawerMetrics(e) {
-    const detail = e.detail
-
+  function onDrawerMetrics(detail) {
     if (!showMobileNavbar) {
       if (detail.position === 'left') {
         $contentLeft = detail.width
@@ -66,7 +64,7 @@
 
   $: showDrawer = (showMobileNavbar && showMenu) || !showMobileNavbar
 
-  function onDrawerClose(e) {
+  function onDrawerClose() {
     showMenu = false
   }
 
@@ -118,22 +116,24 @@
     showCover={showMobileNavbar}
     showHeader={!showMobileNavbar}
     coverColor="var(--app-cover-bg-color)"
-    on:metrics={onDrawerMetrics}
-    on:close={onDrawerClose}
-    on:header-select={onLogo}
+    onmetrics={onDrawerMetrics}
+    onclose={onDrawerClose}
+    onheaderSelect={onLogo}
   >
-    <div slot="header" class="logo-container">
-      <Logo name="teranode" height={28} />
-      {#if expanded}
-        <Logo name="teranode-text" height={14} />
-      {/if}
-    </div>
+    {#snippet header()}
+      <div class="logo-container">
+        <Logo name="teranode" height={28} />
+        {#if expanded}
+          <Logo name="teranode-text" height={14} />
+        {/if}
+      </div>
+    {/snippet}
     {#key menuKey}
       <Menu
         collapsed={!expanded}
         idField="path"
         data={$pageLinks.items}
-        on:select={(e) => onMenuItem({ detail: { item: e.detail.item, type: 'page-links' } })}
+        onselect={(e) => onMenuItem({ item: e.item, type: 'page-links' })}
       />
     {/key}
   </Drawer>
