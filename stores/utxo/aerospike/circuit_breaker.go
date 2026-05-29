@@ -64,8 +64,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/aerospike/aerospike-client-go/v8"
-	"github.com/aerospike/aerospike-client-go/v8/types"
+	"github.com/bsv-blockchain/aerospike-client-go/v8"
+	"github.com/bsv-blockchain/aerospike-client-go/v8/types"
 	"github.com/bsv-blockchain/teranode/errors"
 )
 
@@ -74,9 +74,11 @@ import (
 //
 // All entries here are node- or cluster-level failure modes. Data-state
 // codes (KEY_NOT_FOUND_ERROR, FILTERED_OUT, GENERATION_ERROR, etc.) are
-// intentionally excluded — they're handled by the orphanage and per-record
-// Lua error paths, not by this breaker. Counting them here causes the
-// breaker to trip during normal IBD and defeat orphanage entirely (#953).
+// intentionally excluded — they're handled by per-record error paths in
+// the calling code (missing parents flow into subtreevalidation's
+// sequential revalidation pass; Lua business-rule rejections surface to
+// the caller), not by this breaker. Counting them here causes the breaker
+// to trip during normal IBD and stall sync (#953).
 var infrastructureResultCodes = []types.ResultCode{
 	types.TIMEOUT,
 	types.NETWORK_ERROR,
