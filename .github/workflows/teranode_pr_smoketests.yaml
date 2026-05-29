@@ -21,8 +21,12 @@ env:
 
 jobs:
   smoketest:
-    name: smoketest
+    name: smoketest (shard ${{ matrix.shard }})
     runs-on: teranode-runner-8-core
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2]
     steps:
       # Only login to Docker Hub for internal PRs to avoid rate limits.
       # Fork PRs won't have access to secrets and will skip this step.
@@ -43,8 +47,7 @@ jobs:
           cache: "false"
 
       - name: Run Smoke tests
-        run: make smoketest
-        continue-on-error: false
+        run: make smoketest SHARD=${{ matrix.shard }} TOTAL=3
         env:
           settings_context: ${{ env.SETTINGS_CONTEXT_DEFAULT }}
 
@@ -52,7 +55,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: smoketest-results
+          name: smoketest-shard-${{ matrix.shard }}-results
           path: /tmp/teranode-test-results/smoketest-results.txt
           retention-days: 2
 
