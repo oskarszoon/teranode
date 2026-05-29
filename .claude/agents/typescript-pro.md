@@ -1,6 +1,7 @@
 ---
-# Source: VoltAgent/awesome-claude-code-subagents (vendored copy)
-# https://github.com/VoltAgent/awesome-claude-code-subagents/blob/main/categories/02-language-specialists/typescript-pro.md
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 VoltAgent
+# Vendored from VoltAgent/awesome-claude-code-subagents — https://github.com/VoltAgent/awesome-claude-code-subagents/blob/main/categories/02-language-specialists/typescript-pro.md
 outworked-id: 1b6369e9-4989-47b2-99e5-4dd55cfb3759
 outworked-name: typescript-pro
 outworked-role: Use when implementing TypeScript code requiring advanced type system patterns, complex generics, type-level programming, or end-to-end type safety across full-stack applications.

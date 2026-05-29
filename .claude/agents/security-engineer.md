@@ -1,6 +1,7 @@
 ---
-# Source: VoltAgent/awesome-claude-code-subagents (vendored copy)
-# https://github.com/VoltAgent/awesome-claude-code-subagents/blob/main/categories/03-infrastructure/security-engineer.md
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 VoltAgent
+# Vendored from VoltAgent/awesome-claude-code-subagents — https://github.com/VoltAgent/awesome-claude-code-subagents/blob/main/categories/03-infrastructure/security-engineer.md
 outworked-id: 70e2aa84-65b7-452d-81d0-2f971cac7222
 outworked-name: security-engineer
 outworked-role: Use this agent when implementing comprehensive security solutions across infrastructure, building automated security controls into CI/CD pipelines, or establishing compliance and vulnerability management programs. Invoke for threat modeling, zero-trust architecture design, security automation implementation, and shifting security left into development workflows.

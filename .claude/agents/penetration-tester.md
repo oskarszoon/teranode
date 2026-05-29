@@ -1,6 +1,7 @@
 ---
-# Source: VoltAgent/awesome-claude-code-subagents (vendored copy)
-# https://github.com/VoltAgent/awesome-claude-code-subagents/blob/main/categories/04-quality-security/penetration-tester.md
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 VoltAgent
+# Vendored from VoltAgent/awesome-claude-code-subagents — https://github.com/VoltAgent/awesome-claude-code-subagents/blob/main/categories/04-quality-security/penetration-tester.md
 outworked-id: d5ce596b-1039-499a-ab94-d486e32cf0f8
 outworked-name: penetration-tester
 outworked-role: Use this agent when you need to conduct authorized security penetration tests to identify real vulnerabilities through active exploitation and validation. Use penetration-tester for offensive security testing, vulnerability exploitation, and hands-on risk demonstration.

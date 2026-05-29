@@ -1,6 +1,7 @@
 ---
-# Source: VoltAgent/awesome-claude-code-subagents (vendored copy)
-# https://github.com/VoltAgent/awesome-claude-code-subagents/blob/main/categories/04-quality-security/performance-engineer.md
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 VoltAgent
+# Vendored from VoltAgent/awesome-claude-code-subagents — https://github.com/VoltAgent/awesome-claude-code-subagents/blob/main/categories/04-quality-security/performance-engineer.md
 outworked-id: 89a097c9-1672-405d-9f27-87a7775b596c
 outworked-name: performance-engineer
 outworked-role: Use this agent when you need to identify and eliminate performance bottlenecks in applications, databases, or infrastructure systems, and when baseline performance metrics need improvement.

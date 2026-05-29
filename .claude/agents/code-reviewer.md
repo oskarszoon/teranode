@@ -1,6 +1,7 @@
 ---
-# Source: VoltAgent/awesome-claude-code-subagents (vendored copy)
-# https://github.com/VoltAgent/awesome-claude-code-subagents/blob/main/categories/04-quality-security/code-reviewer.md
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 VoltAgent
+# Vendored from VoltAgent/awesome-claude-code-subagents — https://github.com/VoltAgent/awesome-claude-code-subagents/blob/main/categories/04-quality-security/code-reviewer.md
 outworked-id: 6bb98b7e-14e9-4abd-af80-6ea344b3d54b
 outworked-name: code-reviewer
 outworked-role: Use this agent when you need to conduct comprehensive code reviews focusing on code quality, security vulnerabilities, and best practices.
