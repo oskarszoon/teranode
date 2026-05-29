@@ -5,6 +5,9 @@ import peers from './fixtures/peers.json' with { type: 'json' }
 import settings from './fixtures/settings.json' with { type: 'json' }
 import blocks from './fixtures/blocks.json' with { type: 'json' }
 import blockDetail from './fixtures/block-detail.json' with { type: 'json' }
+import subtreeDetail from './fixtures/subtree-detail.json' with { type: 'json' }
+import txDetail from './fixtures/tx-detail.json' with { type: 'json' }
+import txmetaDetail from './fixtures/txmeta-detail.json' with { type: 'json' }
 
 type MockOptions = {
   authenticated?: boolean
@@ -119,5 +122,30 @@ export async function installApiMocks(page: Page, opts: MockOptions = {}): Promi
       contentType: 'application/json',
       body: JSON.stringify([blockDetail]),
     }),
+  )
+
+  // /viewer/subtree detail. getSubtreeNodes hits /subtree/<hash>/json and the
+  // SubtreeTxsCard hits /subtree/<hash>/txs/json. The two patterns are
+  // disjoint (…/json vs …/txs/json), so registration order between them is
+  // irrelevant. Both return a raw body the client wraps in {ok, data}.
+  await page.route(/\/api\/(?:[^/?#]+\/)?subtree\/[a-fA-F0-9]+\/json(?:\?|$)/, (route: Route) =>
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(subtreeDetail) }),
+  )
+  await page.route(/\/api\/(?:[^/?#]+\/)?subtree\/[a-fA-F0-9]+\/txs\/json(?:\?|$)/, (route: Route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ data: [], pagination: { limit: 20, offset: 0, totalRecords: 0 } }),
+    }),
+  )
+
+  // /viewer/tx detail composes /tx/<hash>/json (getItemData tx) and
+  // /txmeta/<hash>/json (getItemData txmeta). The /tx/ literal does not match
+  // /txmeta/, so the two patterns are disjoint.
+  await page.route(/\/api\/(?:[^/?#]+\/)?tx\/[a-fA-F0-9]+\/json(?:\?|$)/, (route: Route) =>
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(txDetail) }),
+  )
+  await page.route(/\/api\/(?:[^/?#]+\/)?txmeta\/[a-fA-F0-9]+\/json(?:\?|$)/, (route: Route) =>
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(txmetaDetail) }),
   )
 }

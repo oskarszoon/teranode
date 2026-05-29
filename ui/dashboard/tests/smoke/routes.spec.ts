@@ -72,3 +72,26 @@ test.describe('smoke: /viewer click-through to block detail', () => {
     expect(consoleErrors, `console errors on /viewer click-through:\n${consoleErrors.join('\n')}`).toHaveLength(0)
   })
 })
+
+// The /viewer/[type] dynamic route renders four detail components, all using
+// the same Svelte 4 patterns the runes migration (#977) targets. The
+// click-through above only exercises `block`. These cover the other three by
+// direct navigation with a fixed hash, so the migration net guards all four.
+const DETAIL_HASH = '0000000000000000000000000000000000000000000000000000000000000aaa'
+
+const DETAIL_TYPES = ['subtree', 'tx', 'utxo'] as const
+
+for (const type of DETAIL_TYPES) {
+  test.describe(`smoke: /viewer/${type} detail`, () => {
+    test('renders with no console errors', async ({ smokePage, consoleErrors }) => {
+      const response = await smokePage.goto(`/viewer/${type}/?hash=${DETAIL_HASH}`)
+      expect(response?.ok(), `/viewer/${type} should respond 2xx`).toBe(true)
+      await expect(smokePage.locator(PAGE_ROOT)).toBeVisible()
+      await smokePage.waitForTimeout(1000)
+      expect(
+        consoleErrors,
+        `console errors on /viewer/${type}:\n${consoleErrors.join('\n')}`,
+      ).toHaveLength(0)
+    })
+  })
+}
