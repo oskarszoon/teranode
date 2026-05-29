@@ -167,7 +167,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: [0, 1, 2, 3, 4, 5, 6]
     steps:
       - name: Login to Docker Hub
         if: github.event.pull_request.head.repo.full_name == github.repository
@@ -186,7 +186,7 @@ jobs:
           cache: "false"
 
       - name: Run sequential shard
-        run: make sequentialtest-shard SHARD=${{ matrix.shard }} TOTAL=4
+        run: make sequentialtest-shard SHARD=${{ matrix.shard }} TOTAL=7
         env:
           settings_context: ${{ env.SETTINGS_CONTEXT_DEFAULT }}
 
