@@ -75,10 +75,10 @@
   {#if level === 0}
     <div class="tools">
       <div class="icon" use:$tippy={{ content: t('tooltip.collapse-all') }}>
-        <Icon name="icon-chevron-right-line" size={15} on:click={() => onBulkClose(true)} />
+        <Icon name="icon-chevron-right-line" size={15} onclick={() => onBulkClose(true)} />
       </div>
       <div class="icon" use:$tippy={{ content: t('tooltip.expand-all') }}>
-        <Icon name="icon-chevron-down-line" size={15} on:click={() => onBulkClose(false)} />
+        <Icon name="icon-chevron-down-line" size={15} onclick={() => onBulkClose(false)} />
       </div>
       <div class="icon" use:$tippy={{ content: t('tooltip.copy-json-to-clipboard') }}>
         <ActionStatusIcon

@@ -115,7 +115,7 @@
                 {/if}
                 {#if filtersEnabled && filtersState[colDef.id]}
                   <div class="header-icon">
-                    <Icon name="filters" size={18} on:click={() => onFilterClick(colDef.id)} />
+                    <Icon name="filters" size={18} onclick={() => onFilterClick(colDef.id)} />
                   </div>
                 {/if}
               </div>

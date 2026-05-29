@@ -49,7 +49,7 @@
     <div class="link" style:--icon-padding={iconPadding}>
       <a href={hrefWithPrefix} {...props}>{value}</a>
       <div class="icon" use:$tippy={{ content: tooltip }}>
-        <Icon name={icon} size={iconSize} on:click={onIconLocal} />
+        <Icon name={icon} size={iconSize} onclick={onIconLocal} />
       </div>
     </div>
   {:else}
