@@ -653,8 +653,7 @@
   })
 </script>
 
-<PageWithMenu>
-  <div data-testid="page-root">
+<PageWithMenu testId="page-root">
   {#if catchupStatus && catchupStatus.is_catching_up}
     <div class="catchup-status-wrapper">
       <Card contentPadding="16px">
@@ -882,7 +881,6 @@
       />
     </div>
   </Card>
-  </div>
 </PageWithMenu>
 
 {#if showCatchupModal && selectedPeer}

@@ -177,8 +177,8 @@
 
 <svelte:window bind:innerWidth />
 
-<PageWithMenu>
-  <div class="tools-container" data-testid="page-root">
+<PageWithMenu testId="page-root">
+  <div class="tools-container">
     <div class="tools">
       <div class="title">
         {t(`${pageKey}.title`)}

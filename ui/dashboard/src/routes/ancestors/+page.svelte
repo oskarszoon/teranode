@@ -591,8 +591,7 @@
   })
 </script>
 
-<PageWithMenu>
-  <div data-testid="page-root">
+<PageWithMenu testId="page-root">
   <Card contentPadding="0">
     <div class="title" slot="title">
       <Typo variant="title" size="h4" value={t(`${pageKey}.title`, { defaultValue: 'Common Ancestors' })} />
@@ -646,7 +645,6 @@
       />
     {/if}
   </Card>
-  </div>
 </PageWithMenu>
 
 <style>

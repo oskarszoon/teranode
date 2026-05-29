@@ -35,6 +35,8 @@ jobs:
         with:
           path: ~/.cache/ms-playwright
           key: pw-${{ runner.os }}-${{ hashFiles('ui/dashboard/package-lock.json') }}
+          restore-keys: |
+            pw-${{ runner.os }}-
       # Invoke the locally-installed playwright binary directly (already
       # resolved from package-lock.json above) instead of `npx playwright`,
       # which could in principle fetch a different version on-demand.

@@ -1,39 +1,30 @@
 import { test, expect } from './fixtures'
 
-test.describe('smoke: /home', () => {
-  test('renders with no console errors', async ({ smokePage, consoleErrors }) => {
-    const response = await smokePage.goto('/home')
-    expect(response?.ok(), 'route should respond 2xx').toBe(true)
-
-    // Page-specific selector. /home has no native <h1>, so the route root
-    // carries data-testid="page-root" as a stable hook.
-    await expect(smokePage.locator('[data-testid="page-root"]')).toBeVisible()
-
-    await smokePage.waitForTimeout(1000) // idle window for late console output
-    expect(consoleErrors, `console errors:\n${consoleErrors.join('\n')}`).toHaveLength(0)
-  })
-})
-
 type Route = {
   path: string
   selector: string // visible after hydration
   authenticated?: boolean // default true
 }
 
+const PAGE_ROOT = '[data-test-id="page-root"]'
+
+// `/` re-exports `/home/+page.svelte`, so both paths exercise the same
+// component — covering both proves the alias route too.
 const ROUTES: Route[] = [
-  { path: '/', selector: '[data-testid="page-root"]' },
-  { path: '/network', selector: '[data-testid="page-root"]' },
-  { path: '/p2p', selector: '[data-testid="page-root"]' },
-  { path: '/peers', selector: '[data-testid="page-root"]' },
-  { path: '/forks', selector: '[data-testid="page-root"]' },
-  { path: '/ancestors', selector: '[data-testid="page-root"]' },
-  { path: '/viewer', selector: '[data-testid="page-root"]' },
-  // /api is a server-only route group (only +server.ts handlers, no +page.svelte),
-  // not a navigable page. Smoke does not exercise it.
-  { path: '/settings', selector: '[data-testid="page-root"]' },
-  { path: '/admin', selector: '[data-testid="page-root"]' },
-  { path: '/wstest', selector: '[data-testid="page-root"]' },
-  { path: '/login', selector: '[data-testid="page-root"]', authenticated: false },
+  { path: '/', selector: PAGE_ROOT },
+  { path: '/home', selector: PAGE_ROOT },
+  { path: '/network', selector: PAGE_ROOT },
+  { path: '/p2p', selector: PAGE_ROOT },
+  { path: '/peers', selector: PAGE_ROOT },
+  { path: '/forks', selector: PAGE_ROOT },
+  { path: '/ancestors', selector: PAGE_ROOT },
+  { path: '/viewer', selector: PAGE_ROOT },
+  // /api is a server-only route group (only +server.ts handlers, no
+  // +page.svelte), not a navigable page. Smoke does not exercise it.
+  { path: '/settings', selector: PAGE_ROOT },
+  { path: '/admin', selector: PAGE_ROOT },
+  { path: '/wstest', selector: PAGE_ROOT },
+  { path: '/login', selector: PAGE_ROOT, authenticated: false },
 ]
 
 for (const route of ROUTES) {
@@ -56,10 +47,12 @@ for (const route of ROUTES) {
 //   - blocks-list fetch + table population
 //   - block-detail page mount + 3-endpoint compose (block + header + lastblocks)
 //   - URL/router behaviour for the /viewer/[type] dynamic route
+const FIRST_BLOCK_HASH = '0000000000000000000004aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+
 test.describe('smoke: /viewer click-through to block detail', () => {
   test('opens block detail when first block hash is clicked', async ({ smokePage, consoleErrors }) => {
     await smokePage.goto('/viewer')
-    await expect(smokePage.locator('[data-testid="page-root"]')).toBeVisible()
+    await expect(smokePage.locator(PAGE_ROOT)).toBeVisible()
 
     // First block hash link in the blocks table.
     const firstBlockLink = smokePage.locator('a[href^="/viewer/block/?hash="]').first()
@@ -68,8 +61,12 @@ test.describe('smoke: /viewer click-through to block detail', () => {
 
     await smokePage.waitForURL(/\/viewer\/block\/\?hash=[a-fA-F0-9]+/)
 
-    // Detail page is wrapped in its own data-testid="page-root".
-    await expect(smokePage.locator('[data-testid="page-root"]')).toBeVisible()
+    // Detail-page-unique assertion: the BlockDetailsCard renders the full
+    // 64-char hash in its subtitle. Asserting the hash text confirms the
+    // detail card mounted with the right data, not just that any page-root
+    // is visible (the list page also has page-root and could briefly be
+    // mounted during transition).
+    await expect(smokePage.getByText(FIRST_BLOCK_HASH, { exact: false })).toBeVisible()
 
     await smokePage.waitForTimeout(1000)
     expect(consoleErrors, `console errors on /viewer click-through:\n${consoleErrors.join('\n')}`).toHaveLength(0)

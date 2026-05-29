@@ -4,11 +4,11 @@ import { installWsMocks } from './mocks/ws'
 
 // Allowlist of console messages we do not consider failures.
 // Patterns are matched as substrings against the message text.
+// Keep narrow: a bare substring like "echarts" would swallow genuine
+// ECharts errors. Each entry must anchor on a log marker we know is benign.
 const CONSOLE_ALLOWLIST: string[] = [
   '[vite] connected',
   '[vite] hot updated',
-  'echarts',
-  'Download the React DevTools',
   // Browser-emitted network log when /api/auth/check returns 401 on
   // unauthenticated routes (e.g. /login). Expected behaviour, not a bug.
   'Failed to load resource: the server responded with a status of 401 (Unauthorized)',

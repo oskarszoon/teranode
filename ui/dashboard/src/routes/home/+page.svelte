@@ -129,8 +129,8 @@
   }
 </script>
 
-<PageWithMenu>
-  <div class="content" data-testid="page-root">
+<PageWithMenu testId="page-root">
+  <div class="content">
     <HomeStatsCard loading={statsLoading} data={statsData} onRefresh={getStatsData} />
     {#if Graph}
       <svelte:component this={Graph} data={blockGraphData} {period} {onChangePeriod} />

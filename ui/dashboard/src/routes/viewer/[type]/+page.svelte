@@ -18,18 +18,16 @@
   $: hash = ready ? $page.url.searchParams.get('hash') ?? '' : ''
 </script>
 
-<PageWithMenu>
-  <div data-testid="page-root">
-    {#if type === DetailType.block}
-      <BlockDetails {hash} />
-    {:else if type === DetailType.subtree}
-      <SubtreeDetails {hash} />
-    {:else if type === DetailType.tx}
-      <TxDetails {hash} />
-    {:else if type === DetailType.utxo}
-      <UtxoDetails {hash} />
-    {/if}
-  </div>
+<PageWithMenu testId="page-root">
+  {#if type === DetailType.block}
+    <BlockDetails {hash} />
+  {:else if type === DetailType.subtree}
+    <SubtreeDetails {hash} />
+  {:else if type === DetailType.tx}
+    <TxDetails {hash} />
+  {:else if type === DetailType.utxo}
+    <UtxoDetails {hash} />
+  {/if}
 </PageWithMenu>
 
 <style>

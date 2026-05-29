@@ -92,8 +92,8 @@
   })
 </script>
 
-<PageWithMenu>
-  <div class="content" data-testid="page-root">
+<PageWithMenu testId="page-root">
+  <div class="content">
     <div class="fork-nav">
       <Button
         size="small"
