@@ -1,3 +1,5 @@
+<svelte:options runes={true} />
+
 <script lang="ts">
   import Button from '$lib/components/button/index.svelte'
   import Table from '$lib/components/table/index.svelte'
@@ -18,24 +20,23 @@
 
   const baseKey = 'page.viewer'
 
-  $: t = $i18n.t
-  $: i18nLocal = { t, baseKey: 'comp.pager' }
+  const t = $derived($i18n.t)
+  const i18nLocal = $derived({ t, baseKey: 'comp.pager' })
 
-  let colDefs: any[] = []
-  $: colDefs = getColDefs(t) || []
+  const colDefs = $derived(getColDefs(t) || [])
 
-  $: renderCells = getRenderCells(t) || {}
+  const renderCells = $derived(getRenderCells(t) || {})
 
-  let data: any[] = []
+  let data: any[] = $state([])
 
-  $: hasData = data && data.length > 0
+  const hasData = $derived(data && data.length > 0)
 
-  let page = 1
-  let pageSize = 20
-  let totalItems = 0
+  let page = $state(1)
+  let pageSize = $state(20)
+  let totalItems = $state(0)
 
   // Get pagination from URL (read-only, no writing in reactive block)
-  $: {
+  $effect(() => {
     const urlPageSize = $pageStore.url.searchParams.get('pageSize')
     if (urlPageSize) {
       const parsed = parseInt(urlPageSize, 10)
@@ -55,7 +56,7 @@
     } else if (page !== 1) {
       page = 1 // Always reset to page 1 if not in URL
     }
-  }
+  })
 
   function updateURL(page: number, pageSize: number) {
     const url = new URL($pageStore.url)
@@ -71,12 +72,12 @@
     updateURL(page, pageSize)
   }
 
-  $: totalPages = Math.max(1, Math.ceil(totalItems / pageSize))
-  $: showPagerNav = totalPages > 1
-  $: showPagerSize = showPagerNav || (totalPages === 1 && data.length > 5)
-  $: showTableFooter = showPagerSize
+  const totalPages = $derived(Math.max(1, Math.ceil(totalItems / pageSize)))
+  const showPagerNav = $derived(totalPages > 1)
+  const showPagerSize = $derived(showPagerNav || (totalPages === 1 && data.length > 5))
+  const showTableFooter = $derived(showPagerSize)
 
-  let variant = 'dynamic'
+  let variant = $state('dynamic')
   function onToggle(e) {
     const value = e.value
     variant = $tableVariant = value
@@ -132,9 +133,11 @@
   }
 
   // Fetch data when the selected node changes or pagination params change
-  $: if ($assetHTTPAddress) {
-    fetchData(page, pageSize)
-  }
+  $effect(() => {
+    if ($assetHTTPAddress) {
+      fetchData(page, pageSize)
+    }
+  })
 
   function onKeyDown(e) {
     if (!e) e = window.event
@@ -220,4 +223,4 @@
   {/snippet}
 </Card>
 
-<svelte:window on:keydown={onKeyDown} />
+<svelte:window onkeydown={onKeyDown} />

@@ -1,5 +1,6 @@
+<svelte:options runes={true} />
+
 <script lang="ts">
-  import { createEventDispatcher } from 'svelte'
   import { goto } from '$app/navigation'
   import { tippy } from '$lib/stores/media'
   import { mediaSize, MediaSize } from '$lib/stores/media'
@@ -16,37 +17,44 @@
   import { getItemApiUrl, ItemType } from '$internal/api'
   import { blockHashToMiner } from '$internal/stores/p2pStore'
 
-  const dispatch = createEventDispatcher()
-
   const baseKey = 'page.viewer-block.details'
   const fieldKey = `${baseKey}.fields`
 
-  $: t = $i18n.t
+  const t = $derived($i18n.t)
 
-  $: collapse = $mediaSize < MediaSize.sm
+  const collapse = $derived($mediaSize < MediaSize.sm)
 
-  export let data: any = {}
-  export let display: DetailTab = DetailTab.overview
+  let {
+    data = {},
+    display = DetailTab.overview,
+    ondisplay,
+  }: {
+    data?: any
+    display?: DetailTab
+    ondisplay?: (detail: { value: string }) => void
+  } = $props()
 
-  $: expandedHeader = data?.expandedHeader
-  $: isOverview = display === DetailTab.overview
-  $: isJson = display === DetailTab.json
-  
+  const expandedHeader = $derived(data?.expandedHeader)
+  const isOverview = $derived(display === DetailTab.overview)
+  const isJson = $derived(display === DetailTab.json)
+
   // Populate the block hash -> miner cache when block data is loaded
-  $: if (expandedHeader?.hash && expandedHeader?.miner) {
-    blockHashToMiner.update(map => {
-      map.set(expandedHeader.hash, expandedHeader.miner)
-      // Keep cache size manageable (same limit as in p2pStore)
-      if (map.size > 1000) {
-        const firstKey = map.keys().next().value
-        map.delete(firstKey)
-      }
-      return map
-    })
-  }
+  $effect(() => {
+    if (expandedHeader?.hash && expandedHeader?.miner) {
+      blockHashToMiner.update(map => {
+        map.set(expandedHeader.hash, expandedHeader.miner)
+        // Keep cache size manageable (same limit as in p2pStore)
+        if (map.size > 1000) {
+          const firstKey = map.keys().next().value
+          map.delete(firstKey)
+        }
+        return map
+      })
+    }
+  })
 
   function onDisplay(value) {
-    dispatch('display', { value })
+    ondisplay?.({ value })
   }
 
   function onReverseHash(hash) {
@@ -59,7 +67,7 @@
     }
   }
 
-  $: difficultyDisplay = formatNumberExpStr(getDifficultyFromBits(expandedHeader.bits))
+  const difficultyDisplay = $derived(formatNumberExpStr(getDifficultyFromBits(expandedHeader.bits)))
 </script>
 
 <Card title={t(`${baseKey}.title`, { height: expandedHeader.height })}>
@@ -84,7 +92,7 @@
     </div>
     <button
       class="icon"
-      on:click={() => onReverseHash(expandedHeader.hash)}
+      onclick={() => onReverseHash(expandedHeader.hash)}
       use:$tippy={{ content: t('tooltip.reverse-hash') }}
       type="button"
     >

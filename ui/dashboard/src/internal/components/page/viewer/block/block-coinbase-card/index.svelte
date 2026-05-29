@@ -1,3 +1,5 @@
+<svelte:options runes={true} />
+
 <script lang="ts">
   import { formatSatoshi } from '$lib/utils/format'
   import { getDetailsUrl, DetailType } from '$internal/utils/urls'
@@ -11,21 +13,20 @@
   const baseKey = 'page.viewer-block.coinbase'
   const fieldKey = `${baseKey}.fields`
 
-  $: t = $i18n.t
-  $: collapse = $mediaSize < MediaSize.sm
+  const t = $derived($i18n.t)
+  const collapse = $derived($mediaSize < MediaSize.sm)
 
-  export let data: any = {}
+  let { data = {} }: { data?: any } = $props()
 
-  $: coinbaseTx = data?.coinbase_tx
-  $: blockHeight = data?.expandedHeader?.height
-  $: hasOutputs = coinbaseTx?.outputs?.length > 0
+  const coinbaseTx = $derived(data?.coinbase_tx)
 
   // Calculate total block reward from coinbase outputs
-  $: totalReward =
-    coinbaseTx?.outputs?.reduce((sum, output) => sum + (output.satoshis || 0), 0) || 0
+  const totalReward = $derived(
+    coinbaseTx?.outputs?.reduce((sum, output) => sum + (output.satoshis || 0), 0) || 0,
+  )
 
   // Calculate transaction size from hex
-  $: txSize = coinbaseTx?.hex ? coinbaseTx.hex.length / 2 : 0
+  const txSize = $derived(coinbaseTx?.hex ? coinbaseTx.hex.length / 2 : 0)
 </script>
 
 {#if coinbaseTx}
