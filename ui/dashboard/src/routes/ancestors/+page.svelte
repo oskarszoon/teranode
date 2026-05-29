@@ -1,5 +1,7 @@
+<svelte:options runes={true} />
+
 <script lang="ts">
-  import { onMount } from 'svelte'
+  import { onMount, untrack } from 'svelte'
   import { dev } from '$app/environment'
   import PageWithMenu from '$internal/components/page/template/menu/index.svelte'
   import Card from '$internal/components/card/index.svelte'
@@ -14,22 +16,22 @@
   import RenderSpanWithTooltip from '$lib/components/table/renderers/render-span-with-tooltip/index.svelte'
   import RenderHashWithMiner from '$lib/components/table/renderers/render-hash-with-miner/index.svelte'
   import { get } from 'svelte/store'
-  
-  $: t = $i18n.t
-  
+
+  const t = $derived($i18n.t)
+
   const pageKey = 'page.ancestors'
   const fieldKey = `${pageKey}.fields`
-  
-  let blockLocator: string[] = []
-  let isLoadingLocator = false
-  let data: any[] = []
-  let findingAncestors = false
+
+  let blockLocator: string[] = $state([])
+  let isLoadingLocator = $state(false)
+  let data: any[] = $state([])
+  let findingAncestors = $state(false)
   let ancestorErrors: Map<string, string> = new Map()
   let ancestorData: Map<string, {hash: string, height: number | null, miner?: string}> = new Map()
   let hasInitiallyFetchedAncestors = false
   let fetchedPeers: Set<string> = new Set()
-  
-  $: connected = $sock !== null
+
+  const connected = $derived($sock !== null)
   
   // Update table data
   function updateData() {
@@ -391,8 +393,8 @@
     ]
   }
   
-  $: colDefs = getColDefs()
-  
+  const colDefs = $derived(getColDefs())
+
   // Custom render functions using RenderSpan component
   const renderCells = {
     client_name: (idField, item, colId) => {
@@ -560,30 +562,39 @@
     },
   }
   
-  // React to p2pStore changes - table stays reactive
-  $: {
-    if ($miningNodes) {
-      updateData()
+  // React to p2pStore changes - table stays reactive.
+  // updateData() reads $miningNodes and writes `data`; tracking only the store
+  // (untracking the read/write of `data` inside) avoids a runes update loop.
+  $effect(() => {
+    const nodes = $miningNodes
+    if (nodes) {
+      untrack(() => updateData())
     }
-  }
-  
-  // Fetch ancestors for any peers that haven't been fetched yet
-  $: {
-    if (blockLocator.length > 0 && data.length > 0) {
-      data.forEach((peer, index) => {
-        // If we haven't fetched ancestor for this peer yet, do it now
-        if (!fetchedPeers.has(peer.peer_id) && !peer.isCurrentNode) {
-          fetchAncestorForPeer(peer, index)
+  })
+
+  // Fetch ancestors for any peers that haven't been fetched yet.
+  // Triggered by blockLocator/data changes; fetchAncestorForPeer writes `data`,
+  // so the per-peer loop runs untracked to avoid re-triggering this effect.
+  $effect(() => {
+    const locatorLen = blockLocator.length
+    const currentData = data
+    if (locatorLen > 0 && currentData.length > 0) {
+      untrack(() => {
+        currentData.forEach((peer, index) => {
+          // If we haven't fetched ancestor for this peer yet, do it now
+          if (!fetchedPeers.has(peer.peer_id) && !peer.isCurrentNode) {
+            fetchAncestorForPeer(peer, index)
+          }
+        })
+
+        // Mark that we've done initial fetching
+        if (!hasInitiallyFetchedAncestors) {
+          hasInitiallyFetchedAncestors = true
         }
       })
-      
-      // Mark that we've done initial fetching
-      if (!hasInitiallyFetchedAncestors) {
-        hasInitiallyFetchedAncestors = true
-      }
     }
-  }
-  
+  })
+
   onMount(async () => {
     updateData()
     // Fetch the block locator on mount
