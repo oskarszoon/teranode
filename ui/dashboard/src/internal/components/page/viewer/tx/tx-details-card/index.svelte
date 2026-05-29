@@ -1,5 +1,7 @@
+<svelte:options runes={true} />
+
 <script lang="ts">
-  import { createEventDispatcher } from 'svelte'
+  import type { Snippet } from 'svelte'
   import { tippy } from '$lib/stores/media'
   import { mediaSize, MediaSize } from '$lib/stores/media'
   import { addNumCommas, dataSize } from '$lib/utils/format'
@@ -12,24 +14,31 @@
   import i18n from '$internal/i18n'
   import { getItemApiUrl, ItemType } from '$internal/api'
 
-  const dispatch = createEventDispatcher()
-
   const baseKey = 'page.viewer-tx.details'
   const fieldKey = `${baseKey}.fields`
 
-  $: t = $i18n.t
+  const t = $derived($i18n.t)
 
-  $: collapse = $mediaSize < MediaSize.sm
+  const collapse = $derived($mediaSize < MediaSize.sm)
 
-  export let data: any = {}
-  export let display: DetailTab = DetailTab.overview
+  let {
+    data = {},
+    display = DetailTab.overview,
+    ondisplay,
+    merkleProof,
+  }: {
+    data?: any
+    display?: DetailTab
+    ondisplay?: (detail: { value: string }) => void
+    merkleProof?: Snippet
+  } = $props()
 
-  $: isOverview = display === DetailTab.overview
-  $: isJson = display === DetailTab.json
-  $: isMerkleProof = display === DetailTab.merkleproof
+  const isOverview = $derived(display === DetailTab.overview)
+  const isJson = $derived(display === DetailTab.json)
+  const isMerkleProof = $derived(display === DetailTab.merkleproof)
 
   function onDisplay(value) {
-    dispatch('display', { value })
+    ondisplay?.({ value })
   }
 
   function onReverseHash(hash) {
@@ -59,7 +68,7 @@
     </div>
     <button
       class="icon"
-      on:click={() => onReverseHash(data?.txid)}
+      onclick={() => onReverseHash(data?.txid)}
       use:$tippy={{ content: t('tooltip.reverse-hash') }}
       type="button"
     >
@@ -218,7 +227,7 @@
       </div>
     {:else if isMerkleProof}
       <div class="merkle-proof">
-        <slot name="merkle-proof"></slot>
+        {@render merkleProof?.()}
       </div>
     {/if}
   </div>
