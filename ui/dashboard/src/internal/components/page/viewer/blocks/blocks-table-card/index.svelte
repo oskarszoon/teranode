@@ -78,7 +78,7 @@
 
   let variant = 'dynamic'
   function onToggle(e) {
-    const value = e.detail.value
+    const value = e.value
     variant = $tableVariant = value
   }
 
@@ -171,7 +171,7 @@
       on:change={onPage}
     />
     <div style="height: 24px; width: 12px;"></div>
-    <TableToggle value={variant} on:change={onToggle} />
+    <TableToggle value={variant} onchange={onToggle} />
     <Button
       size="small"
       ico={true}

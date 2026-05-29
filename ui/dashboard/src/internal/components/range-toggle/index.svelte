@@ -57,9 +57,9 @@
   const dispatch = createEventDispatcher()
 
   function onSelect(e) {
-    value = e.detail.value
-    dispatch('change', e.detail)
+    value = e.value
+    dispatch('change', e)
   }
 </script>
 
-<Toggle name="range-toggle" size="medium" {items} bind:value on:change={onSelect} />
+<Toggle name="range-toggle" size="medium" {items} bind:value onchange={onSelect} />

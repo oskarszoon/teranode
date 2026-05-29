@@ -55,7 +55,7 @@
 
   let variant = 'dynamic'
   function onToggle(e) {
-    const value = e.detail.value
+    const value = e.value
     variant = $tableVariant = value
   }
 </script>
@@ -81,7 +81,7 @@
       hasBoundaryRight={true}
       on:change={onPage}
     />
-    <TableToggle value={variant} on:change={onToggle} />
+    <TableToggle value={variant} onchange={onToggle} />
     {#if hasSorting}
       <button class="clear-sort-btn" on:click={clearSort} title="Clear sorting">
         <Icon name="icon-close-line" size={16} />

@@ -193,7 +193,7 @@
                 <Checkbox
                   name={item[idField]}
                   checked={selectedRowIds.includes(item[idField])}
-                  on:change={() => onRowSelect(item[idField])}
+                  onchange={() => onRowSelect(item[idField])}
                 />
               </div>
             {/if}

@@ -44,7 +44,7 @@
 
   let variant = 'dynamic'
   function onToggle(e) {
-    const value = e.detail.value
+    const value = e.value
     variant = $tableVariant = value
   }
 
@@ -129,7 +129,7 @@
       hasBoundaryRight={true}
       on:change={onPage}
     />
-    <TableToggle value={variant} on:change={onToggle} />
+    <TableToggle value={variant} onchange={onToggle} />
   {/snippet}
   <Table
     name="txss"
