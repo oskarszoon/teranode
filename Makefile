@@ -219,6 +219,13 @@ sequentialtest-aerospike:
 	@mkdir -p /tmp/teranode-test-results
 	TEST_RETRY_COUNT=$(TEST_RETRY_COUNT) TEST_RETRY_DELAY=$(TEST_RETRY_DELAY) logLevel=INFO test/scripts/run_tests_sequentially.sh --db aerospike 2>&1 | tee /tmp/teranode-test-results/sequentialtest-aerospike-results.txt
 
+.PHONY: sequentialtest-shard
+sequentialtest-shard:
+	@mkdir -p /tmp/teranode-test-results
+	TEST_RETRY_COUNT=$(TEST_RETRY_COUNT) TEST_RETRY_DELAY=$(TEST_RETRY_DELAY) logLevel=INFO \
+		test/scripts/run_tests_sequentially.sh --shard $(SHARD) --total $(TOTAL) 2>&1 \
+		| tee /tmp/teranode-test-results/sequentialtest-shard-$(SHARD)-results.txt
+
 .PHONY: testall
 testall: test longtest sequentialtest
 
