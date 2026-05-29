@@ -26,7 +26,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: [0, 1, 2]
     steps:
       # Only login to Docker Hub for internal PRs to avoid rate limits.
       # Fork PRs won't have access to secrets and will skip this step.
@@ -47,7 +47,7 @@ jobs:
           cache: "false"
 
       - name: Run Smoke tests
-        run: make smoketest SHARD=${{ matrix.shard }} TOTAL=4
+        run: make smoketest SHARD=${{ matrix.shard }} TOTAL=3
         env:
           settings_context: ${{ env.SETTINGS_CONTEXT_DEFAULT }}
 
@@ -167,7 +167,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+        shard: [0, 1, 2, 3, 4, 5, 6]
     steps:
       - name: Login to Docker Hub
         if: github.event.pull_request.head.repo.full_name == github.repository
@@ -186,7 +186,7 @@ jobs:
           cache: "false"
 
       - name: Run sequential shard
-        run: make sequentialtest-shard SHARD=${{ matrix.shard }} TOTAL=8
+        run: make sequentialtest-shard SHARD=${{ matrix.shard }} TOTAL=7
         env:
           settings_context: ${{ env.SETTINGS_CONTEXT_DEFAULT }}
 
