@@ -146,14 +146,16 @@
 </script>
 
 <Card title={t(`${baseKey}.title`)} contentPadding="0" showFooter={showTableFooter}>
-  <div slot="subtitle">
-    {t(`${baseKey}.subtitle`, {
-      fromHeight: hasData ? addNumCommas(data[data.length - 1].height) : 'N/A',
-      toHeight: hasData ? addNumCommas(data[0].height) : 'N/A',
-    })}
-  </div>
+  {#snippet subtitle()}
+    <div>
+      {t(`${baseKey}.subtitle`, {
+        fromHeight: hasData ? addNumCommas(data[data.length - 1].height) : 'N/A',
+        toHeight: hasData ? addNumCommas(data[0].height) : 'N/A',
+      })}
+    </div>
+  {/snippet}
 
-  <svelte:fragment slot="header-tools">
+  {#snippet headerTools()}
     <Pager
       i18n={i18nLocal}
       expandUp={true}
@@ -177,7 +179,7 @@
       tooltip={t('tooltip.refresh')}
       onclick={() => fetchData(page, pageSize)}
     />
-  </svelte:fragment>
+  {/snippet}
   <Table
     name="blocks"
     {variant}
@@ -198,22 +200,24 @@
     getRowIconActions={null}
     on:action={() => {}}
   />
-  <div slot="footer">
-    <Pager
-      i18n={i18nLocal}
-      expandUp={true}
-      {totalItems}
-      showPageSize={showPagerSize}
-      showQuickNav={showPagerNav}
-      showNav={showPagerNav}
-      value={{
-        page,
-        pageSize,
-      }}
-      hasBoundaryRight={true}
-      on:change={onPage}
-    />
-  </div>
+  {#snippet footer()}
+    <div>
+      <Pager
+        i18n={i18nLocal}
+        expandUp={true}
+        {totalItems}
+        showPageSize={showPagerSize}
+        showQuickNav={showPagerNav}
+        showNav={showPagerNav}
+        value={{
+          page,
+          pageSize,
+        }}
+        hasBoundaryRight={true}
+        on:change={onPage}
+      />
+    </div>
+  {/snippet}
 </Card>
 
 <svelte:window on:keydown={onKeyDown} />

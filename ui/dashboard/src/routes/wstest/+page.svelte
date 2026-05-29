@@ -123,9 +123,11 @@
 
 <div class="container" data-test-id="page-root">
   <Card>
-    <div slot="title">
-      <Typo variant="title" size="h4" value="WebSocket Test Tool" />
-    </div>
+    {#snippet title()}
+      <div>
+        <Typo variant="title" size="h4" value="WebSocket Test Tool" />
+      </div>
+    {/snippet}
 
     <div class="controls">
       <TextInput

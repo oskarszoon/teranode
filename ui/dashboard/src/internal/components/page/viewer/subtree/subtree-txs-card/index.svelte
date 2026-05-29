@@ -107,12 +107,14 @@
   contentPadding="0"
   showFooter={showTableFooter}
 >
-  <div slot="subtitle">
-    {data?.length === 1
-      ? t(`${baseKey}.subtitle_singular`, { count: data?.length || 0 })
-      : t(`${baseKey}.subtitle`, { count: data?.length || 0 })}
-  </div>
-  <svelte:fragment slot="header-tools">
+  {#snippet subtitle()}
+    <div>
+      {data?.length === 1
+        ? t(`${baseKey}.subtitle_singular`, { count: data?.length || 0 })
+        : t(`${baseKey}.subtitle`, { count: data?.length || 0 })}
+    </div>
+  {/snippet}
+  {#snippet headerTools()}
     <Pager
       i18n={i18nLocal}
       expandUp={true}
@@ -128,7 +130,7 @@
       on:change={onPage}
     />
     <TableToggle value={variant} on:change={onToggle} />
-  </svelte:fragment>
+  {/snippet}
   <Table
     name="txss"
     {variant}
@@ -149,20 +151,22 @@
     getRowIconActions={null}
     on:action={() => {}}
   />
-  <div slot="footer">
-    <Pager
-      i18n={i18nLocal}
-      expandUp={true}
-      {totalItems}
-      showPageSize={showPagerSize}
-      showQuickNav={showPagerNav}
-      showNav={showPagerNav}
-      value={{
-        page,
-        pageSize,
-      }}
-      hasBoundaryRight={true}
-      on:change={onPage}
-    />
-  </div>
+  {#snippet footer()}
+    <div>
+      <Pager
+        i18n={i18nLocal}
+        expandUp={true}
+        {totalItems}
+        showPageSize={showPagerSize}
+        showQuickNav={showPagerNav}
+        showNav={showPagerNav}
+        value={{
+          page,
+          pageSize,
+        }}
+        hasBoundaryRight={true}
+        on:change={onPage}
+      />
+    </div>
+  {/snippet}
 </Card>

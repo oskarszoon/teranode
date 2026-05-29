@@ -593,10 +593,12 @@
 
 <PageWithMenu testId="page-root">
   <Card contentPadding="0">
-    <div class="title" slot="title">
-      <Typo variant="title" size="h4" value={t(`${pageKey}.title`, { defaultValue: 'Common Ancestors' })} />
-    </div>
-    <svelte:fragment slot="header-tools">
+    {#snippet title()}
+      <div class="title">
+        <Typo variant="title" size="h4" value={t(`${pageKey}.title`, { defaultValue: 'Common Ancestors' })} />
+      </div>
+    {/snippet}
+    {#snippet headerTools()}
       {#if data.length > 0}
         <Button
           size="small"
@@ -612,7 +614,7 @@
         </div>
         <div class="live-label">{t(`page.network.live`)}</div>
       </div>
-    </svelte:fragment>
+    {/snippet}
     {#if !connected}
       <div class="no-data">
         <Icon name="icon-status-light-glow-solid" size={48} color="var(--comp-label-color)" />

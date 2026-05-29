@@ -762,10 +762,12 @@
   {/if}
 
   <Card contentPadding="0" showFooter={showTableFooter}>
-    <div class="title" slot="title">
-      <Typo variant="title" size="h4" value={t(`${pageKey}.title`, { defaultValue: 'Peer Registry' })} />
-    </div>
-    <svelte:fragment slot="header-tools">
+    {#snippet title()}
+      <div class="title">
+        <Typo variant="title" size="h4" value={t(`${pageKey}.title`, { defaultValue: 'Peer Registry' })} />
+      </div>
+    {/snippet}
+    {#snippet headerTools()}
       <div class="stats">
         <span class="stat-item">
           <span class="stat-label">Total:</span>
@@ -815,7 +817,7 @@
         </div>
         <div class="live-label">{t(`page.network.live`)}</div>
       </div>
-    </svelte:fragment>
+    {/snippet}
     {#if error}
       <div class="no-data">
         <Icon name="icon-status-light-glow-solid" size={48} color="#ff6b6b" />
@@ -864,22 +866,24 @@
         on:action={handleAction}
       />
     {/if}
-    <div slot="footer">
-      <Pager
-        i18n={i18nLocal}
-        expandUp={true}
-        totalItems={allData?.length}
-        showPageSize={showPagerSize}
-        showQuickNav={showPagerNav}
-        showNav={showPagerNav}
-        value={{
-          page: currentPage,
-          pageSize: currentPageSize,
-        }}
-        hasBoundaryRight={true}
-        on:change={onPageChange}
-      />
-    </div>
+    {#snippet footer()}
+      <div>
+        <Pager
+          i18n={i18nLocal}
+          expandUp={true}
+          totalItems={allData?.length}
+          showPageSize={showPagerSize}
+          showQuickNav={showPagerNav}
+          showNav={showPagerNav}
+          value={{
+            page: currentPage,
+            pageSize: currentPageSize,
+          }}
+          hasBoundaryRight={true}
+          on:change={onPageChange}
+        />
+      </div>
+    {/snippet}
   </Card>
 </PageWithMenu>
 

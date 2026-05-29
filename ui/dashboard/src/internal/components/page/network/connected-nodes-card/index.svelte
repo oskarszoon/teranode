@@ -61,10 +61,12 @@
 </script>
 
 <Card contentPadding="0" showFooter={showTableFooter}>
-  <div class="title" slot="title">
-    <Typo variant="title" size="h4" value={t(`${pageKey}.title`)} />
-  </div>
-  <svelte:fragment slot="header-tools">
+  {#snippet title()}
+    <div class="title">
+      <Typo variant="title" size="h4" value={t(`${pageKey}.title`)} />
+    </div>
+  {/snippet}
+  {#snippet headerTools()}
     <Pager
       i18n={i18nLocal}
       expandUp={true}
@@ -91,7 +93,7 @@
       </div>
       <div class="live-label">{t(`page.network.live`)}</div>
     </div>
-  </svelte:fragment>
+  {/snippet}
   <Table
     name="nodes"
     {variant}
@@ -117,22 +119,24 @@
     on:action={() => {}}
     on:sort={onSort}
   />
-  <div slot="footer">
-    <Pager
-      i18n={i18nLocal}
-      expandUp={true}
-      totalItems={allData?.length}
-      showPageSize={showPagerSize}
-      showQuickNav={showPagerNav}
-      showNav={showPagerNav}
-      value={{
-        page,
-        pageSize,
-      }}
-      hasBoundaryRight={true}
-      on:change={onPage}
-    />
-  </div>
+  {#snippet footer()}
+    <div>
+      <Pager
+        i18n={i18nLocal}
+        expandUp={true}
+        totalItems={allData?.length}
+        showPageSize={showPagerSize}
+        showQuickNav={showPagerNav}
+        showNav={showPagerNav}
+        value={{
+          page,
+          pageSize,
+        }}
+        hasBoundaryRight={true}
+        on:change={onPage}
+      />
+    </div>
+  {/snippet}
 </Card>
 
 <BlockAssemblyModal />

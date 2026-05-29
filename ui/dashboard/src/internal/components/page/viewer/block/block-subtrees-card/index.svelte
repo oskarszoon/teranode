@@ -72,16 +72,18 @@
   contentPadding="0"
   showFooter={showTableFooter}
 >
-  <div slot="subtitle">
-    {#if totalItems > pageSize}
-      Viewing subtrees {((page - 1) * pageSize) + 1}-{Math.min(page * pageSize, totalItems)} of {totalItems} subtrees
-    {:else if totalItems === 1}
-      {t(`${baseKey}.subtitle_singular`, { count: totalItems || 0 })}
-    {:else}
-      {t(`${baseKey}.subtitle`, { count: totalItems || 0 })}
-    {/if}
-  </div>
-  <svelte:fragment slot="header-tools">
+  {#snippet subtitle()}
+    <div>
+      {#if totalItems > pageSize}
+        Viewing subtrees {((page - 1) * pageSize) + 1}-{Math.min(page * pageSize, totalItems)} of {totalItems} subtrees
+      {:else if totalItems === 1}
+        {t(`${baseKey}.subtitle_singular`, { count: totalItems || 0 })}
+      {:else}
+        {t(`${baseKey}.subtitle`, { count: totalItems || 0 })}
+      {/if}
+    </div>
+  {/snippet}
+  {#snippet headerTools()}
     <Pager
       i18n={i18nLocal}
       expandUp={true}
@@ -97,7 +99,7 @@
       on:change={onPage}
     />
     <TableToggle value={variant} on:change={onToggle} />
-  </svelte:fragment>
+  {/snippet}
   <Table
     name="subtrees"
     {variant}
@@ -118,20 +120,22 @@
     getRowIconActions={null}
     on:action={() => {}}
   />
-  <div slot="footer">
-    <Pager
-      i18n={i18nLocal}
-      expandUp={true}
-      {totalItems}
-      showPageSize={showPagerSize}
-      showQuickNav={showPagerNav}
-      showNav={showPagerNav}
-      value={{
-        page,
-        pageSize,
-      }}
-      hasBoundaryRight={true}
-      on:change={onPage}
-    />
-  </div>
+  {#snippet footer()}
+    <div>
+      <Pager
+        i18n={i18nLocal}
+        expandUp={true}
+        {totalItems}
+        showPageSize={showPagerSize}
+        showQuickNav={showPagerNav}
+        showNav={showPagerNav}
+        value={{
+          page,
+          pageSize,
+        }}
+        hasBoundaryRight={true}
+        on:change={onPage}
+      />
+    </div>
+  {/snippet}
 </Card>

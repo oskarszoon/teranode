@@ -30,18 +30,20 @@
 
 {#if coinbaseTx}
   <Card title={t(`${baseKey}.title`)} headerPadding="20px 24px 16px 24px">
-    <div class="copy-link" slot="subtitle">
-      <a href={getDetailsUrl(DetailType.tx, coinbaseTx.txid)} class="hash-link">{coinbaseTx.txid}</a
-      >
-      <div class="icon" use:$tippy={{ content: t('tooltip.copy-hash-to-clipboard') }}>
-        <ActionStatusIcon
-          icon="icon-duplicate-line"
-          action={copyTextToClipboardVanilla}
-          actionData={coinbaseTx.txid}
-          size={15}
-        />
+    {#snippet subtitle()}
+      <div class="copy-link">
+        <a href={getDetailsUrl(DetailType.tx, coinbaseTx.txid)} class="hash-link">{coinbaseTx.txid}</a
+        >
+        <div class="icon" use:$tippy={{ content: t('tooltip.copy-hash-to-clipboard') }}>
+          <ActionStatusIcon
+            icon="icon-duplicate-line"
+            action={copyTextToClipboardVanilla}
+            actionData={coinbaseTx.txid}
+            size={15}
+          />
+        </div>
       </div>
-    </div>
+    {/snippet}
     <div class="content">
       <div class="fields" class:collapse>
         <div>

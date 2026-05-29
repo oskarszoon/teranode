@@ -23,7 +23,8 @@
 </script>
 
 <Card title={t(`${baseKey}.title`)}>
-  <div class="copy-link" slot="subtitle">
+  {#snippet subtitle()}
+  <div class="copy-link">
     <div class="hash">{data?.hash}</div>
     <div class="icon" use:$tippy={{ content: t('tooltip.copy-hash-to-clipboard') }}>
       <ActionStatusIcon
@@ -50,6 +51,7 @@
       <Icon name="icon-reeverse-line" size={15} />
     </button>
   </div>
+  {/snippet}
 
   <div class="json">
     <div><JSONTree {data} /></div>

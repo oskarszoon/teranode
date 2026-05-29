@@ -47,9 +47,9 @@
   headerPadding="20px 24px 10px 24px"
   wrapHeader={true}
 >
-  <svelte:fragment slot="header-tools">
+  {#snippet headerTools()}
     <RangeToggle value={period} on:change={(e) => onChangePeriod(e.detail.value)} />
-  </svelte:fragment>
+  {/snippet}
 
   <ChartContainer bind:renderKey height="530px">
     {#if graphObj?.graphOptions}

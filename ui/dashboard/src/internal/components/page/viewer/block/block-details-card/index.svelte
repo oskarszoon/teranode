@@ -63,7 +63,8 @@
 </script>
 
 <Card title={t(`${baseKey}.title`, { height: expandedHeader.height })}>
-  <div class="copy-link" slot="subtitle">
+  {#snippet subtitle()}
+  <div class="copy-link">
     <div class="hash">{expandedHeader.hash}</div>
     <div class="icon" use:$tippy={{ content: t('tooltip.copy-hash-to-clipboard') }}>
       <ActionStatusIcon
@@ -92,7 +93,9 @@
     &nbsp;&nbsp;&nbsp;
     <a href="/forks/?hash={expandedHeader.hash}">forks</a>
   </div>
-  <div class="btns" slot="header-tools">
+  {/snippet}
+  {#snippet headerTools()}
+  <div class="btns">
     <Button
       size="small"
       icon="icon-chevron-left-line"
@@ -110,6 +113,7 @@
       onclick={() => navToBlock(data?.nextblock)}
     />
   </div>
+  {/snippet}
   <div class="content">
     <div class="tabs">
       <Button

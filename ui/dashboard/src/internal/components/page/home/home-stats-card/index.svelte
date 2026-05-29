@@ -42,7 +42,7 @@
 </script>
 
 <Card title={t(`${baseKey}.title`)} showFooter={false} headerPadding="20px 24px 10px 24px">
-  <svelte:fragment slot="header-tools">
+  {#snippet headerTools()}
     <div class="live">
       <div class="live-icon" class:connected>
         <Icon name="icon-status-light-glow-solid" size={14} />
@@ -56,7 +56,7 @@
       tooltip={t('tooltip.refresh')}
       onclick={onRefresh}
     />
-  </svelte:fragment>
+  {/snippet}
   <div class="content" style:--grid-template-columns={`repeat(${colCount}, 1fr)`}>
     {#if loading}
       <div class="block">
