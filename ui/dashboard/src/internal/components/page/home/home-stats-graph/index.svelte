@@ -48,7 +48,7 @@
   wrapHeader={true}
 >
   {#snippet headerTools()}
-    <RangeToggle value={period} on:change={(e) => onChangePeriod(e.detail.value)} />
+    <RangeToggle value={period} onchange={(e) => onChangePeriod(e.value)} />
   {/snippet}
 
   <ChartContainer bind:renderKey height="530px">
