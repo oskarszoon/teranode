@@ -20,7 +20,7 @@
 
   async function onSearchKeyDown(e) {
     if (!e) e = window.event
-    const keyCode = e.detail.code || e.detail.key
+    const keyCode = e.code || e.key
 
     if (keyCode === 'Enter') {
       lastSearchCalled = searchValue
@@ -78,7 +78,7 @@
           ? 'icon-search-line'
           : 'icon-search-solid'}
         placeholder={$i18n.t('comp.toolbar.placeholder')}
-        on:keydown={onSearchKeyDown}
+        onkeydown={onSearchKeyDown}
       />
     </div>
   </div>

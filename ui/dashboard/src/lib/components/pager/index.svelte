@@ -92,8 +92,8 @@
   }
 
   const onInputChange = (e) => {
-    const name = e.detail.name
-    const val = parseInt(e.detail.value)
+    const name = e.name
+    const val = parseInt(e.value)
 
     switch (name) {
       case 'page':
@@ -120,7 +120,7 @@
   const onCurrentPage = $derived(parseInt(pageInput) === page)
 
   function onQuickNavKeyDown(e) {
-    const keyCode = e.detail.code || e.detail.key
+    const keyCode = e.code || e.key
     if (!quickNavDisabled && keyCode === 'Enter') {
       onNav('nav', parseInt(pageInput))
       return false
@@ -137,7 +137,7 @@
       border={false}
       disabled={page === 1}
       style={`--font-weight:var(--typo-body-font-weight);--font-size:var(--typo-body-3-font-size);--line-height:var(--typo-body-3-line-height);`}
-      on:click={() => onNav('prev')}
+      onclick={() => onNav('prev')}
     >
       {t(`${baseKey}.prev`)}
     </Tab>
@@ -148,7 +148,7 @@
         border={false}
         selected={isSelected(btn)}
         style={`--font-weight:var(--typo-body-font-weight);--font-size:var(--typo-body-3-font-size);--line-height:var(--typo-body-3-line-height);`}
-        on:click={() => onSelect(btn)}
+        onclick={() => onSelect(btn)}
       >
         {btn.type === 'page' ? btn.page : '...'}
       </Tab>
@@ -160,7 +160,7 @@
       border={false}
       disabled={page === totalPages}
       style={`--font-weight:var(--typo-body-font-weight);--font-size:var(--typo-body-3-font-size);--line-height:var(--typo-body-3-line-height);`}
-      on:click={() => onNav('next')}
+      onclick={() => onNav('next')}
     >
       {t(`${baseKey}.next`)}
     </Tab>
@@ -175,8 +175,8 @@
       size="small"
       value={pageInput}
       valid={!quickNavDisabled || onCurrentPage}
-      on:change={onInputChange}
-      on:keydown={onQuickNavKeyDown}
+      onchange={onInputChange}
+      onkeydown={onQuickNavKeyDown}
     />
     <Typo
       variant="body"
@@ -193,7 +193,7 @@
       items={pageSizeOptions}
       size="small"
       {expandUp}
-      on:change={onInputChange}
+      onchange={onInputChange}
     />
     <Typo variant="body" size={3} value={t(`${baseKey}.rows_per_page`)} wrap={false} />
   </div>

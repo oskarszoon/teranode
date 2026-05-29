@@ -89,8 +89,8 @@
   }
 
   const onInputChange = (e) => {
-    const name = e.detail.name
-    const val = parseInt(e.detail.value)
+    const name = e.name
+    const val = parseInt(e.value)
 
     switch (name) {
       case 'page':
@@ -121,7 +121,7 @@
   }
 
   function onQuickNavKeyDown(e) {
-    const keyCode = e.detail.code || e.detail.key
+    const keyCode = e.code || e.key
     if (!quickNavDisabled && keyCode === 'Enter') {
       onNav('nav', parseInt(pageInput))
       return false
@@ -139,7 +139,7 @@
         items={pageSizeOptions}
         size="small"
         {expandUp}
-        on:change={onInputChange}
+        onchange={onInputChange}
       />
     </div>
   {/if}
@@ -156,8 +156,8 @@
           stretch={true}
           value={pageInput}
           valid={!quickNavDisabled || onCurrentPage}
-          on:change={onInputChange}
-          on:keydown={onQuickNavKeyDown}
+          onchange={onInputChange}
+          onkeydown={onQuickNavKeyDown}
         />
       </div>
       <Typo
@@ -176,14 +176,14 @@
         icon="icon-chevron-left-line"
         size="small"
         disabled={page === 1}
-        on:click={() => onNav('prev')}
+        onclick={() => onNav('prev')}
       />
       {#each btnData as btn}
         <Tab
           variant="primary"
           size="small"
           selected={isSelected(btn)}
-          on:click={() => onSelect(btn)}
+          onclick={() => onSelect(btn)}
         >
           {btn.type === 'page' ? btn.page : '...'}
         </Tab>
@@ -193,7 +193,7 @@
         iconAfter="icon-chevron-right-line"
         size="small"
         disabled={page === totalPages}
-        on:click={() => onNav('next')}
+        onclick={() => onNav('next')}
       />
     </div>
   {/if}
