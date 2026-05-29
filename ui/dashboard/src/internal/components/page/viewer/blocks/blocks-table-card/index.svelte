@@ -65,7 +65,7 @@
   }
 
   function onPage(e) {
-    const data = e.detail
+    const data = e
     page = data.value.page
     pageSize = data.value.pageSize
     updateURL(page, pageSize)
@@ -168,7 +168,7 @@
         pageSize,
       }}
       hasBoundaryRight={true}
-      on:change={onPage}
+      onchange={onPage}
     />
     <div style="height: 24px; width: 12px;"></div>
     <TableToggle value={variant} onchange={onToggle} />
@@ -198,7 +198,7 @@
     {renderCells}
     getRenderProps={null}
     getRowIconActions={null}
-    on:action={() => {}}
+    onaction={() => {}}
   />
   {#snippet footer()}
     <div>
@@ -214,7 +214,7 @@
           pageSize,
         }}
         hasBoundaryRight={true}
-        on:change={onPage}
+        onchange={onPage}
       />
     </div>
   {/snippet}

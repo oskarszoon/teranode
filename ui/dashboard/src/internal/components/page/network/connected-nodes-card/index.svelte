@@ -30,12 +30,12 @@
 
   function onPage(e) {
     // Forward pagination changes to parent component
-    dispatch('pagechange', e.detail)
+    dispatch('pagechange', e)
   }
 
   function onSort(e) {
     // Forward sort changes to parent component
-    dispatch('sort', e.detail)
+    dispatch('sort', e)
   }
 
   function clearSort() {
@@ -79,7 +79,7 @@
         pageSize,
       }}
       hasBoundaryRight={true}
-      on:change={onPage}
+      onchange={onPage}
     />
     <TableToggle value={variant} onchange={onToggle} />
     {#if hasSorting}
@@ -116,8 +116,8 @@
     {renderCells}
     {getRenderProps}
     getRowIconActions={null}
-    on:action={() => {}}
-    on:sort={onSort}
+    onaction={() => {}}
+    onsort={onSort}
   />
   {#snippet footer()}
     <div>
@@ -133,7 +133,7 @@
           pageSize,
         }}
         hasBoundaryRight={true}
-        on:change={onPage}
+        onchange={onPage}
       />
     </div>
   {/snippet}

@@ -28,7 +28,7 @@
   let totalItems = 0
 
   function onPage(e) {
-    const data = e.detail
+    const data = e
     page = data.value.page
     pageSize = data.value.pageSize
   }
@@ -96,7 +96,7 @@
         pageSize,
       }}
       hasBoundaryRight={true}
-      on:change={onPage}
+      onchange={onPage}
     />
     <TableToggle value={variant} onchange={onToggle} />
   {/snippet}
@@ -118,7 +118,7 @@
     {renderCells}
     getRenderProps={null}
     getRowIconActions={null}
-    on:action={() => {}}
+    onaction={() => {}}
   />
   {#snippet footer()}
     <div>
@@ -134,7 +134,7 @@
           pageSize,
         }}
         hasBoundaryRight={true}
-        on:change={onPage}
+        onchange={onPage}
       />
     </div>
   {/snippet}

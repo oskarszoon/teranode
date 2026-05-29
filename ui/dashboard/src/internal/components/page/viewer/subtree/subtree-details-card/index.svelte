@@ -55,7 +55,7 @@
   }
 
   function onPage(e) {
-    const pageData = e.detail
+    const pageData = e
     page = pageData.value.page
     pageSize = pageData.value.pageSize
   }
@@ -211,7 +211,7 @@
             pageSize,
           }}
           hasBoundaryRight={true}
-          on:change={onPage}
+          onchange={onPage}
         />
       </div>
       <div class="json">
@@ -235,7 +235,7 @@
               pageSize,
             }}
             hasBoundaryRight={true}
-            on:change={onPage}
+            onchange={onPage}
           />
         </div>
       {/if}

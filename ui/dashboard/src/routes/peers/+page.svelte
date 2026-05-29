@@ -352,7 +352,7 @@
 
   // Handle pagination changes
   function onPageChange(e) {
-    const data = e.detail
+    const data = e
     const newPage = data.value.page
     const newPageSize = data.value.pageSize
 
@@ -369,7 +369,7 @@
 
   // Handle sort changes
   function onSort(e) {
-    const { colId, value } = e.detail
+    const { colId, value } = e
     sortColumn = colId || ''
     sortOrder = value || ''
 
@@ -393,21 +393,21 @@
 
   // Clear sort
   function clearSort() {
-    onSort({ detail: { colId: '', value: '' } })
+    onSort({ colId: '', value: '' })
   }
 
   // Handle table actions
   function handleAction(event) {
     // Handle any table actions if needed
-    console.log('Table action:', event.detail)
+    console.log('Table action:', event)
   }
 
   $: hasSorting = sortColumn && sortOrder
 
+  // The internal Pager does not emit a "total" event, so totalPages is never
+  // updated from it and stays at its initial value (behaviour unchanged from
+  // the previous dead on:total listener).
   let totalPages = 0
-  const onTotal = (e) => {
-    totalPages = e.detail.total
-  }
 
   $: showPagerNav = totalPages > 1
   $: showPagerSize = showPagerNav || (totalPages === 1 && allData.length > 5)
@@ -798,8 +798,7 @@
           pageSize: currentPageSize,
         }}
         hasBoundaryRight={true}
-        on:change={onPageChange}
-        on:total={onTotal}
+        onchange={onPageChange}
       />
       {#if allData.length > 0}
         <Button size="small" onclick={fetchPeers} disabled={isLoading}>
@@ -862,8 +861,8 @@
         {renderCells}
         getRenderProps={null}
         getRowIconActions={null}
-        on:sort={onSort}
-        on:action={handleAction}
+        onsort={onSort}
+        onaction={handleAction}
       />
     {/if}
     {#snippet footer()}
@@ -880,7 +879,7 @@
             pageSize: currentPageSize,
           }}
           hasBoundaryRight={true}
-          on:change={onPageChange}
+          onchange={onPageChange}
         />
       </div>
     {/snippet}

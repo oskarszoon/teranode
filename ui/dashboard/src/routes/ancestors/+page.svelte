@@ -643,7 +643,7 @@
         expandUp={true}
         {renderCells}
         getRowIconActions={null}
-        on:action={() => {}}
+        onaction={() => {}}
       />
     {/if}
   </Card>
