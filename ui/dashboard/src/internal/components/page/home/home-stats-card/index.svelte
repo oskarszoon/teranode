@@ -1,3 +1,5 @@
+<svelte:options runes={true} />
+
 <script lang="ts">
   import { mediaSize, MediaSize } from '$lib/stores/media'
   import { addNumCommas } from '$lib/utils/format'
@@ -6,16 +8,22 @@
   import i18n from '$internal/i18n'
   import { sock as p2pSock } from '$internal/stores/p2pStore'
 
-  export let loading = true
-  export let data: any = {}
-  export let onRefresh = () => {}
+  let {
+    loading = true,
+    data = {},
+    onRefresh = () => {},
+  }: {
+    loading?: boolean
+    data?: any
+    onRefresh?: () => void
+  } = $props()
 
   const baseKey = 'page.home.stats'
   const fieldKey = `${baseKey}.fields`
 
-  $: t = $i18n.t
+  const t = $derived($i18n.t)
 
-  $: connected = $p2pSock !== null
+  const connected = $derived($p2pSock !== null)
 
   const colsLg = [
     'txns_per_second',
@@ -37,8 +45,10 @@
     'chain_work',
   ]
 
-  $: cols = $mediaSize <= MediaSize.md ? colsMd : colsLg
-  $: colCount = $mediaSize <= MediaSize.md ? ($mediaSize <= MediaSize.xs ? 1 : 2) : 4
+  const cols = $derived($mediaSize <= MediaSize.md ? colsMd : colsLg)
+  const colCount = $derived(
+    $mediaSize <= MediaSize.md ? ($mediaSize <= MediaSize.xs ? 1 : 2) : 4
+  )
 </script>
 
 <Card title={t(`${baseKey}.title`)} showFooter={false} headerPadding="20px 24px 10px 24px">

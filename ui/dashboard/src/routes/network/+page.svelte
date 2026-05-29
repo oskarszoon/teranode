@@ -146,7 +146,7 @@
   }
 
   function onPageChange(e) {
-    const data = e.detail
+    const data = e
     const newPage = data.value.page
     const newPageSize = data.value.pageSize
     
@@ -162,7 +162,7 @@
   }
   
   function onSort(e) {
-    const { colId, value } = e.detail
+    const { colId, value } = e
     sortColumn = colId
     sortOrder = value
 
@@ -329,7 +329,7 @@
     pageSize={currentPageSize}
     {sortColumn}
     {sortOrder}
-    on:pagechange={onPageChange}
-    on:sort={onSort}
+    onpagechange={onPageChange}
+    onsort={onSort}
   />
 </PageWithMenu>
