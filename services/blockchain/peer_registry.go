@@ -159,6 +159,22 @@ type CentralizedPeerRegistry struct {
 	// need to coordinate with r.mu (which guards the in-memory peer maps,
 	// not the logger). Writes go through Store; reads through Load.
 	logger atomic.Value // ulogger.Logger
+
+	// lastCorruptArchiveKey records the most recent sidecar key produced by
+	// Load when it found a corrupt persisted blob. Useful for operator
+	// post-mortems and as a test seam (avoids tests having to probe the
+	// keyspace based on wall-clock time). Empty string if no corruption has
+	// been observed in this process lifetime.
+	lastCorruptArchiveKey atomic.Pointer[string]
+
+	// saveDisabled blocks all persistence-mutating paths (Save and
+	// StartPeriodicSave). Set when Load detects an envelope whose Version is
+	// newer than this binary understands — without it, the next save tick
+	// would overwrite the operator's future-version blob with a downgraded
+	// Version=1 envelope, destroying the data the version check was meant to
+	// protect. The flag is one-way: once set, the only way to clear it is
+	// to construct a fresh registry.
+	saveDisabled atomic.Bool
 }
 
 // NewCentralizedPeerRegistry creates an empty peer registry with the given ban configuration.
@@ -194,6 +210,24 @@ func (r *CentralizedPeerRegistry) log() ulogger.Logger {
 		return v.(loggerHolder).l
 	}
 	return ulogger.New("CentralizedPeerRegistry")
+}
+
+// LastCorruptArchiveKey returns the blob-store key under which the most
+// recent corrupt-blob sidecar was archived, or "" if no corruption has been
+// observed in this process. Operators can use this for post-mortem (e.g.
+// expose via gRPC / a diagnostics endpoint).
+func (r *CentralizedPeerRegistry) LastCorruptArchiveKey() string {
+	if v := r.lastCorruptArchiveKey.Load(); v != nil {
+		return *v
+	}
+	return ""
+}
+
+// SaveDisabled reports whether persistence is currently blocked. Set by Load
+// when an envelope from a future Version is detected; subsequent Save and
+// StartPeriodicSave calls become no-ops to preserve the operator's blob.
+func (r *CentralizedPeerRegistry) SaveDisabled() bool {
+	return r.saveDisabled.Load()
 }
 
 // Register adds a new peer or updates non-zero fields of an existing peer.
@@ -768,6 +802,13 @@ func (r *CentralizedPeerRegistry) StartBanDecay(ctx context.Context) {
 // persistence for the rest of the process lifetime.
 func (r *CentralizedPeerRegistry) StartPeriodicSave(ctx context.Context, interval time.Duration, store blob.Store) {
 	if interval <= 0 || store == nil {
+		return
+	}
+	// Refuse to start when persistence has been disabled (e.g. Load saw a
+	// future-version blob). Without this, the first tick would overwrite the
+	// operator's blob with a downgraded Version=1 envelope.
+	if r.saveDisabled.Load() {
+		r.log().Warnf("peer registry: periodic save not started because persistence is disabled")
 		return
 	}
 

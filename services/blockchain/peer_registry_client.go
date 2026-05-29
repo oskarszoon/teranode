@@ -2,6 +2,7 @@ package blockchain
 
 import (
 	"context"
+	"sync/atomic"
 	"time"
 
 	"github.com/bsv-blockchain/teranode/services/blockchain/blockchain_api"
@@ -94,20 +95,25 @@ type PeerRegistryClient struct {
 	ownsConn bool // true when this client created the connection and is responsible for closing it
 	// logger is used for non-fatal diagnostics during proto decoding (e.g.
 	// invalid BlockHash bytes in a peer message). Optional; nil fallback is
-	// handled in log().
-	logger ulogger.Logger
+	// handled in log(). Stored as atomic.Value because log() runs on every
+	// GetPeer / ListPeers RPC and SetLogger may be called after construction
+	// — matches the CentralizedPeerRegistry hardening pattern.
+	logger atomic.Value // loggerHolder
 }
 
 // SetLogger installs a logger for non-fatal proto-decoding diagnostics.
-// Idempotent. Safe to call multiple times before the client is used
-// concurrently; matches the CentralizedPeerRegistry.SetLogger pattern.
+// Idempotent and safe to call concurrently with log(). Passing nil is a
+// no-op (the default fallback applies).
 func (c *PeerRegistryClient) SetLogger(l ulogger.Logger) {
-	c.logger = l
+	if l == nil {
+		return
+	}
+	c.logger.Store(loggerHolder{l})
 }
 
 func (c *PeerRegistryClient) log() ulogger.Logger {
-	if c.logger != nil {
-		return c.logger
+	if v := c.logger.Load(); v != nil {
+		return v.(loggerHolder).l
 	}
 	return ulogger.New("PeerRegistryClient")
 }
