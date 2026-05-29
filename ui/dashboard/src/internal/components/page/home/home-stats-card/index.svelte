@@ -54,7 +54,7 @@
       ico={true}
       icon="icon-refresh-line"
       tooltip={t('tooltip.refresh')}
-      on:click={onRefresh}
+      onclick={onRefresh}
     />
   </svelte:fragment>
   <div class="content" style:--grid-template-columns={`repeat(${colCount}, 1fr)`}>

@@ -600,7 +600,7 @@
       {#if data.length > 0}
         <Button
           size="small"
-          on:click={refreshAll}
+          onclick={refreshAll}
           disabled={findingAncestors || isLoadingLocator}
         >
           {findingAncestors || isLoadingLocator ? 'Refreshing...' : 'Refresh'}

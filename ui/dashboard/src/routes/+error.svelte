@@ -56,7 +56,7 @@
     <Typo variant="text" size="md" value={body} color="var(--comp-label-color)" />
   </div>
   <div class="btn">
-    <Button variant="tertiary" width={140} on:click={onHome}>{btnLabel}</Button>
+    <Button variant="tertiary" width={140} onclick={onHome}>{btnLabel}</Button>
   </div>
 </div>
 

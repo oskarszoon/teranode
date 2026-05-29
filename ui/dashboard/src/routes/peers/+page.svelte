@@ -800,7 +800,7 @@
         on:total={onTotal}
       />
       {#if allData.length > 0}
-        <Button size="small" on:click={fetchPeers} disabled={isLoading}>
+        <Button size="small" onclick={fetchPeers} disabled={isLoading}>
           {isLoading ? 'Refreshing...' : 'Refresh'}
         </Button>
       {/if}
@@ -821,7 +821,7 @@
         <Icon name="icon-status-light-glow-solid" size={48} color="#ff6b6b" />
         <p>Failed to load peer data</p>
         <p class="sub">{error}</p>
-        <Button size="small" on:click={fetchPeers} disabled={isLoading}>
+        <Button size="small" onclick={fetchPeers} disabled={isLoading}>
           Retry
         </Button>
       </div>

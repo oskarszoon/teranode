@@ -38,7 +38,7 @@
     />
   </div>
   <div class="btn">
-    <Button variant="tertiary" icon="icon-reeverse-line" width={100} on:click={onReverseHash}
+    <Button variant="tertiary" icon="icon-reeverse-line" width={100} onclick={onReverseHash}
       >{t(`${fieldKey}.reverse`)}</Button
     >
   </div>

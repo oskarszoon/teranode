@@ -175,7 +175,7 @@
       ico={true}
       icon="icon-refresh-line"
       tooltip={t('tooltip.refresh')}
-      on:click={() => fetchData(page, pageSize)}
+      onclick={() => fetchData(page, pageSize)}
     />
   </svelte:fragment>
   <Table

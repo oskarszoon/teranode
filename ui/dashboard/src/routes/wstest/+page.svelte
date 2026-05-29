@@ -136,9 +136,9 @@
       />
 
       {#if !connected}
-        <Button on:click={connect} variant="primary">Connect</Button>
+        <Button onclick={connect} variant="primary">Connect</Button>
       {:else}
-        <Button on:click={disconnect} variant="danger">Disconnect</Button>
+        <Button onclick={disconnect} variant="danger">Disconnect</Button>
       {/if}
 
       <div class="status">

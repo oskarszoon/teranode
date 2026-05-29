@@ -72,14 +72,14 @@
         hasFocusRect={false}
         selected={isOverview}
         variant={isOverview ? 'tertiary' : 'primary'}
-        on:click={() => onDisplay('overview')}>{t(`${baseKey}.tab.overview`)}</Button
+        onclick={() => onDisplay('overview')}>{t(`${baseKey}.tab.overview`)}</Button
       >
       <Button
         size="medium"
         hasFocusRect={false}
         selected={isJson}
         variant={isJson ? 'tertiary' : 'primary'}
-        on:click={() => onDisplay('json')}>{t(`${baseKey}.tab.json`)}</Button
+        onclick={() => onDisplay('json')}>{t(`${baseKey}.tab.json`)}</Button
       >
       {#if (data?.blockHashes && data?.blockHashes.length > 0) || (data?.blockIDs && data?.blockIDs.length > 0)}
         <Button
@@ -87,7 +87,7 @@
           hasFocusRect={false}
           selected={isMerkleProof}
           variant={isMerkleProof ? 'tertiary' : 'primary'}
-          on:click={() => onDisplay('merkleproof')}>Merkle Proof</Button
+          onclick={() => onDisplay('merkleproof')}>Merkle Proof</Button
         >
       {/if}
     </div>

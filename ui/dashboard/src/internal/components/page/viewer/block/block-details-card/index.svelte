@@ -99,7 +99,7 @@
       ico={true}
       disabled={!expandedHeader.previousblockhash}
       tooltip={expandedHeader.previousblockhash ? t('tooltip.previous-block') : ''}
-      on:click={() => navToBlock(expandedHeader.previousblockhash)}
+      onclick={() => navToBlock(expandedHeader.previousblockhash)}
     />
     <Button
       size="small"
@@ -107,7 +107,7 @@
       ico={true}
       disabled={!data?.nextblock}
       tooltip={data?.nextblock ? t('tooltip.next-block') : ''}
-      on:click={() => navToBlock(data?.nextblock)}
+      onclick={() => navToBlock(data?.nextblock)}
     />
   </div>
   <div class="content">
@@ -117,14 +117,14 @@
         hasFocusRect={false}
         selected={isOverview}
         variant={isOverview ? 'tertiary' : 'primary'}
-        on:click={() => onDisplay('overview')}>{t(`${baseKey}.tab.overview`)}</Button
+        onclick={() => onDisplay('overview')}>{t(`${baseKey}.tab.overview`)}</Button
       >
       <Button
         size="medium"
         hasFocusRect={false}
         selected={isJson}
         variant={isJson ? 'tertiary' : 'primary'}
-        on:click={() => onDisplay('json')}>{t(`${baseKey}.tab.json`)}</Button
+        onclick={() => onDisplay('json')}>{t(`${baseKey}.tab.json`)}</Button
       >
     </div>
     {#if isOverview}

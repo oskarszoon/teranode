@@ -241,7 +241,7 @@
           icon="icon-status-light-glow-solid"
           iconColor={connected ? '#15B241' : '#CE1722'}
           uppercase={true}
-          on:click={onLive}
+          onclick={onLive}
         >
           {usingLiveData ? t(`${pageKey}.live`) : t(`${pageKey}.paused`)}
         </Button>

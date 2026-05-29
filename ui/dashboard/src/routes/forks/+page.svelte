@@ -98,7 +98,7 @@
       <Button
         size="small"
         disabled={!nearestForks?.prev_fork}
-        on:click={() => nearestForks?.prev_fork && goToFork(nearestForks.prev_fork.parent_hash)}
+        onclick={() => nearestForks?.prev_fork && goToFork(nearestForks.prev_fork.parent_hash)}
       >
         &larr; Prev fork{nearestForks?.prev_fork ? ` (h: ${nearestForks.prev_fork.height})` : ''}
       </Button>
@@ -112,7 +112,7 @@
       <Button
         size="small"
         disabled={!nearestForks?.next_fork}
-        on:click={() => nearestForks?.next_fork && goToFork(nearestForks.next_fork.parent_hash)}
+        onclick={() => nearestForks?.next_fork && goToFork(nearestForks.next_fork.parent_hash)}
       >
         Next fork{nearestForks?.next_fork ? ` (h: ${nearestForks.next_fork.height})` : ''} &rarr;
       </Button>
