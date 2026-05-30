@@ -25,7 +25,19 @@ fi
 # Enumerate with the SAME build config the smoketest run uses (no -tags) so the
 # listed set matches what actually executes — otherwise a tag-gated test could be
 # distributed to a shard's -run regex but never compiled/run, silently dropping it.
-mapfile -t tests < <(cd "$PKG" && go test -list '.*' 2>/dev/null | grep '^Test' | sort)
+# Run go test -list explicitly (not in a process substitution, which would hide a
+# non-zero exit) so a failure errors out instead of yielding an empty list — which
+# would make a shard test nothing yet pass green.
+if ! raw=$(cd "$PKG" && go test -list '.*' 2>&1); then
+    echo "Error: 'go test -list' failed in '$PKG':" >&2
+    printf '%s\n' "$raw" >&2
+    exit 1
+fi
+mapfile -t tests < <(printf '%s\n' "$raw" | grep '^Test' | sort)
+if [ ${#tests[@]} -eq 0 ]; then
+    echo "Error: no tests found in '$PKG' (go test -list returned none)" >&2
+    exit 1
+fi
 
 sel=()
 i=0

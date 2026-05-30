@@ -54,6 +54,14 @@ if [ -n "$TOTAL" ]; then
     fi
 fi
 
+# --db (legacy name-substring filter) and --shard must not be combined: the shard
+# index spans the full list and --db is applied afterward, which would leave shards
+# uneven. They are mutually exclusive.
+if [ -n "$DB_FILTER" ] && [ -n "$TOTAL" ]; then
+    echo "Error: --db cannot be combined with --shard/--total" >&2
+    exit 1
+fi
+
 # Common test flags
 TEST_FLAGS="-timeout 120 -tags aerospike,native,functional,test_sequentially,test_all,memory,postgres,sqlite -count=1"
 
