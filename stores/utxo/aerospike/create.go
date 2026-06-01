@@ -331,7 +331,7 @@ func (s *Store) sendStoreBatch(batch []*BatchStoreItem) {
 			external = true
 		}
 
-		binsToStore, err = s.GetBinsToStore(bItem.tx, bItem.blockHeight, bItem.blockIDs, bItem.blockHeights, bItem.subtreeIdxs, external, bItem.txHash, bItem.isCoinbase, bItem.conflicting, bItem.locked) // false is to say this is a normal record, not external.
+		binsToStore, err = s.GetBinsToStore(bItem.tx, bItem.blockHeight, bItem.blockIDs, bItem.blockHeights, bItem.subtreeIdxs, external, bItem.txHash, bItem.isCoinbase, bItem.conflicting, bItem.locked, nil) // false is to say this is a normal record, not external.
 		if err != nil {
 			util.SafeSend[error](bItem.done, errors.NewProcessingError("could not get bins to store", err))
 			resultHandledElsewhere[idx] = true
@@ -509,7 +509,7 @@ func (s *Store) sendStoreBatch(batch []*BatchStoreItem) {
 				}
 
 				if aErr.ResultCode == types.RECORD_TOO_BIG {
-					binsToStore, err = s.GetBinsToStore(batch[idx].tx, batch[idx].blockHeight, batch[idx].blockIDs, batch[idx].blockHeights, batch[idx].subtreeIdxs, true, batch[idx].txHash, batch[idx].isCoinbase, batch[idx].conflicting, batch[idx].locked) // true is to say this is a big record
+					binsToStore, err = s.GetBinsToStore(batch[idx].tx, batch[idx].blockHeight, batch[idx].blockIDs, batch[idx].blockHeights, batch[idx].subtreeIdxs, true, batch[idx].txHash, batch[idx].isCoinbase, batch[idx].conflicting, batch[idx].locked, nil) // true is to say this is a big record
 					if err != nil {
 						util.SafeSend[error](batch[idx].done, errors.NewProcessingError("could not get bins to store", err))
 						continue
@@ -719,7 +719,7 @@ func extendedTxSize(tx *bt.Tx) int {
 //   - Whether the transaction has UTXOs
 //   - Any error that occurred
 func (s *Store) GetBinsToStore(tx *bt.Tx, blockHeight uint32, blockIDs, blockHeights []uint32, subtreeIdxs []int, external bool,
-	txHash *chainhash.Hash, isCoinbase bool, isConflicting bool, isLocked bool) ([][]*aerospike.Bin, error) {
+	txHash *chainhash.Hash, isCoinbase bool, isConflicting bool, isLocked bool, arena *bt.Arena) ([][]*aerospike.Bin, error) {
 	var (
 		fee          uint64
 		utxoHashes   []*chainhash.Hash
@@ -759,29 +759,7 @@ func (s *Store) GetBinsToStore(tx *bt.Tx, blockHeight uint32, blockIDs, blockHei
 		inputs = make([]interface{}, len(tx.Inputs))
 
 		for i, input := range tx.Inputs {
-			h := input.Bytes(false)
-
-			// this is needed for extended txs, go-bt does not do this itself
-			h = append(h, []byte{
-				byte(input.PreviousTxSatoshis),
-				byte(input.PreviousTxSatoshis >> 8),
-				byte(input.PreviousTxSatoshis >> 16),
-				byte(input.PreviousTxSatoshis >> 24),
-				byte(input.PreviousTxSatoshis >> 32),
-				byte(input.PreviousTxSatoshis >> 40),
-				byte(input.PreviousTxSatoshis >> 48),
-				byte(input.PreviousTxSatoshis >> 56),
-			}...)
-
-			if input.PreviousTxScript == nil {
-				h = append(h, bt.VarInt(0).Bytes()...)
-			} else {
-				l := uint64(len(*input.PreviousTxScript))
-				h = append(h, bt.VarInt(l).Bytes()...)
-				h = append(h, *input.PreviousTxScript...)
-			}
-
-			inputs[i] = h
+			inputs[i] = appendInputExtendedInto(arena, input)
 		}
 	}
 
@@ -790,7 +768,7 @@ func (s *Store) GetBinsToStore(tx *bt.Tx, blockHeight uint32, blockIDs, blockHei
 
 	for i, output := range tx.Outputs {
 		if output != nil {
-			outputs[i] = output.Bytes()
+			outputs[i] = appendOutputInto(arena, output)
 
 			// store all coinbases, non-zero utxos and exceptions from pre-genesis
 			if utxo.ShouldStoreOutputAsUTXO(isCoinbase, output, blockHeight) {
