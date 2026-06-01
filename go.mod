@@ -33,7 +33,7 @@ require (
 	github.com/lib/pq v1.10.9
 	github.com/libp2p/go-libp2p v0.48.0
 	github.com/libp2p/go-libp2p-kad-dht v0.39.1 // indirect
-	github.com/libp2p/go-libp2p-pubsub v0.15.0
+	github.com/libp2p/go-libp2p-pubsub v0.15.0 // indirect
 	github.com/looplab/fsm v1.0.2
 	github.com/mrz1836/go-datastore v1.2.6
 	github.com/mrz1836/go-logger v1.0.4
