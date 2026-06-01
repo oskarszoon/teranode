@@ -7,10 +7,9 @@ import (
 
 	"github.com/bsv-blockchain/go-bt/v2"
 	"github.com/bsv-blockchain/go-bt/v2/bscript"
-	"github.com/stretchr/testify/require"
-
 	"github.com/bsv-blockchain/teranode/stores/utxo/fields"
 	"github.com/bsv-blockchain/teranode/util/test"
+	"github.com/stretchr/testify/require"
 )
 
 // TestCreateArena_ConcurrentReuseNoCorruption verifies that the pool's
