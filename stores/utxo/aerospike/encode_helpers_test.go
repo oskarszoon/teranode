@@ -152,6 +152,24 @@ func TestAppendInputExtendedInto_NilPrevScript(t *testing.T) {
 	require.Equal(t, want, appendInputExtendedInto(arena, in))
 }
 
+func TestExtendedTxSize_NilPrevTxIDHash(t *testing.T) {
+	// An input with no previousTxIDHash set: go-bt's ExtendedBytes() omits the
+	// 32 txid bytes, but Input.Size() counts them. extendedTxSize must still
+	// match len(ExtendedBytes()) — i.e. not rely on the hash being set.
+	tx := bt.NewTx()
+	in := &bt.Input{PreviousTxOutIndex: 0, PreviousTxSatoshis: 1000, SequenceNumber: 0xffffffff}
+	in.UnlockingScript = &bscript.Script{}
+	script, err := bscript.NewFromHexString("76a914000000000000000000000000000000000000000088ac")
+	require.NoError(t, err)
+	in.PreviousTxScript = script
+	// deliberately do NOT set the previousTxIDHash
+	require.Nil(t, in.PreviousTxIDChainHash(), "precondition for this test: hash is nil")
+	tx.Inputs = append(tx.Inputs, in)
+	tx.Outputs = append(tx.Outputs, &bt.Output{Satoshis: 1, LockingScript: script})
+
+	require.Equal(t, len(tx.ExtendedBytes()), extendedTxSize(tx))
+}
+
 func BenchmarkAppendOutputInto_Arena(b *testing.B) {
 	s, _ := bscript.NewFromHexString("76a914000000000000000000000000000000000000000088ac")
 	out := &bt.Output{Satoshis: 1, LockingScript: s}

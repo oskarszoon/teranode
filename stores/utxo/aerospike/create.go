@@ -692,16 +692,16 @@ func appendInputExtendedInto(arena *bt.Arena, in *bt.Input) []byte {
 // plus per-input PreviousTxSatoshis(8) and the previous-script varint+bytes
 // (a nil PreviousTxScript serializes as a single 0x00 == VarInt(0)).
 //
-// Precondition: every input has its previousTxIDHash set (non-nil). This holds
-// for all txs reaching GetBinsToStore — bytes-decoded txs and legacy
-// WireTxToGoBtTx (which calls PreviousTxIDAdd per input) both populate it, and a
-// coinbase's input carries 32 zero bytes (still non-nil). bt.Input.Size()
-// unconditionally counts those 32 bytes while ExtendedBytes() omits a nil hash,
-// so a nil-hash input would make this overcount by 32 — not reachable in the
-// store path.
+// bt.Input.Size() counts 32 bytes for the previous txid unconditionally, but
+// ExtendedBytes() omits them when previousTxIDHash is nil; the correction below
+// keeps this exact for inputs with an unset hash too (production txs always set
+// it — via decode or WireTxToGoBtTx — but we don't rely on that).
 func extendedTxSize(tx *bt.Tx) int {
 	size := tx.Size() + 6
 	for _, in := range tx.Inputs {
+		if in.PreviousTxIDChainHash() == nil {
+			size -= 32
+		}
 		size += 8
 		if in.PreviousTxScript == nil {
 			size += 1
