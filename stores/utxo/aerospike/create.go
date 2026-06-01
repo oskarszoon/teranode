@@ -295,6 +295,9 @@ func (s *Store) sendStoreBatch(batch []*BatchStoreItem) {
 		err         error
 	)
 
+	arena := getCreateArena()
+	defer putCreateArena(arena)
+
 	for idx, bItem := range batch {
 		key, err = aerospike.NewKey(s.namespace, s.setName, bItem.txHash[:])
 		if err != nil {
@@ -331,7 +334,7 @@ func (s *Store) sendStoreBatch(batch []*BatchStoreItem) {
 			external = true
 		}
 
-		binsToStore, err = s.GetBinsToStore(bItem.tx, bItem.blockHeight, bItem.blockIDs, bItem.blockHeights, bItem.subtreeIdxs, external, bItem.txHash, bItem.isCoinbase, bItem.conflicting, bItem.locked, nil) // false is to say this is a normal record, not external.
+		binsToStore, err = s.GetBinsToStore(bItem.tx, bItem.blockHeight, bItem.blockIDs, bItem.blockHeights, bItem.subtreeIdxs, external, bItem.txHash, bItem.isCoinbase, bItem.conflicting, bItem.locked, arena) // false is to say this is a normal record, not external.
 		if err != nil {
 			util.SafeSend[error](bItem.done, errors.NewProcessingError("could not get bins to store", err))
 			resultHandledElsewhere[idx] = true
@@ -345,6 +348,19 @@ func (s *Store) sendStoreBatch(batch []*BatchStoreItem) {
 		start = stat.NewStat("GetBinsToStore").AddTime(start)
 
 		if len(binsToStore) > 1 {
+			// This tx splits into multiple records and is persisted by a goroutine
+			// that outlives sendStoreBatch (and the per-batch arena). Rebuild its
+			// bins with heap-owned backing (nil arena) so the deferred arena reset
+			// cannot corrupt the bytes the goroutine still references.
+			binsToStore, err = s.GetBinsToStore(bItem.tx, bItem.blockHeight, bItem.blockIDs, bItem.blockHeights, bItem.subtreeIdxs, external, bItem.txHash, bItem.isCoinbase, bItem.conflicting, bItem.locked, nil)
+			if err != nil {
+				util.SafeSend[error](bItem.done, errors.NewProcessingError("could not rebuild bins for external store", err))
+				resultHandledElsewhere[idx] = true
+				batchRecords[idx] = aerospike.NewBatchRead(nil, placeholderKey, nil)
+
+				continue
+			}
+
 			// Make this batch item a NOOP and persist all of these to be written via a queue
 			batchRecords[idx] = aerospike.NewBatchRead(nil, placeholderKey, nil)
 			// Goroutine takes ownership of bItem.done; the per-record loop must not touch it.
