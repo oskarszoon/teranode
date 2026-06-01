@@ -600,6 +600,76 @@ func (s *Store) splitIntoBatches(utxos []interface{}, commonBins []*aerospike.Bi
 	return batches
 }
 
+// appendOutputInto serializes output in standard format (satoshis(8 LE) +
+// VarInt(scriptLen) + script) into an arena-backed slice. Replicates go-bt's
+// unexported Output.appendTo. When arena is nil it allocates via make. Zero
+// heap allocations on the arena path (output.Size() gives the exact length).
+func appendOutputInto(arena *bt.Arena, o *bt.Output) []byte {
+	size := o.Size()
+	var buf []byte
+	if arena != nil {
+		buf = arena.Alloc(size)[:0]
+	} else {
+		buf = make([]byte, 0, size)
+	}
+	buf = append(buf,
+		byte(o.Satoshis), byte(o.Satoshis>>8), byte(o.Satoshis>>16), byte(o.Satoshis>>24),
+		byte(o.Satoshis>>32), byte(o.Satoshis>>40), byte(o.Satoshis>>48), byte(o.Satoshis>>56))
+	buf = bt.VarInt(uint64(len(*o.LockingScript))).AppendTo(buf)
+	return append(buf, *o.LockingScript...)
+}
+
+// appendInputExtendedInto serializes input in the store's extended format
+// (standard input bytes + PreviousTxSatoshis(8 LE) + VarInt(prevScriptLen) +
+// prevScript; nil prevScript => single 0x00) into an arena-backed slice.
+// Matches the previous manual layout in GetBinsToStore. When arena is nil it
+// allocates via make.
+func appendInputExtendedInto(arena *bt.Arena, in *bt.Input) []byte {
+	size := in.Size() + 8
+	if in.PreviousTxScript == nil {
+		size += 1
+	} else {
+		l := len(*in.PreviousTxScript)
+		size += bt.VarInt(uint64(l)).Length() + l
+	}
+
+	var buf []byte
+	if arena != nil {
+		buf = arena.Alloc(size)[:0]
+	} else {
+		buf = make([]byte, 0, size)
+	}
+
+	// standard input layout (previousTxIDHash + outindex + unlocking script + sequence)
+	if in.PreviousTxIDChainHash() != nil {
+		buf = append(buf, in.PreviousTxIDChainHash()[:]...)
+	}
+	buf = append(buf,
+		byte(in.PreviousTxOutIndex), byte(in.PreviousTxOutIndex>>8),
+		byte(in.PreviousTxOutIndex>>16), byte(in.PreviousTxOutIndex>>24))
+	if in.UnlockingScript == nil {
+		buf = append(buf, 0x00)
+	} else {
+		buf = bt.VarInt(uint64(len(*in.UnlockingScript))).AppendTo(buf)
+		buf = append(buf, *in.UnlockingScript...)
+	}
+	buf = append(buf,
+		byte(in.SequenceNumber), byte(in.SequenceNumber>>8),
+		byte(in.SequenceNumber>>16), byte(in.SequenceNumber>>24))
+
+	// extended suffix
+	buf = append(buf,
+		byte(in.PreviousTxSatoshis), byte(in.PreviousTxSatoshis>>8), byte(in.PreviousTxSatoshis>>16), byte(in.PreviousTxSatoshis>>24),
+		byte(in.PreviousTxSatoshis>>32), byte(in.PreviousTxSatoshis>>40), byte(in.PreviousTxSatoshis>>48), byte(in.PreviousTxSatoshis>>56))
+	if in.PreviousTxScript == nil {
+		buf = append(buf, 0x00)
+	} else {
+		buf = bt.VarInt(uint64(len(*in.PreviousTxScript))).AppendTo(buf)
+		buf = append(buf, *in.PreviousTxScript...)
+	}
+	return buf
+}
+
 // extendedTxSize returns len(tx.ExtendedBytes()) without serializing the tx.
 // Mirrors go-bt's extended layout: standard size, plus the 6-byte EF marker,
 // plus per-input PreviousTxSatoshis(8) and the previous-script varint+bytes
