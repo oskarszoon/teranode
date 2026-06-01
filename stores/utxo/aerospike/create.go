@@ -319,7 +319,7 @@ func (s *Store) sendStoreBatch(batch []*BatchStoreItem) {
 			// This is a partial transaction, and we calculate the size of the outputs only
 			for _, output := range batch[idx].tx.Outputs {
 				if output != nil {
-					extendedSize += len(output.Bytes())
+					extendedSize += output.Size()
 				}
 			}
 		} else {
