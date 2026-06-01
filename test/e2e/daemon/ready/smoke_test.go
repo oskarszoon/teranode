@@ -997,7 +997,6 @@ func TestRPCQueries(t *testing.T) {
 	// Fixture chain mined ONCE. Returns block 1's coinbase, spendable at the
 	// current tip (CoinbaseMaturity is overridden to 1 by NewTestDaemon).
 	spendableCoinbase := td.MineToMaturityAndGetSpendableCoinbaseTx(t, td.Ctx)
-	_ = spendableCoinbase // consumed by the GetRawTransactionVerbose subtest (added in Task 5)
 
 	t.Run("Version", func(t *testing.T) {
 		resp, err := td.CallRPC(td.Ctx, "version", []any{})
@@ -1301,143 +1300,114 @@ func TestRPCQueries(t *testing.T) {
 		require.Nil(t, getMiningCandidateVerboseResp.Error, "Should not have an error")
 		require.NotNil(t, getMiningCandidateVerboseResp.Result, "Result should not be nil")
 	})
-}
 
-func TestGetRawTransactionVerbose(t *testing.T) {
-	// t.Parallel()
-	// t.Skip("Skipping getrawtransaction verbose test, covered by TestSendTxAndCheckState")
+	// GetRawTransactionVerbose runs LAST: it broadcasts a tx (additive mutation)
+	// built from the fixture's spendable coinbase. No other subtest spends it.
+	t.Run("GetRawTransactionVerbose", func(t *testing.T) {
+		var err error
 
-	td := daemon.NewTestDaemon(t, daemon.TestOptions{
-		EnableRPC:            true,
-		UTXOStoreType:        "aerospike",
-		SettingsOverrideFunc: test.SystemTestSettings(),
+		// Build and broadcast a transaction spending the shared fixture coinbase.
+		newTx := td.CreateTransactionWithOptions(t,
+			transactions.WithInput(spendableCoinbase, 0),
+			transactions.WithP2PKHOutputs(1, 10000),
+		)
+
+		txBytes := hex.EncodeToString(newTx.ExtendedBytes())
+		_, err = td.CallRPC(td.Ctx, "sendrawtransaction", []any{txBytes})
+		require.NoError(t, err, "Failed to send transaction")
+
+		txid := newTx.TxIDChainHash().String()
+
+		// Test createrawtransaction RPC: create a new key/address for the output.
+		privateKey, err := bec.NewPrivateKey()
+		require.NoError(t, err)
+		address, err := bscript.NewAddressFromPublicKey(privateKey.PubKey(), false)
+		require.NoError(t, err)
+
+		inputs := []map[string]interface{}{
+			{
+				"txid": newTx.TxIDChainHash().String(),
+				"vout": 0,
+			},
+		}
+
+		outputs := map[string]float64{
+			address.AddressString: 0.00009000, // 9000 satoshis in BTC
+		}
+
+		resp, err := td.CallRPC(td.Ctx, "createrawtransaction", []any{inputs, outputs})
+		require.NoError(t, err, "Failed to call createrawtransaction")
+
+		var createRawTxResp struct {
+			Result string      `json:"result"`
+			Error  interface{} `json:"error"`
+			ID     int         `json:"id"`
+		}
+		err = json.Unmarshal([]byte(resp), &createRawTxResp)
+		require.NoError(t, err)
+		require.Nil(t, createRawTxResp.Error, "createrawtransaction should not have an error")
+		require.NotEmpty(t, createRawTxResp.Result, "createrawtransaction should return a hex string")
+
+		t.Logf("Created raw transaction: %s", createRawTxResp.Result)
+
+		createdTxBytes, err := hex.DecodeString(createRawTxResp.Result)
+		require.NoError(t, err, "Created transaction should be valid hex")
+		createdTx, err := bt.NewTxFromBytes(createdTxBytes)
+		require.NoError(t, err, "Created transaction should be parseable")
+
+		t.Logf("Created transaction ID: %s", createdTx.TxID())
+		t.Logf("Created transaction has %d inputs and %d outputs", len(createdTx.Inputs), len(createdTx.Outputs))
+
+		require.Len(t, createdTx.Inputs, 1, "Created transaction should have 1 input")
+		require.Len(t, createdTx.Outputs, 1, "Created transaction should have 1 output")
+		require.Equal(t, newTx.TxIDChainHash().String(), createdTx.Inputs[0].PreviousTxIDStr(), "Input should reference the original transaction")
+		require.Equal(t, uint32(0), createdTx.Inputs[0].PreviousTxOutIndex, "Input should reference output 0")
+		require.Equal(t, uint64(9000), createdTx.Outputs[0].Satoshis, "Output should have 9000 satoshis")
+
+		// getrawtransaction with verbose=0 (hex string)
+		resp, err = td.CallRPC(td.Ctx, "getrawtransaction", []any{txid, 0})
+		require.NoError(t, err, "Failed to call getrawtransaction with verbose=0")
+
+		var getRawTxHexResp struct {
+			Result string      `json:"result"`
+			Error  interface{} `json:"error"`
+			ID     int         `json:"id"`
+		}
+
+		err = json.Unmarshal([]byte(resp), &getRawTxHexResp)
+		require.NoError(t, err)
+
+		td.LogJSON(t, "getRawTransactionHex", getRawTxHexResp)
+
+		require.Nil(t, getRawTxHexResp.Error, "Should not have an error")
+		require.NotEmpty(t, getRawTxHexResp.Result, "Transaction hex should not be empty")
+		require.Regexp(t, "^[0-9a-fA-F]+$", getRawTxHexResp.Result, "Result should be hex string")
+		t.Logf("Transaction hex length: %d", len(getRawTxHexResp.Result))
+
+		// getrawtransaction with verbose=1 (JSON format)
+		resp, err = td.CallRPC(td.Ctx, "getrawtransaction", []any{txid, 1})
+		require.NoError(t, err, "Failed to call getrawtransaction with verbose=1")
+
+		var getRawTxVerboseResp helper.GetRawTransactionResponse
+		err = json.Unmarshal([]byte(resp), &getRawTxVerboseResp)
+		require.NoError(t, err)
+
+		td.LogJSON(t, "getRawTransactionVerbose", getRawTxVerboseResp)
+
+		require.Nil(t, getRawTxVerboseResp.Error, "Should not have an error")
+		require.NotNil(t, getRawTxVerboseResp.Result, "Result should not be nil")
+		require.Equal(t, txid, getRawTxVerboseResp.Result.Txid, "Transaction ID should match")
+		require.NotEmpty(t, getRawTxVerboseResp.Result.Hex, "Transaction hex should not be empty")
+		require.Greater(t, getRawTxVerboseResp.Result.Size, int32(0), "Transaction size should be greater than 0")
+		require.Greater(t, getRawTxVerboseResp.Result.Version, int32(0), "Transaction version should be greater than 0")
+
+		t.Logf("Transaction size: %d bytes, version: %d", getRawTxVerboseResp.Result.Size, getRawTxVerboseResp.Result.Version)
+
+		_, err = td.CallRPC(td.Ctx, "sendrawtransaction", []any{getRawTxVerboseResp.Result.Hex})
+		require.NoError(t, err, "Failed to send raw transaction")
+
+		t.Logf("Sent raw transaction: %s", getRawTxVerboseResp.Result.Hex)
 	})
-
-	defer td.Stop(t, true)
-
-	var err error
-
-	// Mine some blocks and create a transaction to test with
-	coinbaseTx := td.MineToMaturityAndGetSpendableCoinbaseTx(t, td.Ctx)
-
-	// Create and send a transaction
-	newTx := td.CreateTransactionWithOptions(t,
-		transactions.WithInput(coinbaseTx, 0),
-		transactions.WithP2PKHOutputs(1, 10000),
-	)
-
-	txBytes := hex.EncodeToString(newTx.ExtendedBytes())
-	_, err = td.CallRPC(td.Ctx, "sendrawtransaction", []any{txBytes})
-	require.NoError(t, err, "Failed to send transaction")
-
-	txid := newTx.TxIDChainHash().String()
-
-	// Test createrawtransaction RPC
-	// Create a new private key and address for the output
-	privateKey, err := bec.NewPrivateKey()
-	require.NoError(t, err)
-	address, err := bscript.NewAddressFromPublicKey(privateKey.PubKey(), false)
-	require.NoError(t, err)
-
-	// Create inputs array - using the first transaction we created
-	inputs := []map[string]interface{}{
-		{
-			"txid": newTx.TxIDChainHash().String(),
-			"vout": 0,
-		},
-	}
-
-	// Create outputs map - send to our new address
-	outputs := map[string]float64{
-		address.AddressString: 0.00009000, // 9000 satoshis in BTC
-	}
-
-	// Call createrawtransaction RPC
-	resp, err := td.CallRPC(td.Ctx, "createrawtransaction", []any{inputs, outputs})
-	require.NoError(t, err, "Failed to call createrawtransaction")
-
-	//
-
-	// Parse the response to get the raw transaction hex
-	var createRawTxResp struct {
-		Result string      `json:"result"`
-		Error  interface{} `json:"error"`
-		ID     int         `json:"id"`
-	}
-	err = json.Unmarshal([]byte(resp), &createRawTxResp)
-	require.NoError(t, err)
-	require.Nil(t, createRawTxResp.Error, "createrawtransaction should not have an error")
-	require.NotEmpty(t, createRawTxResp.Result, "createrawtransaction should return a hex string")
-
-	t.Logf("Created raw transaction: %s", createRawTxResp.Result)
-
-	// Verify the created transaction is valid hex and can be decoded
-	createdTxBytes, err := hex.DecodeString(createRawTxResp.Result)
-	require.NoError(t, err, "Created transaction should be valid hex")
-	createdTx, err := bt.NewTxFromBytes(createdTxBytes)
-	require.NoError(t, err, "Created transaction should be parseable")
-
-	t.Logf("Created transaction ID: %s", createdTx.TxID())
-	t.Logf("Created transaction has %d inputs and %d outputs", len(createdTx.Inputs), len(createdTx.Outputs))
-
-	// Verify the created transaction structure
-	require.Len(t, createdTx.Inputs, 1, "Created transaction should have 1 input")
-	require.Len(t, createdTx.Outputs, 1, "Created transaction should have 1 output")
-	require.Equal(t, newTx.TxIDChainHash().String(), createdTx.Inputs[0].PreviousTxIDStr(), "Input should reference the original transaction")
-	require.Equal(t, uint32(0), createdTx.Inputs[0].PreviousTxOutIndex, "Input should reference output 0")
-	require.Equal(t, uint64(9000), createdTx.Outputs[0].Satoshis, "Output should have 9000 satoshis")
-
-	// Send the created raw transaction to the network so we can test getrawtransaction on it
-	// Note: This will fail because the transaction is not signed, but we can still test createrawtransaction worked
-	// For now, just test the original transaction that was properly created and sent
-
-	// Test getrawtransaction with verbose=0 (hex string) - this is the default
-	resp, err = td.CallRPC(td.Ctx, "getrawtransaction", []any{txid, 0})
-	require.NoError(t, err, "Failed to call getrawtransaction with verbose=0")
-
-	var getRawTxHexResp struct {
-		Result string      `json:"result"`
-		Error  interface{} `json:"error"`
-		ID     int         `json:"id"`
-	}
-
-	err = json.Unmarshal([]byte(resp), &getRawTxHexResp)
-	require.NoError(t, err)
-
-	td.LogJSON(t, "getRawTransactionHex", getRawTxHexResp)
-
-	// Verify verbose=0 response (hex string)
-	require.Nil(t, getRawTxHexResp.Error, "Should not have an error")
-	require.NotEmpty(t, getRawTxHexResp.Result, "Transaction hex should not be empty")
-	require.Regexp(t, "^[0-9a-fA-F]+$", getRawTxHexResp.Result, "Result should be hex string")
-	t.Logf("Transaction hex length: %d", len(getRawTxHexResp.Result))
-
-	// Test getrawtransaction with verbose=1 (JSON format)
-	resp, err = td.CallRPC(td.Ctx, "getrawtransaction", []any{txid, 1})
-	require.NoError(t, err, "Failed to call getrawtransaction with verbose=1")
-
-	var getRawTxVerboseResp helper.GetRawTransactionResponse
-	err = json.Unmarshal([]byte(resp), &getRawTxVerboseResp)
-	require.NoError(t, err)
-
-	td.LogJSON(t, "getRawTransactionVerbose", getRawTxVerboseResp)
-
-	// Verify verbose=1 response (JSON format)
-	require.Nil(t, getRawTxVerboseResp.Error, "Should not have an error")
-	require.NotNil(t, getRawTxVerboseResp.Result, "Result should not be nil")
-	require.Equal(t, txid, getRawTxVerboseResp.Result.Txid, "Transaction ID should match")
-	require.NotEmpty(t, getRawTxVerboseResp.Result.Hex, "Transaction hex should not be empty")
-	require.Greater(t, getRawTxVerboseResp.Result.Size, int32(0), "Transaction size should be greater than 0")
-	require.Greater(t, getRawTxVerboseResp.Result.Version, int32(0), "Transaction version should be greater than 0")
-
-	// Note: The current implementation doesn't include Vin/Vout fields in verbose mode
-	// This is a limitation of the current RPC implementation
-	t.Logf("Transaction size: %d bytes, version: %d", getRawTxVerboseResp.Result.Size, getRawTxVerboseResp.Result.Version)
-
-	_, err = td.CallRPC(td.Ctx, "sendrawtransaction", []any{getRawTxVerboseResp.Result.Hex})
-	require.NoError(t, err, "Failed to send raw transaction")
-
-	t.Logf("Sent raw transaction: %s", getRawTxVerboseResp.Result.Hex)
 }
 
 func TestCreateAndSendRawTransaction(t *testing.T) {
