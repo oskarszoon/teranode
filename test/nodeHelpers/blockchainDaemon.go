@@ -115,12 +115,6 @@ func (m *BlockchainDaemon) StartBlockchainService() error {
 		return err
 	}
 
-	// Create blockchain client using the configured address from settings
-	m.BlockchainClient, err = blockchain.NewClient(m.ctx, m.Logger, m.Settings, m.Settings.BlockChain.GRPCListenAddress)
-	if err != nil {
-		return err
-	}
-
 	// Start all services in background
 	go func() {
 		if err := m.serviceManager.Wait(); err != nil {
@@ -128,8 +122,18 @@ func (m *BlockchainDaemon) StartBlockchainService() error {
 		}
 	}()
 
-	// Wait for all services to be ready
+	// Wait for all services to be ready. StartGRPCServer binds the listening
+	// socket before the service signals readiness (GetListener -> register/close
+	// readyCh -> Serve), so creating the client only after this point removes the
+	// connection-refused race the client retry budget otherwise had to bridge
+	// under load.
 	m.serviceManager.WaitForServiceToBeReady()
+
+	// Create blockchain client using the configured address from settings
+	m.BlockchainClient, err = blockchain.NewClient(m.ctx, m.Logger, m.Settings, m.Settings.BlockChain.GRPCListenAddress)
+	if err != nil {
+		return err
+	}
 
 	// Check initial FSM state
 	initialState, err := m.BlockchainClient.GetFSMCurrentState(m.ctx)
