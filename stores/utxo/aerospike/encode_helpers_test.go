@@ -152,6 +152,20 @@ func TestAppendInputExtendedInto_NilPrevScript(t *testing.T) {
 	require.Equal(t, want, appendInputExtendedInto(arena, in))
 }
 
+func BenchmarkAppendOutputInto_Arena(b *testing.B) {
+	s, _ := bscript.NewFromHexString("76a914000000000000000000000000000000000000000088ac")
+	out := &bt.Output{Satoshis: 1, LockingScript: s}
+	arena := bt.NewArena(1 << 16)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if arena.Used() > 1<<15 {
+			arena.Reset()
+		}
+		_ = appendOutputInto(arena, out)
+	}
+}
+
 func TestAppendHelpers_LargeScripts(t *testing.T) {
 	big := make([]byte, 300) // > 252 => 3-byte VarInt length prefix
 	for i := range big {
