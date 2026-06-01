@@ -981,6 +981,67 @@ func TestDoubleInput(t *testing.T) {
 
 }
 
+// TestRPCQueries shares one daemon across read-only RPC query subtests.
+// The fixture chain is mined once; subtests query it without mutating shared
+// state, except GetRawTransactionVerbose (added last) which only adds its own
+// tx. This collapses what were 8 separate daemons + Aerospike containers into 1.
+func TestRPCQueries(t *testing.T) {
+	td := daemon.NewTestDaemon(t, daemon.TestOptions{
+		EnableRPC:            true,
+		UTXOStoreType:        "aerospike",
+		SettingsOverrideFunc: test.SystemTestSettings(),
+	})
+
+	defer td.Stop(t, true)
+
+	// Fixture chain mined ONCE. Returns block 1's coinbase, spendable at the
+	// current tip (CoinbaseMaturity is overridden to 1 by NewTestDaemon).
+	spendableCoinbase := td.MineToMaturityAndGetSpendableCoinbaseTx(t, td.Ctx)
+	_ = spendableCoinbase // consumed by the GetRawTransactionVerbose subtest (added in Task 5)
+
+	t.Run("Version", func(t *testing.T) {
+		resp, err := td.CallRPC(td.Ctx, "version", []any{})
+		require.NoError(t, err, "Failed to call version")
+
+		var versionResp struct {
+			Result map[string]interface{} `json:"result"`
+			Error  interface{}            `json:"error"`
+			ID     int                    `json:"id"`
+		}
+
+		err = json.Unmarshal([]byte(resp), &versionResp)
+		require.NoError(t, err)
+
+		td.LogJSON(t, "version", versionResp)
+
+		require.Nil(t, versionResp.Error, "Should not have an error")
+		require.NotNil(t, versionResp.Result, "Version result should not be nil")
+		require.NotEmpty(t, versionResp.Result, "Version result should not be empty")
+
+		if btcdInfo, ok := versionResp.Result["btcdjsonrpcapi"]; ok {
+			require.NotNil(t, btcdInfo, "btcdjsonrpcapi version info should be present")
+			t.Logf("btcdjsonrpcapi version info: %+v", btcdInfo)
+		}
+	})
+
+	t.Run("GetPeerInfo", func(t *testing.T) {
+		resp, err := td.CallRPC(td.Ctx, "getpeerinfo", []any{})
+		require.NoError(t, err, "Failed to call getpeerinfo")
+
+		var getPeerInfoResp helper.P2PRPCResponse
+		err = json.Unmarshal([]byte(resp), &getPeerInfoResp)
+		require.NoError(t, err)
+
+		td.LogJSON(t, "getPeerInfo", getPeerInfoResp)
+
+		require.Nil(t, getPeerInfoResp.Error, "Should not have an error")
+		require.NotNil(t, getPeerInfoResp.Result, "Result should not be nil")
+		require.IsType(t, []helper.P2PNode{}, getPeerInfoResp.Result, "Result should be an array of P2PNode")
+
+		t.Logf("Number of peers: %d", len(getPeerInfoResp.Result))
+	})
+}
+
 func TestGetBestBlockHash(t *testing.T) {
 	// t.Parallel()
 	td := daemon.NewTestDaemon(t, daemon.TestOptions{
@@ -1014,39 +1075,6 @@ func TestGetBestBlockHash(t *testing.T) {
 	bestBlock, _, err := td.BlockchainClient.GetBestBlockHeader(td.Ctx)
 	require.NoError(t, err)
 	require.Equal(t, bestBlock.Hash().String(), getBestBlockHashResp.Result, "Should match the actual best block hash")
-}
-
-func TestGetPeerInfo(t *testing.T) {
-	// t.Parallel()
-	td := daemon.NewTestDaemon(t, daemon.TestOptions{
-		EnableRPC:            true,
-		UTXOStoreType:        "aerospike",
-		SettingsOverrideFunc: test.SystemTestSettings(),
-	})
-
-	defer td.Stop(t, true)
-
-	var err error
-
-	// Test getpeerinfo
-	resp, err := td.CallRPC(td.Ctx, "getpeerinfo", []any{})
-	require.NoError(t, err, "Failed to call getpeerinfo")
-
-	var getPeerInfoResp helper.P2PRPCResponse
-	err = json.Unmarshal([]byte(resp), &getPeerInfoResp)
-	require.NoError(t, err)
-
-	td.LogJSON(t, "getPeerInfo", getPeerInfoResp)
-
-	// Verify the response structure
-	require.Nil(t, getPeerInfoResp.Error, "Should not have an error")
-	require.NotNil(t, getPeerInfoResp.Result, "Result should not be nil")
-
-	// In a test environment, we might not have any peers connected
-	// So we just verify the response structure is correct
-	require.IsType(t, []helper.P2PNode{}, getPeerInfoResp.Result, "Result should be an array of P2PNode")
-
-	t.Logf("Number of peers: %d", len(getPeerInfoResp.Result))
 }
 
 func TestGetMiningInfo(t *testing.T) {
@@ -1086,45 +1114,6 @@ func TestGetMiningInfo(t *testing.T) {
 		getMiningInfoResp.Result.Blocks,
 		getMiningInfoResp.Result.Difficulty,
 		getMiningInfoResp.Result.Chain)
-}
-
-func TestVersion(t *testing.T) {
-	// t.Parallel()
-	td := daemon.NewTestDaemon(t, daemon.TestOptions{
-		EnableRPC:            true,
-		UTXOStoreType:        "aerospike",
-		SettingsOverrideFunc: test.SystemTestSettings(),
-	})
-
-	defer td.Stop(t, true)
-
-	var err error
-
-	// Test version command
-	resp, err := td.CallRPC(td.Ctx, "version", []any{})
-	require.NoError(t, err, "Failed to call version")
-
-	var versionResp struct {
-		Result map[string]interface{} `json:"result"`
-		Error  interface{}            `json:"error"`
-		ID     int                    `json:"id"`
-	}
-
-	err = json.Unmarshal([]byte(resp), &versionResp)
-	require.NoError(t, err)
-
-	td.LogJSON(t, "version", versionResp)
-
-	// Verify the response
-	require.Nil(t, versionResp.Error, "Should not have an error")
-	require.NotNil(t, versionResp.Result, "Version result should not be nil")
-	require.NotEmpty(t, versionResp.Result, "Version result should not be empty")
-
-	// Check if btcdjsonrpcapi version info is present
-	if btcdInfo, ok := versionResp.Result["btcdjsonrpcapi"]; ok {
-		require.NotNil(t, btcdInfo, "btcdjsonrpcapi version info should be present")
-		t.Logf("btcdjsonrpcapi version info: %+v", btcdInfo)
-	}
 }
 
 func TestGetBlockVerbosity(t *testing.T) {
