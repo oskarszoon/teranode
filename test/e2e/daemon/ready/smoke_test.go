@@ -1040,80 +1040,48 @@ func TestRPCQueries(t *testing.T) {
 
 		t.Logf("Number of peers: %d", len(getPeerInfoResp.Result))
 	})
-}
 
-func TestGetBestBlockHash(t *testing.T) {
-	// t.Parallel()
-	td := daemon.NewTestDaemon(t, daemon.TestOptions{
-		EnableRPC:            true,
-		UTXOStoreType:        "aerospike",
-		SettingsOverrideFunc: test.SystemTestSettings(),
+	t.Run("GetBestBlockHash", func(t *testing.T) {
+		resp, err := td.CallRPC(td.Ctx, "getbestblockhash", []any{})
+		require.NoError(t, err, "Failed to call getbestblockhash")
+
+		var getBestBlockHashResp helper.BestBlockHashResp
+		err = json.Unmarshal([]byte(resp), &getBestBlockHashResp)
+		require.NoError(t, err)
+
+		td.LogJSON(t, "getBestBlockHash", getBestBlockHashResp)
+
+		require.NotEmpty(t, getBestBlockHashResp.Result, "Best block hash should not be empty")
+		require.Len(t, getBestBlockHashResp.Result, 64, "Block hash should be 64 characters (32 bytes hex)")
+		require.Nil(t, getBestBlockHashResp.Error, "Should not have an error")
+
+		bestBlock, _, err := td.BlockchainClient.GetBestBlockHeader(td.Ctx)
+		require.NoError(t, err)
+		require.Equal(t, bestBlock.Hash().String(), getBestBlockHashResp.Result, "Should match the actual best block hash")
 	})
 
-	defer td.Stop(t, true)
+	t.Run("GetMiningInfo", func(t *testing.T) {
+		resp, err := td.CallRPC(td.Ctx, "getmininginfo", []any{})
+		require.NoError(t, err, "Failed to call getmininginfo")
 
-	// Mine some blocks to have a proper blockchain
-	coinbaseTx := td.MineToMaturityAndGetSpendableCoinbaseTx(t, td.Ctx)
-	_ = coinbaseTx // We just need blocks, not the transaction
+		var getMiningInfoResp helper.GetMiningInfoResponse
+		err = json.Unmarshal([]byte(resp), &getMiningInfoResp)
+		require.NoError(t, err)
 
-	// Test getbestblockhash
-	resp, err := td.CallRPC(td.Ctx, "getbestblockhash", []any{})
-	require.NoError(t, err, "Failed to call getbestblockhash")
+		td.LogJSON(t, "getMiningInfo", getMiningInfoResp)
 
-	var getBestBlockHashResp helper.BestBlockHashResp
-	err = json.Unmarshal([]byte(resp), &getBestBlockHashResp)
-	require.NoError(t, err)
+		require.Nil(t, getMiningInfoResp.Error, "Should not have an error")
+		require.NotNil(t, getMiningInfoResp.Result, "Result should not be nil")
 
-	td.LogJSON(t, "getBestBlockHash", getBestBlockHashResp)
+		require.Greater(t, getMiningInfoResp.Result.Blocks, 0, "Should have mined some blocks")
+		require.Greater(t, getMiningInfoResp.Result.Difficulty, 0.0, "Difficulty should be greater than 0")
+		require.Equal(t, "regtest", getMiningInfoResp.Result.Chain, "Should be on regtest chain")
 
-	// Verify the response
-	require.NotEmpty(t, getBestBlockHashResp.Result, "Best block hash should not be empty")
-	require.Len(t, getBestBlockHashResp.Result, 64, "Block hash should be 64 characters (32 bytes hex)")
-	require.Nil(t, getBestBlockHashResp.Error, "Should not have an error")
-
-	// Verify it matches the actual best block
-	bestBlock, _, err := td.BlockchainClient.GetBestBlockHeader(td.Ctx)
-	require.NoError(t, err)
-	require.Equal(t, bestBlock.Hash().String(), getBestBlockHashResp.Result, "Should match the actual best block hash")
-}
-
-func TestGetMiningInfo(t *testing.T) {
-	// t.Parallel()
-	td := daemon.NewTestDaemon(t, daemon.TestOptions{
-		EnableRPC:            true,
-		UTXOStoreType:        "aerospike",
-		SettingsOverrideFunc: test.SystemTestSettings(),
+		t.Logf("Blocks: %d, Difficulty: %f, Chain: %s",
+			getMiningInfoResp.Result.Blocks,
+			getMiningInfoResp.Result.Difficulty,
+			getMiningInfoResp.Result.Chain)
 	})
-
-	defer td.Stop(t, true)
-
-	// Mine some blocks to have mining data
-	coinbaseTx := td.MineToMaturityAndGetSpendableCoinbaseTx(t, td.Ctx)
-	_ = coinbaseTx // We just need blocks, not the transaction
-
-	// Test getmininginfo
-	resp, err := td.CallRPC(td.Ctx, "getmininginfo", []any{})
-	require.NoError(t, err, "Failed to call getmininginfo")
-
-	var getMiningInfoResp helper.GetMiningInfoResponse
-	err = json.Unmarshal([]byte(resp), &getMiningInfoResp)
-	require.NoError(t, err)
-
-	td.LogJSON(t, "getMiningInfo", getMiningInfoResp)
-
-	// Verify the response
-	require.Nil(t, getMiningInfoResp.Error, "Should not have an error")
-	require.NotNil(t, getMiningInfoResp.Result, "Result should not be nil")
-
-	// Verify expected fields
-	require.Greater(t, getMiningInfoResp.Result.Blocks, 0, "Should have mined some blocks")
-	require.Greater(t, getMiningInfoResp.Result.Difficulty, 0.0, "Difficulty should be greater than 0")
-	require.Equal(t, "regtest", getMiningInfoResp.Result.Chain, "Should be on regtest chain")
-
-	t.Logf("Blocks: %d, Difficulty: %f, Chain: %s",
-		getMiningInfoResp.Result.Blocks,
-		getMiningInfoResp.Result.Difficulty,
-		getMiningInfoResp.Result.Chain)
 }
 
 func TestGetBlockVerbosity(t *testing.T) {
