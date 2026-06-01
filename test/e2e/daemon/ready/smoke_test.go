@@ -1082,178 +1082,137 @@ func TestRPCQueries(t *testing.T) {
 			getMiningInfoResp.Result.Difficulty,
 			getMiningInfoResp.Result.Chain)
 	})
-}
 
-func TestGetBlockVerbosity(t *testing.T) {
-	// t.Parallel()
-	td := daemon.NewTestDaemon(t, daemon.TestOptions{
-		EnableRPC:            true,
-		UTXOStoreType:        "aerospike",
-		SettingsOverrideFunc: test.SystemTestSettings(),
+	t.Run("GetBlockVerbosity", func(t *testing.T) {
+		resp, err := td.CallRPC(td.Ctx, "getblockhash", []any{1})
+		require.NoError(t, err, "Failed to get block hash")
+
+		var getBlockHashResp helper.GetBlockHashResponse
+		err = json.Unmarshal([]byte(resp), &getBlockHashResp)
+		require.NoError(t, err)
+
+		blockHash := getBlockHashResp.Result
+
+		// Test getblock with verbosity 0 (hex string)
+		resp, err = td.CallRPC(td.Ctx, "getblock", []any{blockHash, 0})
+		require.NoError(t, err, "Failed to call getblock with verbosity 0")
+
+		var getBlockVerbosity0Resp struct {
+			Result string      `json:"result"`
+			Error  interface{} `json:"error"`
+			ID     int         `json:"id"`
+		}
+
+		err = json.Unmarshal([]byte(resp), &getBlockVerbosity0Resp)
+		require.NoError(t, err)
+
+		require.Nil(t, getBlockVerbosity0Resp.Error, "Should not have an error")
+		require.NotEmpty(t, getBlockVerbosity0Resp.Result, "Block hex should not be empty")
+		require.Regexp(t, "^[0-9a-fA-F]+$", getBlockVerbosity0Resp.Result, "Result should be hex string")
+		t.Logf("Block hex length: %d", len(getBlockVerbosity0Resp.Result))
+
+		// Test getblock with verbosity 1 (JSON with transaction IDs)
+		resp, err = td.CallRPC(td.Ctx, "getblock", []any{blockHash, 1})
+		require.NoError(t, err, "Failed to call getblock with verbosity 1")
+
+		var getBlockVerbosity1Resp helper.GetBlockByHeightResponse
+		err = json.Unmarshal([]byte(resp), &getBlockVerbosity1Resp)
+		require.NoError(t, err)
+
+		td.LogJSON(t, "getBlockVerbosity1", getBlockVerbosity1Resp)
+
+		require.Nil(t, getBlockVerbosity1Resp.Error, "Should not have an error")
+		require.NotNil(t, getBlockVerbosity1Resp.Result, "Block result should not be nil")
+		require.Equal(t, blockHash, getBlockVerbosity1Resp.Result.Hash, "Block hash should match")
+		require.Greater(t, getBlockVerbosity1Resp.Result.Height, uint32(0), "Block height should be greater than 0")
+		t.Logf("Block has %d transactions", len(getBlockVerbosity1Resp.Result.Tx))
+
+		// Test getblock with verbosity 2 (JSON with full transaction details)
+		resp, err = td.CallRPC(td.Ctx, "getblock", []any{blockHash, 2})
+		require.NoError(t, err, "Failed to call getblock with verbosity 2")
+
+		var getBlockVerbosity2Resp struct {
+			Result interface{} `json:"result"`
+			Error  interface{} `json:"error"`
+			ID     int         `json:"id"`
+		}
+
+		err = json.Unmarshal([]byte(resp), &getBlockVerbosity2Resp)
+		require.NoError(t, err)
+
+		td.LogJSON(t, "getBlockVerbosity2", getBlockVerbosity2Resp)
+
+		require.Nil(t, getBlockVerbosity2Resp.Error, "Should not have an error")
+		t.Logf("Verbosity 2 response received (implementation incomplete): %+v", getBlockVerbosity2Resp.Result)
 	})
 
-	defer td.Stop(t, true)
+	t.Run("GetBlockHeaderVerbose", func(t *testing.T) {
+		resp, err := td.CallRPC(td.Ctx, "getblockhash", []any{1})
+		require.NoError(t, err, "Failed to get block hash")
 
-	var err error
+		var getBlockHashResp helper.GetBlockHashResponse
+		err = json.Unmarshal([]byte(resp), &getBlockHashResp)
+		require.NoError(t, err)
 
-	// Mine some blocks to have data to test with
-	coinbaseTx := td.MineToMaturityAndGetSpendableCoinbaseTx(t, td.Ctx)
-	_ = coinbaseTx
+		blockHash := getBlockHashResp.Result
 
-	// Get a block hash to test with
-	resp, err := td.CallRPC(td.Ctx, "getblockhash", []any{1})
-	require.NoError(t, err, "Failed to get block hash")
+		// Test getblockheader with verbose=true (JSON format)
+		resp, err = td.CallRPC(td.Ctx, "getblockheader", []any{blockHash, true})
+		require.NoError(t, err, "Failed to call getblockheader with verbose=true")
 
-	var getBlockHashResp helper.GetBlockHashResponse
-	err = json.Unmarshal([]byte(resp), &getBlockHashResp)
-	require.NoError(t, err)
+		var getBlockHeaderVerboseResp struct {
+			Result struct {
+				Hash              string  `json:"hash"`
+				Confirmations     int     `json:"confirmations"`
+				Height            uint32  `json:"height"`
+				Version           int     `json:"version"`
+				VersionHex        string  `json:"versionHex"`
+				Merkleroot        string  `json:"merkleroot"`
+				Time              int64   `json:"time"`
+				Mediantime        int64   `json:"mediantime"`
+				Nonce             uint32  `json:"nonce"`
+				Bits              string  `json:"bits"`
+				Difficulty        float64 `json:"difficulty"`
+				Chainwork         string  `json:"chainwork"`
+				Previousblockhash string  `json:"previousblockhash"`
+				Nextblockhash     string  `json:"nextblockhash"`
+			} `json:"result"`
+			Error interface{} `json:"error"`
+			ID    int         `json:"id"`
+		}
 
-	blockHash := getBlockHashResp.Result
+		err = json.Unmarshal([]byte(resp), &getBlockHeaderVerboseResp)
+		require.NoError(t, err)
 
-	// Test getblock with verbosity 0 (hex string)
-	resp, err = td.CallRPC(td.Ctx, "getblock", []any{blockHash, 0})
-	require.NoError(t, err, "Failed to call getblock with verbosity 0")
+		td.LogJSON(t, "getBlockHeaderVerbose", getBlockHeaderVerboseResp)
 
-	var getBlockVerbosity0Resp struct {
-		Result string      `json:"result"`
-		Error  interface{} `json:"error"`
-		ID     int         `json:"id"`
-	}
+		require.Nil(t, getBlockHeaderVerboseResp.Error, "Should not have an error")
+		require.Equal(t, blockHash, getBlockHeaderVerboseResp.Result.Hash, "Block hash should match")
+		require.Greater(t, getBlockHeaderVerboseResp.Result.Height, uint32(0), "Block height should be greater than 0")
+		require.NotEmpty(t, getBlockHeaderVerboseResp.Result.Merkleroot, "Merkle root should not be empty")
+		require.Greater(t, getBlockHeaderVerboseResp.Result.Time, int64(0), "Time should be greater than 0")
 
-	err = json.Unmarshal([]byte(resp), &getBlockVerbosity0Resp)
-	require.NoError(t, err)
+		// Test getblockheader with verbose=false (hex string)
+		resp, err = td.CallRPC(td.Ctx, "getblockheader", []any{blockHash, false})
+		require.NoError(t, err, "Failed to call getblockheader with verbose=false")
 
-	// Verify verbosity 0 response (hex string)
-	require.Nil(t, getBlockVerbosity0Resp.Error, "Should not have an error")
-	require.NotEmpty(t, getBlockVerbosity0Resp.Result, "Block hex should not be empty")
-	require.Regexp(t, "^[0-9a-fA-F]+$", getBlockVerbosity0Resp.Result, "Result should be hex string")
-	t.Logf("Block hex length: %d", len(getBlockVerbosity0Resp.Result))
+		var getBlockHeaderHexResp struct {
+			Result string      `json:"result"`
+			Error  interface{} `json:"error"`
+			ID     int         `json:"id"`
+		}
 
-	// Test getblock with verbosity 1 (JSON with transaction IDs) - this is the default
-	resp, err = td.CallRPC(td.Ctx, "getblock", []any{blockHash, 1})
-	require.NoError(t, err, "Failed to call getblock with verbosity 1")
+		err = json.Unmarshal([]byte(resp), &getBlockHeaderHexResp)
+		require.NoError(t, err)
 
-	var getBlockVerbosity1Resp helper.GetBlockByHeightResponse
-	err = json.Unmarshal([]byte(resp), &getBlockVerbosity1Resp)
-	require.NoError(t, err)
+		td.LogJSON(t, "getBlockHeaderHex", getBlockHeaderHexResp)
 
-	td.LogJSON(t, "getBlockVerbosity1", getBlockVerbosity1Resp)
-
-	// Verify verbosity 1 response (JSON with transaction IDs)
-	require.Nil(t, getBlockVerbosity1Resp.Error, "Should not have an error")
-	require.NotNil(t, getBlockVerbosity1Resp.Result, "Block result should not be nil")
-	require.Equal(t, blockHash, getBlockVerbosity1Resp.Result.Hash, "Block hash should match")
-	require.Greater(t, getBlockVerbosity1Resp.Result.Height, uint32(0), "Block height should be greater than 0")
-	// Note: tx field might be null in some blocks, so we just check the structure is correct
-	t.Logf("Block has %d transactions", len(getBlockVerbosity1Resp.Result.Tx))
-
-	// Test getblock with verbosity 2 (JSON with full transaction details)
-	// Note: Currently verbosity 2 implementation is incomplete in the RPC handler
-	// The transaction details are commented out, so we just test that it doesn't error
-	resp, err = td.CallRPC(td.Ctx, "getblock", []any{blockHash, 2})
-	require.NoError(t, err, "Failed to call getblock with verbosity 2")
-
-	var getBlockVerbosity2Resp struct {
-		Result interface{} `json:"result"`
-		Error  interface{} `json:"error"`
-		ID     int         `json:"id"`
-	}
-
-	err = json.Unmarshal([]byte(resp), &getBlockVerbosity2Resp)
-	require.NoError(t, err)
-
-	td.LogJSON(t, "getBlockVerbosity2", getBlockVerbosity2Resp)
-
-	// Verify verbosity 2 response structure (implementation is incomplete)
-	require.Nil(t, getBlockVerbosity2Resp.Error, "Should not have an error")
-	// Note: Result might be nil due to incomplete implementation
-	t.Logf("Verbosity 2 response received (implementation incomplete): %+v", getBlockVerbosity2Resp.Result)
-}
-
-func TestGetBlockHeaderVerbose(t *testing.T) {
-	// t.Parallel()
-	td := daemon.NewTestDaemon(t, daemon.TestOptions{
-		EnableRPC:            true,
-		UTXOStoreType:        "aerospike",
-		SettingsOverrideFunc: test.SystemTestSettings(),
+		require.Nil(t, getBlockHeaderHexResp.Error, "Should not have an error")
+		require.NotEmpty(t, getBlockHeaderHexResp.Result, "Block header hex should not be empty")
+		require.Regexp(t, "^[0-9a-fA-F]+$", getBlockHeaderHexResp.Result, "Result should be hex string")
+		require.Equal(t, 160, len(getBlockHeaderHexResp.Result), "Block header hex should be 160 characters (80 bytes)")
+		t.Logf("Block header hex: %s", getBlockHeaderHexResp.Result)
 	})
-
-	defer td.Stop(t, true)
-
-	var err error
-
-	// Mine some blocks to have data to test with
-	coinbaseTx := td.MineToMaturityAndGetSpendableCoinbaseTx(t, td.Ctx)
-	_ = coinbaseTx
-
-	// Get a block hash to test with
-	resp, err := td.CallRPC(td.Ctx, "getblockhash", []any{1})
-	require.NoError(t, err, "Failed to get block hash")
-
-	var getBlockHashResp helper.GetBlockHashResponse
-	err = json.Unmarshal([]byte(resp), &getBlockHashResp)
-	require.NoError(t, err)
-
-	blockHash := getBlockHashResp.Result
-
-	// Test getblockheader with verbose=true (JSON format) - this is the default
-	resp, err = td.CallRPC(td.Ctx, "getblockheader", []any{blockHash, true})
-	require.NoError(t, err, "Failed to call getblockheader with verbose=true")
-
-	var getBlockHeaderVerboseResp struct {
-		Result struct {
-			Hash              string  `json:"hash"`
-			Confirmations     int     `json:"confirmations"`
-			Height            uint32  `json:"height"`
-			Version           int     `json:"version"`
-			VersionHex        string  `json:"versionHex"`
-			Merkleroot        string  `json:"merkleroot"`
-			Time              int64   `json:"time"`
-			Mediantime        int64   `json:"mediantime"`
-			Nonce             uint32  `json:"nonce"`
-			Bits              string  `json:"bits"`
-			Difficulty        float64 `json:"difficulty"`
-			Chainwork         string  `json:"chainwork"`
-			Previousblockhash string  `json:"previousblockhash"`
-			Nextblockhash     string  `json:"nextblockhash"`
-		} `json:"result"`
-		Error interface{} `json:"error"`
-		ID    int         `json:"id"`
-	}
-
-	err = json.Unmarshal([]byte(resp), &getBlockHeaderVerboseResp)
-	require.NoError(t, err)
-
-	td.LogJSON(t, "getBlockHeaderVerbose", getBlockHeaderVerboseResp)
-
-	// Verify verbose=true response (JSON format)
-	require.Nil(t, getBlockHeaderVerboseResp.Error, "Should not have an error")
-	require.Equal(t, blockHash, getBlockHeaderVerboseResp.Result.Hash, "Block hash should match")
-	require.Greater(t, getBlockHeaderVerboseResp.Result.Height, uint32(0), "Block height should be greater than 0")
-	require.NotEmpty(t, getBlockHeaderVerboseResp.Result.Merkleroot, "Merkle root should not be empty")
-	require.Greater(t, getBlockHeaderVerboseResp.Result.Time, int64(0), "Time should be greater than 0")
-
-	// Test getblockheader with verbose=false (hex string)
-	resp, err = td.CallRPC(td.Ctx, "getblockheader", []any{blockHash, false})
-	require.NoError(t, err, "Failed to call getblockheader with verbose=false")
-
-	var getBlockHeaderHexResp struct {
-		Result string      `json:"result"`
-		Error  interface{} `json:"error"`
-		ID     int         `json:"id"`
-	}
-
-	err = json.Unmarshal([]byte(resp), &getBlockHeaderHexResp)
-	require.NoError(t, err)
-
-	td.LogJSON(t, "getBlockHeaderHex", getBlockHeaderHexResp)
-
-	// Verify verbose=false response (hex string)
-	require.Nil(t, getBlockHeaderHexResp.Error, "Should not have an error")
-	require.NotEmpty(t, getBlockHeaderHexResp.Result, "Block header hex should not be empty")
-	require.Regexp(t, "^[0-9a-fA-F]+$", getBlockHeaderHexResp.Result, "Result should be hex string")
-	require.Equal(t, 160, len(getBlockHeaderHexResp.Result), "Block header hex should be 160 characters (80 bytes)")
-	t.Logf("Block header hex: %s", getBlockHeaderHexResp.Result)
 }
 
 func TestGetRawTransactionVerbose(t *testing.T) {
