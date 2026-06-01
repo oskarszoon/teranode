@@ -326,8 +326,9 @@ func (s *Store) sendStoreBatch(batch []*BatchStoreItem) {
 				}
 			}
 		} else {
-			// we cannot use tx.Size() here, because it doesn't include the extended data for the inputs
-			extendedSize = len(batch[idx].tx.ExtendedBytes())
+			// tx.Size() omits the extended per-input data; extendedTxSize adds it
+			// (matches len(tx.ExtendedBytes()) without serializing).
+			extendedSize = extendedTxSize(batch[idx].tx)
 		}
 
 		if extendedSize > MaxTxSizeInStoreInBytes {
