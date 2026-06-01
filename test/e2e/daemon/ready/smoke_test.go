@@ -1213,6 +1213,94 @@ func TestRPCQueries(t *testing.T) {
 		require.Equal(t, 160, len(getBlockHeaderHexResp.Result), "Block header hex should be 160 characters (80 bytes)")
 		t.Logf("Block header hex: %s", getBlockHeaderHexResp.Result)
 	})
+
+	t.Run("GetMiningCandidate", func(t *testing.T) {
+		// Default parameters (provideCoinbaseTx=false, verbosity=0)
+		resp, err := td.CallRPC(td.Ctx, "getminingcandidate", []any{})
+		require.NoError(t, err, "Failed to call getminingcandidate with default parameters")
+
+		var getMiningCandidateResp struct {
+			Result struct {
+				ID            string `json:"id"`
+				PrevHash      string `json:"prevhash"`
+				CoinbaseValue int64  `json:"coinbaseValue"`
+				Version       int32  `json:"version"`
+				NBits         string `json:"nBits"`
+				Time          int64  `json:"time"`
+				Height        int32  `json:"height"`
+				MerkleProof   []struct {
+					Index int    `json:"index"`
+					Hash  string `json:"hash"`
+				} `json:"merkleProof"`
+			} `json:"result"`
+			Error interface{} `json:"error"`
+			ID    int         `json:"id"`
+		}
+
+		err = json.Unmarshal([]byte(resp), &getMiningCandidateResp)
+		require.NoError(t, err)
+
+		td.LogJSON(t, "getMiningCandidateDefault", getMiningCandidateResp)
+
+		require.Nil(t, getMiningCandidateResp.Error, "Should not have an error")
+		require.NotEmpty(t, getMiningCandidateResp.Result.ID, "Mining candidate ID should not be empty")
+		require.NotEmpty(t, getMiningCandidateResp.Result.PrevHash, "Previous hash should not be empty")
+		require.Greater(t, getMiningCandidateResp.Result.CoinbaseValue, int64(0), "Coinbase value should be greater than 0")
+		require.Greater(t, getMiningCandidateResp.Result.Height, int32(0), "Height should be greater than 0")
+		require.NotEmpty(t, getMiningCandidateResp.Result.NBits, "NBits should not be empty")
+
+		// provideCoinbaseTx=true
+		resp, err = td.CallRPC(td.Ctx, "getminingcandidate", []any{true})
+		require.NoError(t, err, "Failed to call getminingcandidate with provideCoinbaseTx=true")
+
+		var getMiningCandidateWithCoinbaseResp struct {
+			Result struct {
+				ID            string `json:"id"`
+				PrevHash      string `json:"prevhash"`
+				CoinbaseValue int64  `json:"coinbaseValue"`
+				CoinbaseTx    string `json:"coinbaseTx"`
+				Version       int32  `json:"version"`
+				NBits         string `json:"nBits"`
+				Time          int64  `json:"time"`
+				Height        int32  `json:"height"`
+				MerkleProof   []struct {
+					Index int    `json:"index"`
+					Hash  string `json:"hash"`
+				} `json:"merkleProof"`
+			} `json:"result"`
+			Error interface{} `json:"error"`
+			ID    int         `json:"id"`
+		}
+
+		err = json.Unmarshal([]byte(resp), &getMiningCandidateWithCoinbaseResp)
+		require.NoError(t, err)
+
+		td.LogJSON(t, "getMiningCandidateWithCoinbase", getMiningCandidateWithCoinbaseResp)
+
+		require.Nil(t, getMiningCandidateWithCoinbaseResp.Error, "Should not have an error")
+		require.NotEmpty(t, getMiningCandidateWithCoinbaseResp.Result.ID, "Mining candidate ID should not be empty")
+		t.Logf("CoinbaseTx field present: %t, length: %d",
+			getMiningCandidateWithCoinbaseResp.Result.CoinbaseTx != "",
+			len(getMiningCandidateWithCoinbaseResp.Result.CoinbaseTx))
+
+		// verbosity=1
+		resp, err = td.CallRPC(td.Ctx, "getminingcandidate", []any{false, 1})
+		require.NoError(t, err, "Failed to call getminingcandidate with verbosity=1")
+
+		var getMiningCandidateVerboseResp struct {
+			Result interface{} `json:"result"`
+			Error  interface{} `json:"error"`
+			ID     int         `json:"id"`
+		}
+
+		err = json.Unmarshal([]byte(resp), &getMiningCandidateVerboseResp)
+		require.NoError(t, err)
+
+		td.LogJSON(t, "getMiningCandidateVerbose", getMiningCandidateVerboseResp)
+
+		require.Nil(t, getMiningCandidateVerboseResp.Error, "Should not have an error")
+		require.NotNil(t, getMiningCandidateVerboseResp.Result, "Result should not be nil")
+	})
 }
 
 func TestGetRawTransactionVerbose(t *testing.T) {
@@ -1502,115 +1590,6 @@ func TestCreateAndSendRawTransaction(t *testing.T) {
 	retrievedTx, err := bt.NewTxFromBytes(retrievedTxBytes)
 	require.NoError(t, err, "Retrieved transaction should be parseable")
 	require.Equal(t, signedTxID, retrievedTx.TxIDChainHash().String(), "Retrieved transaction ID should match what we sent")
-}
-
-func TestGetMiningCandidate(t *testing.T) {
-	// t.Parallel()
-	td := daemon.NewTestDaemon(t, daemon.TestOptions{
-		EnableRPC:            true,
-		UTXOStoreType:        "aerospike",
-		SettingsOverrideFunc: test.SystemTestSettings(),
-	})
-
-	defer td.Stop(t, true)
-
-	var err error
-
-	// Mine some blocks to have a proper blockchain
-	coinbaseTx := td.MineToMaturityAndGetSpendableCoinbaseTx(t, td.Ctx)
-	_ = coinbaseTx // We just need blocks, not the transaction
-
-	// Test getminingcandidate with default parameters (provideCoinbaseTx=false, verbosity=0)
-	resp, err := td.CallRPC(td.Ctx, "getminingcandidate", []any{})
-	require.NoError(t, err, "Failed to call getminingcandidate with default parameters")
-
-	var getMiningCandidateResp struct {
-		Result struct {
-			ID            string `json:"id"`
-			PrevHash      string `json:"prevhash"`
-			CoinbaseValue int64  `json:"coinbaseValue"`
-			Version       int32  `json:"version"`
-			NBits         string `json:"nBits"`
-			Time          int64  `json:"time"`
-			Height        int32  `json:"height"`
-			MerkleProof   []struct {
-				Index int    `json:"index"`
-				Hash  string `json:"hash"`
-			} `json:"merkleProof"`
-		} `json:"result"`
-		Error interface{} `json:"error"`
-		ID    int         `json:"id"`
-	}
-
-	err = json.Unmarshal([]byte(resp), &getMiningCandidateResp)
-	require.NoError(t, err)
-
-	td.LogJSON(t, "getMiningCandidateDefault", getMiningCandidateResp)
-
-	// Verify default response
-	require.Nil(t, getMiningCandidateResp.Error, "Should not have an error")
-	require.NotEmpty(t, getMiningCandidateResp.Result.ID, "Mining candidate ID should not be empty")
-	require.NotEmpty(t, getMiningCandidateResp.Result.PrevHash, "Previous hash should not be empty")
-	require.Greater(t, getMiningCandidateResp.Result.CoinbaseValue, int64(0), "Coinbase value should be greater than 0")
-	require.Greater(t, getMiningCandidateResp.Result.Height, int32(0), "Height should be greater than 0")
-	require.NotEmpty(t, getMiningCandidateResp.Result.NBits, "NBits should not be empty")
-
-	// Test getminingcandidate with provideCoinbaseTx=true
-	resp, err = td.CallRPC(td.Ctx, "getminingcandidate", []any{true})
-	require.NoError(t, err, "Failed to call getminingcandidate with provideCoinbaseTx=true")
-
-	var getMiningCandidateWithCoinbaseResp struct {
-		Result struct {
-			ID            string `json:"id"`
-			PrevHash      string `json:"prevhash"`
-			CoinbaseValue int64  `json:"coinbaseValue"`
-			CoinbaseTx    string `json:"coinbaseTx"`
-			Version       int32  `json:"version"`
-			NBits         string `json:"nBits"`
-			Time          int64  `json:"time"`
-			Height        int32  `json:"height"`
-			MerkleProof   []struct {
-				Index int    `json:"index"`
-				Hash  string `json:"hash"`
-			} `json:"merkleProof"`
-		} `json:"result"`
-		Error interface{} `json:"error"`
-		ID    int         `json:"id"`
-	}
-
-	err = json.Unmarshal([]byte(resp), &getMiningCandidateWithCoinbaseResp)
-	require.NoError(t, err)
-
-	td.LogJSON(t, "getMiningCandidateWithCoinbase", getMiningCandidateWithCoinbaseResp)
-
-	// Verify response with coinbase transaction
-	require.Nil(t, getMiningCandidateWithCoinbaseResp.Error, "Should not have an error")
-	require.NotEmpty(t, getMiningCandidateWithCoinbaseResp.Result.ID, "Mining candidate ID should not be empty")
-	// Note: The coinbaseTx field might be empty due to implementation details
-	// We just verify the structure is correct and the field exists
-	t.Logf("CoinbaseTx field present: %t, length: %d",
-		getMiningCandidateWithCoinbaseResp.Result.CoinbaseTx != "",
-		len(getMiningCandidateWithCoinbaseResp.Result.CoinbaseTx))
-
-	// Test getminingcandidate with verbosity=1
-	resp, err = td.CallRPC(td.Ctx, "getminingcandidate", []any{false, 1})
-	require.NoError(t, err, "Failed to call getminingcandidate with verbosity=1")
-
-	// For verbosity=1, we expect more detailed information
-	var getMiningCandidateVerboseResp struct {
-		Result interface{} `json:"result"`
-		Error  interface{} `json:"error"`
-		ID     int         `json:"id"`
-	}
-
-	err = json.Unmarshal([]byte(resp), &getMiningCandidateVerboseResp)
-	require.NoError(t, err)
-
-	td.LogJSON(t, "getMiningCandidateVerbose", getMiningCandidateVerboseResp)
-
-	// Verify verbose response
-	require.Nil(t, getMiningCandidateVerboseResp.Error, "Should not have an error")
-	require.NotNil(t, getMiningCandidateVerboseResp.Result, "Result should not be nil")
 }
 
 // generateRandomAddress generates a random Bitcoin address for the given network.
