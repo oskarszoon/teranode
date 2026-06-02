@@ -21,6 +21,9 @@ func blocksToFeed(chain []*diskblocks.BlockRef, bestHeight, stopHeight uint32) [
 		if ref.Height <= bestHeight {
 			continue
 		}
+		// stopHeight is also applied in ReadChain/selectChain; this is a
+		// belt-and-suspenders cap so the feed is bounded even if the chain
+		// passed in was not pre-truncated. Keep the two in agreement.
 		if stopHeight > 0 && ref.Height > stopHeight {
 			break
 		}

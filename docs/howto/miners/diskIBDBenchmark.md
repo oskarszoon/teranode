@@ -43,6 +43,7 @@ On a machine with a stopped SV Node Testnet datadir, run a daemon with
 - `getblockchaininfo` reports best height 1000.
 
 If the run fails immediately with a `block magic ... does not match` error at the
-first block, the `nDataPos` framing offset is wrong for this datadir's format —
-adjust the `framingSize` seek in `services/legacy/diskblocks/reader.go` and re-run
-the `reader_test.go` fixture tests.
+first block, the `nDataPos` framing offset is wrong for this datadir's format.
+That is a bug — file an issue with the datadir's SV Node version so the
+`blk*.dat` framing handling in `services/legacy/diskblocks/reader.go` can be
+corrected against a fixture, rather than patching the offset locally.
