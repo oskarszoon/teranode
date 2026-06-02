@@ -3136,7 +3136,7 @@ func getBlockLocator(ctx context.Context, store blockchain_store.Store, blockHea
 	// height in a single indexed query instead of one recursive-CTE walk per
 	// entry. ok=false means the store could not safely satisfy the fast path
 	// (fork tip, mid-rebuild, or a missing height) — fall back to the walk.
-	hashesByHeight, ok, err := store.MainChainBlockHashesByHeights(ctx, blockHeaderHash, blockHeaderHeight, heights)
+	hashesByHeight, ok, err := store.MainChainBlockHashesByHeights(ctx, blockHeaderHash, heights)
 	if err != nil {
 		return nil, err
 	}

@@ -26,7 +26,7 @@ func TestMainChainBlockHashesByHeights_FastPath(t *testing.T) {
 	storeBlocks(t, s, block1, block2, block3)
 	ctx := context.Background()
 
-	res, ok, err := s.MainChainBlockHashesByHeights(ctx, block3.Hash(), 3, []uint32{3, 2, 1})
+	res, ok, err := s.MainChainBlockHashesByHeights(ctx, block3.Hash(), []uint32{3, 2, 1})
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Len(t, res, 3)
@@ -35,12 +35,27 @@ func TestMainChainBlockHashesByHeights_FastPath(t *testing.T) {
 	require.Equal(t, block1.Hash().String(), res[1].String())
 }
 
+func TestMainChainBlockHashesByHeights_CeilingFromHashHeight(t *testing.T) {
+	s := newOnMainChainTestStore(t)
+	storeBlocks(t, s, block1, block2, block3)
+	ctx := context.Background()
+
+	// Start hash is block2 (height 2). Requesting height 3 (above block2) must be
+	// excluded because the ceiling is derived from the start hash's OWN height,
+	// not trusted from the caller. The result is therefore incomplete (height 3
+	// missing) and the method falls back rather than returning a wrong locator.
+	res, ok, err := s.MainChainBlockHashesByHeights(ctx, block2.Hash(), []uint32{3, 2, 1})
+	require.NoError(t, err)
+	require.False(t, ok)
+	require.Nil(t, res)
+}
+
 func TestMainChainBlockHashesByHeights_ForkTipFallsBack(t *testing.T) {
 	s := newOnMainChainTestStore(t)
 	storeBlocks(t, s, block1, block2, block3, blockAlternative2)
 	ctx := context.Background()
 
-	res, ok, err := s.MainChainBlockHashesByHeights(ctx, blockAlternative2.Hash(), 2, []uint32{2, 1})
+	res, ok, err := s.MainChainBlockHashesByHeights(ctx, blockAlternative2.Hash(), []uint32{2, 1})
 	require.NoError(t, err)
 	require.False(t, ok, "a fork-tip start hash must signal fallback")
 	require.Nil(t, res)
@@ -54,7 +69,7 @@ func TestMainChainBlockHashesByHeights_RebuildingFallsBack(t *testing.T) {
 	s.mainChainRebuilding.Add(1)
 	defer s.mainChainRebuilding.Add(-1)
 
-	res, ok, err := s.MainChainBlockHashesByHeights(ctx, block3.Hash(), 3, []uint32{3, 2, 1})
+	res, ok, err := s.MainChainBlockHashesByHeights(ctx, block3.Hash(), []uint32{3, 2, 1})
 	require.NoError(t, err)
 	require.False(t, ok, "mid-rebuild must signal fallback")
 	require.Nil(t, res)
@@ -65,7 +80,7 @@ func TestMainChainBlockHashesByHeights_MissingHeightFallsBack(t *testing.T) {
 	storeBlocks(t, s, block1, block2, block3)
 	ctx := context.Background()
 
-	res, ok, err := s.MainChainBlockHashesByHeights(ctx, block3.Hash(), 3, []uint32{3, 99})
+	res, ok, err := s.MainChainBlockHashesByHeights(ctx, block3.Hash(), []uint32{3, 99})
 	require.NoError(t, err)
 	require.False(t, ok)
 	require.Nil(t, res)
@@ -76,7 +91,7 @@ func TestMainChainBlockHashesByHeights_EmptyInputsFallBack(t *testing.T) {
 	storeBlocks(t, s, block1, block2, block3)
 	ctx := context.Background()
 
-	res, ok, err := s.MainChainBlockHashesByHeights(ctx, block3.Hash(), 3, nil)
+	res, ok, err := s.MainChainBlockHashesByHeights(ctx, block3.Hash(), nil)
 	require.NoError(t, err)
 	require.False(t, ok)
 	require.Nil(t, res)
@@ -88,7 +103,7 @@ func TestMainChainBlockHashesByHeights_AgreesWithCTEWalk(t *testing.T) {
 	ctx := context.Background()
 
 	heights := []uint32{3, 2, 1}
-	res, ok, err := s.MainChainBlockHashesByHeights(ctx, block3.Hash(), 3, heights)
+	res, ok, err := s.MainChainBlockHashesByHeights(ctx, block3.Hash(), heights)
 	require.NoError(t, err)
 	require.True(t, ok)
 
@@ -112,7 +127,7 @@ func TestMainChainBlockHashesByHeights_PostgreSQL(t *testing.T) {
 		ctx := t.Context()
 
 		heights := []uint32{2, 1}
-		res, ok, err := s.MainChainBlockHashesByHeights(ctx, block2.Hash(), 2, heights)
+		res, ok, err := s.MainChainBlockHashesByHeights(ctx, block2.Hash(), heights)
 		require.NoError(t, err)
 		require.True(t, ok)
 		require.Len(t, res, 2)
@@ -177,7 +192,7 @@ func TestMainChainBlockHashesByHeights_PostgreSQL(t *testing.T) {
 		_, _, err := s.StoreBlock(ctx, altBlock2, "test_peer")
 		require.NoError(t, err)
 
-		res, ok, err := s.MainChainBlockHashesByHeights(ctx, altBlock2.Hash(), 2, []uint32{2, 1})
+		res, ok, err := s.MainChainBlockHashesByHeights(ctx, altBlock2.Hash(), []uint32{2, 1})
 		require.NoError(t, err)
 		require.False(t, ok)
 		require.Nil(t, res)
@@ -289,7 +304,7 @@ func BenchmarkBlockLocatorFetch(b *testing.B) {
 			s.responseCache.DeleteAll()
 			b.StartTimer()
 
-			_, ok, err := s.MainChainBlockHashesByHeights(ctx, tipHash, tipHeight, heights)
+			_, ok, err := s.MainChainBlockHashesByHeights(ctx, tipHash, heights)
 			require.NoError(b, err)
 			require.True(b, ok)
 		}

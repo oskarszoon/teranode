@@ -210,15 +210,21 @@ func (m *MockStore) GetBlockInChainByHeightHash(ctx context.Context, height uint
 
 // MainChainBlockHashesByHeights returns the hash of the block at each requested
 // height from the height index. Returns ok=false when disabled, when inputs are
-// empty, or when any height is missing or above startHeight, mirroring the SQL
-// store's fallback contract.
-func (m *MockStore) MainChainBlockHashesByHeights(ctx context.Context, startHash *chainhash.Hash, startHeight uint32, heights []uint32) (map[uint32]*chainhash.Hash, bool, error) {
+// empty, or when any height is missing or above the start block's own height,
+// mirroring the SQL store's fallback contract.
+func (m *MockStore) MainChainBlockHashesByHeights(ctx context.Context, startHash *chainhash.Hash, heights []uint32) (map[uint32]*chainhash.Hash, bool, error) {
 	if m.MainChainFastPathDisabled || startHash == nil || len(heights) == 0 {
 		return nil, false, nil
 	}
 
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+
+	startBlock, ok := m.Blocks[*startHash]
+	if !ok {
+		return nil, false, nil
+	}
+	startHeight := startBlock.Height
 
 	result := make(map[uint32]*chainhash.Hash, len(heights))
 

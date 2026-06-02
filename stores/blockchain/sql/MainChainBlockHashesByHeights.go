@@ -22,7 +22,7 @@ import (
 // given height (<= startHeight) is the unique ancestor of startHash at that
 // height — identical to what the recursive walk would return. This mirrors the
 // preflight + fallback used by GetLatestBlockHeaderFromBlockLocator.
-func (s *SQL) MainChainBlockHashesByHeights(ctx context.Context, startHash *chainhash.Hash, startHeight uint32, heights []uint32) (map[uint32]*chainhash.Hash, bool, error) {
+func (s *SQL) MainChainBlockHashesByHeights(ctx context.Context, startHash *chainhash.Hash, heights []uint32) (map[uint32]*chainhash.Hash, bool, error) {
 	ctx, _, deferFn := tracing.Tracer("blockchain").Start(ctx, "sql:MainChainBlockHashesByHeights")
 	defer deferFn()
 
@@ -36,14 +36,20 @@ func (s *SQL) MainChainBlockHashesByHeights(ctx context.Context, startHash *chai
 		return nil, false, nil
 	}
 
-	// Preflight: only safe when startHash is on the main chain. Treat DB errors
-	// or unknown hashes as "not on main chain" so the CTE walk stays
-	// authoritative and surfaces any real error.
-	var startOnMain bool
+	// Preflight: only safe when startHash is on the main chain. Fetch the hash's
+	// own height and use it as the ceiling so results are constrained to
+	// ancestors-of-or-equal-to startHash — matching the recursive walk exactly
+	// and avoiding any trust in a caller-supplied height. Treat DB errors or an
+	// unknown hash (ErrNoRows) as "not on main chain" so the CTE walk stays
+	// authoritative. Mirrors GetLatestBlockHeaderFromBlockLocator.
+	var (
+		startOnMain bool
+		startHeight int64
+	)
 	if err := s.db.QueryRowContext(ctx,
-		`SELECT COALESCE((SELECT on_main_chain FROM blocks WHERE hash = $1 LIMIT 1), false)`,
+		`SELECT on_main_chain, height FROM blocks WHERE hash = $1 LIMIT 1`,
 		startHash[:],
-	).Scan(&startOnMain); err != nil {
+	).Scan(&startOnMain, &startHeight); err != nil {
 		return nil, false, nil
 	}
 
@@ -68,11 +74,11 @@ func (s *SQL) MainChainBlockHashesByHeights(ctx context.Context, startHash *chai
 			WHERE on_main_chain = true
 			  AND height <= $1
 			  AND height = ANY($2)`
-		args = []interface{}{int64(startHeight), hs}
+		args = []interface{}{startHeight, hs}
 	} else {
 		placeholders := make([]string, len(heights))
 		args = make([]interface{}, len(heights)+1)
-		args[0] = int64(startHeight)
+		args[0] = startHeight
 
 		for i, h := range heights {
 			placeholders[i] = fmt.Sprintf("$%d", i+2)
