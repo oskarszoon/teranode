@@ -2,9 +2,14 @@ package sql
 
 import (
 	"context"
+	"net/url"
 	"strings"
 	"testing"
 
+	"github.com/bsv-blockchain/go-bt/v2/chainhash"
+	"github.com/bsv-blockchain/teranode/model"
+	"github.com/bsv-blockchain/teranode/ulogger"
+	"github.com/bsv-blockchain/teranode/util/test"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/stretchr/testify/require"
 )
@@ -176,5 +181,117 @@ func TestMainChainBlockHashesByHeights_PostgreSQL(t *testing.T) {
 		require.NoError(t, err)
 		require.False(t, ok)
 		require.Nil(t, res)
+	})
+}
+
+// newOnMainChainTestStoreForBench mirrors newOnMainChainTestStore for benchmarks
+// (sqlitememory store, waits for the background startup rebuild to complete).
+func newOnMainChainTestStoreForBench(b *testing.B) *SQL {
+	b.Helper()
+
+	tSettings := test.CreateBaseTestSettings(b)
+
+	storeURL, err := url.Parse("sqlitememory:///")
+	require.NoError(b, err)
+
+	s, err := New(ulogger.TestLogger{}, storeURL, tSettings)
+	require.NoError(b, err)
+
+	b.Cleanup(func() { _ = s.Close() })
+
+	waitForStartupRebuild(b, s)
+
+	return s
+}
+
+// benchBuildMainChain stores a linear main chain of n blocks (heights 1..n) off
+// the seeded genesis, each linked to its predecessor by HashPrevBlock so the
+// store forms real parent_id links and marks them on_main_chain. Returns the tip
+// hash and height.
+func benchBuildMainChain(b *testing.B, s *SQL, n uint32) (*chainhash.Hash, uint32) {
+	b.Helper()
+
+	ctx := context.Background()
+
+	_, _, err := s.StoreBlock(ctx, block1, "")
+	require.NoError(b, err)
+	prevHash := block1.Hash()
+
+	for h := uint32(2); h <= n; h++ {
+		blk := &model.Block{
+			Header: &model.BlockHeader{
+				Version:        1,
+				Timestamp:      1729259727,
+				Nonce:          h, // vary to keep block hashes distinct
+				HashPrevBlock:  prevHash,
+				HashMerkleRoot: hashMerkleRoot,
+				Bits:           *bits,
+			},
+			Height:           h,
+			CoinbaseTx:       coinbaseTx,
+			TransactionCount: 1,
+			Subtrees:         []*chainhash.Hash{subtree},
+		}
+
+		_, _, err := s.StoreBlock(ctx, blk, "")
+		require.NoError(b, err)
+		prevHash = blk.Hash()
+	}
+
+	return prevHash, n
+}
+
+// benchLocatorHeights mirrors services/blockchain.computeLocatorHeights (kept
+// local to avoid importing the service package from the store package).
+func benchLocatorHeights(tipHeight uint32) []uint32 {
+	heights := make([]uint32, 0, 64)
+	step := uint32(1)
+	height := tipHeight
+	for {
+		heights = append(heights, height)
+		if height == 0 {
+			break
+		}
+		if step > height {
+			step = height
+		}
+		height -= step
+		if len(heights) > 10 {
+			step *= 2
+		}
+	}
+	return heights
+}
+
+func BenchmarkBlockLocatorFetch(b *testing.B) {
+	const chainLen = 5_000
+
+	s := newOnMainChainTestStoreForBench(b)
+	tipHash, tipHeight := benchBuildMainChain(b, s, chainLen)
+	ctx := context.Background()
+
+	heights := benchLocatorHeights(tipHeight)
+
+	b.Run("fast-path-batch", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_, ok, err := s.MainChainBlockHashesByHeights(ctx, tipHash, tipHeight, heights)
+			require.NoError(b, err)
+			require.True(b, ok)
+		}
+	})
+
+	b.Run("per-height-cte-walk", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			hash := tipHash
+			for _, h := range heights {
+				blk, _, err := s.GetBlockInChainByHeightHash(ctx, h, hash)
+				require.NoError(b, err)
+				hash = blk.Header.Hash()
+			}
+		}
 	})
 }
