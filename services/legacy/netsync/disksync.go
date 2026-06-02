@@ -10,7 +10,7 @@ import (
 	"github.com/bsv-blockchain/teranode/services/legacy/peer"
 )
 
-// diskSyncProgressInterval controls how often progress is logged.
+// diskSyncProgressInterval is how many blocks between progress log lines.
 const diskSyncProgressInterval = 1000
 
 // blocksToFeed returns the slice of chain refs strictly above bestHeight, up to
@@ -69,10 +69,11 @@ func (sm *SyncManager) RunDiskSync(ctx context.Context, datadir string, stopHeig
 
 	start := time.Now()
 	var blocks, txs, bytesRead uint64
-	lastHeight := feed[0].Height - 1
+	lastHeight := meta.Height
 
 	for _, ref := range feed {
 		if ctx.Err() != nil {
+			// FSM remains in LEGACYSYNCING; the caller that cancelled owns cleanup.
 			return ctx.Err()
 		}
 
@@ -86,7 +87,7 @@ func (sm *SyncManager) RunDiskSync(ctx context.Context, datadir string, stopHeig
 		}
 
 		if err = sm.HandleBlockDirect(ctx, diskPeer, ref.Hash, msgBlock); err != nil {
-			return errors.NewProcessingError("[DiskSync] HandleBlockDirect failed at height %d (%s)", ref.Height, ref.Hash.String(), err)
+			return errors.NewProcessingError("[DiskSync] HandleBlockDirect failed at height %d (%s)", ref.Height, ref.Hash, err)
 		}
 
 		blocks++
@@ -102,8 +103,12 @@ func (sm *SyncManager) RunDiskSync(ctx context.Context, datadir string, stopHeig
 	}
 
 	elapsed := time.Since(start)
+	var blocksPerSec float64
+	if secs := elapsed.Seconds(); secs > 0 {
+		blocksPerSec = float64(blocks) / secs
+	}
 	sm.logger.Infof("[DiskSync] done: %d blocks, %d txs, %.2f GB in %s (height %d) | %.1f blocks/s",
-		blocks, txs, float64(bytesRead)/1e9, elapsed.Round(time.Second), lastHeight, float64(blocks)/elapsed.Seconds())
+		blocks, txs, float64(bytesRead)/1e9, elapsed.Round(time.Second), lastHeight, blocksPerSec)
 
 	if err = sm.blockchainClient.Run(ctx, "legacy/netsync/disksync"); err != nil {
 		return errors.NewProcessingError("[DiskSync] failed to transition to RUNNING", err)
