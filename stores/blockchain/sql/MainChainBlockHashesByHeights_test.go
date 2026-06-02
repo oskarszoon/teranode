@@ -272,10 +272,20 @@ func BenchmarkBlockLocatorFetch(b *testing.B) {
 
 	heights := benchLocatorHeights(tipHeight)
 
+	// Both paths are measured COLD: GetBlockInChainByHeightHash caches its
+	// result in s.responseCache, and in production that cache is invalidated by
+	// StoreBlock on every new block (so each locator build against the advancing
+	// tip is effectively cold). Clearing the cache each iteration — outside the
+	// timer — keeps the comparison honest. MainChainBlockHashesByHeights is
+	// uncached, so the clear is a no-op for it but kept for symmetry.
 	b.Run("fast-path-batch", func(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
+			b.StopTimer()
+			s.responseCache.DeleteAll()
+			b.StartTimer()
+
 			_, ok, err := s.MainChainBlockHashesByHeights(ctx, tipHash, tipHeight, heights)
 			require.NoError(b, err)
 			require.True(b, ok)
@@ -286,6 +296,10 @@ func BenchmarkBlockLocatorFetch(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
+			b.StopTimer()
+			s.responseCache.DeleteAll()
+			b.StartTimer()
+
 			hash := tipHash
 			for _, h := range heights {
 				blk, _, err := s.GetBlockInChainByHeightHash(ctx, h, hash)
