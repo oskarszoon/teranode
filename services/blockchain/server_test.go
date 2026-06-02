@@ -3908,15 +3908,21 @@ func Test_HeartbeatSenderStopsOnContextCancel(t *testing.T) {
 func Test_getBlockLocator_FastPathMatchesWalk(t *testing.T) {
 	ctx := context.Background()
 
-	for _, tipHeight := range []uint32{0, 5, 12, 255, 1000} {
+	for _, tipHeight := range []uint32{0, 5, 12, 13, 255, 1000} {
 		store := blockchain_store.NewMockStore()
 
+		var prevHash *chainhash.Hash
 		for i := uint32(0); i <= tipHeight; i++ {
+			prev := &chainhash.Hash{}
+			if prevHash != nil {
+				prev = prevHash
+			}
+
 			block := &model.Block{
 				Height: i,
 				Header: &model.BlockHeader{
 					Version:        i,
-					HashPrevBlock:  &chainhash.Hash{},
+					HashPrevBlock:  prev,
 					HashMerkleRoot: &chainhash.Hash{},
 					Timestamp:      i,
 					Bits:           model.NBit{},
@@ -3925,6 +3931,8 @@ func Test_getBlockLocator_FastPathMatchesWalk(t *testing.T) {
 			}
 			_, _, err := store.StoreBlock(ctx, block, "")
 			require.NoError(t, err)
+
+			prevHash = block.Hash()
 		}
 
 		start := store.BlockByHeight[tipHeight].Hash()
