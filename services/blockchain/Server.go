@@ -3141,7 +3141,8 @@ func getBlockLocator(ctx context.Context, store blockchain_store.Store, blockHea
 // progression is pure arithmetic and does not depend on any stored block, so
 // the full set is known before any database access.
 func computeLocatorHeights(blockHeaderHeight uint32) []uint32 {
-	// Capacity hint mirrors the original maxEntries calculation.
+	// Pre-allocate: at most 1 (the height itself) + 10 + floor(log2(height-10))
+	// for the doubling-skip portion + 1 (genesis) entries.
 	var maxEntries uint8
 	if blockHeaderHeight <= 12 {
 		maxEntries = uint8(blockHeaderHeight) + 1
@@ -3178,9 +3179,9 @@ func computeLocatorHeights(blockHeaderHeight uint32) []uint32 {
 
 // getBlockLocatorByWalk builds a locator by walking the chain identified by
 // startHash, fetching the block at each height with a recursive-CTE lookup.
-// Each lookup is anchored at the previously found block, so the recursive
-// segments are disjoint. This is the original behavior, retained as the
-// fallback for fork tips.
+// Each call uses the hash returned by the previous call as its new start, so
+// the walk hops forward through the height schedule. This is the original
+// behavior, retained as the fallback for fork tips.
 func getBlockLocatorByWalk(ctx context.Context, store blockchain_store.Store, startHash *chainhash.Hash, heights []uint32) ([]*chainhash.Hash, error) {
 	locator := make([]*chainhash.Hash, 0, len(heights))
 	hash := startHash

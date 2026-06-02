@@ -392,6 +392,12 @@ func Test_computeLocatorHeights(t *testing.T) {
 	require.Equal(t, []uint32{0}, computeLocatorHeights(0))
 	require.Equal(t, []uint32{1, 0}, computeLocatorHeights(1))
 	require.Equal(t,
+		[]uint32{12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0},
+		computeLocatorHeights(12))
+	require.Equal(t,
+		[]uint32{13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 0},
+		computeLocatorHeights(13))
+	require.Equal(t,
 		[]uint32{255, 254, 253, 252, 251, 250, 249, 248, 247, 246, 245, 244, 242, 238, 230, 214, 182, 118, 0},
 		computeLocatorHeights(255))
 	require.Equal(t,
