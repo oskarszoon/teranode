@@ -1,6 +1,7 @@
 package diskblocks
 
 import (
+	"math"
 	"path/filepath"
 	"sort"
 
@@ -70,6 +71,10 @@ func (in *IndexDB) ReadChain(stopHeight uint32) ([]*BlockRef, error) {
 // genesis (height 0) ref is present, walks it back to genesis, and returns it
 // ordered genesis -> tip. A frontier gap or stale fork simply lowers the chosen
 // tip rather than erroring.
+// Complexity: each candidate tip is tried highest-height first, so a healthy
+// chain resolves in O(n) (the top tip completes immediately). A pathological
+// datadir with many incomplete high-height orphans degrades toward O(n*m);
+// acceptable for an offline benchmark tool.
 func selectChain(refs map[chainhash.Hash]*BlockRef, stopHeight uint32) ([]*BlockRef, error) {
 	tips := make([]*BlockRef, 0, len(refs))
 	for _, r := range refs {
@@ -78,7 +83,7 @@ func selectChain(refs map[chainhash.Hash]*BlockRef, stopHeight uint32) ([]*Block
 	sort.Slice(tips, func(i, j int) bool { return tips[i].Height > tips[j].Height })
 
 	for _, tip := range tips {
-		chain := make([]*BlockRef, 0, tip.Height+1)
+		chain := make([]*BlockRef, 0, int(tip.Height)+1)
 		cur := tip
 		complete := true
 		for {
@@ -100,7 +105,7 @@ func selectChain(refs map[chainhash.Hash]*BlockRef, stopHeight uint32) ([]*Block
 		for i, j := 0, len(chain)-1; i < j; i, j = i+1, j-1 {
 			chain[i], chain[j] = chain[j], chain[i]
 		}
-		if stopHeight > 0 && uint32(len(chain)) > stopHeight+1 {
+		if stopHeight > 0 && stopHeight < math.MaxUint32 && uint32(len(chain)) > stopHeight+1 {
 			chain = chain[:stopHeight+1]
 		}
 		return chain, nil

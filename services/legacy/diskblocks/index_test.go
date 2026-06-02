@@ -26,6 +26,11 @@ func chainRefs(n int) map[chainhash.Hash]*BlockRef {
 	return m
 }
 
+func TestSelectChainEmpty(t *testing.T) {
+	_, err := selectChain(map[chainhash.Hash]*BlockRef{}, 0)
+	require.Error(t, err)
+}
+
 func TestSelectChainLinear(t *testing.T) {
 	got, err := selectChain(chainRefs(5), 0)
 	require.NoError(t, err)
