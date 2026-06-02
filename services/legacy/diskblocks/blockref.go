@@ -11,15 +11,15 @@ import (
 
 // Block index status flags, mirroring Bitcoin Core's BlockStatus bits.
 const (
-	BlockValidReserved     = 1
-	BlockValidTree         = 2
-	BlockValidTransactions = 3
-	BlockValidChain        = 4
-	BlockValidScripts      = 5
-	BlockValidMask         = BlockValidReserved | BlockValidTree | BlockValidTransactions | BlockValidChain | BlockValidScripts
+	BlockValidReserved     uint64 = 1
+	BlockValidTree         uint64 = 2
+	BlockValidTransactions uint64 = 3
+	BlockValidChain        uint64 = 4
+	BlockValidScripts      uint64 = 5
+	BlockValidMask                = BlockValidReserved | BlockValidTree | BlockValidTransactions | BlockValidChain | BlockValidScripts
 
-	BlockHaveData = 8
-	BlockHaveUndo = 16
+	BlockHaveData uint64 = 8
+	BlockHaveUndo uint64 = 16
 )
 
 // BlockRef locates one block in an SV Node datadir and carries the chain links
@@ -35,7 +35,9 @@ type BlockRef struct {
 }
 
 // readVarInt decodes one Bitcoin Core base-128 "ReadVarInt" value and returns
-// it with the number of bytes consumed.
+// it with the number of bytes consumed. On empty input it returns (0, 0); the
+// caller is responsible for detecting a truncated record (e.g. via the
+// remaining-length check before reading the 80-byte header).
 func readVarInt(data []byte) (uint64, int) {
 	var n uint64
 	i := 0
@@ -69,20 +71,20 @@ func parseBlockIndexRecord(data []byte) (*BlockRef, error) {
 	txs, i := readVarInt(data[pos:])
 	pos += i
 
-	if int(status)&BlockHaveData == 0 {
+	if status&BlockHaveData == 0 {
 		return nil, errors.NewBlockInvalidError("block index record has no on-disk data")
 	}
 
 	var nFile, nDataPos uint64
-	if int(status)&(BlockHaveData|BlockHaveUndo) != 0 {
+	if status&(BlockHaveData|BlockHaveUndo) != 0 {
 		nFile, i = readVarInt(data[pos:])
 		pos += i
 	}
-	if int(status)&BlockHaveData != 0 {
+	if status&BlockHaveData != 0 {
 		nDataPos, i = readVarInt(data[pos:])
 		pos += i
 	}
-	if int(status)&BlockHaveUndo != 0 {
+	if status&BlockHaveUndo != 0 {
 		_, i = readVarInt(data[pos:]) // nUndoPos (discarded)
 		pos += i
 	}

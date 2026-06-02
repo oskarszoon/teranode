@@ -79,3 +79,29 @@ func TestParseBlockIndexRecordRejectsNoData(t *testing.T) {
 	_, err := parseBlockIndexRecord(buf.Bytes())
 	require.Error(t, err)
 }
+
+func TestParseBlockIndexRecordWithUndo(t *testing.T) {
+	header := make([]byte, 80)
+	header[0] = 0x01
+	prev := bytes.Repeat([]byte{0xCD}, 32)
+	copy(header[4:36], prev)
+
+	status := BlockValidTransactions | BlockHaveData | BlockHaveUndo
+	var buf bytes.Buffer
+	buf.Write(encodeVarInt(1))              // version (discarded)
+	buf.Write(encodeVarInt(900))            // height
+	buf.Write(encodeVarInt(uint64(status))) // status
+	buf.Write(encodeVarInt(5))              // txcount
+	buf.Write(encodeVarInt(12))             // nFile
+	buf.Write(encodeVarInt(40000))          // nDataPos
+	buf.Write(encodeVarInt(777))            // nUndoPos (read and discarded)
+	buf.Write(header)                       // 80-byte header
+
+	ref, err := parseBlockIndexRecord(buf.Bytes())
+	require.NoError(t, err)
+	require.Equal(t, uint32(900), ref.Height)
+	require.Equal(t, uint32(12), ref.NFile)
+	require.Equal(t, uint32(40000), ref.NDataPos)
+	require.Equal(t, uint64(5), ref.TxCount)
+	require.True(t, ref.HaveData)
+}
