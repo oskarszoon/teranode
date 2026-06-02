@@ -388,6 +388,17 @@ func Test_getBlockLocator(t *testing.T) {
 	})
 }
 
+func Test_computeLocatorHeights(t *testing.T) {
+	require.Equal(t, []uint32{0}, computeLocatorHeights(0))
+	require.Equal(t, []uint32{1, 0}, computeLocatorHeights(1))
+	require.Equal(t,
+		[]uint32{255, 254, 253, 252, 251, 250, 249, 248, 247, 246, 245, 244, 242, 238, 230, 214, 182, 118, 0},
+		computeLocatorHeights(255))
+	require.Equal(t,
+		[]uint32{1000, 999, 998, 997, 996, 995, 994, 993, 992, 991, 990, 989, 987, 983, 975, 959, 927, 863, 735, 479, 0},
+		computeLocatorHeights(1000))
+}
+
 func Test_getBlockHeadersToCommonAncestor(t *testing.T) {
 	ctx := setup(t)
 

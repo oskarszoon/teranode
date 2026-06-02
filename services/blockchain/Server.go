@@ -3130,39 +3130,33 @@ func getBlockLocator(ctx context.Context, store blockchain_store.Store, blockHea
 		return []*chainhash.Hash{genesisBlock.Header.Hash()}, nil
 	}
 
-	// From https://github.com/bitcoinsv/bsvd/blob/20910511e9006a12e90cddc9f292af8b82950f81/blockchain/chainview.go#L351
-	// Calculate the max number of entries that will ultimately be in the
-	// block locator. See the description of the algorithm for how these
-	// numbers are derived.
+	heights := computeLocatorHeights(blockHeaderHeight)
+
+	return getBlockLocatorByWalk(ctx, store, blockHeaderHash, heights)
+}
+
+// computeLocatorHeights returns the descending list of heights that make up a
+// block locator anchored at blockHeaderHeight: the height itself, the previous
+// 10, then heights at exponentially doubling gaps, ending at genesis (0). The
+// progression is pure arithmetic and does not depend on any stored block, so
+// the full set is known before any database access.
+func computeLocatorHeights(blockHeaderHeight uint32) []uint32 {
+	// Capacity hint mirrors the original maxEntries calculation.
 	var maxEntries uint8
-
 	if blockHeaderHeight <= 12 {
-		blockHeaderHeightUint8, err := safeconversion.Uint32ToUint8(blockHeaderHeight)
-		if err != nil {
-			return nil, errors.WrapGRPC(err)
-		}
-
-		maxEntries = blockHeaderHeightUint8 + 1
+		maxEntries = uint8(blockHeaderHeight) + 1
 	} else {
-		// Requested hash itself + previous 10 entries + genesis block.
-		// Then floor(log2(height-10)) entries for the skip portion.
-		adjustedHeight := blockHeaderHeight - 10
-		maxEntries = 12 + fastLog2Floor(adjustedHeight)
+		// Requested height + previous 10 + genesis, then floor(log2(height-10))
+		// entries for the doubling-skip portion.
+		maxEntries = 12 + fastLog2Floor(blockHeaderHeight-10)
 	}
 
-	locator := make([]*chainhash.Hash, 0, maxEntries)
+	heights := make([]uint32, 0, maxEntries)
 	step := uint32(1)
 	height := blockHeaderHeight
-	hash := blockHeaderHash
 
 	for {
-		block, _, err := store.GetBlockInChainByHeightHash(ctx, height, hash)
-		if err != nil {
-			return nil, err
-		}
-
-		hash = block.Header.Hash()
-		locator = append(locator, hash)
+		heights = append(heights, height)
 
 		if height == 0 {
 			break
@@ -3174,9 +3168,31 @@ func getBlockLocator(ctx context.Context, store blockchain_store.Store, blockHea
 
 		height -= step
 
-		if len(locator) > 10 {
+		if len(heights) > 10 {
 			step *= 2
 		}
+	}
+
+	return heights
+}
+
+// getBlockLocatorByWalk builds a locator by walking the chain identified by
+// startHash, fetching the block at each height with a recursive-CTE lookup.
+// Each lookup is anchored at the previously found block, so the recursive
+// segments are disjoint. This is the original behavior, retained as the
+// fallback for fork tips.
+func getBlockLocatorByWalk(ctx context.Context, store blockchain_store.Store, startHash *chainhash.Hash, heights []uint32) ([]*chainhash.Hash, error) {
+	locator := make([]*chainhash.Hash, 0, len(heights))
+	hash := startHash
+
+	for _, h := range heights {
+		block, _, err := store.GetBlockInChainByHeightHash(ctx, h, hash)
+		if err != nil {
+			return nil, err
+		}
+
+		hash = block.Header.Hash()
+		locator = append(locator, hash)
 	}
 
 	return locator, nil
