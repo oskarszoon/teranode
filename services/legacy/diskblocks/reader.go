@@ -11,6 +11,9 @@ import (
 	"github.com/bsv-blockchain/teranode/errors"
 )
 
+// framingSize is the per-block header in blk*.dat: [4-byte network magic LE][4-byte size LE].
+const framingSize = 8
+
 // BlockReader reads raw blocks from an SV Node datadir's blk*.dat files.
 type BlockReader struct {
 	blocksDir string
@@ -39,7 +42,7 @@ func (br *BlockReader) ReadBlock(ref *BlockRef) (*wire.MsgBlock, uint64, error) 
 	}
 	defer f.Close()
 
-	framingStart := int64(ref.NDataPos) - 8
+	framingStart := int64(ref.NDataPos) - framingSize
 	if framingStart < 0 {
 		return nil, 0, errors.NewProcessingError("invalid nDataPos %d in %s", ref.NDataPos, path)
 	}
@@ -47,7 +50,7 @@ func (br *BlockReader) ReadBlock(ref *BlockRef) (*wire.MsgBlock, uint64, error) 
 		return nil, 0, errors.NewProcessingError("seek %s", path, err)
 	}
 
-	var hdr [8]byte
+	var hdr [framingSize]byte
 	if _, err = io.ReadFull(f, hdr[:]); err != nil {
 		return nil, 0, errors.NewProcessingError("read framing in %s", path, err)
 	}
@@ -63,8 +66,8 @@ func (br *BlockReader) ReadBlock(ref *BlockRef) (*wire.MsgBlock, uint64, error) 
 		return nil, 0, errors.NewProcessingError("decode block in %s", path, err)
 	}
 	if lr.N != 0 {
-		return nil, 0, errors.NewProcessingError("truncated block in %s: %d bytes unread", path, lr.N)
+		return nil, 0, errors.NewProcessingError("short decode in %s: %d frame bytes unconsumed", path, lr.N)
 	}
 
-	return msg, uint64(size) + 8, nil
+	return msg, uint64(size) + framingSize, nil
 }
