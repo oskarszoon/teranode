@@ -3132,6 +3132,25 @@ func getBlockLocator(ctx context.Context, store blockchain_store.Store, blockHea
 
 	heights := computeLocatorHeights(blockHeaderHeight)
 
+	// Fast path: when blockHeaderHash is on the main chain, fetch every locator
+	// height in a single indexed query instead of one recursive-CTE walk per
+	// entry. ok=false means the store could not safely satisfy the fast path
+	// (fork tip, mid-rebuild, or a missing height) — fall back to the walk.
+	hashesByHeight, ok, err := store.MainChainBlockHashesByHeights(ctx, blockHeaderHash, blockHeaderHeight, heights)
+	if err != nil {
+		return nil, err
+	}
+
+	if ok {
+		locator := make([]*chainhash.Hash, 0, len(heights))
+		for _, h := range heights {
+			// The store guarantees a complete result set when ok is true.
+			locator = append(locator, hashesByHeight[h])
+		}
+
+		return locator, nil
+	}
+
 	return getBlockLocatorByWalk(ctx, store, blockHeaderHash, heights)
 }
 

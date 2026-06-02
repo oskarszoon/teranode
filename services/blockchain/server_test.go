@@ -3904,3 +3904,42 @@ func Test_HeartbeatSenderStopsOnContextCancel(t *testing.T) {
 		t.Fatal("Heartbeat sender did not stop when context was cancelled")
 	}
 }
+
+func Test_getBlockLocator_FastPathMatchesWalk(t *testing.T) {
+	ctx := context.Background()
+
+	for _, tipHeight := range []uint32{0, 5, 12, 255, 1000} {
+		store := blockchain_store.NewMockStore()
+
+		for i := uint32(0); i <= tipHeight; i++ {
+			block := &model.Block{
+				Height: i,
+				Header: &model.BlockHeader{
+					Version:        i,
+					HashPrevBlock:  &chainhash.Hash{},
+					HashMerkleRoot: &chainhash.Hash{},
+					Timestamp:      i,
+					Bits:           model.NBit{},
+					Nonce:          i,
+				},
+			}
+			_, _, err := store.StoreBlock(ctx, block, "")
+			require.NoError(t, err)
+		}
+
+		start := store.BlockByHeight[tipHeight].Hash()
+
+		store.MainChainFastPathDisabled = false
+		fast, err := getBlockLocator(ctx, store, start, tipHeight)
+		require.NoError(t, err)
+
+		store.MainChainFastPathDisabled = true
+		walk, err := getBlockLocator(ctx, store, start, tipHeight)
+		require.NoError(t, err)
+
+		require.Equal(t, len(walk), len(fast), "tip=%d length mismatch", tipHeight)
+		for i := range walk {
+			require.Equal(t, walk[i].String(), fast[i].String(), "tip=%d idx=%d hash mismatch", tipHeight, i)
+		}
+	}
+}
