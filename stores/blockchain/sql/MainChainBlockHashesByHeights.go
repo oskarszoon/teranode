@@ -117,9 +117,10 @@ func (s *SQL) MainChainBlockHashesByHeights(ctx context.Context, startHash *chai
 		return nil, false, errors.NewStorageError("[MainChainBlockHashesByHeights] rows error", err)
 	}
 
-	// Defensive: any missing height (duplicates are impossible — the locator
-	// schedule is strictly decreasing) means we cannot guarantee an identical
-	// locator, so fall back rather than emit a short/wrong one.
+	// Defensive: if the result is incomplete — any requested height missing, or
+	// duplicate input heights collapsed by the map — we cannot guarantee a
+	// correct locator, so fall back rather than emit a short or wrong one. This
+	// method takes arbitrary heights and does not assume the caller's schedule.
 	if len(result) != len(heights) {
 		return nil, false, nil
 	}

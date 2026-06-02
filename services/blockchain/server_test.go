@@ -270,7 +270,7 @@ func mockBlock(ctx *testContext, t *testing.T) *model.Block {
 	err = ctx.subtreeStore.Set(context.Background(), subtree.RootHash()[:], fileformat.FileTypeSubtree, subtreeBytes)
 	require.NoError(t, err)
 
-	subtreeHashes := make([]*chainhash.Hash, 0)
+	subtreeHashes := make([]*chainhash.Hash, 0, 1)
 	subtreeHashes = append(subtreeHashes, subtree.RootHash())
 
 	blockHeader := &model.BlockHeader{

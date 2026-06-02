@@ -242,7 +242,10 @@ func benchBuildMainChain(b *testing.B, s *SQL, n uint32) (*chainhash.Hash, uint3
 }
 
 // benchLocatorHeights mirrors services/blockchain.computeLocatorHeights (kept
-// local to avoid importing the service package from the store package).
+// local to avoid importing the service package from the store package). The
+// slice capacity differs (fixed 64 vs. the production computed maxEntries),
+// which is irrelevant to the benchmark; if the production height formula
+// changes, update this copy to match.
 func benchLocatorHeights(tipHeight uint32) []uint32 {
 	heights := make([]uint32, 0, 64)
 	step := uint32(1)
