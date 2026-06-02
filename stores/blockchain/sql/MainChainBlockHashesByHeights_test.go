@@ -126,7 +126,22 @@ func TestMainChainBlockHashesByHeights_PostgreSQL(t *testing.T) {
 		storeTestBlocks(t, s)
 		ctx := t.Context()
 
-		rows, err := s.db.QueryContext(ctx, `
+		// Disable seq scan so the planner is forced onto an index path: this
+		// asserts the fast-path query CAN be served by idx_on_main_chain_height,
+		// rather than depending on cost estimates that favour a seq scan on a
+		// tiny test table. SET LOCAL requires a transaction.
+		//
+		// The EXPLAIN query text below must match the Postgres branch of
+		// MainChainBlockHashesByHeights exactly — it intentionally pins the
+		// query shape so a future change that stops using the index fails here.
+		tx, err := s.db.BeginTx(ctx, nil)
+		require.NoError(t, err)
+		defer func() { _ = tx.Rollback() }()
+
+		_, err = tx.ExecContext(ctx, "SET LOCAL enable_seqscan = off")
+		require.NoError(t, err)
+
+		rows, err := tx.QueryContext(ctx, `
 			EXPLAIN (FORMAT TEXT)
 			SELECT height, hash FROM blocks
 			WHERE on_main_chain = true AND height <= $1 AND height = ANY($2)`,
