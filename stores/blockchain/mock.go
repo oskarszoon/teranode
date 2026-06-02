@@ -45,6 +45,9 @@ type MockStore struct {
 	BlockIsMined map[chainhash.Hash]bool
 	// state tracks the current state of the mock store (e.g., IDLE)
 	state string
+	// MainChainFastPathDisabled, when true, makes MainChainBlockHashesByHeights
+	// return ok=false so callers exercise the per-height walk fallback (test hook).
+	MainChainFastPathDisabled bool
 	// mu provides thread-safe access to all MockStore fields
 	mu sync.RWMutex
 }
@@ -203,6 +206,32 @@ func (m *MockStore) GetBlockInChainByHeightHash(ctx context.Context, height uint
 	}
 
 	return block, false, nil
+}
+
+// MainChainBlockHashesByHeights returns the hash of the block at each requested
+// height from the height index. Returns ok=false when disabled, when inputs are
+// empty, or when any height is missing or above startHeight, mirroring the SQL
+// store's fallback contract.
+func (m *MockStore) MainChainBlockHashesByHeights(ctx context.Context, startHash *chainhash.Hash, startHeight uint32, heights []uint32) (map[uint32]*chainhash.Hash, bool, error) {
+	if m.MainChainFastPathDisabled || startHash == nil || len(heights) == 0 {
+		return nil, false, nil
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	result := make(map[uint32]*chainhash.Hash, len(heights))
+
+	for _, h := range heights {
+		block, ok := m.BlockByHeight[h]
+		if !ok || h > startHeight {
+			return nil, false, nil
+		}
+
+		result[h] = block.Hash()
+	}
+
+	return result, true, nil
 }
 
 func (m *MockStore) GetBlockStats(ctx context.Context) (*model.BlockStats, error) {
