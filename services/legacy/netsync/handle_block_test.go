@@ -1329,11 +1329,11 @@ func TestSyncManager_createUtxos_ChunkErrorReturnsWrappedProcessingError(t *test
 // successful call makes the loop-top mergeCtx.Err() check the ONLY thing that can
 // stop iteration 2.
 //
-// Short-circuit intact:  iteration 2's check returns mergeCtx.Err() before any
-//   further call, so postTriggerCount == 0.
+// Short-circuit intact: iteration 2's check returns mergeCtx.Err() before any
+// further call, so postTriggerCount == 0.
 // Short-circuit removed: iteration 2 issues a SetMinedMulti call (postTriggerCount
-//   becomes 1, then that call's error stops the loop) — the count assertion fails
-//   with "expected 0, got 1", pinpointing the regression.
+// becomes 1, then that call's error stops the loop) — the count assertion fails
+// with "expected 0, got 1", pinpointing the regression.
 func TestSyncManager_createUtxos_ChunkFailureCancelsSiblings(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
