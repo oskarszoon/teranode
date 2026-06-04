@@ -151,6 +151,27 @@ func (a *Association) StreamPeers() []*Peer {
 	return peers
 }
 
+// ReadBytes returns the total number of bytes read off the wire across all
+// streams in the association, counted at byte granularity (i.e. updated as a
+// message streams in, not only on completion). It is the progress signal used
+// to tell an actively-downloading large block apart from a stalled peer, since
+// a multi-GB block arriving on the DATA1 stream would otherwise show no
+// movement until it fully completes.
+func (a *Association) ReadBytes() uint64 {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	var total uint64
+
+	for _, s := range a.streams {
+		if s != nil && s.Peer != nil {
+			total += s.Peer.ReadBytes()
+		}
+	}
+
+	return total
+}
+
 // HasRecentActivity returns true if any stream in the association has
 // received a message within the given timeout duration.
 func (a *Association) HasRecentActivity(timeout time.Duration) bool {

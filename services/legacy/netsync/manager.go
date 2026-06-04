@@ -168,9 +168,16 @@ type syncPeerState struct {
 	mu                sync.RWMutex // Protects all fields
 	recvBytes         uint64
 	recvBytesLastTick uint64
-	lastBlockTime     time.Time
-	violations        int
-	ticks             uint64
+	// assocReadBytes tracks byte-granular read progress across the sync peer's
+	// whole association (GENERAL + DATA1). Unlike recvBytes (the GENERAL peer's
+	// message-granular total) it advances while a large block is still
+	// streaming in on DATA1, so it can tell an active fat-block download apart
+	// from a stalled peer.
+	assocReadBytes         uint64
+	assocReadBytesLastTick uint64
+	lastBlockTime          time.Time
+	violations             int
+	ticks                  uint64
 }
 
 // validNetworkSpeed checks if the peer is slow and
@@ -215,6 +222,45 @@ func (sps *syncPeerState) updateNetwork(syncPeer *peerpkg.Peer) {
 	sps.ticks++
 	sps.recvBytesLastTick = sps.recvBytes
 	sps.recvBytes = syncPeer.BytesReceived()
+
+	sps.assocReadBytesLastTick = sps.assocReadBytes
+	sps.assocReadBytes = associationReadBytes(syncPeer)
+}
+
+// hasHealthyDownloadThroughput reports whether the sync peer's association
+// pulled in data over the last tick at or above minSyncPeerNetworkSpeed. It is
+// used to keep a sync peer that is actively downloading a large block — which
+// streams in on DATA1 and so completes no block within maxLastBlockTime — from
+// being rotated as if it were stalled. It does not mutate violation state.
+func (sps *syncPeerState) hasHealthyDownloadThroughput(minSyncPeerNetworkSpeed uint64) bool {
+	sps.mu.RLock()
+	defer sps.mu.RUnlock()
+
+	// Need at least one prior sample to compute a delta.
+	if sps.ticks == 0 {
+		return false
+	}
+
+	recvDiff := sps.assocReadBytes - sps.assocReadBytesLastTick
+
+	// Require actual bytes to have moved: a peer that delivered nothing is not
+	// "downloading", regardless of how the speed threshold is configured (it may
+	// be 0, which would otherwise make any rate pass).
+	if recvDiff == 0 {
+		return false
+	}
+
+	return recvDiff/uint64(syncPeerTickerInterval.Seconds()) >= minSyncPeerNetworkSpeed
+}
+
+// associationReadBytes returns the byte-granular read total across the peer's
+// association (all streams), or the peer's own count when not multistream.
+func associationReadBytes(p *peerpkg.Peer) uint64 {
+	if assoc := p.AssociationRef(); assoc != nil {
+		return assoc.ReadBytes()
+	}
+
+	return p.ReadBytes()
 }
 
 // updateLastBlockTime updates the last block time
@@ -789,6 +835,19 @@ func (sm *SyncManager) handleCheckSyncPeer() {
 		sm.logger.Debugf("[CheckSyncPeer] sync peer %s check (headers-first mode, speed check skipped), time since last block: %v (limit %v)", sp.String(), lastBlockSince, maxLastBlockTime)
 	}
 	isLastBlockTimeViolation := lastBlockSince > maxLastBlockTime
+
+	// A multi-GB block can take longer than maxLastBlockTime to arrive. Under
+	// the BlockPriority stream policy it streams in on the DATA1 stream, so no
+	// block "completes" (lastBlockTime stays put) even though bytes are
+	// actively flowing across the association. Don't rotate a sync peer that is
+	// still pulling data at a healthy rate — it is making progress on a large
+	// block, not stalled. A genuinely stalled peer delivers no throughput and
+	// is still rotated; a withholding-but-chatty peer is dropped by the peer
+	// layer's block-response deadline.
+	if isLastBlockTimeViolation && sps.hasHealthyDownloadThroughput(sm.minSyncPeerNetworkSpeed) {
+		sm.logger.Debugf("[CheckSyncPeer] sync peer %s exceeded last-block-time but association still downloading at a healthy rate; not rotating", sp.String())
+		isLastBlockTimeViolation = false
+	}
 
 	// If no violations detected, the sync peer is healthy — nothing to do.
 	if !isNetworkSpeedViolation && !isLastBlockTimeViolation {

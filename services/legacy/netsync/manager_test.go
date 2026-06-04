@@ -872,6 +872,57 @@ func TestHandleCheckSyncPeer_HeadersFirstMode(t *testing.T) {
 		// No violations, sync peer should still be set
 		assert.Equal(t, sp, sm.loadSyncPeer())
 	})
+
+	t.Run("headers-first mode keeps actively-downloading peer despite last-block-time", func(t *testing.T) {
+		sp := &peer.Peer{}
+		sps := &syncPeerState{
+			lastBlockTime:          time.Now().Add(-10 * time.Minute), // past maxLastBlockTime
+			ticks:                  1,
+			assocReadBytes:         10 * 1024 * 1024, // 10 MB pulled in over the last tick
+			assocReadBytesLastTick: 0,
+		}
+
+		sm := &SyncManager{
+			logger:                  ulogger.TestLogger{},
+			peerStates:              txmap.NewSyncedMap[*peer.Peer, *peerSyncState](),
+			minSyncPeerNetworkSpeed: 51200,
+		}
+		sm.storeSyncPeer(sp, sps)
+		sm.headersFirstMode.Store(true)
+		sm.peerStates.Set(sp, &peerSyncState{})
+
+		// A large block is still streaming in (healthy association throughput),
+		// so the peer must NOT be rotated even though no block completed within
+		// maxLastBlockTime. If it rotated, the minimal SyncManager would panic.
+		require.NotPanics(t, func() { sm.handleCheckSyncPeer() })
+		assert.Equal(t, sp, sm.loadSyncPeer())
+	})
+}
+
+func TestHasHealthyDownloadThroughput(t *testing.T) {
+	const minSpeed = 51200 // 50 KiB/s, matches default minSyncPeerNetworkSpeed
+
+	t.Run("no prior sample", func(t *testing.T) {
+		sps := &syncPeerState{ticks: 0, assocReadBytes: 10 * 1024 * 1024}
+		require.False(t, sps.hasHealthyDownloadThroughput(minSpeed))
+	})
+
+	t.Run("no bytes moved is never healthy, even with zero threshold", func(t *testing.T) {
+		sps := &syncPeerState{ticks: 1, assocReadBytes: 100, assocReadBytesLastTick: 100}
+		require.False(t, sps.hasHealthyDownloadThroughput(0))
+	})
+
+	t.Run("chatter below threshold", func(t *testing.T) {
+		// ~33 B/s over a 30s tick — far below 50 KiB/s.
+		sps := &syncPeerState{ticks: 1, assocReadBytes: 1000, assocReadBytesLastTick: 0}
+		require.False(t, sps.hasHealthyDownloadThroughput(minSpeed))
+	})
+
+	t.Run("active download above threshold", func(t *testing.T) {
+		// 10 MB over the tick — well above 50 KiB/s.
+		sps := &syncPeerState{ticks: 1, assocReadBytes: 10 * 1024 * 1024, assocReadBytesLastTick: 0}
+		require.True(t, sps.hasHealthyDownloadThroughput(minSpeed))
+	})
 }
 
 // TestHandleNewPeerMsg_NilFSMState exercises the path where the blockchain

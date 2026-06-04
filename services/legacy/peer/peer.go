@@ -76,6 +76,16 @@ const (
 	// wait for a block message to be received after sending a getdata
 	// message.
 	stallResponseTimeoutBlocks = 5 * time.Minute
+
+	// minBlockDownloadBytesPerSec is the association-wide read throughput, in
+	// bytes/sec, above which a pending block response is considered to be
+	// actively downloading rather than stalled. A multi-GB block can take
+	// longer than stallResponseTimeoutBlocks to arrive; while bytes keep
+	// flowing this fast its deadline is extended instead of disconnecting a
+	// peer that is making real progress. Mirrors the netsync default
+	// minSyncPeerNetworkSpeed (50 KiB/s) — comfortably above ping/inv chatter,
+	// far below real block-transfer rates.
+	minBlockDownloadBytesPerSec = 51200
 )
 
 var (
@@ -463,11 +473,16 @@ type HostToNetAddrFunc func(host string, port uint16,
 type Peer struct {
 	// The following variables must only be used atomically.
 	bytesReceived uint64
-	bytesSent     uint64
-	lastRecv      int64
-	lastSend      int64
-	connected     int32
-	disconnect    int32
+	// readBytes counts bytes read off the wire at byte granularity (updated per
+	// underlying conn Read, not only on whole-message completion). It is the
+	// progress signal used to detect an actively-streaming large block; see
+	// activityConn.
+	readBytes  uint64
+	bytesSent  uint64
+	lastRecv   int64
+	lastSend   int64
+	connected  int32
+	disconnect int32
 
 	conn net.Conn
 
@@ -881,6 +896,27 @@ func (p *Peer) BytesSent() uint64 {
 // This function is safe for concurrent access.
 func (p *Peer) BytesReceived() uint64 {
 	return atomic.LoadUint64(&p.bytesReceived)
+}
+
+// ReadBytes returns the number of bytes read off the wire at byte granularity.
+// Unlike BytesReceived (updated per completed message) this advances while a
+// large message is still streaming in, so it can distinguish an actively
+// downloading peer from a stalled one.
+//
+// This function is safe for concurrent access.
+func (p *Peer) ReadBytes() uint64 {
+	return atomic.LoadUint64(&p.readBytes)
+}
+
+// associationReadBytes returns the byte-granular read total across all streams
+// of the peer's association, or just this peer's own count when it is not part
+// of a multistream association.
+func (p *Peer) associationReadBytes() uint64 {
+	if assoc := p.AssociationRef(); assoc != nil {
+		return assoc.ReadBytes()
+	}
+
+	return p.ReadBytes()
 }
 
 // TimeConnected returns the time at which the peer connected.
@@ -1584,6 +1620,10 @@ func (p *Peer) stallHandler() {
 	// ioStopped is used to detect when both the input and output handler
 	// goroutines are done.
 	var ioStopped bool
+
+	// lastAssocReadBytes samples association-wide read progress between ticks so
+	// an actively-downloading block can be told apart from a stalled peer.
+	lastAssocReadBytes := p.associationReadBytes()
 out:
 	for {
 		select {
@@ -1654,12 +1694,31 @@ out:
 				offset += now.Sub(handlersStartTime)
 			}
 
+			// Sample association-wide read throughput since the last tick. A
+			// multi-GB block streams in on the DATA1 stream, so the GENERAL
+			// peer (which armed the block deadline) sees no whole-message
+			// receipt — but readBytes advances byte-by-byte across the
+			// association, revealing an active download.
+			curAssocReadBytes := p.associationReadBytes()
+			recvDelta := curAssocReadBytes - lastAssocReadBytes
+			lastAssocReadBytes = curAssocReadBytes
+			healthyDownload := recvDelta/uint64(stallTickInterval.Seconds()) >= minBlockDownloadBytesPerSec
+
 			// Disconnect the peer if a pending response has not arrived by
 			// its adjusted deadline. While a block fetch is in flight,
 			// non-block deadlines are suppressed (see expiredStallResponse).
 			if command, stalled := expiredStallResponse(pendingResponses, now, offset); stalled {
-				reason := fmt.Sprintf("Peer appears to be stalled or misbehaving, %s timeout", command)
-				p.DisconnectWithInfo(reason)
+				if isBlockResponseCommand(command) && healthyDownload {
+					// The block is still actively arriving at a healthy rate;
+					// extend its deadline rather than disconnect a peer that is
+					// making real progress on a large (multi-GB) block.
+					pendingResponses[command] = now.Add(stallResponseTimeoutBlocks)
+					p.logger.Debugf("Extending %s deadline for %s: block downloading at %d B/s",
+						command, p, recvDelta/uint64(stallTickInterval.Seconds()))
+				} else {
+					reason := fmt.Sprintf("Peer appears to be stalled or misbehaving, %s timeout", command)
+					p.DisconnectWithInfo(reason)
+				}
 			}
 
 			// Reset the deadline offset for the next tick.
@@ -2695,6 +2754,27 @@ func (p *Peer) sendVerack() error {
 	return nil
 }
 
+// activityConn wraps a net.Conn to record byte-level read progress. Each
+// successful Read advances the peer's byte-granular readBytes counter and
+// refreshes lastRecv, so progress/liveness checks reflect a large message
+// (e.g. a multi-GB block) that is actively streaming in but has not yet
+// completed — not just whole-message receipts. Only Read is overridden; all
+// other net.Conn methods delegate to the embedded conn.
+type activityConn struct {
+	net.Conn
+	peer *Peer
+}
+
+func (c *activityConn) Read(b []byte) (int, error) {
+	n, err := c.Conn.Read(b)
+	if n > 0 {
+		atomic.AddUint64(&c.peer.readBytes, uint64(n))
+		atomic.StoreInt64(&c.peer.lastRecv, time.Now().Unix())
+	}
+
+	return n, err
+}
+
 // AssociateConnection associates the given conn to the peer.   Calling this
 // function when the peer is already connected will have no effect.
 func (p *Peer) AssociateConnection(conn net.Conn) {
@@ -2703,7 +2783,9 @@ func (p *Peer) AssociateConnection(conn net.Conn) {
 		return
 	}
 
-	p.conn = conn
+	// Wrap the connection so reads advance the byte-granular progress counters
+	// even while a single large message (a fat block) is still streaming in.
+	p.conn = &activityConn{Conn: conn, peer: p}
 	p.timeConnected = time.Now()
 
 	if p.inbound {
