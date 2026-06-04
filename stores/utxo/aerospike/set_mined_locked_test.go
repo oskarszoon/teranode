@@ -197,3 +197,75 @@ func TestSetMinedMultiWithExpressionsClearsLockWhenBlockIDFilteredOut(t *testing
 	require.False(t, recordLocked(t, client, store, txHash, 0),
 		"master must be unlocked even when the blockID filter excludes the write (issue #1037)")
 }
+
+// TestSetMinedMultiHealsAlreadyMinedLockedPaginationRecord reproduces the wedged
+// state observed on the live node: the master is already mined (its blockID is
+// present) but a pagination record is still locked. The legacy IBD loop re-mines
+// the parent's block on every cycle, so a re-mine (SetMinedMulti with a blockID
+// already in the record's list) MUST clear the pagination lock — otherwise the
+// orphan never heals. Covers both store paths.
+func TestSetMinedMultiHealsAlreadyMinedLockedPaginationRecord(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping Aerospike integration test in short mode")
+	}
+
+	for _, useExpressions := range []bool{false, true} {
+		name := "lua"
+		if useExpressions {
+			name = "expressions"
+		}
+
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			logger := ulogger.NewErrorTestLogger(t)
+			settings := test.CreateBaseTestSettings(t)
+			settings.UtxoStore.UtxoBatchSize = 4
+			settings.Aerospike.EnableSetMinedFilterExpressions = useExpressions
+
+			client, store, _, cleanup := initAerospike(t, settings, logger)
+			defer cleanup()
+
+			cleanDB(t, client)
+
+			const blockHeight = 604314
+			const blockID = 635313
+
+			tx := createTransactionWithOutputs(10) // master + extra records
+			txHash := tx.TxIDChainHash()
+
+			_, err := store.Create(ctx, tx, blockHeight, utxo.WithLocked(true))
+			require.NoError(t, err)
+
+			extras := totalExtraRecs(t, client, store, txHash)
+			require.GreaterOrEqual(t, extras, 1)
+
+			// First mine: blockID becomes present, locks cleared on all records.
+			_, err = store.SetMinedMulti(ctx, []*chainhash.Hash{txHash}, utxo.MinedBlockInfo{
+				BlockID: blockID, BlockHeight: blockHeight, OnLongestChain: true,
+			})
+			require.NoError(t, err)
+
+			// Simulate the orphan that survived: a pagination record is locked again
+			// (in production it was never unlocked because the quick-validate unlock
+			// failed to run; here we force the same end-state directly).
+			for i := uint32(1); i <= uint32(extras); i++ {
+				key, kerr := aerospike.NewKey(store.GetNamespace(), store.GetName(), uaerospike.CalculateKeySourceInternal(txHash, i))
+				require.NoError(t, kerr)
+				require.NoError(t, client.PutBins(nil, key, aerospike.NewBin(fields.Locked.String(), true)))
+				require.True(t, recordLocked(t, client, store, txHash, i))
+			}
+
+			// Re-mine with the SAME blockID (already present). This is what the legacy
+			// IBD loop does every cycle; it must heal the pagination lock.
+			_, err = store.SetMinedMulti(ctx, []*chainhash.Hash{txHash}, utxo.MinedBlockInfo{
+				BlockID: blockID, BlockHeight: blockHeight, OnLongestChain: true,
+			})
+			require.NoError(t, err)
+
+			for i := uint32(1); i <= uint32(extras); i++ {
+				require.Falsef(t, recordLocked(t, client, store, txHash, i),
+					"pagination record %d must be unlocked after a re-mine with an already-present blockID (issue #1037)", i)
+			}
+		})
+	}
+}

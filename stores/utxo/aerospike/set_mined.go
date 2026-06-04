@@ -233,13 +233,13 @@ func (s *Store) SetMinedMulti(ctx context.Context, hashes []*chainhash.Hash, min
 	}
 
 	// Process batch results
-	blockIDs, lockClearItems, err := s.processBatchResultsForSetMined(ctx, batchRecords, hashes, thisBlockHeight, minedBlockInfo)
+	blockIDs, work, err := s.processBatchResultsForSetMined(ctx, batchRecords, hashes, thisBlockHeight, minedBlockInfo)
 
 	// #1037: clear the lock on the pagination records of successfully-mined
 	// external txs. Done here (not inside the result processor) so the processor
 	// stays free of follow-up I/O. Runs even when err != nil so a tx mined
 	// successfully is fully unlocked despite a sibling failure in the same batch.
-	if clearErr := s.clearLockedOnRecordsMulti(lockClearItems); clearErr != nil {
+	if clearErr := s.applyLockClearWork(ctx, work); clearErr != nil {
 		err = errors.Join(err, clearErr)
 	}
 
@@ -314,7 +314,7 @@ func (s *Store) executeBatchOperation(batchRecords []aerospike.BatchRecordIfc) e
 // (SetMinedMulti) so this function stays free of follow-up writes for the
 // lock-clear path — keeping it unit-testable without a live client.
 func (s *Store) processBatchResultsForSetMined(ctx context.Context, batchRecords []aerospike.BatchRecordIfc,
-	hashes []*chainhash.Hash, thisBlockHeight uint32, minedBlockInfo utxo.MinedBlockInfo) (map[chainhash.Hash][]uint32, []lockClearItem, error) {
+	hashes []*chainhash.Hash, thisBlockHeight uint32, minedBlockInfo utxo.MinedBlockInfo) (map[chainhash.Hash][]uint32, lockClearWork, error) {
 	var errs error
 	okUpdates := 0
 	nrErrors := 0
@@ -335,7 +335,7 @@ func (s *Store) processBatchResultsForSetMined(ctx context.Context, batchRecords
 	// #1037: pagination/extra records of successfully-mined external txs whose
 	// `locked` flag must be cleared (the master-keyed setMined only clears the
 	// master). Populated from the setMined response's childCount (= totalExtraRecs).
-	var lockClearItems []lockClearItem
+	var work lockClearWork
 	// DAH timing assumption:
 	// - thisBatch operates under a fixed block-processing context.
 	// - thisBlockHeight and retention are immutable for the duration of SetMinedMulti() execution.
@@ -376,7 +376,7 @@ func (s *Store) processBatchResultsForSetMined(ctx context.Context, batchRecords
 			// UDF itself). childCount == totalExtraRecs is surfaced by setMined on a
 			// mine; UnsetMined never reaches here as a clear (childCount only on mine).
 			if res != nil && !minedBlockInfo.UnsetMined && res.ChildCount > 0 {
-				lockClearItems = append(lockClearItems, lockClearItem{txID: hashes[idx], childCount: res.ChildCount})
+				work.items = append(work.items, lockClearItem{txID: hashes[idx], childCount: res.ChildCount})
 			}
 		}
 
@@ -426,12 +426,12 @@ func (s *Store) processBatchResultsForSetMined(ctx context.Context, batchRecords
 
 	prometheusTxMetaAerospikeMapSetMinedBatchN.Add(float64(okUpdates))
 
-	// lockClearItems (pagination records of successfully-mined external txs) are
-	// returned to the caller for clearing, so a tx that was mined successfully is
-	// fully unlocked even if a sibling record in the same batch errored below.
+	// work (pagination records of successfully-mined external txs) is returned to
+	// the caller for clearing, so a tx that was mined successfully is fully
+	// unlocked even if a sibling record in the same batch errored below.
 	if errs != nil || nrErrors > 0 {
 		prometheusTxMetaAerospikeMapSetMinedBatchErrN.Add(float64(nrErrors))
-		return blockIDs, lockClearItems, errors.NewError("aerospike batchRecord errors", errs)
+		return blockIDs, work, errors.NewError("aerospike batchRecord errors", errs)
 	}
 
 	// Execute aggregated follow-ups in batches
@@ -459,10 +459,10 @@ func (s *Store) processBatchResultsForSetMined(ctx context.Context, batchRecords
 	// setDAHExternalTransactionMulti removed as it would no-op
 
 	if postErr != nil {
-		return blockIDs, lockClearItems, errors.NewError("aerospike setMined follow-up batch errors", postErr)
+		return blockIDs, work, errors.NewError("aerospike setMined follow-up batch errors", postErr)
 	}
 
-	return blockIDs, lockClearItems, nil
+	return blockIDs, work, nil
 }
 
 // processSingleBatchRecord processes a single batch record result, allocating a
@@ -562,13 +562,44 @@ func (s *Store) handleSetMinedSignal(ctx context.Context, signal LuaSignal, hash
 	return errs
 }
 
-// lockClearItem identifies a transaction whose pagination/extra records (and,
-// when includeMaster is set, its master record) must have the `locked` flag
-// cleared as part of marking the transaction mined.
+// lockClearItem identifies a transaction whose pagination/extra records must
+// have the `locked` flag cleared as part of marking the transaction mined. The
+// master record's lock is cleared by the setMined UDF / expression write itself.
 type lockClearItem struct {
-	txID          *chainhash.Hash
-	childCount    int  // number of pagination/extra records, cleared at indices 1..childCount
-	includeMaster bool // also clear the master record (index 0)
+	txID       *chainhash.Hash
+	childCount int // number of pagination/extra records, cleared at indices 1..childCount
+}
+
+// lockClearWork is the lock-clearing follow-up that a setMined result processor
+// hands back to its public caller (#1037). The processors stay free of follow-up
+// I/O so they remain unit-testable without a live client.
+type lockClearWork struct {
+	// items: pagination records to unlock directly (childCount known from the
+	// setMined response / totalExtraRecs bin; the master is already unlocked).
+	items []lockClearItem
+	// fullUnlock: transactions whose record state is unknown from the batch (the
+	// expression write was FILTERED_OUT, so the child count and even the master's
+	// lock state were not returned). SetLocked(false) reads the child count from
+	// the master and clears every record (master + all pagination records).
+	fullUnlock []chainhash.Hash
+}
+
+// applyLockClearWork performs the lock-clearing follow-up I/O collected by a
+// setMined result processor. Safe to call with empty work (no-op).
+func (s *Store) applyLockClearWork(ctx context.Context, work lockClearWork) error {
+	var err error
+
+	if clearErr := s.clearLockedOnRecordsMulti(work.items); clearErr != nil {
+		err = errors.Join(err, clearErr)
+	}
+
+	if len(work.fullUnlock) > 0 {
+		if unlockErr := s.SetLocked(ctx, work.fullUnlock, false); unlockErr != nil {
+			err = errors.Join(err, unlockErr)
+		}
+	}
+
+	return err
 }
 
 // clearLockedOnRecordsMulti clears the `locked` flag on the requested records in
@@ -592,9 +623,6 @@ type lockClearItem struct {
 func (s *Store) clearLockedOnRecordsMulti(items []lockClearItem) error {
 	total := 0
 	for _, it := range items {
-		if it.includeMaster {
-			total++
-		}
 		if it.childCount > 0 {
 			total += it.childCount
 		}
@@ -624,12 +652,6 @@ func (s *Store) clearLockedOnRecordsMulti(items []lockClearItem) error {
 	}
 
 	for _, it := range items {
-		if it.includeMaster {
-			if err := appendRecord(it.txID, 0); err != nil {
-				return err
-			}
-		}
-
 		for i := uint32(1); i <= uint32(it.childCount); i++ { // nolint:gosec
 			if err := appendRecord(it.txID, i); err != nil {
 				return err
