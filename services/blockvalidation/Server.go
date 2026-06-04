@@ -1322,6 +1322,11 @@ func (u *Server) ValidateBlock(ctx context.Context, request *blockvalidation_api
 	// Create meta regenerator for potential meta file recovery (no peer URL for gRPC, local store only)
 	metaRegenerator := u.blockValidation.createMetaRegenerator(nil)
 	if ok, err := block.Valid(ctx, u.logger, u.subtreeStore, u.utxoStore, oldBlockIDsMap, blockHeaders, blockHeaderIDs, u.settings, metaRegenerator); !ok {
+		// Transient catchup-state (e.g. parent tx not yet in our store) must not be
+		// reported as a consensus failure to the caller. See issue #1031.
+		if errors.Is(err, errors.ErrBlockIncomplete) {
+			return nil, errors.WrapGRPC(errors.NewBlockIncompleteError("[ValidateBlock][%s] block validation hit transient missing-data state: %s", block.Hash().String(), err))
+		}
 		return nil, errors.WrapGRPC(errors.NewBlockInvalidError("[ValidateBlock][%s] block is not valid", block.String(), err))
 	}
 

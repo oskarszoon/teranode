@@ -1631,6 +1631,13 @@ func (u *BlockValidation) ValidateBlockWithOptions(ctx context.Context, block *m
 					return err
 				}
 
+				// Transient catchup-state surfaced from block.Valid (e.g. a parent transaction
+				// not yet in our store). Don't poison the DB; signal incomplete so catchup
+				// retries another peer. See issue #1031.
+				if errors.Is(err, errors.ErrBlockIncomplete) {
+					return errors.NewBlockIncompleteError("[ValidateBlock][%s] block validation hit transient missing-data state: %s", block.Hash().String(), err)
+				}
+
 				if !opts.IsRevalidation {
 					u.storeInvalidBlock(ctx, block, opts.PeerID, reason)
 				}
