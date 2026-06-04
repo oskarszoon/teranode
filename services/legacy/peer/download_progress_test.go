@@ -51,9 +51,9 @@ func TestAssociationReadBytesSumsStreams(t *testing.T) {
 	require.Equal(t, uint64(1000), assoc.ReadBytes())
 
 	general.SetAssociation(assoc)
-	require.Equal(t, uint64(1000), general.associationReadBytes())
+	require.Equal(t, uint64(1000), general.AssociationReadBytes())
 
 	lone := &Peer{}
 	atomic.StoreUint64(&lone.readBytes, 42)
-	require.Equal(t, uint64(42), lone.associationReadBytes())
+	require.Equal(t, uint64(42), lone.AssociationReadBytes())
 }

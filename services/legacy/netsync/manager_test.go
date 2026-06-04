@@ -947,6 +947,13 @@ func TestHasHealthyDownloadThroughput(t *testing.T) {
 		sps := &syncPeerState{ticks: 1, assocReadBytes: 10 * 1024 * 1024, assocReadBytesLastTick: 0}
 		require.True(t, sps.hasHealthyDownloadThroughput(minSpeed))
 	})
+
+	t.Run("counter decrease (stream removed) is not healthy", func(t *testing.T) {
+		// A stream dropped between samples, so the association sum fell. The
+		// unsigned subtraction must not wrap to a huge "healthy" value.
+		sps := &syncPeerState{ticks: 2, assocReadBytes: 1000, assocReadBytesLastTick: 10 * 1024 * 1024}
+		require.False(t, sps.hasHealthyDownloadThroughput(minSpeed))
+	})
 }
 
 // TestHandleNewPeerMsg_NilFSMState exercises the path where the blockchain

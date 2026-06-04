@@ -224,7 +224,7 @@ func (sps *syncPeerState) updateNetwork(syncPeer *peerpkg.Peer) {
 	sps.recvBytes = syncPeer.BytesReceived()
 
 	sps.assocReadBytesLastTick = sps.assocReadBytes
-	sps.assocReadBytes = associationReadBytes(syncPeer)
+	sps.assocReadBytes = syncPeer.AssociationReadBytes()
 }
 
 // hasHealthyDownloadThroughput reports whether the sync peer's association
@@ -241,6 +241,14 @@ func (sps *syncPeerState) hasHealthyDownloadThroughput(minSyncPeerNetworkSpeed u
 		return false
 	}
 
+	// Association.ReadBytes sums over the streams present at sample time. If a
+	// stream (e.g. DATA1) was removed between samples the sum drops, so guard
+	// the unsigned subtraction: a decrease means a stream just died, which is
+	// the opposite of healthy progress — treat it as no throughput.
+	if sps.assocReadBytes < sps.assocReadBytesLastTick {
+		return false
+	}
+
 	recvDiff := sps.assocReadBytes - sps.assocReadBytesLastTick
 
 	// Require actual bytes to have moved: a peer that delivered nothing is not
@@ -251,16 +259,6 @@ func (sps *syncPeerState) hasHealthyDownloadThroughput(minSyncPeerNetworkSpeed u
 	}
 
 	return recvDiff/uint64(syncPeerTickerInterval.Seconds()) >= minSyncPeerNetworkSpeed
-}
-
-// associationReadBytes returns the byte-granular read total across the peer's
-// association (all streams), or the peer's own count when not multistream.
-func associationReadBytes(p *peerpkg.Peer) uint64 {
-	if assoc := p.AssociationRef(); assoc != nil {
-		return assoc.ReadBytes()
-	}
-
-	return p.ReadBytes()
 }
 
 // updateLastBlockTime updates the last block time

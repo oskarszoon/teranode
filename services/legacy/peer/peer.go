@@ -919,10 +919,10 @@ func (p *Peer) ReadBytes() uint64 {
 	return atomic.LoadUint64(&p.readBytes)
 }
 
-// associationReadBytes returns the byte-granular read total across all streams
+// AssociationReadBytes returns the byte-granular read total across all streams
 // of the peer's association, or just this peer's own count when it is not part
 // of a multistream association.
-func (p *Peer) associationReadBytes() uint64 {
+func (p *Peer) AssociationReadBytes() uint64 {
 	if assoc := p.AssociationRef(); assoc != nil {
 		return assoc.ReadBytes()
 	}
@@ -1468,6 +1468,11 @@ func (p *Peer) maybeAddDeadline(pendingResponses map[string]time.Time, msgCmd st
 // are not part of an association notify only themselves, preserving the
 // original single-stream behaviour. Each send is guarded by the target peer's
 // quit channel so a stream that is tearing down cannot block the reader.
+//
+// Note: the (buffered-1) sends lightly couple the receiving stream's inHandler
+// to each sibling stall handler's scheduling. There is no deadlock risk — stall
+// handlers never send back on these channels — at most a brief wait for a
+// sibling handler to drain one message.
 func (p *Peer) signalReceived(rmsg wire.Message) {
 	msg := stallControlMsg{sccReceiveMessage, rmsg}
 
@@ -1658,7 +1663,7 @@ func (p *Peer) stallHandler() {
 
 	// lastAssocReadBytes samples association-wide read progress between ticks so
 	// an actively-downloading block can be told apart from a stalled peer.
-	lastAssocReadBytes := p.associationReadBytes()
+	lastAssocReadBytes := p.AssociationReadBytes()
 
 	// blockFetchStart records when the current block fetch first went in flight.
 	// It bounds how long throughput-based extension can keep a block alive
@@ -1749,8 +1754,18 @@ out:
 			// peer (which armed the block deadline) sees no whole-message
 			// receipt — but readBytes advances byte-by-byte across the
 			// association, revealing an active download.
-			curAssocReadBytes := p.associationReadBytes()
-			recvDelta := curAssocReadBytes - lastAssocReadBytes
+			curAssocReadBytes := p.AssociationReadBytes()
+
+			// AssociationReadBytes sums over the streams present at sample time;
+			// if a stream was removed between ticks the sum drops. Guard the
+			// unsigned subtraction so a decrease reads as zero progress (not a
+			// wrapped-around "healthy" value) — a dying stream must not extend a
+			// block deadline.
+			var recvDelta uint64
+			if curAssocReadBytes >= lastAssocReadBytes {
+				recvDelta = curAssocReadBytes - lastAssocReadBytes
+			}
+
 			lastAssocReadBytes = curAssocReadBytes
 			healthyDownload := recvDelta/uint64(stallTickInterval.Seconds()) >= minBlockDownloadBytesPerSec
 
