@@ -507,13 +507,15 @@ func (s *Store) processBatchResultsForSetMinedExpressions(
 
 	prometheusTxMetaAerospikeMapSetMinedBatchN.Add(float64(okUpdates))
 
-	if nrErrors > 0 {
+	// Mirror the Lua path's single guard (set_mined.go) instead of the nested
+	// `if nrErrors > 0 { if errs != nil }`: every nrErrors++ is paired with an
+	// errs join, so the two conditions move together — keeping them as one
+	// expression removes the implicit coupling. work is still returned so the
+	// caller unlocks successfully-mined (and FILTERED_OUT) records despite a
+	// sibling failure in this batch.
+	if errs != nil || nrErrors > 0 {
 		prometheusTxMetaAerospikeMapSetMinedBatchErrN.Add(float64(nrErrors))
-		if errs != nil {
-			// work still returned so the caller unlocks successfully-mined (and
-			// FILTERED_OUT) records despite a sibling failure in this batch.
-			return blockIDs, work, errors.NewError("aerospike batch record errors", errs)
-		}
+		return blockIDs, work, errors.NewError("aerospike batch record errors", errs)
 	}
 
 	// Execute follow-up actions for external transactions (child record and blob storage DAH)

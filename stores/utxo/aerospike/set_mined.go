@@ -587,15 +587,21 @@ type lockClearWork struct {
 // applyLockClearWork performs the lock-clearing follow-up I/O collected by a
 // setMined result processor. Safe to call with empty work (no-op).
 func (s *Store) applyLockClearWork(ctx context.Context, work lockClearWork) error {
+	// Assign the first non-nil error directly rather than errors.Join(nil, err),
+	// which would wrap it in a stdlib joinError and drop the rich *errors.Error type.
 	var err error
 
 	if clearErr := s.clearLockedOnRecordsMulti(work.items); clearErr != nil {
-		err = errors.Join(err, clearErr)
+		err = clearErr
 	}
 
 	if len(work.fullUnlock) > 0 {
 		if unlockErr := s.SetLocked(ctx, work.fullUnlock, false); unlockErr != nil {
-			err = errors.Join(err, unlockErr)
+			if err == nil {
+				err = unlockErr
+			} else {
+				err = errors.Join(err, unlockErr)
+			}
 		}
 	}
 
@@ -652,6 +658,13 @@ func (s *Store) clearLockedOnRecordsMulti(items []lockClearItem) error {
 	}
 
 	for _, it := range items {
+		// Guard against a non-positive childCount: uint32(negative) would wrap to
+		// ~4e9 and blow up the batch. Both producers only ever append childCount > 0,
+		// so this is belt-and-suspenders for self-consistency with the sizing loop.
+		if it.childCount <= 0 {
+			continue
+		}
+
 		for i := uint32(1); i <= uint32(it.childCount); i++ { // nolint:gosec
 			if err := appendRecord(it.txID, i); err != nil {
 				return err
@@ -659,6 +672,10 @@ func (s *Store) clearLockedOnRecordsMulti(items []lockClearItem) error {
 		}
 	}
 
+	// A non-nil top-level error here is a transport/batch-level failure, surfaced
+	// hard. The benign per-record KEY_NOT_FOUND tolerance below relies on Aerospike
+	// reporting missing records per-record (BatchRecord.Err), not as a top-level
+	// error — consistent with the rest of this package's batch handling.
 	if err := s.batchOperate(util.GetAerospikeBatchPolicy(s.settings), batchRecords); err != nil {
 		return errors.NewStorageError("[clearLockedOnRecordsMulti] failed to clear locked flag", err)
 	}

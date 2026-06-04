@@ -269,3 +269,63 @@ func TestSetMinedMultiHealsAlreadyMinedLockedPaginationRecord(t *testing.T) {
 		})
 	}
 }
+
+// TestSetMinedMultiUnlocksDespiteSiblingError pins the cross-sibling guarantee:
+// when a SetMinedMulti batch contains a paginated tx that mines successfully and a
+// sibling hash that errors (e.g. not found), the successfully-mined tx must still
+// have its pagination records unlocked — the lock-clear must not be skipped just
+// because another record in the batch failed. A regression that early-returns
+// before applyLockClearWork would re-introduce the #1037 wedge while still
+// compiling and passing the happy-path tests.
+func TestSetMinedMultiUnlocksDespiteSiblingError(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping Aerospike integration test in short mode")
+	}
+
+	for _, useExpressions := range []bool{false, true} {
+		name := "lua"
+		if useExpressions {
+			name = "expressions"
+		}
+
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			logger := ulogger.NewErrorTestLogger(t)
+			settings := test.CreateBaseTestSettings(t)
+			settings.UtxoStore.UtxoBatchSize = 4
+			settings.Aerospike.EnableSetMinedFilterExpressions = useExpressions
+
+			client, store, _, cleanup := initAerospike(t, settings, logger)
+			defer cleanup()
+
+			cleanDB(t, client)
+
+			const blockHeight = 604314
+
+			tx := createTransactionWithOutputs(10)
+			txHash := tx.TxIDChainHash()
+
+			_, err := store.Create(ctx, tx, blockHeight, utxo.WithLocked(true))
+			require.NoError(t, err)
+
+			extras := totalExtraRecs(t, client, store, txHash)
+			require.GreaterOrEqual(t, extras, 1)
+
+			// A hash that was never created — its record does not exist, so it errors
+			// (TX_NOT_FOUND) inside the same SetMinedMulti batch.
+			missing := &chainhash.Hash{0xDE, 0xAD, 0xBE, 0xEF}
+
+			_, err = store.SetMinedMulti(ctx, []*chainhash.Hash{txHash, missing}, utxo.MinedBlockInfo{
+				BlockID: 1, BlockHeight: blockHeight, OnLongestChain: true,
+			})
+			require.Error(t, err, "the missing sibling must surface an error")
+
+			// ...but the tx that did mine must be fully unlocked regardless.
+			require.False(t, recordLocked(t, client, store, txHash, 0), "master of the mined tx must be unlocked")
+			for i := uint32(1); i <= uint32(extras); i++ {
+				require.Falsef(t, recordLocked(t, client, store, txHash, i),
+					"pagination record %d of the successfully-mined tx must be unlocked despite the sibling error (issue #1037)", i)
+			}
+		})
+	}
+}
