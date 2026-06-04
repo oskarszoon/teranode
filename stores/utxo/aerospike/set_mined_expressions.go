@@ -322,17 +322,29 @@ func (s *Store) SetMinedMultiWithExpressions(ctx context.Context, hashes []*chai
 	prometheusTxMetaAerospikeMapSetMinedBatch.Inc()
 
 	// Process results
-	return s.processBatchResultsForSetMinedExpressions(ctx, batchRecords, hashes, thisBlockHeight, minedBlockInfo)
+	blockIDs, lockClearItems, err := s.processBatchResultsForSetMinedExpressions(ctx, batchRecords, hashes, thisBlockHeight, minedBlockInfo)
+
+	// #1037: clear the lock on pagination records, and on the master of any record
+	// whose write was FILTERED_OUT (blockID already present) — the filter would
+	// otherwise skip the Locked=false op. Done here, outside the result processor,
+	// so the processor performs no follow-up I/O and stays unit-testable.
+	if clearErr := s.clearLockedOnRecordsMulti(lockClearItems); clearErr != nil {
+		err = errors.Join(err, clearErr)
+	}
+
+	return blockIDs, err
 }
 
-// processBatchResultsForSetMinedExpressions processes the batch results and handles follow-up actions.
+// processBatchResultsForSetMinedExpressions processes the batch results and
+// returns the per-tx blockID map plus the records whose `locked` flag must be
+// cleared (#1037); the lock-clearing I/O is performed by the caller.
 func (s *Store) processBatchResultsForSetMinedExpressions(
 	ctx context.Context,
 	batchRecords []aerospike.BatchRecordIfc,
 	hashes []*chainhash.Hash,
 	thisBlockHeight uint32,
 	minedBlockInfo utxo.MinedBlockInfo,
-) (map[chainhash.Hash][]uint32, error) {
+) (map[chainhash.Hash][]uint32, []lockClearItem, error) {
 	blockIDs := make(map[chainhash.Hash][]uint32, len(hashes))
 	var errs error
 	okUpdates := 0
@@ -348,6 +360,10 @@ func (s *Store) processBatchResultsForSetMinedExpressions(
 		TxID *chainhash.Hash
 		DAH  uint32
 	}, 0)
+	// #1037: records whose `locked` flag must be cleared on the pagination/extra
+	// records (and on the master for FILTERED_OUT records, see below). The master
+	// of a non-filtered record is unlocked by the main batch write's Locked=false op.
+	var lockClearItems []lockClearItem
 
 	// Process each batch record result
 	for i, batchRecord := range batchRecords {
@@ -371,6 +387,13 @@ func (s *Store) processBatchResultsForSetMinedExpressions(
 					// check at the end of this function sees this hash as covered.
 					blockIDs[*hash] = []uint32{minedBlockInfo.BlockID}
 					okUpdates++
+
+					// #1037 (filter-gating): when the write is FILTERED_OUT the whole
+					// batch write — including the Locked=false op — is skipped, so a
+					// still-locked master would never be cleared by this path. The tx
+					// is mined (its blockID is present), therefore it must be spendable:
+					// clear the master's lock unconditionally via the unfiltered pass.
+					lockClearItems = append(lockClearItems, lockClearItem{txID: hash, includeMaster: true})
 					continue
 				}
 			}
@@ -435,6 +458,16 @@ func (s *Store) processBatchResultsForSetMinedExpressions(
 			}
 		}
 
+		// #1037: this batch write cleared `locked` on the master only. Clear it on
+		// the pagination/extra records too, so a child spending a high-index output
+		// (vout >= utxoBatchSize) of a freshly-mined paginated tx is not rejected
+		// with TX_LOCKED. Keyed on the presence of extra records (not the external
+		// flag) so it holds for any paginated tx. UnsetMined never uses this path
+		// (SetMinedMulti routes it to the UDF), so collecting here is always safe.
+		if state.TotalExtraRecs != nil && *state.TotalExtraRecs > 0 {
+			lockClearItems = append(lockClearItems, lockClearItem{txID: hash, childCount: *state.TotalExtraRecs})
+		}
+
 		okUpdates++
 	}
 
@@ -474,7 +507,9 @@ func (s *Store) processBatchResultsForSetMinedExpressions(
 	if nrErrors > 0 {
 		prometheusTxMetaAerospikeMapSetMinedBatchErrN.Add(float64(nrErrors))
 		if errs != nil {
-			return blockIDs, errors.NewError("aerospike batch record errors", errs)
+			// lockClearItems still returned so the caller unlocks successfully-mined
+			// (and FILTERED_OUT) records despite a sibling failure in this batch.
+			return blockIDs, lockClearItems, errors.NewError("aerospike batch record errors", errs)
 		}
 	}
 
@@ -488,8 +523,8 @@ func (s *Store) processBatchResultsForSetMinedExpressions(
 	}
 
 	if postErr != nil {
-		return blockIDs, errors.NewError("aerospike setMined follow-up batch errors", postErr)
+		return blockIDs, lockClearItems, errors.NewError("aerospike setMined follow-up batch errors", postErr)
 	}
 
-	return blockIDs, nil
+	return blockIDs, lockClearItems, nil
 }

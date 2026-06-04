@@ -139,7 +139,7 @@ func TestProcessBatchResultsForSetMinedExpressions_FilteredOutSynthesizesMapEntr
 	rec.BatchRec().Err = &aerospike.AerospikeError{ResultCode: types.FILTERED_OUT}
 
 	const blockID uint32 = 1234
-	got, err := s.processBatchResultsForSetMinedExpressions(
+	got, _, err := s.processBatchResultsForSetMinedExpressions(
 		context.Background(),
 		[]aerospike.BatchRecordIfc{rec},
 		[]*chainhash.Hash{hash},
@@ -163,7 +163,7 @@ func TestProcessBatchResultsForSetMinedExpressions_KeyNotFoundIsHardError(t *tes
 	rec := newFakeBatchWrite(t, hash)
 	rec.BatchRec().Err = &aerospike.AerospikeError{ResultCode: types.KEY_NOT_FOUND_ERROR}
 
-	got, err := s.processBatchResultsForSetMinedExpressions(
+	got, _, err := s.processBatchResultsForSetMinedExpressions(
 		context.Background(),
 		[]aerospike.BatchRecordIfc{rec},
 		[]*chainhash.Hash{hash},
@@ -187,7 +187,7 @@ func TestProcessBatchResultsForSetMinedExpressions_CoverageGap_NilRecord(t *test
 	rec := newFakeBatchWrite(t, hash)
 	// Default state: rec.BatchRec().Err == nil && rec.BatchRec().Record == nil.
 
-	got, err := s.processBatchResultsForSetMinedExpressions(
+	got, _, err := s.processBatchResultsForSetMinedExpressions(
 		context.Background(),
 		[]aerospike.BatchRecordIfc{rec},
 		[]*chainhash.Hash{hash},
@@ -213,7 +213,7 @@ func TestProcessBatchResultsForSetMinedExpressions_CoverageGap_EmptyBlockIDs(t *
 		"blockIDs": []interface{}{},
 	}}
 
-	got, err := s.processBatchResultsForSetMinedExpressions(
+	got, _, err := s.processBatchResultsForSetMinedExpressions(
 		context.Background(),
 		[]aerospike.BatchRecordIfc{rec},
 		[]*chainhash.Hash{hash},
@@ -237,7 +237,7 @@ func TestProcessBatchResultsForSetMinedExpressions_UnsetMinedToleratesGap(t *tes
 	rec := newFakeBatchWrite(t, hash)
 	// Nil Record — same shape as the NilRecord test above.
 
-	got, err := s.processBatchResultsForSetMinedExpressions(
+	got, _, err := s.processBatchResultsForSetMinedExpressions(
 		context.Background(),
 		[]aerospike.BatchRecordIfc{rec},
 		[]*chainhash.Hash{hash},

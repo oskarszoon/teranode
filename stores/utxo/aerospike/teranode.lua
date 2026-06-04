@@ -667,6 +667,22 @@ function setMined(rec, blockID, blockHeight, subtreeIdx, currentBlockHeight, blo
         end
     end
 
+    -- #1037: On a mine, always surface the pagination/extra-record count so the
+    -- client can clear the `locked` flag on the pagination records too. This UDF
+    -- runs on (and can only mutate) the master record, so the lock-clear above
+    -- only affects the master. For an external/paginated tx, any pagination
+    -- record left locked (e.g. created WithLocked(true) by quick-validate or the
+    -- validator 2PC, whose unlock then never ran) would stay locked forever, and
+    -- a child spending an output that lives on a pagination record (vout >=
+    -- utxoBatchSize) would fail permanently with TX_LOCKED. The client clears the
+    -- pagination records using this count.
+    if not unsetMined then
+        local totalExtraRecs = rec[BIN_TOTAL_EXTRA_RECS]
+        if totalExtraRecs and totalExtraRecs > 0 then
+            response[FIELD_CHILD_COUNT] = totalExtraRecs
+        end
+    end
+
     return response
 end
 
