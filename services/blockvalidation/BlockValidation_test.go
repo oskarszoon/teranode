@@ -3760,3 +3760,67 @@ func TestBlockValidation_InvalidBlock_PublishesToKafka(t *testing.T) {
 	// Use the thread-safe method to check if Publish was called
 	require.True(t, mockKafka.IsPublishCalled(), "Kafka Publish should be called for invalid block (duplicate transaction)")
 }
+
+func TestBlockValidation_SubtreeError_Classification(t *testing.T) {
+	initPrometheusMetrics()
+
+	tests := []struct {
+		name          string
+		subtreeErr    error
+		wantContains  string // substring expected in ValidateBlock's returned error
+		wantPersisted bool   // whether the block should end up stored (as invalid)
+	}{
+		{
+			name:          "missing parent is transient, not persisted",
+			subtreeErr:    errors.NewTxMissingParentError("parent tx not yet in store"),
+			wantContains:  "BLOCK_INCOMPLETE",
+			wantPersisted: false,
+		},
+		{
+			name:          "tx not found is transient, not persisted",
+			subtreeErr:    errors.NewTxNotFoundError("tx not yet in store"),
+			wantContains:  "BLOCK_INCOMPLETE",
+			wantPersisted: false,
+		},
+		{
+			name:          "tx invalid is a consensus violation, persisted",
+			subtreeErr:    errors.NewTxInvalidError("tx fails script validation"),
+			wantContains:  "BLOCK_INVALID",
+			wantPersisted: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			utxoStore, _, _, txStore, subtreeStore, deferFunc := setup(t)
+			defer deferFunc()
+
+			tSettings := test.CreateBaseTestSettings(t)
+			blockChainStore, err := blockchain_store.NewStore(ulogger.TestLogger{}, &url.URL{Scheme: "sqlitememory"}, tSettings)
+			require.NoError(t, err)
+			blockchainClient, err := blockchain.NewLocalClient(ulogger.TestLogger{}, tSettings, blockChainStore, nil, nil)
+			require.NoError(t, err)
+
+			// Inject the subtree-validation error at the CheckBlockSubtrees boundary.
+			subtreeValidationClient := &subtreevalidation.MockSubtreeValidation{}
+			subtreeValidationClient.Mock.On("CheckBlockSubtrees", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+				Return(tc.subtreeErr)
+
+			block := createValidBlock(t, tSettings, utxoStore, subtreeValidationClient, blockchainClient, txStore, subtreeStore)
+
+			blockValidation := NewBlockValidation(ctx, ulogger.TestLogger{}, tSettings, blockchainClient, subtreeStore, txStore, utxoStore, nil, subtreeValidationClient)
+
+			err = blockValidation.ValidateBlock(context.Background(), block, "http://localhost")
+			require.Error(t, err)
+			require.ErrorContains(t, err, tc.wantContains)
+
+			exists, existsErr := blockchainClient.GetBlockExists(context.Background(), block.Header.Hash())
+			require.NoError(t, existsErr)
+			require.Equal(t, tc.wantPersisted, exists,
+				"transient errors must NOT persist the block; consensus errors must")
+		})
+	}
+}

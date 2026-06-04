@@ -1403,13 +1403,24 @@ func (u *BlockValidation) ValidateBlockWithOptions(ctx context.Context, block *m
 		ctxLogger.Infof("[ValidateBlock][%s] validating %d subtrees", block.Hash().String(), len(block.Subtrees))
 
 		if err = u.validateBlockSubtrees(ctx, block, opts.PeerID, baseURL); err != nil {
-			if errors.Is(err, errors.ErrTxInvalid) || errors.Is(err, errors.ErrTxMissingParent) || errors.Is(err, errors.ErrTxNotFound) {
+			// Genuine consensus violation — a transaction in the block is invalid. Persist invalid.
+			if errors.Is(err, errors.ErrTxInvalid) {
 				ctxLogger.Warnf("[ValidateBlock][%s] block contains invalid transactions, marking as invalid: %s", block.Hash().String(), err)
 				reason := fmt.Sprintf("block contains invalid transactions: %s", err.Error())
 				if !opts.IsRevalidation {
 					u.storeInvalidBlock(ctx, block, opts.PeerID, reason)
 				}
 				return errors.NewBlockInvalidError("[ValidateBlock][%s] block contains invalid transactions: %s", block.Hash().String(), err)
+			}
+
+			// Catchup-state errors: a parent transaction is not yet in our store because we
+			// have not yet absorbed the block that contains it. This is a transient ordering
+			// problem, NOT a consensus violation. Do NOT persist the block as invalid (that
+			// poisons the DB permanently and stalls sync); signal incomplete so catchup
+			// retries another peer. See issue #1031.
+			if errors.Is(err, errors.ErrTxMissingParent) || errors.Is(err, errors.ErrTxNotFound) {
+				ctxLogger.Warnf("[ValidateBlock][%s] transient missing-data during subtree validation, will retry: %s", block.Hash().String(), err)
+				return errors.NewBlockIncompleteError("[ValidateBlock][%s] transient missing-data during subtree validation: %s", block.Hash().String(), err)
 			}
 
 			return err
