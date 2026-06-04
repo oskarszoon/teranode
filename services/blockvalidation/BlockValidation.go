@@ -1786,6 +1786,14 @@ func (u *BlockValidation) storeInvalidBlock(ctx context.Context, block *model.Bl
 // checkParentInvalid checks if the parent block is invalid. This is an optimization
 // to skip expensive validation when the parent is already invalid.
 //
+// NOTE (#1031): this deliberately cascades on the bare Invalid flag without inspecting
+// WHY the parent is invalid. That is correct because transient catchup-state errors no
+// longer persist invalid=true (see the validateBlockSubtrees and block.Valid handlers and
+// model.getParentTxMetaBlockIDs) — a parent marked invalid is invalid for a genuine
+// consensus reason, so a child built on it is genuinely invalid too. Reason-based
+// classification is not possible here anyway: BlockHeaderMeta carries no invalid-reason
+// field. Do not "fix" this to suppress cascades without first re-checking that invariant.
+//
 // Parameters:
 //   - parentMeta: Metadata of the parent block (can be nil)
 //

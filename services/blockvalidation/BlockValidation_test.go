@@ -3940,3 +3940,16 @@ func TestBlockValidation_BlockValidMissingParent_NotPersistedInvalid(t *testing.
 	require.NoError(t, existsErr)
 	require.False(t, exists, "transient missing-parent during block.Valid must not persist the block as invalid")
 }
+
+func TestCheckParentInvalid_CascadeIsIntentional(t *testing.T) {
+	bv := &BlockValidation{}
+
+	// A genuinely-invalid parent cascades to its child (intended; see issue #1031 site D).
+	require.True(t, bv.checkParentInvalid(&model.BlockHeaderMeta{Invalid: true}))
+
+	// A valid parent does not.
+	require.False(t, bv.checkParentInvalid(&model.BlockHeaderMeta{Invalid: false}))
+
+	// Unknown parent metadata is not treated as invalid.
+	require.False(t, bv.checkParentInvalid(nil))
+}
