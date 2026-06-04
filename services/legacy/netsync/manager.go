@@ -437,6 +437,28 @@ func (sm *SyncManager) loadSyncPeerAndState() (*peerpkg.Peer, *syncPeerState) {
 	return sm.syncPeer, sm.syncPeerState
 }
 
+// syncPeerStateFor returns the sync peer's state if p is the current sync peer
+// or another stream of its association, and whether it matched. Under the
+// BlockPriority policy a block is delivered on the DATA1 stream — a different
+// Peer from the GENERAL sync peer — so a plain `p == syncPeer` check misses it
+// and the sync peer's lastBlockTime is never refreshed during multistream sync.
+func (sm *SyncManager) syncPeerStateFor(p *peerpkg.Peer) (*syncPeerState, bool) {
+	sp, sps := sm.loadSyncPeerAndState()
+	if sp == nil || sps == nil || p == nil {
+		return nil, false
+	}
+
+	if p == sp {
+		return sps, true
+	}
+
+	if a := p.AssociationRef(); a != nil && a == sp.AssociationRef() {
+		return sps, true
+	}
+
+	return nil, false
+}
+
 // storeSyncPeer sets the sync peer and its state, safe for concurrent access.
 func (sm *SyncManager) storeSyncPeer(peer *peerpkg.Peer, state *syncPeerState) {
 	sm.syncPeerMu.Lock()
@@ -1381,7 +1403,7 @@ func (sm *SyncManager) handleBlockMsg(bmsg *blockQueueMsg) error {
 		blkHashUpdate *chainhash.Hash
 	)
 
-	if sp, sps := sm.loadSyncPeerAndState(); peer == sp && sps != nil {
+	if sps, ok := sm.syncPeerStateFor(peer); ok {
 		sps.updateLastBlockTime()
 	}
 

@@ -956,6 +956,46 @@ func TestHasHealthyDownloadThroughput(t *testing.T) {
 	})
 }
 
+// TestSyncPeerStateFor verifies the last-block-time refresh matches not just the
+// sync peer itself but any stream of its association — under BlockPriority the
+// block is delivered on the DATA1 stream peer, not the GENERAL sync peer.
+func TestSyncPeerStateFor(t *testing.T) {
+	general := &peer.Peer{}
+	sps := &syncPeerState{lastBlockTime: time.Now()}
+
+	sm := &SyncManager{
+		logger:     ulogger.TestLogger{},
+		peerStates: txmap.NewSyncedMap[*peer.Peer, *peerSyncState](),
+	}
+	sm.storeSyncPeer(general, sps)
+
+	assoc := peer.NewAssociation([]byte{0x01}, general)
+	general.SetAssociation(assoc)
+
+	// The DATA1 stream peer is a different Peer sharing the same association.
+	data1 := &peer.Peer{}
+	require.True(t, assoc.AddStream(wire.StreamTypeData1, data1))
+	data1.SetAssociation(assoc)
+
+	t.Run("sync peer itself matches", func(t *testing.T) {
+		got, ok := sm.syncPeerStateFor(general)
+		require.True(t, ok)
+		require.Equal(t, sps, got)
+	})
+
+	t.Run("association sibling (DATA1) matches", func(t *testing.T) {
+		got, ok := sm.syncPeerStateFor(data1)
+		require.True(t, ok)
+		require.Equal(t, sps, got)
+	})
+
+	t.Run("unrelated peer does not match", func(t *testing.T) {
+		other := &peer.Peer{}
+		_, ok := sm.syncPeerStateFor(other)
+		require.False(t, ok)
+	})
+}
+
 // TestHandleNewPeerMsg_NilFSMState exercises the path where the blockchain
 // client returns (nil, err) from GetFSMCurrentState — common during transient
 // gRPC failures or service restarts. The pre-fix code dereferenced the nil
