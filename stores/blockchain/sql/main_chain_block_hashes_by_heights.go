@@ -2,6 +2,7 @@ package sql
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"strings"
 
@@ -57,41 +58,7 @@ func (s *SQL) MainChainBlockHashesByHeights(ctx context.Context, startHash *chai
 		return nil, false, nil
 	}
 
-	var (
-		q    string
-		args []interface{}
-	)
-
-	if s.engine == util.Postgres {
-		hs := make(pgtype.FlatArray[int64], len(heights))
-		for i, h := range heights {
-			hs[i] = int64(h)
-		}
-
-		q = `
-			SELECT height, hash
-			FROM blocks
-			WHERE on_main_chain = true
-			  AND height <= $1
-			  AND height = ANY($2)`
-		args = []interface{}{startHeight, hs}
-	} else {
-		placeholders := make([]string, len(heights))
-		args = make([]interface{}, len(heights)+1)
-		args[0] = startHeight
-
-		for i, h := range heights {
-			placeholders[i] = fmt.Sprintf("$%d", i+2)
-			args[i+1] = int64(h)
-		}
-
-		q = fmt.Sprintf(`
-			SELECT height, hash
-			FROM blocks
-			WHERE on_main_chain = true
-			  AND height <= $1
-			  AND height IN (%s)`, strings.Join(placeholders, ","))
-	}
+	q, args := s.mainChainHeightsQuery(startHeight, heights)
 
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
@@ -99,28 +66,9 @@ func (s *SQL) MainChainBlockHashesByHeights(ctx context.Context, startHash *chai
 	}
 	defer rows.Close()
 
-	result := make(map[uint32]*chainhash.Hash, len(heights))
-
-	for rows.Next() {
-		var (
-			height    uint32
-			hashBytes []byte
-		)
-
-		if err := rows.Scan(&height, &hashBytes); err != nil {
-			return nil, false, errors.NewStorageError("[MainChainBlockHashesByHeights] scan failed", err)
-		}
-
-		hash, err := chainhash.NewHash(hashBytes)
-		if err != nil {
-			return nil, false, errors.NewProcessingError("[MainChainBlockHashesByHeights] failed to convert hash", err)
-		}
-
-		result[height] = hash
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, false, errors.NewStorageError("[MainChainBlockHashesByHeights] rows error", err)
+	result, err := scanHeightHashes(rows, len(heights))
+	if err != nil {
+		return nil, false, err
 	}
 
 	// Defensive: if the result is incomplete — any requested height missing, or
@@ -132,4 +80,72 @@ func (s *SQL) MainChainBlockHashesByHeights(ctx context.Context, startHash *chai
 	}
 
 	return result, true, nil
+}
+
+// mainChainHeightsQuery builds the engine-specific SELECT (and its bound args)
+// returning (height, hash) for the given on-main-chain heights, capped at
+// startHeight. Postgres binds a single array via ANY($2); SQLite expands
+// positional IN placeholders. Heights are always passed as bound parameters —
+// never interpolated — so the dynamic SQLite string carries no injection risk.
+func (s *SQL) mainChainHeightsQuery(startHeight int64, heights []uint32) (string, []interface{}) {
+	if s.engine == util.Postgres {
+		hs := make(pgtype.FlatArray[int64], len(heights))
+		for i, h := range heights {
+			hs[i] = int64(h)
+		}
+
+		return `
+			SELECT height, hash
+			FROM blocks
+			WHERE on_main_chain = true
+			  AND height <= $1
+			  AND height = ANY($2)`, []interface{}{startHeight, hs}
+	}
+
+	placeholders := make([]string, len(heights))
+	args := make([]interface{}, len(heights)+1)
+	args[0] = startHeight
+
+	for i, h := range heights {
+		placeholders[i] = fmt.Sprintf("$%d", i+2)
+		args[i+1] = int64(h)
+	}
+
+	return fmt.Sprintf(`
+		SELECT height, hash
+		FROM blocks
+		WHERE on_main_chain = true
+		  AND height <= $1
+		  AND height IN (%s)`, strings.Join(placeholders, ",")), args
+}
+
+// scanHeightHashes reads (height, hash) rows into a map keyed by height. The
+// caller compares len against the number of requested heights to detect an
+// incomplete result; this helper only surfaces real DB/decode errors.
+func scanHeightHashes(rows *sql.Rows, expectedLen int) (map[uint32]*chainhash.Hash, error) {
+	result := make(map[uint32]*chainhash.Hash, expectedLen)
+
+	for rows.Next() {
+		var (
+			height    uint32
+			hashBytes []byte
+		)
+
+		if err := rows.Scan(&height, &hashBytes); err != nil {
+			return nil, errors.NewStorageError("[MainChainBlockHashesByHeights] scan failed", err)
+		}
+
+		hash, err := chainhash.NewHash(hashBytes)
+		if err != nil {
+			return nil, errors.NewProcessingError("[MainChainBlockHashesByHeights] failed to convert hash", err)
+		}
+
+		result[height] = hash
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, errors.NewStorageError("[MainChainBlockHashesByHeights] rows error", err)
+	}
+
+	return result, nil
 }
