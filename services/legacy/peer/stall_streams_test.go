@@ -196,6 +196,37 @@ func TestClearBlockResponseGroup(t *testing.T) {
 	})
 }
 
+// TestShouldExtendBlockDeadline guards the wall-clock cap on throughput-based
+// block-deadline extension: a healthy download is extended only while within
+// MaxBlockDownloadTime, so a peer dribbling bytes forever cannot hold the sync
+// slot indefinitely.
+func TestShouldExtendBlockDeadline(t *testing.T) {
+	now := time.Unix(3_000_000, 0)
+	start := now.Add(-time.Minute) // fetch in flight for 1 minute
+
+	t.Run("healthy block within cap extends", func(t *testing.T) {
+		require.True(t, shouldExtendBlockDeadline(wire.CmdBlock, true, start, now))
+	})
+
+	t.Run("non-block command never extends", func(t *testing.T) {
+		require.False(t, shouldExtendBlockDeadline(wire.CmdHeaders, true, start, now))
+	})
+
+	t.Run("unhealthy throughput does not extend", func(t *testing.T) {
+		require.False(t, shouldExtendBlockDeadline(wire.CmdBlock, false, start, now))
+	})
+
+	t.Run("no fetch in flight does not extend", func(t *testing.T) {
+		require.False(t, shouldExtendBlockDeadline(wire.CmdBlock, true, time.Time{}, now))
+	})
+
+	t.Run("past the wall-clock cap stops extending despite healthy throughput", func(t *testing.T) {
+		overCap := now.Add(-MaxBlockDownloadTime - time.Second)
+		require.False(t, shouldExtendBlockDeadline(wire.CmdBlock, true, overCap, now),
+			"a slow-drip peer must be rotated once the cap is exceeded")
+	})
+}
+
 // TestResponseStallBudget guards the per-command refresh budgets so that, after
 // a block fetch completes, a head-of-line-blocked response is restored to its
 // original allowance (notably headers' 90s) rather than the 30s base.

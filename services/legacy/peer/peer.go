@@ -86,6 +86,17 @@ const (
 	// minSyncPeerNetworkSpeed (50 KiB/s) — comfortably above ping/inv chatter,
 	// far below real block-transfer rates.
 	minBlockDownloadBytesPerSec = 51200
+
+	// MaxBlockDownloadTime is the absolute wall-clock ceiling on how long a
+	// single block fetch may be kept alive by throughput-based deadline
+	// extension. Without a cap, a malicious peer could dribble bytes at just
+	// above minBlockDownloadBytesPerSec indefinitely — never completing a valid
+	// block — and hold the single sync-peer slot, stalling IBD. Past this cap
+	// the block deadline is enforced (and, in netsync, the sync peer rotated)
+	// regardless of throughput. Generous for honest fat blocks: a 4 GB block
+	// need only average ~2.3 MB/s to finish inside the window. Shared with the
+	// netsync sync-peer rotation cap so both layers agree.
+	MaxBlockDownloadTime = 30 * time.Minute
 )
 
 var (
@@ -1500,6 +1511,37 @@ func isBlockResponseCommand(cmd string) bool {
 	}
 }
 
+// blockResponsePending reports whether a block-family response is currently
+// awaited.
+func blockResponsePending(pending map[string]time.Time) bool {
+	for cmd := range pending {
+		if isBlockResponseCommand(cmd) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// shouldExtendBlockDeadline reports whether an expired block-response deadline
+// should be extended (because the block is still actively arriving) rather than
+// treated as a stall. Extension is allowed only while throughput is healthy AND
+// the fetch has been in flight for less than MaxBlockDownloadTime — the
+// wall-clock cap that stops a peer dribbling bytes forever from holding the
+// sync slot indefinitely. blockFetchStart is the zero value when no block fetch
+// is in flight.
+func shouldExtendBlockDeadline(command string, healthyDownload bool, blockFetchStart, now time.Time) bool {
+	if !isBlockResponseCommand(command) || !healthyDownload {
+		return false
+	}
+
+	if blockFetchStart.IsZero() {
+		return false
+	}
+
+	return now.Sub(blockFetchStart) < MaxBlockDownloadTime
+}
+
 // responseStallBudget returns the deadline allowance a pending response of the
 // given command is granted, mirroring maybeAddDeadline. It is used to restore a
 // response's full budget when deadlines are refreshed after a block fetch
@@ -1532,14 +1574,7 @@ func responseStallBudget(cmd string) time.Duration {
 // sync peer. Liveness during a block fetch is gated instead by the block's own
 // (much longer) deadline.
 func expiredStallResponse(pending map[string]time.Time, now time.Time, offset time.Duration) (string, bool) {
-	blockPending := false
-
-	for cmd := range pending {
-		if isBlockResponseCommand(cmd) {
-			blockPending = true
-			break
-		}
-	}
+	blockPending := blockResponsePending(pending)
 
 	for command, deadline := range pending {
 		if now.Before(deadline.Add(offset)) {
@@ -1624,6 +1659,11 @@ func (p *Peer) stallHandler() {
 	// lastAssocReadBytes samples association-wide read progress between ticks so
 	// an actively-downloading block can be told apart from a stalled peer.
 	lastAssocReadBytes := p.associationReadBytes()
+
+	// blockFetchStart records when the current block fetch first went in flight.
+	// It bounds how long throughput-based extension can keep a block alive
+	// (MaxBlockDownloadTime); zero when no block fetch is outstanding.
+	var blockFetchStart time.Time
 out:
 	for {
 		select {
@@ -1633,6 +1673,12 @@ out:
 				// Add a deadline for the expected response
 				// message if needed.
 				p.maybeAddDeadline(pendingResponses, msg.message.Command())
+
+				// Start the block-fetch wall-clock window when a block first
+				// goes in flight, so throughput-based extension is bounded.
+				if blockFetchStart.IsZero() && blockResponsePending(pendingResponses) {
+					blockFetchStart = time.Now()
+				}
 
 			case sccReceiveMessage:
 				// Remove received messages from the expected
@@ -1647,7 +1693,11 @@ out:
 				case wire.CmdTx:
 					fallthrough
 				case wire.CmdNotFound:
-					clearBlockResponseGroup(pendingResponses, time.Now())
+					// If a block fetch actually completed, close its wall-clock
+					// window so the next fetch starts a fresh one.
+					if clearBlockResponseGroup(pendingResponses, time.Now()) {
+						blockFetchStart = time.Time{}
+					}
 				default:
 					delete(pendingResponses, msgCmd)
 				}
@@ -1708,13 +1758,20 @@ out:
 			// its adjusted deadline. While a block fetch is in flight,
 			// non-block deadlines are suppressed (see expiredStallResponse).
 			if command, stalled := expiredStallResponse(pendingResponses, now, offset); stalled {
-				if isBlockResponseCommand(command) && healthyDownload {
-					// The block is still actively arriving at a healthy rate;
-					// extend its deadline rather than disconnect a peer that is
+				if shouldExtendBlockDeadline(command, healthyDownload, blockFetchStart, now) {
+					// The block is still actively arriving at a healthy rate and
+					// within the wall-clock cap; extend the whole block-response
+					// group (armed together) rather than disconnect a peer
 					// making real progress on a large (multi-GB) block.
-					pendingResponses[command] = now.Add(stallResponseTimeoutBlocks)
-					p.logger.Debugf("Extending %s deadline for %s: block downloading at %d B/s",
-						command, p, recvDelta/uint64(stallTickInterval.Seconds()))
+					refreshed := now.Add(stallResponseTimeoutBlocks)
+					for cmd := range pendingResponses {
+						if isBlockResponseCommand(cmd) {
+							pendingResponses[cmd] = refreshed
+						}
+					}
+
+					p.logger.Debugf("Extending block deadline for %s: downloading at %d B/s (%.0fs into fetch, cap %s)",
+						p, recvDelta/uint64(stallTickInterval.Seconds()), now.Sub(blockFetchStart).Seconds(), MaxBlockDownloadTime)
 				} else {
 					reason := fmt.Sprintf("Peer appears to be stalled or misbehaving, %s timeout", command)
 					p.DisconnectWithInfo(reason)

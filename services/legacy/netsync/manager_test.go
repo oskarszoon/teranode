@@ -897,6 +897,30 @@ func TestHandleCheckSyncPeer_HeadersFirstMode(t *testing.T) {
 		require.NotPanics(t, func() { sm.handleCheckSyncPeer() })
 		assert.Equal(t, sp, sm.loadSyncPeer())
 	})
+
+	t.Run("rotates a slow-drip peer once past the wall-clock cap", func(t *testing.T) {
+		sp := &peer.Peer{}
+		sps := &syncPeerState{
+			// No completed block for longer than peer.MaxBlockDownloadTime.
+			lastBlockTime:          time.Now().Add(-peer.MaxBlockDownloadTime - time.Minute),
+			ticks:                  1,
+			assocReadBytes:         10 * 1024 * 1024, // still "healthy" throughput
+			assocReadBytesLastTick: 0,
+		}
+
+		sm := &SyncManager{
+			logger:                  ulogger.TestLogger{},
+			peerStates:              txmap.NewSyncedMap[*peer.Peer, *peerSyncState](),
+			minSyncPeerNetworkSpeed: 51200,
+		}
+		sm.storeSyncPeer(sp, sps)
+		sm.headersFirstMode.Store(true)
+		sm.peerStates.Set(sp, &peerSyncState{})
+
+		// Past the cap, throughput no longer protects the peer — it is rotated
+		// (which panics in this minimal SyncManager).
+		assert.Panics(t, func() { sm.handleCheckSyncPeer() })
+	})
 }
 
 func TestHasHealthyDownloadThroughput(t *testing.T) {

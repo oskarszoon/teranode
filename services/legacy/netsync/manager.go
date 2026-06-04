@@ -842,10 +842,16 @@ func (sm *SyncManager) handleCheckSyncPeer() {
 	// actively flowing across the association. Don't rotate a sync peer that is
 	// still pulling data at a healthy rate — it is making progress on a large
 	// block, not stalled. A genuinely stalled peer delivers no throughput and
-	// is still rotated; a withholding-but-chatty peer is dropped by the peer
-	// layer's block-response deadline.
-	if isLastBlockTimeViolation && sps.hasHealthyDownloadThroughput(sm.minSyncPeerNetworkSpeed) {
-		sm.logger.Debugf("[CheckSyncPeer] sync peer %s exceeded last-block-time but association still downloading at a healthy rate; not rotating", sp.String())
+	// is still rotated.
+	//
+	// This suppression is itself capped at peer.MaxBlockDownloadTime: past that
+	// wall-clock window the peer is rotated regardless of throughput, so a
+	// malicious peer cannot dribble bytes just above the threshold forever to
+	// hold the single sync-peer slot and stall IBD.
+	if isLastBlockTimeViolation &&
+		lastBlockSince < peerpkg.MaxBlockDownloadTime &&
+		sps.hasHealthyDownloadThroughput(sm.minSyncPeerNetworkSpeed) {
+		sm.logger.Debugf("[CheckSyncPeer] sync peer %s exceeded last-block-time but association still downloading at a healthy rate (%.0fs in, cap %s); not rotating", sp.String(), lastBlockSince.Seconds(), peerpkg.MaxBlockDownloadTime)
 		isLastBlockTimeViolation = false
 	}
 
