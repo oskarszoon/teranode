@@ -1458,6 +1458,25 @@ func isBlockResponseCommand(cmd string) bool {
 	}
 }
 
+// responseStallBudget returns the deadline allowance a pending response of the
+// given command is granted, mirroring maybeAddDeadline. It is used to restore a
+// response's full budget when deadlines are refreshed after a block fetch
+// completes, so e.g. a queued headers reply keeps its 90s allowance rather than
+// being cut to the 30s base. CmdInv maps to the longer block budget since the
+// only inv worth refreshing here follows a getblocks; that is conservative
+// (never shorter) for the rare mempool-inv case.
+func responseStallBudget(cmd string) time.Duration {
+	switch cmd {
+	case wire.CmdHeaders:
+		// Headers can take a while for the remote peer to load.
+		return stallResponseTimeout * 3
+	case wire.CmdBlock, wire.CmdMerkleBlock, wire.CmdTx, wire.CmdNotFound, wire.CmdInv:
+		return stallResponseTimeoutBlocks
+	default:
+		return stallResponseTimeout
+	}
+}
+
 // expiredStallResponse returns the pending-response command whose deadline has
 // passed and that should cause the peer to be disconnected for stalling, or
 // ("", false) if no disconnect is warranted.
@@ -1554,13 +1573,13 @@ out:
 					// A block fetch just completed. Any responses that were
 					// head-of-line blocked behind it (and whose deadlines were
 					// suppressed by expiredStallResponse while the block was in
-					// flight) get a fresh deadline so they are not judged
-					// stalled the instant the block stops suppressing them.
-					// Only extend — never shorten a deadline that still has
-					// more runway than the grace window.
-					refreshed := time.Now().Add(stallResponseTimeout)
+					// flight) are refreshed to their full per-command budget so
+					// they are not judged stalled the instant the block stops
+					// suppressing them. Only extend — never shorten a deadline
+					// that still has more runway.
+					now := time.Now()
 					for cmd, deadline := range pendingResponses {
-						if refreshed.After(deadline) {
+						if refreshed := now.Add(responseStallBudget(cmd)); refreshed.After(deadline) {
 							pendingResponses[cmd] = refreshed
 						}
 					}

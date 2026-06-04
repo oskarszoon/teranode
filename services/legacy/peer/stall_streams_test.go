@@ -128,3 +128,19 @@ func TestExpiredStallResponseSuppressesNonBlockWhileBlockInFlight(t *testing.T) 
 		require.Empty(t, cmd)
 	})
 }
+
+// TestResponseStallBudget guards the per-command refresh budgets so that, after
+// a block fetch completes, a head-of-line-blocked response is restored to its
+// original allowance (notably headers' 90s) rather than the 30s base.
+func TestResponseStallBudget(t *testing.T) {
+	require.Equal(t, stallResponseTimeout*3, responseStallBudget(wire.CmdHeaders),
+		"headers must keep their extended load budget on refresh")
+
+	for _, cmd := range []string{wire.CmdBlock, wire.CmdMerkleBlock, wire.CmdTx, wire.CmdNotFound, wire.CmdInv} {
+		require.Equal(t, stallResponseTimeoutBlocks, responseStallBudget(cmd),
+			"block-family response %s must get the block budget", cmd)
+	}
+
+	require.Equal(t, stallResponseTimeout, responseStallBudget(wire.CmdVerAck),
+		"other responses fall back to the base budget")
+}
