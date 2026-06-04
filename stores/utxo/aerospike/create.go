@@ -177,7 +177,12 @@ func (s *Store) Create(ctx context.Context, tx *bt.Tx, blockHeight uint32, opts 
 		}
 	}
 
-	errCh := make(chan error)
+	// Buffered-1, matching every other completion channel in the package: now
+	// that the wait below can time out / cancel, Create may depart before
+	// sendStoreBatch sends. A buffered channel lets that send land in the buffer
+	// instead of relying on the deferred close turning it into a recovered
+	// send-on-closed (the resultHandledElsewhere guard ensures at most one send).
+	errCh := make(chan error, 1)
 	defer close(errCh)
 
 	var txHash *chainhash.Hash
