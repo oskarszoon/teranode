@@ -18,7 +18,9 @@ import (
 // for the leak fix are exercised without a live Aerospike instance.
 
 func panicOperate() func(*aerospike.BatchPolicy, []aerospike.BatchRecordIfc) aerospike.Error {
-	return func(*aerospike.BatchPolicy, []aerospike.BatchRecordIfc) aerospike.Error { panic("simulated batch panic") }
+	return func(*aerospike.BatchPolicy, []aerospike.BatchRecordIfc) aerospike.Error {
+		panic("simulated batch panic")
+	}
 }
 
 func errorOperate() func(*aerospike.BatchPolicy, []aerospike.BatchRecordIfc) aerospike.Error {
