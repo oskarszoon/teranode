@@ -129,6 +129,73 @@ func TestExpiredStallResponseSuppressesNonBlockWhileBlockInFlight(t *testing.T) 
 	})
 }
 
+// TestSignalReceivedSelfNotifiedWhenRemovedFromStreams covers the teardown
+// edge: a peer that still references its association but has already been
+// removed from the stream set (RemoveStream) must still notify its own stall
+// handler so its deadlines clear.
+func TestSignalReceivedSelfNotifiedWhenRemovedFromStreams(t *testing.T) {
+	general := newStallTestPeer(wire.StreamTypeGeneral)
+
+	assoc := NewAssociation([]byte{0x09}, general)
+	assoc.SetPolicy(wire.BlockPriorityStreamPolicy)
+	general.SetAssociation(assoc)
+
+	// Simulate mid-teardown: general is no longer in the association's streams.
+	assoc.RemoveStream(wire.StreamTypeGeneral)
+	require.Empty(t, assoc.StreamPeers())
+
+	general.signalReceived(wire.NewMsgHeaders())
+
+	select {
+	case got := <-general.stallControl:
+		require.Equal(t, sccReceiveMessage, got.command)
+	case <-time.After(time.Second):
+		t.Fatal("peer removed from streams did not notify its own stall handler")
+	}
+}
+
+// TestClearBlockResponseGroup guards that the post-block deadline refresh only
+// fires when a block fetch was actually outstanding — an unsolicited relayed tx
+// must not refresh (and thereby perpetually defer) an unrelated pending
+// deadline such as a stalled getheaders.
+func TestClearBlockResponseGroup(t *testing.T) {
+	now := time.Unix(2_000_000, 0)
+
+	t.Run("block completion refreshes queued non-block deadline", func(t *testing.T) {
+		pending := map[string]time.Time{
+			wire.CmdBlock:   now.Add(time.Minute),  // block was in flight
+			wire.CmdHeaders: now.Add(-time.Second), // expired while suppressed
+		}
+		refreshed := clearBlockResponseGroup(pending, now)
+		require.True(t, refreshed)
+		require.NotContains(t, pending, wire.CmdBlock, "block group is cleared")
+		require.Equal(t, now.Add(stallResponseTimeout*3), pending[wire.CmdHeaders],
+			"headers restored to full 90s budget")
+	})
+
+	t.Run("unsolicited tx (no block pending) does not refresh", func(t *testing.T) {
+		expired := now.Add(-time.Second)
+		pending := map[string]time.Time{
+			wire.CmdHeaders: expired, // genuinely stalled getheaders
+		}
+		refreshed := clearBlockResponseGroup(pending, now)
+		require.False(t, refreshed, "a relayed tx with no block pending must not refresh")
+		require.Equal(t, expired, pending[wire.CmdHeaders],
+			"stalled getheaders deadline is left untouched so it can still fire")
+	})
+
+	t.Run("tx as a genuine getdata response refreshes", func(t *testing.T) {
+		pending := map[string]time.Time{
+			wire.CmdTx:  now.Add(time.Minute),
+			wire.CmdInv: now.Add(-time.Second),
+		}
+		refreshed := clearBlockResponseGroup(pending, now)
+		require.True(t, refreshed)
+		require.NotContains(t, pending, wire.CmdTx)
+		require.Equal(t, now.Add(stallResponseTimeoutBlocks), pending[wire.CmdInv])
+	})
+}
+
 // TestResponseStallBudget guards the per-command refresh budgets so that, after
 // a block fetch completes, a head-of-line-blocked response is restored to its
 // original allowance (notably headers' 90s) rather than the 30s base.

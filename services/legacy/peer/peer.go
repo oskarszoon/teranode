@@ -1424,25 +1424,31 @@ func (p *Peer) maybeAddDeadline(pendingResponses map[string]time.Time, msgCmd st
 func (p *Peer) signalReceived(rmsg wire.Message) {
 	msg := stallControlMsg{sccReceiveMessage, rmsg}
 
-	assoc := p.AssociationRef()
-	if assoc == nil {
-		select {
-		case p.stallControl <- msg:
-		case <-p.quit:
-		}
-
-		return
-	}
-
-	for _, sp := range assoc.StreamPeers() {
-		if sp == nil {
-			continue
-		}
-
+	notify := func(sp *Peer) {
 		select {
 		case sp.stallControl <- msg:
 		case <-sp.quit:
 		}
+	}
+
+	// Always notify self first, even if this peer is mid-teardown and no longer
+	// present in the association's stream set (RemoveStream); its own deadlines
+	// must still clear.
+	notify(p)
+
+	assoc := p.AssociationRef()
+	if assoc == nil {
+		return
+	}
+
+	// Fan out to the sibling streams so a response delivered on one stream
+	// clears the deadline armed on another.
+	for _, sp := range assoc.StreamPeers() {
+		if sp == nil || sp == p {
+			continue
+		}
+
+		notify(sp)
 	}
 }
 
@@ -1515,6 +1521,42 @@ func expiredStallResponse(pending map[string]time.Time, now time.Time, offset ti
 	return "", false
 }
 
+// clearBlockResponseGroup removes the getdata response group (block,
+// merkleblock, tx, notfound) from pending and reports whether any of them was
+// actually awaited. When one was — i.e. a block fetch genuinely completed — the
+// remaining deadlines are refreshed (extend-only) to their full per-command
+// budget so a response that was head-of-line blocked behind the block on a
+// shared stream is not judged stalled the instant the block stops suppressing
+// it (see expiredStallResponse).
+//
+// The refresh is gated on a block having actually been pending: an unsolicited
+// relayed tx (a CmdTx that was not a response to our getdata) clears the group
+// as before but must NOT refresh other deadlines, otherwise ambient tx traffic
+// would perpetually defer a genuinely stalled getheaders.
+func clearBlockResponseGroup(pending map[string]time.Time, now time.Time) bool {
+	blockWasPending := false
+
+	for _, cmd := range []string{wire.CmdBlock, wire.CmdMerkleBlock, wire.CmdTx, wire.CmdNotFound} {
+		if _, ok := pending[cmd]; ok {
+			blockWasPending = true
+		}
+
+		delete(pending, cmd)
+	}
+
+	if !blockWasPending {
+		return false
+	}
+
+	for cmd, deadline := range pending {
+		if refreshed := now.Add(responseStallBudget(cmd)); refreshed.After(deadline) {
+			pending[cmd] = refreshed
+		}
+	}
+
+	return true
+}
+
 // stallHandler handles stall detection for the peer.  This entails keeping
 // track of expected responses and assigning them deadlines while accounting for
 // the time spent in callbacks.  It must be run as a goroutine.
@@ -1565,24 +1607,7 @@ out:
 				case wire.CmdTx:
 					fallthrough
 				case wire.CmdNotFound:
-					delete(pendingResponses, wire.CmdBlock)
-					delete(pendingResponses, wire.CmdMerkleBlock)
-					delete(pendingResponses, wire.CmdTx)
-					delete(pendingResponses, wire.CmdNotFound)
-
-					// A block fetch just completed. Any responses that were
-					// head-of-line blocked behind it (and whose deadlines were
-					// suppressed by expiredStallResponse while the block was in
-					// flight) are refreshed to their full per-command budget so
-					// they are not judged stalled the instant the block stops
-					// suppressing them. Only extend — never shorten a deadline
-					// that still has more runway.
-					now := time.Now()
-					for cmd, deadline := range pendingResponses {
-						if refreshed := now.Add(responseStallBudget(cmd)); refreshed.After(deadline) {
-							pendingResponses[cmd] = refreshed
-						}
-					}
+					clearBlockResponseGroup(pendingResponses, time.Now())
 				default:
 					delete(pendingResponses, msgCmd)
 				}
