@@ -134,6 +134,23 @@ func (a *Association) StreamCount() int {
 	return len(a.streams)
 }
 
+// StreamPeers returns a snapshot of the peers backing each stream in the
+// association. It is used to fan stall-control signals across all streams so a
+// response delivered on one stream (e.g. a block/headers reply on DATA1) clears
+// the matching pending-response deadline armed on another stream (e.g. the
+// getdata/getheaders sent on GENERAL).
+func (a *Association) StreamPeers() []*Peer {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	peers := make([]*Peer, 0, len(a.streams))
+	for _, s := range a.streams {
+		if s != nil && s.Peer != nil {
+			peers = append(peers, s.Peer)
+		}
+	}
+	return peers
+}
+
 // HasRecentActivity returns true if any stream in the association has
 // received a message within the given timeout duration.
 func (a *Association) HasRecentActivity(timeout time.Duration) bool {

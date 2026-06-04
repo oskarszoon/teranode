@@ -1405,6 +1405,97 @@ func (p *Peer) maybeAddDeadline(pendingResponses map[string]time.Time, msgCmd st
 	}
 }
 
+// signalReceived notifies stall handlers that a response message arrived so the
+// matching pending-response deadline can be cleared.
+//
+// Under a multistream association (e.g. BlockPriority) a request and its
+// response travel on different streams: teranode sends getheaders/getdata on
+// the GENERAL stream — which arms the response deadline on the GENERAL stream's
+// peer — while the svnode delivers the headers/block reply on DATA1, a separate
+// Peer with its own stall handler. Clearing only the receiving peer's deadline
+// leaves the GENERAL peer's deadline armed forever, so it eventually
+// false-disconnects with a spurious "<cmd> timeout" (observed live: a 90s
+// "headers timeout" while a fat block was legitimately downloading on DATA1).
+// Fan the clear signal out to every stream peer in the association so the
+// deadline clears regardless of which stream delivered the response. Peers that
+// are not part of an association notify only themselves, preserving the
+// original single-stream behaviour. Each send is guarded by the target peer's
+// quit channel so a stream that is tearing down cannot block the reader.
+func (p *Peer) signalReceived(rmsg wire.Message) {
+	msg := stallControlMsg{sccReceiveMessage, rmsg}
+
+	assoc := p.AssociationRef()
+	if assoc == nil {
+		select {
+		case p.stallControl <- msg:
+		case <-p.quit:
+		}
+
+		return
+	}
+
+	for _, sp := range assoc.StreamPeers() {
+		if sp == nil {
+			continue
+		}
+
+		select {
+		case sp.stallControl <- msg:
+		case <-sp.quit:
+		}
+	}
+}
+
+// isBlockResponseCommand reports whether cmd is one of the responses expected
+// after a getdata for a block. These can take minutes to arrive for multi-GB
+// blocks.
+func isBlockResponseCommand(cmd string) bool {
+	switch cmd {
+	case wire.CmdBlock, wire.CmdMerkleBlock, wire.CmdTx, wire.CmdNotFound:
+		return true
+	default:
+		return false
+	}
+}
+
+// expiredStallResponse returns the pending-response command whose deadline has
+// passed and that should cause the peer to be disconnected for stalling, or
+// ("", false) if no disconnect is warranted.
+//
+// While a block-family response is still pending, deadlines for non-block
+// responses (e.g. headers, inv) are NOT treated as stalls. A multi-GB block can
+// take minutes to download and, under the BlockPriority stream policy, blocks
+// and headers share the DATA1 stream — a follow-on getheaders reply is
+// head-of-line blocked behind the in-flight block, so its shorter (90s)
+// deadline would otherwise fire mid-download and disconnect a perfectly healthy
+// sync peer. Liveness during a block fetch is gated instead by the block's own
+// (much longer) deadline.
+func expiredStallResponse(pending map[string]time.Time, now time.Time, offset time.Duration) (string, bool) {
+	blockPending := false
+
+	for cmd := range pending {
+		if isBlockResponseCommand(cmd) {
+			blockPending = true
+			break
+		}
+	}
+
+	for command, deadline := range pending {
+		if now.Before(deadline.Add(offset)) {
+			continue
+		}
+
+		// Suppress non-block stalls while a block is legitimately in flight.
+		if blockPending && !isBlockResponseCommand(command) {
+			continue
+		}
+
+		return command, true
+	}
+
+	return "", false
+}
+
 // stallHandler handles stall detection for the peer.  This entails keeping
 // track of expected responses and assigning them deadlines while accounting for
 // the time spent in callbacks.  It must be run as a goroutine.
@@ -1459,6 +1550,20 @@ out:
 					delete(pendingResponses, wire.CmdMerkleBlock)
 					delete(pendingResponses, wire.CmdTx)
 					delete(pendingResponses, wire.CmdNotFound)
+
+					// A block fetch just completed. Any responses that were
+					// head-of-line blocked behind it (and whose deadlines were
+					// suppressed by expiredStallResponse while the block was in
+					// flight) get a fresh deadline so they are not judged
+					// stalled the instant the block stops suppressing them.
+					// Only extend — never shorten a deadline that still has
+					// more runway than the grace window.
+					refreshed := time.Now().Add(stallResponseTimeout)
+					for cmd, deadline := range pendingResponses {
+						if refreshed.After(deadline) {
+							pendingResponses[cmd] = refreshed
+						}
+					}
 				default:
 					delete(pendingResponses, msgCmd)
 				}
@@ -1505,16 +1610,12 @@ out:
 				offset += now.Sub(handlersStartTime)
 			}
 
-			// Disconnect the peer if any of the pending responses
-			// don't arrive by their adjusted deadline.
-			for command, deadline := range pendingResponses {
-				if now.Before(deadline.Add(offset)) {
-					continue
-				}
-
+			// Disconnect the peer if a pending response has not arrived by
+			// its adjusted deadline. While a block fetch is in flight,
+			// non-block deadlines are suppressed (see expiredStallResponse).
+			if command, stalled := expiredStallResponse(pendingResponses, now, offset); stalled {
 				reason := fmt.Sprintf("Peer appears to be stalled or misbehaving, %s timeout", command)
 				p.DisconnectWithInfo(reason)
-				break
 			}
 
 			// Reset the deadline offset for the next tick.
@@ -1658,7 +1759,7 @@ out:
 		processingTimer.Reset(p.settings.Legacy.PeerProcessingTimeout)
 
 		atomic.StoreInt64(&p.lastRecv, time.Now().Unix())
-		p.stallControl <- stallControlMsg{sccReceiveMessage, rmsg}
+		p.signalReceived(rmsg)
 
 		// Handle each supported message type.
 		p.stallControl <- stallControlMsg{sccHandlerStart, rmsg}

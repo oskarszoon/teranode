@@ -602,7 +602,7 @@ func NewSettings(alternativeContext ...string) *Settings {
 			OutpointBatcherConcurrency:       getInt("legacy_outpointBatcherConcurrency", 32, alternativeContext...),
 			PrintInvMessages:                 getBool("legacy_printInvMessages", false, alternativeContext...),
 			GRPCAddress:                      getString("legacy_grpcAddress", "", alternativeContext...),
-			AllowBlockPriority:               getBool("legacy_allowBlockPriority", false, alternativeContext...),
+			AllowBlockPriority:               getBool("legacy_allowBlockPriority", true, alternativeContext...),
 			GRPCListenAddress:                getString("legacy_grpcListenAddress", "", alternativeContext...),
 			SavePeers:                        getBool("legacy_savePeers", false, alternativeContext...), // by default we do not save the peers
 			AllowSyncCandidateFromLocalPeers: getBool("legacy_allowSyncCandidateFromLocalPeers", false, alternativeContext...),
