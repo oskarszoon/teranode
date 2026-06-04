@@ -155,6 +155,18 @@ type Store struct {
 	batcherWait time.Duration
 }
 
+// batchOperate runs a batch through the underlying Aerospike client, honouring
+// the test-only batchOperateFn override when set. Centralising the call lets
+// unit tests drive the dispatch functions' panic/error/result paths without a
+// live Aerospike instance.
+func (s *Store) batchOperate(policy *aerospike.BatchPolicy, records []aerospike.BatchRecordIfc) aerospike.Error {
+	if s.batchOperateFn != nil {
+		return s.batchOperateFn(policy, records)
+	}
+
+	return s.client.BatchOperate(policy, records)
+}
+
 // New creates a new Aerospike-based UTXO store.
 // The URL format is: aerospike://host:port/namespace?set=setname&
 // URL parameters:

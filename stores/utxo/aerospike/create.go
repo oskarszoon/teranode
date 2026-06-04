@@ -503,12 +503,7 @@ func (s *Store) sendStoreBatch(batch []*BatchStoreItem) {
 
 	batchID := s.batchID.Add(1)
 
-	batchOperate := s.batchOperateFn
-	if batchOperate == nil {
-		batchOperate = s.client.BatchOperate
-	}
-
-	err = batchOperate(batchPolicy, batchRecords)
+	err = s.batchOperate(batchPolicy, batchRecords)
 	if err != nil {
 		var aErr *aerospike.AerospikeError
 
@@ -1067,12 +1062,7 @@ func (s *Store) storeExternallyWithLock(
 
 	batchPolicy := util.GetAerospikeBatchPolicy(s.settings)
 
-	batchOperate := s.batchOperateFn
-	if batchOperate == nil {
-		batchOperate = s.client.BatchOperate
-	}
-
-	if err := batchOperate(batchPolicy, batchRecords); err != nil {
+	if err := s.batchOperate(batchPolicy, batchRecords); err != nil {
 		util.SafeSend[error](bItem.done, errors.NewProcessingError("[%s] BatchOperate failed for tx %s", funcName, bItem.txHash, err))
 		return
 	}
@@ -1307,7 +1297,7 @@ func (s *Store) clearCreatingFlag(txHash *chainhash.Hash, numRecords int) error 
 
 	// Phase 1: Clear child records first (indices 1, 2, ..., N-1)
 	if len(childWrites) > 0 {
-		err := s.client.BatchOperate(batchPolicy, childWrites)
+		err := s.batchOperate(batchPolicy, childWrites)
 		if err != nil {
 			return errors.NewProcessingError("failed to unlock child records", err)
 		}
@@ -1334,7 +1324,7 @@ func (s *Store) clearCreatingFlag(txHash *chainhash.Hash, numRecords int) error 
 	// Phase 2: Clear master record last (index 0)
 	// Only executed if children succeeded - master's creating flag becomes atomic completion indicator
 	if masterWrite != nil {
-		err := s.client.BatchOperate(batchPolicy, []aerospike.BatchRecordIfc{masterWrite})
+		err := s.batchOperate(batchPolicy, []aerospike.BatchRecordIfc{masterWrite})
 		if err != nil {
 			return errors.NewProcessingError("failed to unlock master record", err)
 		}

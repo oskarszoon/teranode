@@ -608,12 +608,7 @@ func (s *Store) BatchDecorate(ctx context.Context, items []*utxo.UnresolvedMetaD
 		return nil
 	}
 
-	batchOperate := s.batchOperateFn
-	if batchOperate == nil {
-		batchOperate = s.client.BatchOperate
-	}
-
-	err = batchOperate(batchPolicy, batchRecords)
+	err = s.batchOperate(batchPolicy, batchRecords)
 	if err != nil {
 		s.logger.Errorf("error in aerospike map store batch records:\n%v\n%v", batchRecords, err)
 		return errors.NewStorageError("error in aerospike map store batch records", err)
@@ -1332,7 +1327,7 @@ func (s *Store) sendOutpointBatch(batch []*batchOutpoint) {
 	}
 
 	// send the batch to aerospike
-	err = s.client.BatchOperate(batchPolicy, batchRecords)
+	err = s.batchOperate(batchPolicy, batchRecords)
 	if err != nil {
 		for _, item := range batch {
 			sendErrorAndClose(item.errCh, errors.NewStorageError("error in aerospike send outpoint batch records", err))

@@ -118,7 +118,7 @@ func (s *Store) setLockedBatch(batch []*batchLocked) {
 		)
 	}
 
-	if err := s.client.BatchOperate(util.GetAerospikeBatchPolicy(s.settings), batchRecords); err != nil {
+	if err := s.batchOperate(util.GetAerospikeBatchPolicy(s.settings), batchRecords); err != nil {
 		for idx, batchItem := range batch {
 			if handled[idx] {
 				continue

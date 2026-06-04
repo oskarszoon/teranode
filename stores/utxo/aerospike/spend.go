@@ -129,7 +129,7 @@ func (s *Store) IncrementSpentRecordsMulti(txids []*chainhash.Hash, increment in
 		))
 	}
 
-	if err := s.client.BatchOperate(batchPolicy, batchRecords); err != nil {
+	if err := s.batchOperate(batchPolicy, batchRecords); err != nil {
 		*batchRecordsPtr = batchRecords
 		putBatchRecordsSlice(batchRecordsPtr)
 		return errors.NewStorageError("[IncrementSpentRecordsMulti] error in aerospike batch", err)
@@ -202,7 +202,7 @@ func (s *Store) SetDAHForChildRecordsMulti(items []struct {
 		}
 	}
 
-	if err := s.client.BatchOperate(util.GetAerospikeBatchPolicy(s.settings), batchRecords); err != nil {
+	if err := s.batchOperate(util.GetAerospikeBatchPolicy(s.settings), batchRecords); err != nil {
 		return errors.NewStorageError("[SetDAHForChildRecordsMulti] failed to set DAH", err)
 	}
 
@@ -681,7 +681,7 @@ func (s *Store) createBatchRecords(batchesByKey map[keyIgnoreLocked][]aerospike.
 // executeSpendBatch executes the batch operation
 func (s *Store) executeSpendBatch(batchRecords []aerospike.BatchRecordIfc, batch []*batchSpend, batchID uint64) error {
 	batchPolicy := util.GetAerospikeBatchPolicy(s.settings)
-	err := s.client.BatchOperate(batchPolicy, batchRecords)
+	err := s.batchOperate(batchPolicy, batchRecords)
 	if err != nil {
 		// trySignal (not a blocking send): items skipped in prepareSpendBatches
 		// already have a queued result on their buffered-1 errCh, and a blocking
@@ -1075,7 +1075,7 @@ func (s *Store) verifyAllChildrenSpent(ctx context.Context, txID *chainhash.Hash
 		))
 	}
 
-	if err := s.client.BatchOperate(batchPolicy, batchRecords); err != nil {
+	if err := s.batchOperate(batchPolicy, batchRecords); err != nil {
 		return false, errors.NewStorageError("[verifyAllChildrenSpent][%s] batch read failed", txID.String(), err)
 	}
 
@@ -1181,7 +1181,7 @@ func (s *Store) sendIncrementBatch(batch []*batchIncrement) {
 	}
 
 	// send the batch to aerospike
-	if err := s.client.BatchOperate(batchPolicy, batchRecords); err != nil {
+	if err := s.batchOperate(batchPolicy, batchRecords); err != nil {
 		for i, item := range batch {
 			if handled[i] {
 				continue
@@ -1265,7 +1265,7 @@ func (s *Store) sendSetDAHBatch(batch []*batchDAH) {
 	}
 
 	// Execute batch operation
-	if err := s.client.BatchOperate(util.GetAerospikeBatchPolicy(s.settings), batchRecords); err != nil {
+	if err := s.batchOperate(util.GetAerospikeBatchPolicy(s.settings), batchRecords); err != nil {
 		for i, bItem := range batch {
 			if handled[i] {
 				continue
