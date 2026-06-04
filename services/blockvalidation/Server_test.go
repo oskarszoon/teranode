@@ -1843,3 +1843,18 @@ func TestCatchup_SuccessRateCalculation(t *testing.T) {
 		})
 	}
 }
+
+func TestIsUnvalidatablePeerError(t *testing.T) {
+	// Genuine consensus failures — the peer served a block we can prove is invalid.
+	require.True(t, isUnvalidatablePeerError(errors.NewBlockInvalidError("bad block")))
+	require.True(t, isUnvalidatablePeerError(errors.NewTxInvalidError("bad tx")))
+
+	// Transient catchup-state — our store hasn't caught up; the peer is not at fault.
+	require.False(t, isUnvalidatablePeerError(errors.NewTxMissingParentError("parent not yet present")))
+	require.False(t, isUnvalidatablePeerError(errors.NewTxNotFoundError("tx not yet present")))
+	require.False(t, isUnvalidatablePeerError(errors.NewBlockIncompleteError("incomplete")))
+
+	// Unrelated errors are not peer-malicious either.
+	require.False(t, isUnvalidatablePeerError(errors.NewServiceError("service down")))
+	require.False(t, isUnvalidatablePeerError(nil))
+}
