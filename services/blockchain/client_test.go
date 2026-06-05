@@ -4890,7 +4890,6 @@ func TestClient_CatchUpBlocks(t *testing.T) {
 	})
 }
 
-
 // Test Idle function
 func TestClient_Idle(t *testing.T) {
 	logger := ulogger.NewErrorTestLogger(t)

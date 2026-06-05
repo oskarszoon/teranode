@@ -3709,7 +3709,6 @@ func Test_IsFullyReady(t *testing.T) {
 	}
 }
 
-
 // Test_Idle tests the Idle gRPC method
 func Test_Idle(t *testing.T) {
 	ctx := setup(t)

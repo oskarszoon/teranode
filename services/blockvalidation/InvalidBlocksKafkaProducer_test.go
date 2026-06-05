@@ -371,7 +371,6 @@ func (m *MockBlockchainClient) IsFSMCurrentState(ctx context.Context, state bloc
 	return args.Bool(0), args.Error(1)
 }
 
-
 // LocateBlockHeaders implements the blockchain.ClientI interface
 func (m *MockBlockchainClient) LocateBlockHeaders(ctx context.Context, locator []*chainhash.Hash, hashStop *chainhash.Hash, maxHashes uint32) ([]*model.BlockHeader, error) {
 	args := m.Called(ctx, locator, hashStop, maxHashes)

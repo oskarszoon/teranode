@@ -2024,7 +2024,6 @@ func (c *Client) ReportPeerFailure(ctx context.Context, hash *chainhash.Hash, pe
 	return nil
 }
 
-
 // Idle transitions the blockchain service to the idle state via FSM event.
 // This method sends an IDLE event to the blockchain service's finite state machine,
 // causing it to transition to the IDLE state where it stops active processing
