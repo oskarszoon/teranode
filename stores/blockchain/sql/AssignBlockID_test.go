@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
+	"github.com/bsv-blockchain/teranode/stores/blockchain/options"
 	"github.com/bsv-blockchain/teranode/ulogger"
 	"github.com/bsv-blockchain/teranode/util/test"
 	"github.com/stretchr/testify/require"
@@ -68,4 +69,30 @@ func TestAssignBlockID_ConcurrentCallersConverge(t *testing.T) {
 	for i := 1; i < n; i++ {
 		require.Equal(t, ids[0], ids[i], "all concurrent callers for one hash must get one id")
 	}
+}
+
+func TestAssignBlockID_ClearedOnCommit(t *testing.T) {
+	tSettings := test.CreateBaseTestSettings(t)
+	storeURL, err := url.Parse("sqlitememory:///")
+	require.NoError(t, err)
+
+	s, err := New(ulogger.TestLogger{}, storeURL, tSettings)
+	require.NoError(t, err)
+	defer s.Close()
+
+	ctx := context.Background()
+
+	reserved, err := s.AssignBlockID(ctx, block1.Hash())
+	require.NoError(t, err)
+	require.NotZero(t, reserved)
+
+	storedID, _, err := s.StoreBlock(ctx, block1, "test", options.WithID(reserved))
+	require.NoError(t, err)
+	require.Equal(t, reserved, storedID)
+
+	require.Nil(t, s.blockIDReservations.Get(*block1.Hash()), "reservation must be cleared on commit")
+
+	again, err := s.AssignBlockID(ctx, block1.Hash())
+	require.NoError(t, err)
+	require.Equal(t, reserved, again, "AssignBlockID must return the committed id after reservation is cleared")
 }
