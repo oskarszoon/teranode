@@ -423,11 +423,13 @@ func (b *BlockAssembler) reset(ctx context.Context, validateInputs ...bool) erro
 		return errors.NewProcessingError("[Reset] error getting reorg blocks", err)
 	}
 
-	// The fast-forward reset path was previously gated on the legacy-sync FSM state (now removed),
-	// which was never entered in normal operation, so it has been dead.
-	// This commit preserves that exact behaviour with a literal false; a later
-	// commit re-homes the optimization under a checkpoint-height gate.
-	isLegacySync := false
+	// Fast-forward reset is safe when the whole forward range is at/below the
+	// highest checkpoint: PoW + checkpoint guarantee canonicality, so the full
+	// conflicting-transaction processing in the SubtreeProcessor reset is
+	// unnecessary. Mirrors the trust invariant blockvalidation uses for
+	// skipDifficultyCheck / quickValidate.
+	highestCheckpoint := blockchain.HighestCheckpointHeight(b.settings.ChainCfgParams.Checkpoints)
+	useFastForwardReset := meta.Height <= highestCheckpoint
 
 	currentHeight := meta.Height
 
@@ -592,7 +594,7 @@ func (b *BlockAssembler) reset(ctx context.Context, validateInputs ...bool) erro
 		Height: currentHeight,
 	})
 
-	if response := b.subtreeProcessor.Reset(baBestBlockHeader, moveBackBlocks, moveForwardBlocks, isLegacySync, postProcessFn); response.Err != nil {
+	if response := b.subtreeProcessor.Reset(baBestBlockHeader, moveBackBlocks, moveForwardBlocks, useFastForwardReset, postProcessFn); response.Err != nil {
 		b.logger.Errorf("[BlockAssembler][Reset] resetting error resetting subtree processor: %v", response.Err)
 		// something went wrong, we need to set the best block header in the block assembly to be the
 		// same as the subtree processor's best block header

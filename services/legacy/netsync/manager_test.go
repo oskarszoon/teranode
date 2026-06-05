@@ -1041,6 +1041,45 @@ func TestHandleNewPeerMsg_NilFSMState(t *testing.T) {
 	require.Equal(t, uint64(0), sm.currentFeeFilter.Load(), "fee filter must not be set when FSM state is unavailable")
 }
 
+// TestHandleNewPeerMsg_SetsFeeFilterWhenCatchingBlocks verifies that a peer
+// connecting while the node is catching up is asked (via a raised feefilter) to
+// hold back transaction announcements, reducing load during sync. The filter is
+// restored to the policy default once the node reaches RUNNING
+// (resetFeeFilterToDefault).
+func TestHandleNewPeerMsg_SetsFeeFilterWhenCatchingBlocks(t *testing.T) {
+	chainParams := &chaincfg.MainNetParams
+
+	catchingBlocks := blockchain2.FSMStateCATCHINGBLOCKS
+	blockchainClient := &blockchain2.Mock{}
+	blockchainClient.Mock.On("GetFSMCurrentState", mock.Anything).
+		Return(&catchingBlocks, nil)
+
+	sm := &SyncManager{
+		ctx:              context.Background(),
+		settings:         test.CreateBaseTestSettings(t),
+		logger:           ulogger.TestLogger{},
+		chainParams:      chainParams,
+		blockchainClient: blockchainClient,
+		peerStates:       txmap.NewSyncedMap[*peer.Peer, *peerSyncState](),
+	}
+
+	peerCfg := peer.Config{
+		Listeners:        peer.MessageListeners{},
+		UserAgentName:    "btcdtest",
+		UserAgentVersion: "1.0",
+		ChainParams:      chainParams,
+		Services:         0,
+	}
+	_, smPeer, err := MakeConnectedPeers(t, peerCfg, peerCfg, 99)
+	require.NoError(t, err)
+
+	sm.handleNewPeerMsg(smPeer)
+
+	require.True(t, sm.peerStates.Exists(smPeer), "peer must be registered")
+	require.Equal(t, uint64(bsvutil.SatoshiPerBitcoin), sm.currentFeeFilter.Load(),
+		"fee filter must be raised while catching up")
+}
+
 // TestHandleNewPeerMsg_SkipsDisconnectedPeer verifies that a peer whose socket
 // was torn down before the queued newPeerMsg drained is not inserted into
 // peerStates. Pairs with the Connected() filter in startSync to prevent a dead

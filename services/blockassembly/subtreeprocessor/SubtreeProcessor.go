@@ -124,8 +124,8 @@ type resetBlocks struct {
 	// responseCh receives the reset operation response
 	responseCh chan ResetResponse
 
-	// isLegacySync indicates whether this is a legacy synchronization operation
-	isLegacySync bool
+	// useFastForwardReset indicates whether to use fast-forward reset (coinbase-only UTXO processing) for checkpoint-trusted blocks
+	useFastForwardReset bool
 
 	// postProcess is an optional function to execute after the reset
 	postProcess func() error
@@ -815,7 +815,7 @@ func (stp *SubtreeProcessor) Start(ctx context.Context) {
 					stp.setCurrentRunningState(StateResetBlocks)
 
 					err = stp.reset(resetBlocksMsg.blockHeader, resetBlocksMsg.moveBackBlocks, resetBlocksMsg.moveForwardBlocks,
-						resetBlocksMsg.isLegacySync, resetBlocksMsg.postProcess)
+						resetBlocksMsg.useFastForwardReset, resetBlocksMsg.postProcess)
 
 					if resetBlocksMsg.responseCh != nil {
 						resetBlocksMsg.responseCh <- ResetResponse{Err: err}
@@ -1173,26 +1173,26 @@ func (stp *SubtreeProcessor) GetCurrentLength() int {
 //   - blockHeader: New block header to reset to
 //   - moveBackBlocks: Blocks to move down in the chain
 //   - moveForwardBlocks: Blocks to move up in the chain
-//   - isLegacySync: Whether this is a legacy sync operation
+//   - useFastForwardReset: Whether to use fast-forward reset (coinbase-only UTXO processing) for checkpoint-trusted blocks
 //
 // Returns:
 //   - ResetResponse: Response containing any errors encountered
-func (stp *SubtreeProcessor) Reset(blockHeader *model.BlockHeader, moveBackBlocks []*model.Block, moveForwardBlocks []*model.Block, isLegacySync bool, postProcess func() error) ResetResponse {
+func (stp *SubtreeProcessor) Reset(blockHeader *model.BlockHeader, moveBackBlocks []*model.Block, moveForwardBlocks []*model.Block, useFastForwardReset bool, postProcess func() error) ResetResponse {
 	responseCh := make(chan ResetResponse)
 	stp.resetCh <- &resetBlocks{
-		blockHeader:       blockHeader,
-		moveBackBlocks:    moveBackBlocks,
-		moveForwardBlocks: moveForwardBlocks,
-		responseCh:        responseCh,
-		isLegacySync:      isLegacySync,
-		postProcess:       postProcess,
+		blockHeader:         blockHeader,
+		moveBackBlocks:      moveBackBlocks,
+		moveForwardBlocks:   moveForwardBlocks,
+		responseCh:          responseCh,
+		useFastForwardReset: useFastForwardReset,
+		postProcess:         postProcess,
 	}
 
 	return <-responseCh
 }
 
 func (stp *SubtreeProcessor) reset(blockHeader *model.BlockHeader, moveBackBlocks []*model.Block, moveForwardBlocks []*model.Block,
-	isLegacySync bool, postProcess func() error) error {
+	useFastForwardReset bool, postProcess func() error) error {
 	_, _, deferFn := tracing.Tracer("subtreeprocessor").Start(context.Background(), "reset",
 		tracing.WithParentStat(stp.stats),
 		tracing.WithHistogram(prometheusSubtreeProcessorReset),
@@ -1306,8 +1306,8 @@ func (stp *SubtreeProcessor) reset(blockHeader *model.BlockHeader, moveBackBlock
 		_ = g.Wait()
 	}
 
-	// optimized version for legacy sync
-	if isLegacySync {
+	// fast-forward reset: coinbase-only UTXO processing for checkpoint-trusted blocks
+	if useFastForwardReset {
 		coinbaseTxsAdded := sync.Map{}
 
 		g, gCtx := errgroup.WithContext(context.Background())
