@@ -535,11 +535,6 @@ func (m *Mock) ReportPeerFailure(ctx context.Context, hash *chainhash.Hash, peer
 	return args.Error(0)
 }
 
-// LegacySync mocks the LegacySync method
-func (m *Mock) LegacySync(ctx context.Context) error {
-	args := m.Called(ctx)
-	return args.Error(0)
-}
 
 // Idle mocks the Idle method
 func (m *Mock) Idle(ctx context.Context) error {
@@ -1299,9 +1294,6 @@ func (m *mockBlockClient) CatchUpBlocks(ctx context.Context, req *emptypb.Empty,
 	return &emptypb.Empty{}, m.err
 }
 
-func (m *mockBlockClient) LegacySync(ctx context.Context, req *emptypb.Empty, opts ...grpc.CallOption) (*emptypb.Empty, error) {
-	return &emptypb.Empty{}, m.err
-}
 
 func (m *mockBlockClient) Idle(ctx context.Context, req *emptypb.Empty, opts ...grpc.CallOption) (*emptypb.Empty, error) {
 	return &emptypb.Empty{}, m.err

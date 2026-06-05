@@ -475,9 +475,6 @@ func (c *LocalClient) ReportPeerFailure(ctx context.Context, hash *chainhash.Has
 	return nil
 }
 
-func (c *LocalClient) LegacySync(ctx context.Context) error {
-	return nil
-}
 
 // GetBlockLocator returns a block locator for the latest block.
 // This function will be much faster, when moved to the server side.

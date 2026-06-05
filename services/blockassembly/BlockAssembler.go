@@ -423,13 +423,11 @@ func (b *BlockAssembler) reset(ctx context.Context, validateInputs ...bool) erro
 		return errors.NewProcessingError("[Reset] error getting reorg blocks", err)
 	}
 
-	isLegacySync, err := b.blockchainClient.IsFSMCurrentState(ctx, blockchain.FSMStateLEGACYSYNCING)
-	if err != nil {
-		b.logger.Errorf("[BlockAssembler][Reset] error getting FSM state: %v", err)
-
-		// if we can't get the FSM state, we assume we are not in legacy sync, which is the default, but less optimized
-		isLegacySync = false
-	}
+	// The fast-forward reset path was previously gated on the legacy-sync FSM state (now removed),
+	// which was never entered in normal operation, so it has been dead.
+	// This commit preserves that exact behaviour with a literal false; a later
+	// commit re-homes the optimization under a checkpoint-height gate.
+	isLegacySync := false
 
 	currentHeight := meta.Height
 
