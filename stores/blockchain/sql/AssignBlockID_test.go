@@ -96,3 +96,46 @@ func TestAssignBlockID_ClearedOnCommit(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, reserved, again, "AssignBlockID must return the committed id after reservation is cleared")
 }
+
+// Simulates the legacy + blockvalidation race over the SAME block: both call
+// AssignBlockID concurrently, then one commits. The committed block id MUST
+// equal the id every caller saw — i.e. no phantom id can exist.
+func TestAssignBlockID_TwoPathRace_NoPhantom(t *testing.T) {
+	tSettings := test.CreateBaseTestSettings(t)
+	storeURL, err := url.Parse("sqlitememory:///")
+	require.NoError(t, err)
+
+	s, err := New(ulogger.TestLogger{}, storeURL, tSettings)
+	require.NoError(t, err)
+	defer s.Close()
+
+	ctx := context.Background()
+
+	var legacyID, catchupID uint64
+	var legacyErr, catchupErr error
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		legacyID, legacyErr = s.AssignBlockID(ctx, block1.Hash())
+	}()
+	go func() {
+		defer wg.Done()
+		catchupID, catchupErr = s.AssignBlockID(ctx, block1.Hash())
+	}()
+	wg.Wait()
+	require.NoError(t, legacyErr)
+	require.NoError(t, catchupErr)
+
+	require.Equal(t, legacyID, catchupID, "both ingestion paths must get the same id")
+
+	storedID, _, err := s.StoreBlock(ctx, block1, "test", options.WithID(legacyID))
+	require.NoError(t, err)
+	require.Equal(t, legacyID, storedID)
+
+	// The id every path used IS a committed, on-chain block — never a phantom.
+	got, ok, err := s.blockIDByHash(ctx, block1.Hash())
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, storedID, got)
+}
