@@ -1046,6 +1046,14 @@ func (sm *SyncManager) reuseBlockIDFromUTXO(ctx context.Context, block *bsvutil.
 	if err != nil || meta == nil || len(meta.BlockIDs) == 0 {
 		return 0, false
 	}
+	if len(meta.BlockIDs) > 1 {
+		// Normal sync records exactly one mined-in block per fresh tx. More than
+		// one means this tx is referenced by multiple blocks (reorg / re-mine), so
+		// BlockIDs[0] may not be THIS block — surface it loudly rather than risk a
+		// silent mis-assignment that could re-create the phantom-id wedge.
+		sm.logger.Warnf("[reuseBlockIDFromUTXO] tx %s has %d mined-in block ids %v; reusing [0] for block %s — verify if sync stalls",
+			txs[1].Hash().String(), len(meta.BlockIDs), meta.BlockIDs, block.Hash().String())
+	}
 	return meta.BlockIDs[0], true
 }
 

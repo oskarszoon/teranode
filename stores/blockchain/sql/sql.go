@@ -263,6 +263,10 @@ func New(logger ulogger.Logger, storeURL *url.URL, tSettings *settings.Settings)
 
 	s.blockIDReservations = ttlcache.New[chainhash.Hash, uint64](
 		ttlcache.WithTTL[chainhash.Hash, uint64](blockIDReservationTTL),
+		// Do not extend the TTL on lookups: a reservation must expire a fixed time
+		// after it was created, so a repeatedly-polled-but-never-committed hash is
+		// reclaimed instead of being kept alive by reads (bounds map growth).
+		ttlcache.WithDisableTouchOnHit[chainhash.Hash, uint64](),
 	)
 	go s.blockIDReservations.Start() // janitor
 
