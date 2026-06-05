@@ -287,12 +287,10 @@ func TestBlockAssembler_Reset_FastForwardGatedOnCheckpoint(t *testing.T) {
 		chain := buildChain(genesis, 2, 11000)
 		addChain(t, items, chain)
 
-		var captured4th bool
 		mockStp := &subtreeprocessor.MockSubtreeProcessor{}
 		mockStp.On("WaitForPendingBlocks", mock.Anything).Return(nil)
 		mockStp.On("Reset", mock.Anything, mock.Anything, mock.Anything, true, mock.Anything).
-			Return(subtreeprocessor.ResetResponse{}).
-			Run(func(args mock.Arguments) { captured4th = args.Bool(3) })
+			Return(subtreeprocessor.ResetResponse{})
 		// GetCurrentBlockHeader is only consulted on the Reset error path; not expected here.
 		injectMockStp(t, items, mockStp)
 
@@ -301,8 +299,8 @@ func TestBlockAssembler_Reset_FastForwardGatedOnCheckpoint(t *testing.T) {
 
 		require.NoError(t, items.blockAssembler.reset(t.Context()))
 
+		// 4th arg true => useFastForwardReset (target height <= highest checkpoint).
 		mockStp.AssertCalled(t, "Reset", mock.Anything, mock.Anything, mock.Anything, true, mock.Anything)
-		require.True(t, captured4th, "useFastForwardReset must be true when reset target height <= highest checkpoint")
 	})
 
 	// Highest checkpoint at 100, reset target height > 100 → full reset (false).
@@ -318,19 +316,17 @@ func TestBlockAssembler_Reset_FastForwardGatedOnCheckpoint(t *testing.T) {
 		chain := buildChain(genesis, 101, 12000)
 		addChain(t, items, chain)
 
-		var captured4th bool
 		mockStp := &subtreeprocessor.MockSubtreeProcessor{}
 		mockStp.On("WaitForPendingBlocks", mock.Anything).Return(nil)
 		mockStp.On("Reset", mock.Anything, mock.Anything, mock.Anything, false, mock.Anything).
-			Return(subtreeprocessor.ResetResponse{}).
-			Run(func(args mock.Arguments) { captured4th = args.Bool(3) })
+			Return(subtreeprocessor.ResetResponse{})
 		injectMockStp(t, items, mockStp)
 
 		items.blockAssembler.setBestBlockHeader(genesis, 0)
 
 		require.NoError(t, items.blockAssembler.reset(t.Context()))
 
+		// 4th arg false => full reset (target height > highest checkpoint).
 		mockStp.AssertCalled(t, "Reset", mock.Anything, mock.Anything, mock.Anything, false, mock.Anything)
-		require.False(t, captured4th, "useFastForwardReset must be false when reset target height > highest checkpoint")
 	})
 }

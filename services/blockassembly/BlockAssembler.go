@@ -428,6 +428,11 @@ func (b *BlockAssembler) reset(ctx context.Context, validateInputs ...bool) erro
 	// conflicting-transaction processing in the SubtreeProcessor reset is
 	// unnecessary. Mirrors the trust invariant blockvalidation uses for
 	// skipDifficultyCheck / quickValidate.
+	//
+	// Testing meta.Height (the target tip) alone is sufficient: it is the max
+	// height of the forward range, so meta.Height <= checkpoint implies every
+	// forward block is <= checkpoint. A range that straddles the checkpoint has
+	// meta.Height > checkpoint and takes the full path.
 	highestCheckpoint := blockchain.HighestCheckpointHeight(b.settings.ChainCfgParams.Checkpoints)
 	useFastForwardReset := meta.Height <= highestCheckpoint
 

@@ -795,12 +795,15 @@ func (sm *SyncManager) handleNewPeerMsg(peer *peerpkg.Peer) {
 	// Initialize the peer state
 	isSyncCandidate := sm.isSyncCandidate(peer)
 
-	// While catching up, ask newly-connected peers to hold back transaction
-	// announcements to reduce load during sync. The filter is restored to the
-	// policy default once we reach RUNNING (resetFeeFilterToDefault).
+	// While catching up, ask every newly-connected peer to hold back
+	// transaction announcements to reduce load during sync. The raise is queued
+	// per-peer; the global currentFeeFilter is only the marker the reset path
+	// (resetFeeFilterToDefault) checks, so it must NOT gate the per-peer queue —
+	// otherwise only the first peer to connect during catch-up would be told.
+	// The filter is restored to the policy default once we reach RUNNING.
 	if state, ferr := sm.blockchainClient.GetFSMCurrentState(sm.ctx); ferr != nil {
 		sm.logger.Errorf("[handleNewPeerMsg] failed to get current FSM state: %v", ferr)
-	} else if state != nil && *state == teranodeblockchain.FSMStateCATCHINGBLOCKS && sm.currentFeeFilter.Load() != bsvutil.SatoshiPerBitcoin {
+	} else if state != nil && *state == teranodeblockchain.FSMStateCATCHINGBLOCKS {
 		feeFilter := wire.NewMsgFeeFilter(bsvutil.SatoshiPerBitcoin)
 		peer.QueueMessage(feeFilter, nil)
 		sm.currentFeeFilter.Store(bsvutil.SatoshiPerBitcoin)
