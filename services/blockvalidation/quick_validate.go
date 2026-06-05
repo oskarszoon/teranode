@@ -204,10 +204,10 @@ func (u *BlockValidation) quickValidateBlock(ctx context.Context, block *model.B
 			return errors.NewProcessingError("[quickValidateBlock][%s] block ID was not assigned during subtree processing", block.Hash().String())
 		}
 	} else {
-		// No subtrees to process, get next block ID
-		id, err = u.blockchainClient.GetNextBlockID(ctx)
+		// No subtrees to process, assign block ID idempotently
+		id, err = u.blockchainClient.AssignBlockID(ctx, block.Hash())
 		if err != nil {
-			return errors.NewProcessingError("[quickValidateBlock][%s] failed to get next block ID", block.Hash().String(), err)
+			return errors.NewProcessingError("[quickValidateBlock][%s] failed to assign block ID", block.Hash().String(), err)
 		}
 		block.ID = uint32(id) // nolint:gosec
 	}
@@ -289,11 +289,11 @@ func (u *BlockValidation) quickValidateBlockAsync(ctx context.Context, block *mo
 		}
 	}
 
-	// If no block ID was assigned during processing, get next block ID
+	// If no block ID was assigned during processing, assign idempotently
 	if block.ID == 0 {
-		id, err = u.blockchainClient.GetNextBlockID(ctx)
+		id, err = u.blockchainClient.AssignBlockID(ctx, block.Hash())
 		if err != nil {
-			return errors.NewProcessingError("[quickValidateBlockAsync][%s] failed to get next block ID", block.Hash().String(), err)
+			return errors.NewProcessingError("[quickValidateBlockAsync][%s] failed to assign block ID", block.Hash().String(), err)
 		}
 		block.ID = uint32(id) // nolint:gosec
 	}
@@ -400,9 +400,9 @@ func (u *BlockValidation) processBlockSubtreesSequential(ctx context.Context, bl
 				block.ID = existingMeta.BlockIDs[0]
 				u.logger.Debugf("[processBlockSubtreesSequential][%s] reusing BlockID %d from retry", block.Hash().String(), existingBlockID)
 			} else if block.ID == 0 {
-				id, err := u.blockchainClient.GetNextBlockID(ctx)
+				id, err := u.blockchainClient.AssignBlockID(ctx, block.Hash())
 				if err != nil {
-					return 0, errors.NewProcessingError("[processBlockSubtreesSequential][%s] failed to get block ID", block.Hash().String(), err)
+					return 0, errors.NewProcessingError("[processBlockSubtreesSequential][%s] failed to assign block ID", block.Hash().String(), err)
 				}
 				block.ID = uint32(id) // nolint:gosec
 			}
@@ -523,9 +523,9 @@ func (u *BlockValidation) processBlockSubtreesPipeline(ctx context.Context, bloc
 					block.ID = existingMeta.BlockIDs[0]
 					u.logger.Debugf("[processBlockSubtreesPipeline][%s] reusing BlockID %d from retry", block.Hash().String(), existingBlockID)
 				} else if block.ID == 0 {
-					id, err := u.blockchainClient.GetNextBlockID(gCtx)
+					id, err := u.blockchainClient.AssignBlockID(gCtx, block.Hash())
 					if err != nil {
-						return errors.NewProcessingError("[processBlockSubtreesPipeline][%s] failed to get block ID", block.Hash().String(), err)
+						return errors.NewProcessingError("[processBlockSubtreesPipeline][%s] failed to assign block ID", block.Hash().String(), err)
 					}
 					block.ID = uint32(id) // nolint:gosec
 				}
@@ -652,9 +652,9 @@ func (u *BlockValidation) processBlockSubtreesPipelineAsync(ctx context.Context,
 					block.ID = existingMeta.BlockIDs[0]
 					u.logger.Debugf("[processBlockSubtreesPipelineAsync][%s] reusing BlockID %d from retry", block.Hash().String(), existingBlockID)
 				} else if block.ID == 0 {
-					id, err := u.blockchainClient.GetNextBlockID(gCtx)
+					id, err := u.blockchainClient.AssignBlockID(gCtx, block.Hash())
 					if err != nil {
-						return errors.NewProcessingError("[processBlockSubtreesPipelineAsync][%s] failed to get block ID", block.Hash().String(), err)
+						return errors.NewProcessingError("[processBlockSubtreesPipelineAsync][%s] failed to assign block ID", block.Hash().String(), err)
 					}
 					block.ID = uint32(id) // nolint:gosec
 				}
