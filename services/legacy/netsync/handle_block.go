@@ -1038,6 +1038,10 @@ func (sm *SyncManager) reuseBlockIDFromUTXO(ctx context.Context, block *bsvutil.
 	// bt.Tx.TxIDChainHash() both resolve to the same 32-byte txid, and both
 	// return *chainhash.Hash from github.com/bsv-blockchain/go-bt/v2/chainhash
 	// — the type utxoStore.Get expects.
+	// We trust BlockIDs[0] as this block's id: the first non-coinbase tx of a
+	// block is created by that block during sync, so the first recorded mined-in
+	// id is this block's. (blockvalidation's quick path keys the same recovery on
+	// its first non-coinbase tx — keep the two in sync if this assumption changes.)
 	meta, err := sm.utxoStore.Get(ctx, txs[1].Hash(), fields.BlockIDs)
 	if err != nil || meta == nil || len(meta.BlockIDs) == 0 {
 		return 0, false

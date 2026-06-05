@@ -1008,7 +1008,9 @@ func (m *mockBlockClient) AssignBlockID(ctx context.Context, req *blockchain_api
 	if m.err != nil {
 		return nil, m.err
 	}
-	return &blockchain_api.AssignBlockIDResponse{}, nil
+	// Mirror the configured GetNextBlockID id so callers that wire up an id get a
+	// consistent, non-zero value here too (getter is nil-safe → 0 when unset).
+	return &blockchain_api.AssignBlockIDResponse{BlockId: m.responseGetNextBlockID.GetNextBlockId()}, nil
 }
 
 func (m *mockBlockClient) GetBlockStats(

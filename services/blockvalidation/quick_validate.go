@@ -392,7 +392,10 @@ func (u *BlockValidation) processBlockSubtreesSequential(ctx context.Context, bl
 		}
 
 		// Phase 4: Check for retry and get block ID (only on first batch)
-		// This is specific to quick validation to handle retries gracefully
+		// This is specific to quick validation to handle retries gracefully.
+		// batchTxs[0] is the first non-coinbase tx; its recorded mined-in id is
+		// this block's. The legacy quick path (netsync reuseBlockIDFromUTXO) keys
+		// the same recovery on its first non-coinbase tx — keep them in sync.
 		if !blockIDSet && len(batch.batchTxs) > 0 {
 			existingMeta, err := u.utxoStore.Get(ctx, batch.batchTxs[0].TxIDChainHash(), fields.BlockIDs)
 			if err == nil && existingMeta != nil && len(existingMeta.BlockIDs) > 0 {
