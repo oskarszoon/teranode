@@ -46,6 +46,16 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: "false"
 
+      - name: Restore Go build & module cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: gobuild-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            gobuild-${{ runner.os }}-
+
       - name: Run Smoke tests
         run: make smoketest SHARD=${{ matrix.shard }} TOTAL=3
         env:
@@ -78,6 +88,16 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: "false"
+
+      - name: Restore Go build & module cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: gobuild-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            gobuild-${{ runner.os }}-
 
       - name: Run Pruner tests
         run: make prunertest
@@ -113,6 +133,16 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: "false"
 
+      - name: Restore Go build & module cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: gobuild-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            gobuild-${{ runner.os }}-
+
       - name: Run Legacy Sync tests
         run: make legacy-sync
         continue-on-error: false
@@ -146,6 +176,16 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: "false"
+
+      - name: Restore Go build & module cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: gobuild-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            gobuild-${{ runner.os }}-
 
       - name: Run Chain Integrity tests
         run: make chainintegrity
@@ -184,6 +224,16 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: "false"
+
+      - name: Restore Go build & module cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: gobuild-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            gobuild-${{ runner.os }}-
 
       - name: Run sequential shard
         run: make sequentialtest-shard SHARD=${{ matrix.shard }} TOTAL=7

@@ -36,13 +36,17 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: "false"
 
-      - name: Restore Go module cache
+      - name: Restore Go build & module cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          path: ~/go/pkg/mod
-          key: gomod-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
+          # Build cache too (see teranode_pr_tests.yaml): keeps the -race+coverage
+          # compile incremental, avoiding the ~13GB cold-compile peak.
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: gobuild-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            gomod-${{ runner.os }}-
+            gobuild-${{ runner.os }}-
 
       - name: Run Go tests
         run: make test
@@ -76,13 +80,17 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: "false"
 
-      - name: Restore Go module cache
+      - name: Restore Go build & module cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          path: ~/go/pkg/mod
-          key: gomod-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
+          # Build cache too (see teranode_pr_tests.yaml): keeps the -race+coverage
+          # compile incremental, avoiding the ~13GB cold-compile peak.
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: gobuild-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            gomod-${{ runner.os }}-
+            gobuild-${{ runner.os }}-
 
       - name: Run Smoke tests
         run: make smoketest
@@ -118,13 +126,17 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: "false"
 
-      - name: Restore Go module cache
+      - name: Restore Go build & module cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          path: ~/go/pkg/mod
-          key: gomod-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
+          # Build cache too (see teranode_pr_tests.yaml): keeps the -race+coverage
+          # compile incremental, avoiding the ~13GB cold-compile peak.
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: gobuild-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            gomod-${{ runner.os }}-
+            gobuild-${{ runner.os }}-
 
       - name: Run Pruner tests
         run: make prunertest
@@ -166,13 +178,17 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: "false"
 
-      - name: Restore Go module cache
+      - name: Restore Go build & module cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          path: ~/go/pkg/mod
-          key: gomod-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
+          # Build cache too (see teranode_pr_tests.yaml): keeps the -race+coverage
+          # compile incremental, avoiding the ~13GB cold-compile peak.
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: gobuild-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            gomod-${{ runner.os }}-
+            gobuild-${{ runner.os }}-
 
       # Re-run golangci-lint separately without exiting on errors and generating a report for use in Sonar
       - name: golangci-lint

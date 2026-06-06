@@ -182,10 +182,17 @@ install-tools:
 	go install github.com/ctrf-io/go-ctrf-json-reporter/cmd/go-ctrf-json-reporter@latest
 	go install gotest.tools/gotestsum@latest
 
+# Cap test/compile parallelism. `go test -race -coverpkg=./...` compiles the
+# whole repo with race+coverage instrumentation; at the runner's default
+# GOMAXPROCS this peaks ~13GB and intermittently OOMs the CI runner during the
+# build phase. -p bounds the packages compiled/tested in parallel, capping peak
+# memory. Override locally for speed, e.g. `make test GO_TEST_P=16`.
+GO_TEST_P ?= 8
+
 .PHONY: test
 test:
 	@command -v gotestsum >/dev/null 2>&1 || { echo "gotestsum not found. Installing..."; $(MAKE) install-tools; }
-	SETTINGS_CONTEXT=test gotestsum --format pkgname -- -race -tags "testtxmetacache" -count=1 -timeout=10m -coverprofile=coverage.out -coverpkg=./... $$(go list ./... | grep -v github.com/bsv-blockchain/teranode/test/ | sort)
+	SETTINGS_CONTEXT=test gotestsum --format pkgname -- -race -tags "testtxmetacache" -count=1 -timeout=10m -p $(GO_TEST_P) -coverprofile=coverage.out -coverpkg=./... $$(go list ./... | grep -v github.com/bsv-blockchain/teranode/test/ | sort)
 
 # run tests in the test/longtest directory
 .PHONY: longtest
