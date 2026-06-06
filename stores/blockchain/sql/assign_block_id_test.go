@@ -139,3 +139,23 @@ func TestAssignBlockID_TwoPathRace_NoPhantom(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, storedID, got)
 }
+
+// TestAssignBlockID_DBError covers the storage-error path: when the underlying
+// DB is unavailable the committed-id lookup fails, and AssignBlockID must
+// surface that error rather than silently minting a fresh id (which could
+// re-introduce the divergence this method exists to prevent).
+func TestAssignBlockID_DBError(t *testing.T) {
+	tSettings := test.CreateBaseTestSettings(t)
+	storeURL, err := url.Parse("sqlitememory:///")
+	require.NoError(t, err)
+
+	s, err := New(ulogger.TestLogger{}, storeURL, tSettings)
+	require.NoError(t, err)
+
+	// Close the store (and its DB) so the committed-id lookup SELECT errors.
+	require.NoError(t, s.Close())
+
+	h := chainhash.HashH([]byte("block-db-error"))
+	_, err = s.AssignBlockID(context.Background(), &h)
+	require.Error(t, err, "AssignBlockID must surface a storage error when the DB is closed, not mint an id")
+}
