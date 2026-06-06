@@ -39,6 +39,8 @@ import (
 	"github.com/bsv-blockchain/teranode/ulogger"
 	"github.com/bsv-blockchain/teranode/util"
 	"github.com/bsv-blockchain/teranode/util/usql"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/lib/pq"
 	"golang.org/x/sync/singleflight"
 	_ "modernc.org/sqlite"
 )
@@ -1345,12 +1347,66 @@ func (s *SQL) reconcileOnMainChain(ctx context.Context) error {
 // mainChainRebuilding is incremented for the duration of the call so concurrent
 // queries fall back to the authoritative CTE rather than reading partially-updated
 // flags. The counter-based guard is safe under reentrant/overlapping callers.
-func (s *SQL) rebuildOnMainChainFlag(ctx context.Context, full bool) (err error) {
+func (s *SQL) rebuildOnMainChainFlag(ctx context.Context, full bool) error {
 	s.mainChainRebuilding.Add(1)
 	defer s.mainChainRebuilding.Add(-1)
 
+	// The transaction below runs at REPEATABLE READ (see rebuildOnMainChainFlagTx)
+	// so all of its statements share one snapshot. On Postgres a snapshot-isolated
+	// transaction can abort with 40001 (serialization_failure) or 40P01
+	// (deadlock_detected) if a concurrent committed transaction modified a row it
+	// writes. The only caller that runs without slowPathMu held is the startup
+	// goroutine (see New); Invalidate/Revalidate hold slowPathMu and StoreBlock
+	// holds it for its whole duration, so they cannot conflict. The startup window
+	// can, however, race a slow-path StoreBlock UPDATE — so retry the whole
+	// transaction (begin → reads → UPDATEs → commit) as a unit on those codes.
+	// tx.ExecContext / tx.QueryRowContext are stdlib *sql.Tx methods and do NOT
+	// go through usql's per-statement retry, so the retry has to live here.
+	//
+	// On SQLite the modernc driver ignores the isolation option and never returns
+	// 40001/40P01, so isSerializationRetry is always false and the loop runs once.
+	const maxRebuildAttempts = 3
+
+	var err error
+	for attempt := 0; attempt < maxRebuildAttempts; attempt++ {
+		err = s.rebuildOnMainChainFlagTx(ctx, full)
+		if err == nil || !s.isSerializationRetry(err) {
+			return err
+		}
+		s.logger.Warnf("rebuildOnMainChainFlag: serialization conflict (attempt %d/%d), retrying: %v", attempt+1, maxRebuildAttempts, err)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+	}
+
+	return err
+}
+
+// isSerializationRetry reports whether err is a Postgres serialization_failure
+// (40001) or deadlock_detected (40P01) — the two codes a REPEATABLE READ
+// transaction can raise on a write-write conflict and which are safe to retry by
+// re-running the whole transaction. SQLite never produces these codes.
+func (*SQL) isSerializationRetry(err error) bool {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == usql.PgErrSerializationFail || pgErr.Code == usql.PgErrDeadlockDetected
+	}
+
+	var pqErr *pq.Error
+	if errors.As(err, &pqErr) {
+		code := string(pqErr.Code)
+		return code == usql.PgErrSerializationFail || code == usql.PgErrDeadlockDetected
+	}
+
+	return false
+}
+
+// rebuildOnMainChainFlagTx runs one attempt of the on_main_chain rebuild inside a
+// single REPEATABLE READ transaction. See rebuildOnMainChainFlag for the retry
+// wrapper and the snapshot-isolation rationale.
+func (s *SQL) rebuildOnMainChainFlagTx(ctx context.Context, full bool) (err error) {
 	var tx *sql.Tx
-	tx, err = s.db.BeginTx(ctx, nil)
+	tx, err = s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
 	if err != nil {
 		return errors.NewStorageError("rebuildOnMainChainFlag: failed to begin transaction", err)
 	}
@@ -1367,6 +1423,12 @@ func (s *SQL) rebuildOnMainChainFlag(ctx context.Context, full bool) (err error)
 	if err = tx.QueryRowContext(ctx, bestQ).Scan(&bestBlockID, &bestHeight); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil // empty DB — nothing to rebuild
+		}
+		// Return the raw driver error on a serialization/deadlock abort so the
+		// retry wrapper can classify it: errors.NewStorageError captures only the
+		// message string of a non-*Error cause, discarding the typed *pgconn.PgError.
+		if s.isSerializationRetry(err) {
+			return err
 		}
 		return errors.NewStorageError("rebuildOnMainChainFlag: failed to get best block", err)
 	}
@@ -1397,6 +1459,9 @@ func (s *SQL) rebuildOnMainChainFlag(ctx context.Context, full bool) (err error)
 		WHERE on_main_chain = true AND height >= $2 AND id NOT IN (SELECT id FROM main_chain)
 	`
 	if _, err = tx.ExecContext(ctx, q1, bestBlockID, windowBottom); err != nil {
+		if s.isSerializationRetry(err) {
+			return err
+		}
 		return errors.NewStorageError("rebuildOnMainChainFlag: failed to clear stale on_main_chain flags", err)
 	}
 
@@ -1415,10 +1480,16 @@ func (s *SQL) rebuildOnMainChainFlag(ctx context.Context, full bool) (err error)
 		WHERE on_main_chain = false AND height >= $2 AND id IN (SELECT id FROM main_chain)
 	`
 	if _, err = tx.ExecContext(ctx, q2, bestBlockID, windowBottom); err != nil {
+		if s.isSerializationRetry(err) {
+			return err
+		}
 		return errors.NewStorageError("rebuildOnMainChainFlag: failed to set on_main_chain flags", err)
 	}
 
 	if err = tx.Commit(); err != nil {
+		if s.isSerializationRetry(err) {
+			return err
+		}
 		return errors.NewStorageError("rebuildOnMainChainFlag: failed to commit transaction", err)
 	}
 
