@@ -54,12 +54,14 @@ func SetupTestPostgresContainer() (string, func() error, error) {
 	dbName := fmt.Sprintf("testdb_%d", n)
 
 	// Build a connStr targeting the postgres system database to run CREATE DATABASE.
-	// Using "postgres" (the always-present system DB) instead of "template1" avoids
-	// the "template1 is being accessed by other users" error entirely, since postgres
-	// system DB is never used as a template source.
+	// CREATE DATABASE still copies from template1 by default regardless of which DB we
+	// connect to; the point of connecting the admin session to the "postgres" system DB
+	// (rather than template1) is that this session is not itself counted as an active
+	// template1 user, so it can't block the template copy. Combined with the createMu
+	// serialisation below, this avoids "template1 is being accessed by other users".
 	adminConnStr, err := swapDatabase(sharedConnStr, "postgres")
 	if err != nil {
-		return "", nil, fmt.Errorf("build admin connStr: %w", err)
+		return "", nil, errors.NewProcessingError("build admin connStr", err)
 	}
 
 	// Serialize CREATE DATABASE to avoid concurrent template access errors.
@@ -67,13 +69,13 @@ func SetupTestPostgresContainer() (string, func() error, error) {
 	err = execAdmin(adminConnStr, fmt.Sprintf("CREATE DATABASE %s", pq.QuoteIdentifier(dbName)))
 	createMu.Unlock()
 	if err != nil {
-		return "", nil, fmt.Errorf("create database %s: %w", dbName, err)
+		return "", nil, errors.NewProcessingError("create database %s", dbName, err)
 	}
 
 	// Build the per-test connStr.
 	testConnStr, err := swapDatabase(sharedConnStr, dbName)
 	if err != nil {
-		return "", nil, fmt.Errorf("build test connStr: %w", err)
+		return "", nil, errors.NewProcessingError("build test connStr", err)
 	}
 
 	cleanup := func() error {
@@ -129,12 +131,14 @@ func startSharedContainer() (string, error) {
 		}
 	}
 	if err != nil {
-		return "", fmt.Errorf("start postgres container: %w", err)
+		return "", errors.NewProcessingError("start postgres container", err)
 	}
 
 	connStr, err := postgresC.ConnectionString(ctx)
 	if err != nil {
-		return "", fmt.Errorf("get connection string: %w", err)
+		// Don't leak the container if we created it but can't get its conn string.
+		_ = postgresC.Terminate(ctx)
+		return "", errors.NewProcessingError("get connection string", err)
 	}
 
 	// Ensure sslmode=disable is present before storing as sharedConnStr.
@@ -145,6 +149,9 @@ func startSharedContainer() (string, error) {
 		return "", errors.NewProcessingError("database validation failed", err)
 	}
 
+	// postgresC is intentionally not retained: there is no per-test teardown for the
+	// shared container, so it is reaped by the testcontainers Ryuk reaper when the test
+	// process exits. Only the per-test databases are dropped (see cleanup above).
 	return connStr, nil
 }
 
@@ -153,7 +160,7 @@ func startSharedContainer() (string, error) {
 func swapDatabase(connStr, newDB string) (string, error) {
 	u, err := url.Parse(connStr)
 	if err != nil {
-		return "", fmt.Errorf("parse connStr: %w", err)
+		return "", errors.NewProcessingError("parse connStr", err)
 	}
 	u.Path = "/" + newDB
 	return u.String(), nil
@@ -163,7 +170,7 @@ func swapDatabase(connStr, newDB string) (string, error) {
 func execAdmin(adminConnStr, stmt string) error {
 	db, err := sql.Open("postgres", adminConnStr)
 	if err != nil {
-		return fmt.Errorf("open admin connection: %w", err)
+		return errors.NewProcessingError("open admin connection", err)
 	}
 	defer db.Close()
 
@@ -231,7 +238,7 @@ func validateDatabaseConnection(connStr string, maxRetries int) error {
 		}
 	}
 
-	return errors.NewProcessingError(
-		fmt.Sprintf("failed to validate database connection after %d attempts: %v", maxRetries, lastErr),
-	)
+	// Pass lastErr as the trailing arg so it is wrapped as the cause (preserving the
+	// error chain for debugging flaky startup), with %d for the attempt count.
+	return errors.NewProcessingError("failed to validate database connection after %d attempts", maxRetries, lastErr)
 }
