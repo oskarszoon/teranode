@@ -187,7 +187,7 @@ install-tools:
 # GOMAXPROCS this peaks ~13GB and intermittently OOMs the CI runner during the
 # build phase. -p bounds the packages compiled/tested in parallel, capping peak
 # memory. Override locally for speed, e.g. `make test GO_TEST_P=16`.
-GO_TEST_P ?= 8
+GO_TEST_P ?= 4
 
 .PHONY: test
 test:
