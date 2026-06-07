@@ -25,7 +25,8 @@ env:
 jobs:
   golangci-lint:
     name: golangci-lint
-    runs-on: teranode-runner-8-core
+    # arm64-safe: pure Go analysis, no containers (golangci-lint ships arm64).
+    runs-on: teranode-runner-8-core-arm
     steps:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
 
@@ -59,11 +60,11 @@ jobs:
   test:
     name: test
     # ARM runner: the x86 16-core runner OOM-killed the `go test -race
-    # -coverpkg=./...` compile of the whole repo (~13GB peak). arm64 has more
-    # headroom and runs `make test` natively (proven locally on arm64). Only
-    # this `make test` job moves — postgres testcontainers (arm64-available) +
-    # the testtxmetacache tag (no aerospike images). Trying 32-core for speed.
-    runs-on: teranode-runner-32-core-arm
+    # -coverpkg=./...` compile (~13GB peak) — arm64 runners have ample RAM
+    # (~64GB on 16-core; telemetry showed ~70GB peak at 32 cores, and 32-core
+    # gave no speedup, so 16-core is the cost/perf sweet spot). Runs `make test`
+    # natively: postgres testcontainers (arm64) + testtxmetacache (no aerospike).
+    runs-on: teranode-runner-16-core-arm
     steps:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
 
@@ -90,30 +91,7 @@ jobs:
             gomod-${{ runner.os }}-
 
       - name: Run Go tests
-        # TEMP telemetry: log runner specs + sample peak mem/disk during the run
-        # to size the runner. Remove before merge once core count is decided.
-        run: |
-          echo "::group::runner resources"
-          echo "cores=$(nproc)  GOMAXPROCS=$(go env GOMAXPROCS)"
-          free -h || true
-          df -h / || true
-          echo "::endgroup::"
-          ( peak=0; pdisk=0
-            while :; do
-              u=$(awk '/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} END{print t-a}' /proc/meminfo)
-              [ "${u:-0}" -gt "$peak" ] && peak=$u
-              d=$(df --output=used -k / 2>/dev/null | tail -1 | tr -dc '0-9')
-              [ "${d:-0}" -gt "$pdisk" ] && pdisk=$d
-              printf '%s %s\n' "$peak" "${pdisk:-0}" > /tmp/peak.txt
-              sleep 5
-            done ) & SAMPLER=$!
-          set +e; make test; rc=$?; set -e
-          kill "$SAMPLER" 2>/dev/null || true
-          if [ -f /tmp/peak.txt ]; then
-            read pm pd < /tmp/peak.txt
-            echo "::notice title=test resource usage::peak mem $((pm/1024)) MiB, peak disk $((pd/1024)) MiB on $(nproc) cores"
-          fi
-          exit $rc
+        run: make test
         continue-on-error: false
 
       - name: Upload coverage report
