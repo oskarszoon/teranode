@@ -183,15 +183,9 @@ install-tools:
 	go install gotest.tools/gotestsum@latest
 
 .PHONY: test
-# -p 8 caps how many package test binaries run concurrently. With -race, an
-# overloaded runner starves the GC of CPU, so a few binaries' off-heap footprint
-# (race shadow / cgo arenas) balloons transiently — sql.test swung to ~34G under
-# the default -p (= core count) while the same package run uncontended is ~2G
-# (#1051). Bounding concurrency lets GC keep pace and caps the job-wide peak; it is
-# the lever that lets the suite fit a 16-core/64GB runner.
 test:
 	@command -v gotestsum >/dev/null 2>&1 || { echo "gotestsum not found. Installing..."; $(MAKE) install-tools; }
-	SETTINGS_CONTEXT=test gotestsum --format pkgname -- -race -p 8 -tags "testtxmetacache" -count=1 -timeout=10m -coverprofile=coverage.out -coverpkg=./... $$(go list ./... | grep -v github.com/bsv-blockchain/teranode/test/ | sort)
+	SETTINGS_CONTEXT=test gotestsum --format pkgname -- -race -tags "testtxmetacache" -count=1 -timeout=10m -coverprofile=coverage.out -coverpkg=./... $$(go list ./... | grep -v github.com/bsv-blockchain/teranode/test/ | sort)
 
 # run tests in the test/longtest directory
 .PHONY: longtest
