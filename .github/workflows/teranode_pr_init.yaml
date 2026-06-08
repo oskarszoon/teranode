@@ -7,6 +7,10 @@ name: Teranode PR init
 
 on:
   pull_request:
+    # TEMP (CI-143 experiment): disabled — '**' never matches a base branch, so
+    # this never runs on a PR. Also stops claude-code-review (workflow_run off this).
+    # Revert before merge.
+    branches-ignore: ['**']
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

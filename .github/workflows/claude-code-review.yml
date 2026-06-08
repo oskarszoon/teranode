@@ -17,6 +17,9 @@ on:
     workflows: ["Teranode PR init"]
     types:
       - completed
+    # TEMP (CI-143 experiment): disabled (belt-and-suspenders; init is already
+    # neutered). '**' never matches the triggering run's head branch. Revert before merge.
+    branches-ignore: ['**']
 
 permissions:
   contents: read

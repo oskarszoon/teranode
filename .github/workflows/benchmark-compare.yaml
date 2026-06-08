@@ -2,6 +2,9 @@ name: Benchmark Comparison
 
 on:
   pull_request:
+    # TEMP (CI-143 experiment): disabled. Also stops benchmark-report (workflow_run
+    # off this). Revert before merge.
+    branches-ignore: ['**']
     types: [opened, synchronize, reopened]
 
 env:

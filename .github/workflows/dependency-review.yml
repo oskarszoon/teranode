@@ -6,6 +6,8 @@ name: Dependency Review
 
 on:
   pull_request:
+    # TEMP (CI-143 experiment): disabled. Revert before merge.
+    branches-ignore: ['**']
 
 # Read-only default token; the job below elevates only what it needs.
 permissions:

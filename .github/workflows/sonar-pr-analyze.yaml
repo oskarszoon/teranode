@@ -16,6 +16,10 @@ on:
     workflows: ["Teranode PR tests"]
     types:
       - completed
+    # TEMP (CI-143 experiment): disabled. This chains off "Teranode PR tests",
+    # which we keep running, so it must be neutered directly. '**' never matches
+    # the triggering run's head branch. Revert before merge.
+    branches-ignore: ['**']
 
 concurrency:
   group: sonar-pr-${{ github.event.workflow_run.pull_requests[0].number || github.event.workflow_run.head_branch }}

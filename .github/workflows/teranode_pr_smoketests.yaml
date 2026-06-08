@@ -2,6 +2,8 @@ name: Teranode PR smoke tests
 
 on:
   pull_request:
+    # TEMP (CI-143 experiment): disabled. Revert before merge.
+    branches-ignore: ['**']
     paths-ignore:
       - 'docs/**'
 
