@@ -59,13 +59,14 @@ jobs:
 
   test:
     name: test
-    # TEMPORARY: 32-core/128GB arm to stop intermittent OOM (exit 143). `make test`
-    # runs `go test -race -coverpkg=./...` over the whole repo; a few test binaries
-    # peak very high (sql ~34G, blockassembly ~31G, subtreeprocessor ~20G) and at
-    # -p=16 enough overlap to exhaust a 16-core/64GB runner intermittently. Job-wide
-    # peak measured ~110GB+. This is a stopgap until per-package memory is reduced —
-    # tracked in #1051. Revert to teranode-runner-16-core-arm once that lands.
-    runs-on: teranode-runner-32-core-arm
+    # Reverted from the temporary 32-core/128GB stopgap back to 16-core/64GB now that
+    # #1051's per-package memory reductions have landed: blockassembly 32G->4.5G,
+    # txmetacache 15G->1.5G, model 11G->1.4G, subtreeprocessor 17G->6.1G. The original
+    # OOM was the sql.test + blockassembly double-peak (~34G + ~32G) overlapping past
+    # 64GB; with blockassembly down, that overlap is gone. sql.test still varies up to
+    # ~34G under -race but fits a 64GB runner on its own. Watching the end-of-run peak
+    # table; if it OOMs intermittently, cap `-p` / serialize the heavy binaries.
+    runs-on: teranode-runner-16-core-arm
     steps:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
 
