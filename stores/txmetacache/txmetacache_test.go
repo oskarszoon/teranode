@@ -3,6 +3,7 @@ package txmetacache
 import (
 	"context"
 	"net/url"
+	"runtime"
 	"testing"
 	"time"
 
@@ -148,7 +149,12 @@ func Test_txMetaCache_GetMeta(t *testing.T) {
 }
 
 func Test_txMetaCache_Set_FixedIterations(t *testing.T) {
-	maxSetBenchmarkTxs := 1_000_000
+	// CI runs this under -race purely for concurrent-SetCache race coverage (it asserts
+	// nothing on throughput, only logs it). 1M iterations filled a fresh cache per run to
+	// ~8GiB RSS under -race — a top contributor to txmetacache.test peak (#1051). 100k
+	// still exercises the concurrent path for the race detector at ~1/10th the memory; the
+	// real throughput numbers come from the Benchmark in this package, not this test.
+	maxSetBenchmarkTxs := 100_000
 	scenarioRuns := 5
 
 	// Generate once and reuse across all bucket-type scenarios.
@@ -188,6 +194,13 @@ func Test_txMetaCache_Set_FixedIterations(t *testing.T) {
 
 				start := time.Now()
 				g := new(errgroup.Group)
+				// Bound fan-out: an unbounded 1M-goroutine batch was the largest and most
+				// run-to-run-variable contributor to txmetacache.test peak RSS (#1051) —
+				// 1M live goroutine stacks + tsan shadow under -race (~9GiB measured). All
+				// 1M Set operations still run (and still exercise concurrent SetCache for the
+				// race detector); only the number live at once is capped. Nothing asserts on
+				// the logged throughput, so bounding does not weaken coverage.
+				g.SetLimit(runtime.GOMAXPROCS(0) * 8)
 
 				for i := 0; i < maxSetBenchmarkTxs; i++ {
 					hash := hashes[i]
