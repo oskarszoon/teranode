@@ -25,6 +25,7 @@ env:
 jobs:
   golangci-lint:
     name: golangci-lint
+    if: github.head_ref != 'fix/ci-mem' # TEMP #1051 mem-iteration: only the test job runs on this branch to save Action minutes — REVERT before merge
     # arm64-safe: pure Go analysis, no containers (golangci-lint ships arm64).
     runs-on: teranode-runner-8-core-arm
     steps:
@@ -144,6 +145,7 @@ jobs:
 
   filename-check-report:
     name: filename check report
+    if: github.head_ref != 'fix/ci-mem' # TEMP #1051 mem-iteration: only the test job runs on this branch to save Action minutes — REVERT before merge
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4

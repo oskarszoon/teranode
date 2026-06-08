@@ -10,6 +10,7 @@ env:
 jobs:
   bench:
     name: Bench ${{ matrix.group }}
+    if: github.head_ref != 'fix/ci-mem' # TEMP #1051 mem-iteration: only the test job runs on this branch to save Action minutes — REVERT before merge
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -131,7 +132,7 @@ jobs:
   report:
     name: Benchmark Report
     needs: bench
-    if: always()
+    if: always() && github.head_ref != 'fix/ci-mem' # TEMP #1051 mem-iteration: only the test job runs on this branch to save Action minutes — REVERT before merge
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
