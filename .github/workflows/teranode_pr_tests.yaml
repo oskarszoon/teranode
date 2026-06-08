@@ -73,29 +73,55 @@ jobs:
         uses: ./.github/actions/go-cache
 
       - name: Run Go tests
-        # Live memory sampler streamed to the job log every 2s. GitHub uploads
-        # step logs in real time, so this SURVIVES the SIGTERM/143 that kills the
-        # job mid-run — unlike catchpoint's post-job summary (never runs when the
-        # job is terminated) and `if: always()` artifact uploads (also normal
-        # steps that don't run after a mid-step kill). Tells us whether RSS was
-        # near the 64GB ceiling at the moment of death (→ memory) or comfortably
-        # low (→ runner reclaim / infra). Also prints the top-3 RSS processes so
-        # we can see if one test binary is the hog or it's broad parallelism.
+        # Memory telemetry that captures true PEAKS (not point-in-time samples)
+        # and survives a SIGTERM/143:
+        #   * per-binary peak = VmHWM from /proc/<pid>/status — the kernel's
+        #     monotonic peak-RSS high-water mark — so we never miss a spike
+        #     between samples (sql.test grew ~8G in one 2s tick). Keyed by the
+        #     untruncated binary name from /proc/<pid>/cmdline.
+        #   * per-job peak    = cgroup memory.peak (v2) / max_usage_in_bytes (v1),
+        #     falling back to /proc/meminfo used. Exact kernel high-water.
+        # Samples stream to the live log every 5s (GitHub uploads logs in real
+        # time, so they survive the kill — unlike catchpoint's post-job summary or
+        # `if: always()` artifact uploads, both normal steps that don't run after a
+        # mid-step kill). A sorted FINAL table prints on exit for clean runs. The
+        # sampler runs under `set +e` so a SIGPIPE/no-match never trips the step's
+        # `set -e`; `make test` keeps `set -e`.
         run: |
-          sample_mem() {
+          TRACK="$(mktemp)"
+          job_peak() {
+            local f
+            for f in /sys/fs/cgroup/memory.peak /sys/fs/cgroup/memory/memory.max_usage_in_bytes; do
+              if [ -r "$f" ]; then awk -v b="$(<"$f")" 'BEGIN{printf "%.1fG", b/1073741824}'; return; fi
+            done
+            awk '/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} END{printf "%.1fG",(t-a)/1048576}' /proc/meminfo
+          }
+          sample() {
+            set +e
+            local st pid hwm cmd name
             while :; do
-              awk -v t="$(date +%T)" '
-                /^MemTotal:/     {tot=$2}
-                /^MemAvailable:/ {av=$2}
-                END {printf "MEMSAMPLE %s used=%.1fG avail=%.1fG of %.1fG\n", t,(tot-av)/1048576,av/1048576,tot/1048576}
-              ' /proc/meminfo
-              ps -eo rss=,comm= --sort=-rss 2>/dev/null | awk 'NR<=3 {printf "  TOP %.1fG %s\n",$1/1048576,$2}'
-              sleep 2
+              for st in /proc/[0-9]*/status; do
+                pid="${st#/proc/}"; pid="${pid%/status}"
+                hwm="$(awk '/^VmHWM:/{print $2; exit}' "$st" 2>/dev/null)"
+                [ -n "$hwm" ] || continue
+                cmd="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)"
+                name="${cmd%% *}"; name="${name##*/}"
+                case "$name" in *.test) echo "$hwm $name" >> "$TRACK" ;; esac
+              done
+              echo "PEAK $(date +%T) job=$(job_peak)"
+              sort -rn "$TRACK" 2>/dev/null | awk '!seen[$2]++{printf "  BIN %.1fG %s\n",$1/1048576,$2} NR>200{exit}'
+              sleep 5
             done
           }
-          sample_mem &
-          SAMPLER_PID=$!
-          trap 'kill "$SAMPLER_PID" 2>/dev/null || true' EXIT
+          sample & SAMPLER_PID=$!
+          finalize() {
+            set +e
+            kill "$SAMPLER_PID" 2>/dev/null
+            echo "=== FINAL PEAKS  job=$(job_peak) ==="
+            awk '$1>m[$2]{m[$2]=$1} END{for (k in m) printf "%d %s\n", m[k], k}' "$TRACK" 2>/dev/null \
+              | sort -rn | awk '{printf "  BINPEAK %.1fG %s\n",$1/1048576,$2}'
+          }
+          trap finalize EXIT
           make test
         continue-on-error: false
 
