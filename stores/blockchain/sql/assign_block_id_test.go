@@ -140,6 +140,114 @@ func TestAssignBlockID_TwoPathRace_NoPhantom(t *testing.T) {
 	require.Equal(t, storedID, got)
 }
 
+// TestAssignBlockID_SurvivesTTLExpiry is the #1056 core regression: a reservation
+// must survive the in-memory ttlcache TTL window. If block processing outlasts
+// blockIDReservationTTL (a multi-GB block on slow hardware during IBD), the cache
+// entry is evicted; a second caller for the same still-uncommitted hash must get
+// the SAME id from the durable reservation table, not burn a fresh nextval — which
+// would re-create the phantom-id divergence #1043 closed (UTXO mined-info under
+// id1, committed block row under id2).
+//
+// This is the same code path that protects a process RESTART and a SECOND
+// blockchain instance (replicas>1): all three reach AssignBlockID with the hash
+// uncommitted and absent from the in-memory L1 cache, and must recover the id from
+// the durable L2 table rather than allocate a new one.
+func TestAssignBlockID_SurvivesTTLExpiry(t *testing.T) {
+	tSettings := test.CreateBaseTestSettings(t)
+	storeURL, err := url.Parse("sqlitememory:///")
+	require.NoError(t, err)
+
+	s, err := New(ulogger.TestLogger{}, storeURL, tSettings)
+	require.NoError(t, err)
+	defer s.Close()
+
+	ctx := context.Background()
+	h := chainhash.HashH([]byte("block-ttl-expiry"))
+
+	id1, err := s.AssignBlockID(ctx, &h)
+	require.NoError(t, err)
+	require.NotZero(t, id1)
+
+	// Simulate the TTL firing mid-processing: evict the in-memory reservation while
+	// the block is still uncommitted.
+	s.blockIDReservations.Delete(h)
+	require.Nil(t, s.blockIDReservations.Get(h), "in-memory reservation evicted")
+
+	id2, err := s.AssignBlockID(ctx, &h)
+	require.NoError(t, err)
+	require.Equal(t, id1, id2, "reservation must survive ttlcache eviction via the durable table")
+}
+
+// TestAssignBlockID_DurableReservationClearedOnCommit verifies the best-effort
+// DELETE on StoreBlock commit removes the durable reservation row, so the table
+// does not grow unboundedly once a block is committed.
+func TestAssignBlockID_DurableReservationClearedOnCommit(t *testing.T) {
+	tSettings := test.CreateBaseTestSettings(t)
+	storeURL, err := url.Parse("sqlitememory:///")
+	require.NoError(t, err)
+
+	s, err := New(ulogger.TestLogger{}, storeURL, tSettings)
+	require.NoError(t, err)
+	defer s.Close()
+
+	ctx := context.Background()
+
+	reserved, err := s.AssignBlockID(ctx, block1.Hash())
+	require.NoError(t, err)
+	require.NotZero(t, reserved)
+
+	_, ok, err := s.durableReservationID(ctx, block1.Hash())
+	require.NoError(t, err)
+	require.True(t, ok, "durable reservation row should exist before commit")
+
+	storedID, _, err := s.StoreBlock(ctx, block1, "test", options.WithID(reserved))
+	require.NoError(t, err)
+	require.Equal(t, reserved, storedID)
+
+	_, ok, err = s.durableReservationID(ctx, block1.Hash())
+	require.NoError(t, err)
+	require.False(t, ok, "durable reservation row must be cleared on commit")
+}
+
+// TestSweepStaleReservations verifies the age-based sweep reclaims durable
+// reservations for blocks that were fetched but never committed (bounding table
+// growth), while leaving in-flight reservations untouched.
+func TestSweepStaleReservations(t *testing.T) {
+	tSettings := test.CreateBaseTestSettings(t)
+	storeURL, err := url.Parse("sqlitememory:///")
+	require.NoError(t, err)
+
+	s, err := New(ulogger.TestLogger{}, storeURL, tSettings)
+	require.NoError(t, err)
+	defer s.Close()
+
+	ctx := context.Background()
+
+	// A stale reservation: inserted directly with a reserved_at well past the sweep
+	// age (> staleReservationSweepAge).
+	staleHash := chainhash.HashH([]byte("block-stale"))
+	_, err = s.db.ExecContext(ctx,
+		`INSERT INTO block_id_reservations (hash, block_id, reserved_at) VALUES ($1, $2, datetime('now','-2 hours'))`,
+		staleHash[:], uint64(99999))
+	require.NoError(t, err)
+
+	// A fresh reservation via the normal path (reserved_at defaults to now).
+	freshHash := chainhash.HashH([]byte("block-fresh"))
+	freshID, err := s.AssignBlockID(ctx, &freshHash)
+	require.NoError(t, err)
+
+	s.sweepStaleReservations(ctx)
+
+	_, ok, err := s.durableReservationID(ctx, &staleHash)
+	require.NoError(t, err)
+	require.False(t, ok, "stale reservation (older than sweep age) must be reclaimed")
+
+	id, ok, err := s.durableReservationID(ctx, &freshHash)
+	require.NoError(t, err)
+	require.True(t, ok, "fresh reservation must survive the sweep")
+	require.Equal(t, freshID, id)
+}
+
 // TestAssignBlockID_DBError covers the storage-error path: when the underlying
 // DB is unavailable the committed-id lookup fails, and AssignBlockID must
 // surface that error rather than silently minting a fresh id (which could
