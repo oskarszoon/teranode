@@ -164,6 +164,14 @@ type Server struct {
 	// catchupAlternatives tracks alternative peer sources for blocks in catchup
 	catchupAlternatives *ttlcache.Cache[chainhash.Hash, []processBlockCatchup]
 
+	// blockCatchupAttempts counts catchup re-entry cycles per block hash within a
+	// cooldown window (#1057). Once a block reaches CatchupMaxAttemptsPerBlock it is
+	// not re-enqueued until the entry's TTL expires, bounding the livelock where a
+	// block no peer can complete repeatedly clears its guard and re-enters catchup,
+	// pinning a worker and the catchup lock. TTL window only (no touch-on-hit) so the
+	// block can be retried again later if better peers appear.
+	blockCatchupAttempts *ttlcache.Cache[chainhash.Hash, int]
+
 	// stats tracks operational metrics for monitoring and troubleshooting
 	stats *gocore.Stat
 
@@ -352,6 +360,13 @@ func New(
 		catchupCh:           make(chan processBlockCatchup, tSettings.BlockValidation.CatchupChBufferSize),
 		processBlockNotify:  ttlcache.New[chainhash.Hash, bool](),
 		catchupAlternatives: ttlcache.New[chainhash.Hash, []processBlockCatchup](ttlcache.WithTTL[chainhash.Hash, []processBlockCatchup](10 * time.Minute)),
+		blockCatchupAttempts: ttlcache.New[chainhash.Hash, int](
+			ttlcache.WithTTL[chainhash.Hash, int](10*time.Minute),
+			// Do not extend the window on reads: the cooldown runs a fixed time from
+			// the first failed attempt, so the enqueue-gate's Get checks cannot keep a
+			// block suppressed forever.
+			ttlcache.WithDisableTouchOnHit[chainhash.Hash, int](),
+		),
 		adaptiveFetch:       af,
 		stats:               gocore.NewStat("blockvalidation"),
 		kafkaConsumerClient: kafkaConsumerClient,
@@ -593,6 +608,11 @@ func (u *Server) Init(ctx context.Context) (err error) {
 
 	go u.processBlockNotify.Start()
 	go u.catchupAlternatives.Start()
+	// nil-guarded: this cache is newer than some Server-literal test fixtures that
+	// call Init without initialising it (NewServer always does). Matches Stop().
+	if u.blockCatchupAttempts != nil {
+		go u.blockCatchupAttempts.Start()
+	}
 
 	// Start fork manager cleanup routine
 	go u.forkManager.StartCleanupRoutine(ctx)
@@ -652,6 +672,19 @@ func (u *Server) Init(ctx context.Context) (err error) {
 
 			case c := <-u.catchupCh:
 				{
+					// #1057: authoritative cap chokepoint. catchup() takes the catchup
+					// lock and re-validates, so a block no peer can complete must not be
+					// processed once it has exhausted its attempt budget — skip it (clear
+					// its guard) until the cooldown window expires. This covers EVERY
+					// enqueue path (addBlockToPriorityQueue, processBlockFound,
+					// processBlockFoundChannel), not just the guarded one.
+					if u.catchupAttemptsExhausted(c.block.Hash()) {
+						u.logger.Warnf("[catchup] Block %s in cooldown after exhausting catchup attempts (cap %d); skipping until window expires", c.block.Hash().String(), u.settings.BlockValidation.CatchupMaxAttemptsPerBlock)
+						u.processBlockNotify.Delete(*c.block.Hash())
+						u.catchupAlternatives.Delete(*c.block.Hash())
+						continue
+					}
+
 					// Check if peer is bad or malicious before attempting catchup
 					if u.isPeerBad(c.peerID) || u.isPeerMalicious(ctx, c.peerID) {
 						u.logger.Warnf("[catchup][%s] peer %s (%s) is marked as bad or malicious, trying alternative peers", c.block.Hash().String(), c.peerID, c.baseURL)
@@ -685,7 +718,10 @@ func (u *Server) Init(ctx context.Context) (err error) {
 
 						// Local infrastructure/service failure (e.g. blockchain service unavailable) — not a peer issue
 						if errors.Is(err, errors.ErrServiceError) {
-							u.logger.Warnf("[catchup] Local service error during catchup for block %s, clearing markers to allow retry: %v", c.block.Hash().String(), err)
+							// #1057: count this cycle toward the per-block cap so a persistent
+							// local service error cannot drive unbounded re-entry.
+							attempts := u.recordCatchupAttempt(c.block.Hash())
+							u.logger.Warnf("[catchup] Local service error during catchup for block %s (attempt %d/%d), clearing markers to allow retry: %v", c.block.Hash().String(), attempts, u.settings.BlockValidation.CatchupMaxAttemptsPerBlock, err)
 							u.processBlockNotify.Delete(*c.block.Hash())
 							u.catchupAlternatives.Delete(*c.block.Hash())
 							continue
@@ -767,12 +803,26 @@ func (u *Server) Init(ctx context.Context) (err error) {
 						}
 
 						if !catchupSucceeded {
+							// #1057: every peer source (P2P-selected and cached alternatives)
+							// failed this cycle. Count it toward the per-block cap so an
+							// incomplete block no peer can complete (e.g. ErrBlockIncomplete from
+							// a seeded peer) cannot re-enter catchup forever; re-enqueue is gated
+							// by catchupAttemptsExhausted once the cap is reached.
+							attempts := u.recordCatchupAttempt(blockHash)
+							if u.settings.BlockValidation.CatchupMaxAttemptsPerBlock > 0 && attempts >= u.settings.BlockValidation.CatchupMaxAttemptsPerBlock {
+								u.logger.Warnf("[catchup] Block %s exhausted catchup attempts (%d/%d); entering cooldown before any further retry", blockHash.String(), attempts, u.settings.BlockValidation.CatchupMaxAttemptsPerBlock)
+							}
+
 							// Clear processing marker and alternatives to allow retries
 							u.processBlockNotify.Delete(*blockHash)
 							u.catchupAlternatives.Delete(*blockHash)
 						}
 					} else {
-						// Success - clear alternatives for this block
+						// Success - clear alternatives for this block; reset the attempt
+						// counter so a later unrelated catchup for this hash starts fresh.
+						if u.blockCatchupAttempts != nil {
+							u.blockCatchupAttempts.Delete(*c.block.Hash())
+						}
 						u.catchupAlternatives.Delete(*c.block.Hash())
 						// Clear the processing marker
 						u.processBlockNotify.Delete(*c.block.Hash())
@@ -1153,6 +1203,11 @@ func (u *Server) Start(ctx context.Context, readyCh chan<- struct{}) error {
 func (u *Server) Stop(_ context.Context) error {
 	u.processBlockNotify.Stop()
 	u.catchupAlternatives.Stop()
+	// nil-guarded: this cache is newer than some Server-literal test fixtures that
+	// don't initialise it (NewServer always does). Matches the nil-safe helpers.
+	if u.blockCatchupAttempts != nil {
+		u.blockCatchupAttempts.Stop()
+	}
 
 	// Wait for all background tasks in BlockValidation to complete
 	if u.blockValidation != nil {
@@ -1708,6 +1763,40 @@ func (u *Server) blockProcessingWorker(ctx context.Context, workerID int) {
 	}
 }
 
+// recordCatchupAttempt increments and returns the catchup-attempt count for a
+// block within the current cooldown window (#1057). The window starts at the
+// first recorded attempt and is not extended by reads, so a block can be retried
+// again once the entry's TTL expires. A nil cache (a Server built without the
+// normal NewServer wiring, e.g. in some unit tests) degrades to no tracking.
+func (u *Server) recordCatchupAttempt(blockHash *chainhash.Hash) int {
+	if u.blockCatchupAttempts == nil {
+		return 0
+	}
+
+	n := 1
+	if item := u.blockCatchupAttempts.Get(*blockHash); item != nil {
+		n = item.Value() + 1
+	}
+
+	u.blockCatchupAttempts.Set(*blockHash, n, ttlcache.DefaultTTL)
+
+	return n
+}
+
+// catchupAttemptsExhausted reports whether a block has reached the per-block
+// catchup attempt cap and is therefore in its cooldown window. A cap of <= 0
+// disables the bound (unbounded retries). A nil cache reports not-exhausted.
+func (u *Server) catchupAttemptsExhausted(blockHash *chainhash.Hash) bool {
+	maxAttempts := u.settings.BlockValidation.CatchupMaxAttemptsPerBlock
+	if maxAttempts <= 0 || u.blockCatchupAttempts == nil {
+		return false
+	}
+
+	item := u.blockCatchupAttempts.Get(*blockHash)
+
+	return item != nil && item.Value() >= maxAttempts
+}
+
 // addBlockToPriorityQueue adds a block to the priority queue with appropriate classification
 func (u *Server) addBlockToPriorityQueue(ctx context.Context, blockFound processBlockFound) {
 	u.logger.Debugf("[addBlockToPriorityQueue] Started for block %s from %s", blockFound.hash.String(), blockFound.baseURL)
@@ -1765,6 +1854,22 @@ func (u *Server) addBlockToPriorityQueue(ctx context.Context, blockFound process
 
 	if !parentExists {
 		u.logger.Infof("[addBlockToPriorityQueue] Parent block %s doesn't exist for block %s, sending to catchup", block.Header.HashPrevBlock.String(), blockFound.hash.String())
+
+		// #1057: bound catchup retries. If this block has exhausted its per-block
+		// attempt budget within the cooldown window, do not re-enqueue it — a block
+		// no peer can complete (e.g. incomplete, missing its coinbase) must not keep
+		// re-entering catchup and pinning a worker and the catchup lock. The attempt
+		// cache TTL lets the block be retried again once the window expires, so a
+		// transient outage self-heals.
+		if u.catchupAttemptsExhausted(blockFound.hash) {
+			u.logger.Warnf("[addBlockToPriorityQueue] Block %s has exhausted catchup attempts (cap %d); skipping re-enqueue until cooldown expires", blockFound.hash.String(), u.settings.BlockValidation.CatchupMaxAttemptsPerBlock)
+
+			if blockFound.errCh != nil {
+				blockFound.errCh <- nil
+			}
+
+			return
+		}
 
 		// Check if we're already processing this block in catchup
 		if u.processBlockNotify.Get(*blockFound.hash) != nil {

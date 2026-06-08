@@ -26,6 +26,66 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestCatchupAttemptCap is the #1057 regression: catchup retries for a single
+// block must be bounded so a block no peer can complete (or a persistent local
+// service error) cannot re-enter catchup forever and pin a worker + the catchup
+// lock. The per-block attempt counter caps at CatchupMaxAttemptsPerBlock and then
+// reports the block as exhausted (in cooldown); once the window expires the block
+// can be retried again, so a transient failure self-heals. A cap of <= 0 disables
+// the bound.
+func TestCatchupAttemptCap(t *testing.T) {
+	tSettings := test.CreateBaseTestSettings(t)
+	tSettings.BlockValidation.CatchupMaxAttemptsPerBlock = 3
+
+	u := &Server{
+		settings: tSettings,
+		logger:   ulogger.TestLogger{},
+		blockCatchupAttempts: ttlcache.New[chainhash.Hash, int](
+			ttlcache.WithTTL[chainhash.Hash, int](10*time.Minute),
+			ttlcache.WithDisableTouchOnHit[chainhash.Hash, int](),
+		),
+	}
+
+	h := chainhash.HashH([]byte("blk-cap"))
+
+	require.False(t, u.catchupAttemptsExhausted(&h), "zero attempts is not exhausted")
+	require.Equal(t, 1, u.recordCatchupAttempt(&h))
+	require.False(t, u.catchupAttemptsExhausted(&h), "1/3 is below the cap")
+	require.Equal(t, 2, u.recordCatchupAttempt(&h))
+	require.False(t, u.catchupAttemptsExhausted(&h), "2/3 is below the cap")
+	require.Equal(t, 3, u.recordCatchupAttempt(&h))
+	require.True(t, u.catchupAttemptsExhausted(&h), "3/3 reaches the cap -> cooldown")
+
+	// A different block has its own independent budget.
+	other := chainhash.HashH([]byte("blk-other"))
+	require.False(t, u.catchupAttemptsExhausted(&other))
+
+	// Cooldown reset (simulating the TTL window expiring): the block can be retried.
+	u.blockCatchupAttempts.Delete(h)
+	require.False(t, u.catchupAttemptsExhausted(&h), "after the window expires the block is retriable again")
+
+	// Cap disabled (<= 0) never exhausts, regardless of attempt count.
+	tSettings.BlockValidation.CatchupMaxAttemptsPerBlock = 0
+	for i := 0; i < 10; i++ {
+		u.recordCatchupAttempt(&h)
+	}
+	require.False(t, u.catchupAttemptsExhausted(&h), "cap <= 0 disables the bound")
+}
+
+// TestCatchupAttemptCap_NilCacheSafe verifies the helpers degrade gracefully when
+// the attempt cache was never initialised (a Server literal built without the
+// NewServer wiring, as some unit tests do): no panic, no cap.
+func TestCatchupAttemptCap_NilCacheSafe(t *testing.T) {
+	tSettings := test.CreateBaseTestSettings(t)
+	u := &Server{settings: tSettings, logger: ulogger.TestLogger{}} // blockCatchupAttempts == nil
+
+	h := chainhash.HashH([]byte("blk-nil"))
+	require.NotPanics(t, func() {
+		require.Equal(t, 0, u.recordCatchupAttempt(&h))
+		require.False(t, u.catchupAttemptsExhausted(&h))
+	})
+}
+
 // TestBlockProcessingWithRetry tests the retry mechanism when block fetching fails
 func TestBlockProcessingWithRetry(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
