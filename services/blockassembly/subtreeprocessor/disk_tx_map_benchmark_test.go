@@ -289,8 +289,14 @@ func TestDiskTxMap_ExistenceLayerThroughput(t *testing.T) {
 	t.Logf("Ops/sec:       %.0f", opsPerSec)
 	t.Logf("Ns/op:         %.0f", float64(elapsed.Nanoseconds())/float64(totalOps))
 
-	// Threshold is 1M ops/sec to pass under -race (race detector adds ~10x overhead).
-	// Without -race, this achieves ~35M ops/sec.
-	require.Greaterf(t, opsPerSec, 1_000_000.0,
-		"Existence layer must achieve >1M ops/sec (with -race), got %.0f ops/sec", opsPerSec)
+	// Throughput is informational, not a hard gate: a fixed >1M ops/sec floor under
+	// -race flakes on shared CI runners (saw ~953k ops/sec on a 16-core runner vs >1M
+	// on the temporary 32-core one, #1051). Without -race this achieves ~35M ops/sec.
+	// Log a note when below target instead of failing; real perf regressions belong in
+	// the Benchmark in this package, not the -race correctness suite. This mirrors the
+	// sibling TestDiskTxMap_ThroughputTarget, which already only logs.
+	const targetOpsPerSec = 1_000_000.0
+	if opsPerSec < targetOpsPerSec {
+		t.Logf("NOTE: below %.0f ops/sec target (%.0f) — expected on slower/shared runners under -race; not a failure.", targetOpsPerSec, opsPerSec)
+	}
 }

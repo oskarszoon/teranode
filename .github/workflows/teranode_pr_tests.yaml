@@ -139,6 +139,7 @@ jobs:
       # against the PEAKMEM sql.test line above (which is under full -p contention).
       # REMOVE once answered.
       - name: sql.test shard diagnostic
+        if: always()
         continue-on-error: true
         run: |
           set +e
