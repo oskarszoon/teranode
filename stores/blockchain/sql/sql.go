@@ -1365,7 +1365,10 @@ func (s *SQL) rebuildOnMainChainFlag(ctx context.Context, full bool) error {
 	//
 	// On SQLite the modernc driver ignores the isolation option and never returns
 	// 40001/40P01, so isSerializationRetry is always false and the loop runs once.
-	const maxRebuildAttempts = 3
+	const (
+		maxRebuildAttempts = 3
+		retryBaseDelay     = 100 * time.Millisecond
+	)
 
 	var err error
 	for attempt := 0; attempt < maxRebuildAttempts; attempt++ {
@@ -1373,11 +1376,28 @@ func (s *SQL) rebuildOnMainChainFlag(ctx context.Context, full bool) error {
 		if err == nil || !s.isSerializationRetry(err) {
 			return err
 		}
-		s.logger.Warnf("rebuildOnMainChainFlag: serialization conflict (attempt %d/%d), retrying: %v", attempt+1, maxRebuildAttempts, err)
-		if ctx.Err() != nil {
+
+		// On the final attempt, stop here and fall through to the exhaustion log +
+		// return below — logging "retrying" when no retry follows would be misleading.
+		if attempt == maxRebuildAttempts-1 {
+			break
+		}
+
+		// Exponential backoff (100ms, 200ms, ...) to match util/usql house style,
+		// aborting early if the context is cancelled.
+		backoff := retryBaseDelay << uint(attempt)
+		s.logger.Warnf("rebuildOnMainChainFlag: serialization conflict (attempt %d/%d), retrying in %s: %v", attempt+1, maxRebuildAttempts, backoff, err)
+		select {
+		case <-ctx.Done():
 			return ctx.Err()
+		case <-time.After(backoff):
 		}
 	}
+
+	// Retries exhausted on a serialization conflict. Return the raw typed driver
+	// error (not wrapped) so callers can still classify it via errors.As; log here
+	// for visibility since the error is otherwise only surfaced by the caller.
+	s.logger.Warnf("rebuildOnMainChainFlag: serialization conflict persisted after %d attempts: %v", maxRebuildAttempts, err)
 
 	return err
 }
