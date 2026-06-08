@@ -424,10 +424,18 @@ func (b *BlockAssembler) reset(ctx context.Context, validateInputs ...bool) erro
 	}
 
 	// Fast-forward reset is safe when the whole forward range is at/below the
-	// highest checkpoint: PoW + checkpoint guarantee canonicality, so the full
-	// conflicting-transaction processing in the SubtreeProcessor reset is
-	// unnecessary. Mirrors the trust invariant blockvalidation uses for
-	// skipDifficultyCheck / quickValidate.
+	// highest checkpoint: these are the genuine historical blocks, whose
+	// canonicality is guaranteed by PoW plus upstream checkpoint enforcement
+	// (which keeps a non-canonical sub-checkpoint block from ever reaching
+	// reset), so the per-block conflicting-transaction processing in the
+	// SubtreeProcessor reset is unnecessary.
+	//
+	// This is the same checkpoint-trust idea blockvalidation uses for
+	// skipDifficultyCheck / quickValidate, but it goes a step further: the quick
+	// validation path still runs a pre-storage checkParentExistsOnChain
+	// double-spend check, whereas this path waives conflict handling for the
+	// forward range entirely. The safety therefore rests on these being the real
+	// historical chain (gated by the checkpoint), not on the height test alone.
 	//
 	// Testing meta.Height (the target tip) alone is sufficient: it is the max
 	// height of the forward range, so meta.Height <= checkpoint implies every
