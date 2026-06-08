@@ -16,8 +16,12 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-// sharedContainer holds the single shared PostgreSQL container for the test binary.
-// Initialised once via containerOnce; containerErr is permanent if init fails.
+// sharedConnStr is the base connStr for the single PostgreSQL container shared across
+// the test binary. The container is started exactly once via containerOnce; its handle
+// is not retained — its lifecycle is bound to the test process / CI runner teardown
+// (Ryuk is disabled in CI). containerErr is permanent if that one-time start fails, so a
+// transient first-start failure fails every caller in the binary (see startSharedContainer's
+// internal 3-attempt retry, which mitigates this).
 var (
 	containerOnce sync.Once
 	sharedConnStr string // base connStr pointing at the default "testdb" database
