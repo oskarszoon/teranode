@@ -132,6 +132,46 @@ jobs:
           make test
         continue-on-error: false
 
+      # TEMP #1051 diagnostic — localise sql.test's ~34G spike. Runs stores/blockchain/sql
+      # ALONE (full twice for variance + two 155-test halves), each with its own VmHWM,
+      # to tell whether the spike is intrinsic to the package (→ splitting it helps) or
+      # only emerges under cross-binary contention (→ it won't). Compare SQLDIAG numbers
+      # against the PEAKMEM sql.test line above (which is under full -p contention).
+      # REMOVE once answered.
+      - name: sql.test shard diagnostic
+        continue-on-error: true
+        run: |
+          set +e
+          names=$(grep -rhE '^func Test[A-Za-z0-9_]+\(' stores/blockchain/sql/*_test.go | sed -E 's/^func (Test[A-Za-z0-9_]+)\(.*/\1/' | sort -u)
+          total=$(printf '%s\n' "$names" | wc -l); half=$(( (total + 1) / 2 ))
+          A=$(printf '%s\n' "$names" | head -n "$half" | paste -sd'|' -)
+          B=$(printf '%s\n' "$names" | tail -n +"$((half + 1))" | paste -sd'|' -)
+          echo "diagnostic: $total top-level tests, half=$half"
+          run_measure() {
+            local label="$1"; shift
+            "$@" >"/tmp/diag-$label.log" 2>&1 &
+            local gopid=$! peak=0 hwm cmd st
+            while kill -0 "$gopid" 2>/dev/null; do
+              for st in /proc/[0-9]*/status; do
+                cmd="$(tr '\0' ' ' < "${st%status}cmdline" 2>/dev/null)"
+                case "$cmd" in
+                  *sql.test*)
+                    hwm="$(awk '/^VmHWM:/{print $2; exit}' "$st" 2>/dev/null)"
+                    [ -n "$hwm" ] && [ "$hwm" -gt "$peak" ] && peak="$hwm" ;;
+                esac
+              done
+              sleep 1
+            done
+            wait "$gopid"; local rc=$?
+            awk -v p="$peak" -v l="$label" -v r="$rc" 'BEGIN{printf "SQLDIAG %-7s peak=%.1fG rc=%s\n", l, p/1048576, r}'
+          }
+          echo "::group::sql.test shard diagnostic (stores/blockchain/sql run ALONE)"
+          run_measure full1  go test -race -tags testtxmetacache -coverpkg=./... -count=1 -timeout=10m ./stores/blockchain/sql
+          run_measure full2  go test -race -tags testtxmetacache -coverpkg=./... -count=1 -timeout=10m ./stores/blockchain/sql
+          run_measure shardA go test -race -tags testtxmetacache -coverpkg=./... -count=1 -timeout=10m -run "^($A)\$" ./stores/blockchain/sql
+          run_measure shardB go test -race -tags testtxmetacache -coverpkg=./... -count=1 -timeout=10m -run "^($B)\$" ./stores/blockchain/sql
+          echo "::endgroup::"
+
       - name: Upload coverage report
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
