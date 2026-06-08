@@ -2,7 +2,6 @@ package sql
 
 import (
 	stdsql "database/sql"
-	"fmt"
 	"testing"
 
 	"github.com/bsv-blockchain/teranode/util/usql"
@@ -10,6 +9,17 @@ import (
 	"github.com/lib/pq"
 	"github.com/stretchr/testify/require"
 )
+
+// wrappedErr wraps err behind an Unwrap method so errors.As traverses to it,
+// mirroring how fmt.Errorf("%w", ...) chains a typed driver error in production
+// (fmt.Errorf is forbidden repo-wide by forbidigo).
+type wrappedErr struct {
+	msg string
+	err error
+}
+
+func (w *wrappedErr) Error() string { return w.msg + ": " + w.err.Error() }
+func (w *wrappedErr) Unwrap() error { return w.err }
 
 // TestIsSerializationRetry locks in the classification the rebuildOnMainChainFlag
 // retry loop depends on: only Postgres serialization_failure (40001) and
@@ -28,11 +38,11 @@ func TestIsSerializationRetry(t *testing.T) {
 		{"pgx deadlock_detected", &pgconn.PgError{Code: usql.PgErrDeadlockDetected}, true},
 		{"pq serialization_failure", &pq.Error{Code: pq.ErrorCode(usql.PgErrSerializationFail)}, true},
 		{"pq deadlock_detected", &pq.Error{Code: pq.ErrorCode(usql.PgErrDeadlockDetected)}, true},
-		{"wrapped pgx serialization_failure", fmt.Errorf("rebuild: %w", &pgconn.PgError{Code: usql.PgErrSerializationFail}), true},
+		{"wrapped pgx serialization_failure", &wrappedErr{msg: "rebuild", err: &pgconn.PgError{Code: usql.PgErrSerializationFail}}, true},
 		{"pgx unique_violation (non-retryable)", &pgconn.PgError{Code: "23505"}, false},
 		{"pq unique_violation (non-retryable)", &pq.Error{Code: "23505"}, false},
 		{"sql.ErrNoRows", stdsql.ErrNoRows, false},
-		{"plain error", fmt.Errorf("some other failure"), false},
+		{"plain error", stdsql.ErrConnDone, false},
 		{"nil", nil, false},
 	}
 
