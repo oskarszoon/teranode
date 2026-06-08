@@ -32,12 +32,15 @@ jobs:
   # process, which is why it is the only one affected. Revert this branch before merge.
   test:
     name: test
-    # ARM runner: the x86 16-core runner OOM-killed the `go test -race
-    # -coverpkg=./...` compile (~13GB peak) — arm64 runners have ample RAM
-    # (~64GB on 16-core; telemetry showed ~70GB peak at 32 cores, and 32-core
-    # gave no speedup, so 16-core is the cost/perf sweet spot). Runs `make test`
-    # natively: postgres testcontainers (arm64) + testtxmetacache (no aerospike).
-    runs-on: teranode-runner-16-core-arm
+    # TEMP (CI-143): bumped 16-core (64GB) -> 32-core (128GB) arm to capture full
+    # telemetry. At 64GB the job OOM-died mid-run (sql.test ~26G + blockassembly
+    # ~16G + others overlapping tipped past the 62.7G host) before catchpoint's
+    # post-job summary could run. 128GB gives headroom so the job COMPLETES —
+    # catchpoint then posts, and combined with the live stdout sampler below we
+    # capture the whole peak. NOTE: 32 cores => -p=32, so more fat binaries
+    # overlap and the peak here will be HIGHER than the 16-core peak. Runs
+    # `make test` natively: postgres testcontainers (arm64) + testtxmetacache.
+    runs-on: teranode-runner-32-core-arm
     steps:
       # TEMP (CI-143): re-add catchpoint workflow telemetry (removed in PR #948)
       # to capture peak memory/CPU/IO for the whole job. Charts land in the job
