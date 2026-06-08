@@ -110,6 +110,10 @@ type batcherIfc[T any] interface {
 	Trigger()
 	SetDrainMode(enabled bool)
 	SetTickInterval(d time.Duration)
+	// Close signals the batcher to drain any queued items, dispatch them via
+	// the configured callback, and shut down its worker goroutines. Must not
+	// be called concurrently with Put / PutCtx.
+	Close()
 }
 
 // Store implements the UTXO store interface using Aerospike.
@@ -511,6 +515,99 @@ func (s *Store) GetBlockState() utxo.BlockState {
 	return utxo.BlockState{
 		Height:     s.blockHeight.Load(),
 		MedianTime: s.medianBlockTime.Load(),
+	}
+}
+
+// Close drains all batched-write workers and releases the Aerospike client.
+//
+// Closing the batchers blocks until any items still queued have been
+// dispatched through their configured callbacks (this is the contract
+// of go-batcher's Close — see batcher.go:Close, which closes the input
+// channel, drains it, and dispatches the residual batch with reason
+// "shutdown"). Without this drain, a SIGTERM mid-flight silently loses
+// the in-channel items: the caller has already received a successful
+// Create/Spend/etc. return because background batchers ack on enqueue,
+// not on dispatch, so the parent block gets committed elsewhere but the
+// UTXO write never reaches Aerospike. On restart, blocks that spend
+// those outputs fail with missing-parent errors.
+//
+// Close honors the context for the overall drain timeout. Implementations
+// of batcherIfc.Close are expected to drain promptly; if the context
+// deadline expires first, an error is returned but draining — and the
+// release of the Aerospike client and external blob store — continues
+// best-effort. The client and external store are released inside the drain
+// goroutine so they are not leaked even when ctx expires first; leaking the
+// client in particular would leave a closed-or-stale entry that a later
+// in-process restart for the same host would reuse and fail with
+// INVALID_NODE_ERROR.
+func (s *Store) Close(ctx context.Context) error {
+	done := make(chan struct{})
+
+	var extErr error
+
+	go func() {
+		defer close(done)
+		// Order is dependency-driven: a batcher whose drain callback enqueues
+		// into another batcher MUST be closed before that downstream batcher,
+		// otherwise the drain Puts into an already-closed input channel and
+		// go-batcher panics with "send on closed channel". The only such edge
+		// is the spend batcher: sendSpendBatchLua -> processSpendBatchResults
+		// -> SetDAHForChildRecords / IncrementSpentRecords enqueue into
+		// setDAHBatcher (spend.go) and incrementBatcher (spend.go). So spend
+		// must be drained before setDAH and increment.
+		//
+		// We therefore drain the producer/durable writers first (store, then
+		// spend), then spend's downstream consumers (setDAH, increment), then
+		// the remaining independent batchers (get, outpoint, locked). store
+		// feeds no other batcher; get/outpoint/locked are not fed by any
+		// batcher drain. (Closing each batcher blocks until its worker has
+		// drained — go-batcher v2.0.4.)
+		if s.storeBatcher != nil {
+			s.storeBatcher.Close()
+		}
+		if s.spendBatcher != nil {
+			s.spendBatcher.Close()
+		}
+		// Downstream consumers of the spend drain — must come after spend.
+		if s.setDAHBatcher != nil {
+			s.setDAHBatcher.Close()
+		}
+		if s.incrementBatcher != nil {
+			s.incrementBatcher.Close()
+		}
+		// Independent batchers (no inbound batcher-drain edge).
+		if s.getBatcher != nil {
+			s.getBatcher.Close()
+		}
+		if s.outpointBatcher != nil {
+			s.outpointBatcher.Close()
+		}
+		if s.lockedBatcher != nil {
+			s.lockedBatcher.Close()
+		}
+
+		// Drains complete; close the external blob store (created in
+		// Store.New) so its handles/connections are not leaked.
+		if s.externalStore != nil {
+			extErr = s.externalStore.Close(ctx)
+		}
+
+		// Close the Aerospike client. The client is shared per host via
+		// util's connection cache, so close-and-evict it rather than closing
+		// in place — otherwise the cache would keep a closed client and a
+		// later store for the same host (e.g. an in-process daemon restart)
+		// would reuse it and fail with INVALID_NODE_ERROR. Done inside the
+		// goroutine so it still runs even when ctx has already expired.
+		if s.client != nil {
+			util.CloseAerospikeClient(s.url.Host)
+		}
+	}()
+
+	select {
+	case <-done:
+		return extErr
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
