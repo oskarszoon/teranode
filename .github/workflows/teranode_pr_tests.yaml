@@ -70,7 +70,30 @@ jobs:
         uses: ./.github/actions/go-cache
 
       - name: Run Go tests
-        run: make test
+        # Live memory sampler streamed to the job log every 2s. GitHub uploads
+        # step logs in real time, so this SURVIVES the SIGTERM/143 that kills the
+        # job mid-run — unlike catchpoint's post-job summary (never runs when the
+        # job is terminated) and `if: always()` artifact uploads (also normal
+        # steps that don't run after a mid-step kill). Tells us whether RSS was
+        # near the 64GB ceiling at the moment of death (→ memory) or comfortably
+        # low (→ runner reclaim / infra). Also prints the top-3 RSS processes so
+        # we can see if one test binary is the hog or it's broad parallelism.
+        run: |
+          sample_mem() {
+            while :; do
+              awk -v t="$(date +%T)" '
+                /^MemTotal:/     {tot=$2}
+                /^MemAvailable:/ {av=$2}
+                END {printf "MEMSAMPLE %s used=%.1fG avail=%.1fG of %.1fG\n", t,(tot-av)/1048576,av/1048576,tot/1048576}
+              ' /proc/meminfo
+              ps -eo rss=,comm= --sort=-rss 2>/dev/null | awk 'NR<=3 {printf "  TOP %.1fG %s\n",$1/1048576,$2}'
+              sleep 2
+            done
+          }
+          sample_mem &
+          SAMPLER_PID=$!
+          trap 'kill "$SAMPLER_PID" 2>/dev/null || true' EXIT
+          make test
         continue-on-error: false
 
       - name: Upload coverage report
