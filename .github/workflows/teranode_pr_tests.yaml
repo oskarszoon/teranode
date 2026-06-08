@@ -166,11 +166,11 @@ jobs:
             wait "$gopid"; local rc=$?
             awk -v p="$peak" -v l="$label" -v r="$rc" 'BEGIN{printf "SQLDIAG %-7s peak=%.1fG rc=%s\n", l, p/1048576, r}'
           }
-          echo "::group::sql.test shard diagnostic (stores/blockchain/sql run ALONE)"
-          run_measure full1  go test -race -tags testtxmetacache -coverpkg=./... -count=1 -timeout=10m ./stores/blockchain/sql
-          run_measure full2  go test -race -tags testtxmetacache -coverpkg=./... -count=1 -timeout=10m ./stores/blockchain/sql
-          run_measure shardA go test -race -tags testtxmetacache -coverpkg=./... -count=1 -timeout=10m -run "^($A)\$" ./stores/blockchain/sql
-          run_measure shardB go test -race -tags testtxmetacache -coverpkg=./... -count=1 -timeout=10m -run "^($B)\$" ./stores/blockchain/sql
+          echo "::group::sql.test GOMEMLIMIT probe (shardA reproducibly spikes to ~33G)"
+          run_measure A_nolimit                  go test -race -tags testtxmetacache -coverpkg=./... -count=1 -timeout=10m -run "^($A)\$" ./stores/blockchain/sql
+          run_measure A_16g  env GOMEMLIMIT=16GiB go test -race -tags testtxmetacache -coverpkg=./... -count=1 -timeout=10m -run "^($A)\$" ./stores/blockchain/sql
+          run_measure A_8g   env GOMEMLIMIT=8GiB  go test -race -tags testtxmetacache -coverpkg=./... -count=1 -timeout=10m -run "^($A)\$" ./stores/blockchain/sql
+          run_measure A_4g   env GOMEMLIMIT=4GiB  go test -race -tags testtxmetacache -coverpkg=./... -count=1 -timeout=10m -run "^($A)\$" ./stores/blockchain/sql
           echo "::endgroup::"
 
       - name: Upload coverage report
