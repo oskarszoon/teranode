@@ -31,6 +31,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	"github.com/bsv-blockchain/go-chaincfg"
 	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/model"
@@ -40,6 +41,7 @@ import (
 	"github.com/bsv-blockchain/teranode/util"
 	"github.com/bsv-blockchain/teranode/util/usql"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jellydator/ttlcache/v3"
 	"github.com/lib/pq"
 	"golang.org/x/sync/singleflight"
 	_ "modernc.org/sqlite"
@@ -49,6 +51,11 @@ import (
 // GetBlockHeaders). Set to 10 minutes because block validation in production can take
 // several minutes, and the cached results (parent_id walks) are immutable.
 const chainWalkCacheTTL = 10 * time.Minute
+
+// blockIDReservationTTL bounds how long a block-id reservation (AssignBlockID)
+// survives without a commit. Reservations are normally cleared on commit; the
+// TTL only reclaims entries for blocks that are fetched but never committed.
+const blockIDReservationTTL = 10 * time.Minute
 
 // rebuildOffChainSetTimeout bounds the duration of rebuildOffChainSet calls made with
 // context.Background() (in InvalidateBlock, RevalidateBlock). This prevents the rebuild
@@ -101,6 +108,18 @@ type SQL struct {
 	// false without consulting the off-chain set. This prevents non-existent/garbage
 	// block IDs from being incorrectly treated as on-chain.
 	maxBlockID atomic.Uint64
+	// blockIDReservations maps a not-yet-committed block hash to the block ID
+	// reserved for it. Two ingestion paths (legacy netsync + blockvalidation
+	// catchup) can race on the same block during IBD; without a shared authority
+	// each calls nextval and gets a DIFFERENT id, one of which is written into the
+	// block's UTXO mined-info while the block commits under the other — orphaning
+	// the first id (a phantom that later fails checkOldBlockIDs and wedges sync).
+	// This cache makes assignment idempotent per hash. Entries are deleted on
+	// commit (StoreBlock) and auto-expire to bound growth from abandoned blocks.
+	blockIDReservations *ttlcache.Cache[chainhash.Hash, uint64]
+	// blockIDReservationMu serializes the check-then-reserve critical section so
+	// concurrent callers for the same hash converge on one id.
+	blockIDReservationMu sync.Mutex
 	// chainWalkCache is a dedicated cache for chain-walking queries (GetBlockHeaderIDs,
 	// GetBlockHeaders) that follow parent_id links. Unlike responseCache, this is only
 	// invalidated on chain reorganizations (InvalidateBlock/RevalidateBlock), because
@@ -243,6 +262,16 @@ func New(logger ulogger.Logger, storeURL *url.URL, tSettings *settings.Settings)
 	}
 
 	s.backgroundDone = make(chan struct{})
+
+	s.blockIDReservations = ttlcache.New[chainhash.Hash, uint64](
+		ttlcache.WithTTL[chainhash.Hash, uint64](blockIDReservationTTL),
+		// Do not extend the TTL on lookups: a reservation must expire a fixed time
+		// after it was created, so a repeatedly-polled-but-never-committed hash is
+		// reclaimed instead of being kept alive by reads (bounds map growth).
+		ttlcache.WithDisableTouchOnHit[chainhash.Hash, uint64](),
+	)
+	go s.blockIDReservations.Start() // janitor
+
 	if useInMemory {
 		s.chainWalkCache = NewGenerationalCache()
 		s.offChainBlockIDs = make(map[uint32]struct{})
@@ -250,6 +279,7 @@ func New(logger ulogger.Logger, storeURL *url.URL, tSettings *settings.Settings)
 
 	err = s.insertGenesisTransaction(logger, s.chainParams)
 	if err != nil {
+		s.blockIDReservations.Stop() // avoid leaking the janitor goroutine on the error path
 		return nil, errors.NewStorageError("failed to insert genesis transaction", err)
 	}
 
@@ -356,6 +386,9 @@ func (s *SQL) Close() error {
 	s.responseCache.Stop()
 	if s.chainWalkCache != nil {
 		s.chainWalkCache.Stop()
+	}
+	if s.blockIDReservations != nil {
+		s.blockIDReservations.Stop()
 	}
 	return s.db.Close()
 }
