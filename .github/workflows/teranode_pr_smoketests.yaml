@@ -46,6 +46,9 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: "false"
 
+      - name: Restore Go caches
+        uses: ./.github/actions/go-cache
+
       - name: Run Smoke tests
         run: make smoketest SHARD=${{ matrix.shard }} TOTAL=3
         env:
@@ -81,6 +84,9 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: "false"
 
+      - name: Restore Go caches
+        uses: ./.github/actions/go-cache
+
       - name: Run Pruner tests
         run: make prunertest
         continue-on-error: false
@@ -114,6 +120,9 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: "false"
+
+      - name: Restore Go caches
+        uses: ./.github/actions/go-cache
 
       - name: Run Legacy Sync tests
         run: make legacy-sync
@@ -150,6 +159,9 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: "false"
+
+      - name: Restore Go caches
+        uses: ./.github/actions/go-cache
 
       - name: Run Chain Integrity tests
         run: make chainintegrity
@@ -188,6 +200,9 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: "false"
+
+      - name: Restore Go caches
+        uses: ./.github/actions/go-cache
 
       - name: Run sequential shard
         run: make sequentialtest-shard SHARD=${{ matrix.shard }} TOTAL=7
