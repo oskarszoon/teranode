@@ -405,7 +405,10 @@ func (sm *SyncManager) prepareSubtrees(ctx context.Context, block *bsvutil.Block
 			if idErr != nil {
 				return nil, 0, errors.NewProcessingError("[prepareSubtrees] failed to assign block ID", idErr)
 			}
-			blockID = uint32(id) // nolint:gosec
+			blockID, idErr = safeconversion.Uint64ToUint32(id)
+			if idErr != nil {
+				return nil, 0, errors.NewProcessingError("[prepareSubtrees] assigned block id %d exceeds uint32", id, idErr)
+			}
 		}
 
 		// in quickValidationMode, we can process transactions in a block in parallel, but in reverse order
