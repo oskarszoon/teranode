@@ -12,6 +12,7 @@ import (
 
 	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/services/blockchain"
+	"github.com/bsv-blockchain/teranode/services/blockchain/blockchain_api"
 	"github.com/bsv-blockchain/teranode/settings"
 	"github.com/bsv-blockchain/teranode/stores/blob"
 	blobMemory "github.com/bsv-blockchain/teranode/stores/blob/memory"
@@ -593,6 +594,10 @@ func TestServerStart_FSMContextCancellation(t *testing.T) {
 
 	mockBlockchainClient := &blockchain.Mock{}
 	mockBlockchainClient.On("WaitUntilFSMTransitionFromIdleState", mock.Anything).Return(context.Canceled)
+	// http.Start() starts the main-chain cache, which subscribes to blockchain
+	// notifications; without this expectation the mock panics (and races).
+	mockBlockchainClient.On("Subscribe", mock.Anything, mock.Anything).
+		Return(make(chan *blockchain_api.Notification), nil).Maybe()
 
 	server := NewServer(logger, tSettings, utxoStore, blobMemory.New(), blobMemory.New(), blobMemory.New(), mockBlockchainClient, nil, nil, nil)
 	require.NoError(t, server.Init(ctx))

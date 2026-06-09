@@ -110,6 +110,14 @@ func ConstructMerkleProof(txID *chainhash.Hash, repo MerkleProofConstructor) (*M
 	// Get transaction metadata
 	txMeta, err := repo.GetTxMeta(txID)
 	if err != nil {
+		// Unknown hash: real stores signal a missing key with ErrTxNotFound.
+		// Deliberately return a plain NotFoundError WITHOUT wrapping the cause —
+		// teranode's errors.Is matches codes through the wrapped chain, so
+		// carrying ERR_TX_NOT_FOUND here would collide with the orphan-only
+		// sentinel below and kill the HTTP layer's subtree fallback.
+		if terr.Is(err, terr.ErrTxNotFound) || terr.Is(err, terr.ErrNotFound) {
+			return nil, terr.NewNotFoundError("transaction %s not found", txID.String())
+		}
 		return nil, terr.NewProcessingError("failed to get transaction metadata", err)
 	}
 

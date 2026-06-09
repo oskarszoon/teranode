@@ -164,7 +164,10 @@ func (h *HTTP) GetTransactionMeta(mode ReadMode) func(c echo.Context) error {
 		// (production path); falls back to direct gRPC when the cache is unavailable
 		// (e.g. unit tests that construct HTTP without going through New()).
 		mainChainIndex := -1
-		for i, blockID := range meta.BlockIDs {
+		// Cap at numEntries like the loop above: guards against malformed parallel
+		// arrays so mainChainIndex can never index beyond their common length.
+		for i := 0; i < numEntries; i++ {
+			blockID := meta.BlockIDs[i]
 			var (
 				onChain bool
 				err     error
