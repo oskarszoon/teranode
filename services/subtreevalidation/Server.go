@@ -836,7 +836,7 @@ func (u *Server) checkSubtreeFromBlock(ctx context.Context, request *subtreevali
 			return false, errors.NewProcessingError("[CheckSubtree] Failed to get FSM current state", err)
 		}
 
-		// During legacy syncing or catching up, disable adding transactions to block assembly
+		// While catching up blocks, disable adding transactions to block assembly
 		if *currentState == blockchain.FSMStateCATCHINGBLOCKS {
 			validatorOptions = append(validatorOptions, validator.WithAddTXToBlockAssembly(false))
 		}

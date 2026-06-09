@@ -1331,13 +1331,14 @@ func (sm *SyncManager) handleBlockMsg(bmsg *blockQueueMsg) error {
 
 	sm.logger.Debugf("[handleBlockMsg][%s] calling HandleBlockDirect", bmsg.blockHash)
 
-	// if not in Legacy Sync mode, we need to potentially download the block,
-	// promote block to the block validation via kafka (p2p -> blockvalidation message),
-	// without calling HandleBlockDirect. Such that it doesn't interfere with the operation of block validation.
+	// Process the block directly. A missing-parent error (ErrBlockNotFound) while
+	// catching up just means the sync peer sent a block newer than our current
+	// tip — handled as a no-op below; any other missing-parent triggers a request
+	// for the missing blocks so block validation can proceed in order.
 	if err = sm.HandleBlockDirect(sm.ctx, bmsg.peer, bmsg.blockHash, bmsg.block); err != nil {
 		if catchingBlocks && errors.Is(err, errors.ErrBlockNotFound) {
 			// previous block not found? Probably a new block message from our syncPeer while we are still syncing
-			sm.logger.Errorf("Failed to process new block in legacy mode %v: %v", bmsg.blockHash, err)
+			sm.logger.Errorf("Failed to process new block %v while catching up: %v", bmsg.blockHash, err)
 			return nil
 		} else if errors.Is(err, errors.ErrBlockNotFound) {
 			// We don't have the parent of this block/header, so we'll request it.

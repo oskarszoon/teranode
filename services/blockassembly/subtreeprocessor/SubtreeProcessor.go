@@ -1418,12 +1418,11 @@ func (stp *SubtreeProcessor) reset(blockHeader *model.BlockHeader, moveBackBlock
 
 		// Mark processed_at for all blocks. For intermediate blocks use a lightweight
 		// direct SetBlockProcessedAt call to avoid running adjustSubtreeSize and
-		// updatePrecomputedMiningData on stale stats repeatedly during fast-forward.
-		// Only the final block gets full finalizeBlockProcessing. This is intentional
-		// and safe in the fast-forward path (callers gate it on checkpoint-trusted
-		// blocks): per-block precomputed-mining-data is irrelevant while catching up,
-		// only the resulting tip needs the full refresh. Do not "fix" by finalizing
-		// every block — that reintroduces the per-block cost this path avoids.
+		// updatePrecomputedMiningData on stale stats repeatedly while moving forward.
+		// Only the final block gets full finalizeBlockProcessing. This applies to all
+		// resets regardless of checkpoint trust: per-block precomputed-mining-data is
+		// irrelevant mid-reset, only the resulting tip needs the full refresh. Do not
+		// "fix" by finalizing every block — that reintroduces the per-block cost.
 		for i, block := range moveForwardBlocks {
 			if i < len(moveForwardBlocks)-1 {
 				if err := stp.blockchainClient.SetBlockProcessedAt(ctx, block.Header.Hash()); err != nil {
