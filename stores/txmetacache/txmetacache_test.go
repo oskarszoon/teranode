@@ -194,12 +194,13 @@ func Test_txMetaCache_Set_FixedIterations(t *testing.T) {
 
 				start := time.Now()
 				g := new(errgroup.Group)
-				// Bound fan-out: an unbounded 1M-goroutine batch was the largest and most
-				// run-to-run-variable contributor to txmetacache.test peak RSS (#1051) —
-				// 1M live goroutine stacks + tsan shadow under -race (~9GiB measured). All
-				// 1M Set operations still run (and still exercise concurrent SetCache for the
-				// race detector); only the number live at once is capped. Nothing asserts on
-				// the logged throughput, so bounding does not weaken coverage.
+				// Bound fan-out: this used to spawn one goroutine per Set in a single
+				// unbounded batch (originally 1M — the largest and most run-to-run-variable
+				// contributor to txmetacache.test peak RSS, ~9GiB measured under -race, #1051).
+				// All maxSetBenchmarkTxs Set operations still run (and still exercise
+				// concurrent SetCache for the race detector); only the number live at once is
+				// capped. Nothing asserts on the logged throughput, so bounding does not
+				// weaken coverage.
 				g.SetLimit(runtime.GOMAXPROCS(0) * 8)
 
 				for i := 0; i < maxSetBenchmarkTxs; i++ {
