@@ -86,6 +86,69 @@ func TestCatchupAttemptCap_NilCacheSafe(t *testing.T) {
 	})
 }
 
+// newAttemptCapServer builds a Server with just the attempt-cap machinery wired,
+// for the cooldown-window tests below.
+func newAttemptCapServer(t *testing.T, cap int) *Server {
+	t.Helper()
+	tSettings := test.CreateBaseTestSettings(t)
+	tSettings.BlockValidation.CatchupMaxAttemptsPerBlock = cap
+	return &Server{
+		settings: tSettings,
+		logger:   ulogger.TestLogger{},
+		blockCatchupAttempts: ttlcache.New[chainhash.Hash, int](
+			ttlcache.WithTTL[chainhash.Hash, int](10*time.Minute),
+			ttlcache.WithDisableTouchOnHit[chainhash.Hash, int](),
+		),
+	}
+}
+
+// TestCatchupAttemptCap_WindowAnchoredToFirstFailure is the #1057 P1 regression:
+// the cooldown window must run from the FIRST failure, not be extended by each
+// subsequent one. ttlcache.Set always (re)sets the TTL, so the old code reset the
+// window on every failure. Assert the stored expiry does not move on a repeat
+// failure (a window reset would push it ~10 minutes out).
+func TestCatchupAttemptCap_WindowAnchoredToFirstFailure(t *testing.T) {
+	u := newAttemptCapServer(t, 5)
+	h := chainhash.HashH([]byte("blk-window"))
+
+	// Seed a first failure whose cooldown window is already partway through — a 30s
+	// remaining window stands in for "the original failure happened a while ago".
+	// (Two back-to-back recordCatchupAttempt calls can't show the bug: even a full
+	// reset lands ~microseconds from the first, so we must start from a window that
+	// is meaningfully shorter than the fresh 10-minute default.)
+	u.blockCatchupAttempts.Set(h, 1, 30*time.Second)
+
+	// A repeat failure must PRESERVE that ~30s window, not reset it to a fresh
+	// ~10-minute one.
+	require.Equal(t, 2, u.recordCatchupAttempt(&h))
+
+	item := u.blockCatchupAttempts.Get(h)
+	require.NotNil(t, item, "entry must still exist")
+	require.Less(t, time.Until(item.ExpiresAt()), 2*time.Minute,
+		"repeat failure must preserve the original (~30s) cooldown window, not reset it to a fresh ~10m one")
+}
+
+// TestCatchupAttemptCap_ClearedOnSuccess is the #1057 P2 regression: a recovering
+// block must not carry its accumulated failure count into a later catchup. The
+// helper used by every success path resets the counter and its window.
+func TestCatchupAttemptCap_ClearedOnSuccess(t *testing.T) {
+	u := newAttemptCapServer(t, 3)
+	h := chainhash.HashH([]byte("blk-recover"))
+
+	require.Equal(t, 1, u.recordCatchupAttempt(&h))
+	require.Equal(t, 2, u.recordCatchupAttempt(&h))
+	require.False(t, u.catchupAttemptsExhausted(&h), "2/3 is below the cap")
+
+	require.Equal(t, 3, u.recordCatchupAttempt(&h))
+	require.True(t, u.catchupAttemptsExhausted(&h), "3/3 reaches the cap")
+
+	u.clearCatchupAttempts(&h)
+
+	require.Nil(t, u.blockCatchupAttempts.Get(h), "counter must be gone after success")
+	require.False(t, u.catchupAttemptsExhausted(&h))
+	require.Equal(t, 1, u.recordCatchupAttempt(&h), "next failure starts a fresh count")
+}
+
 // TestBlockProcessingWithRetry tests the retry mechanism when block fetching fails
 func TestBlockProcessingWithRetry(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

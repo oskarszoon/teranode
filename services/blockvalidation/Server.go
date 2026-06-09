@@ -759,6 +759,8 @@ func (u *Server) Init(ctx context.Context) (err error) {
 
 						// First, try intelligent peer selection from P2P service
 						if u.tryAlternativePeersForCatchup(ctx, c.block, c.peerID) {
+							// Recovered via an alternative peer — reset the attempt counter.
+							u.clearCatchupAttempts(blockHash)
 							continue
 						}
 
@@ -788,9 +790,10 @@ func (u *Server) Init(ctx context.Context) (err error) {
 								// Try catchup with alternative peer
 								if altErr := u.catchup(ctx, alt.block, alt.peerID, alt.baseURL); altErr == nil {
 									u.logger.Infof("[catchup] Successfully processed block %s from alternative peer %s", blockHash.String(), alt.peerID)
-									// Clear processing marker and alternatives
+									// Clear processing marker, alternatives, and the attempt counter.
 									u.processBlockNotify.Delete(*blockHash)
 									u.catchupAlternatives.Delete(*blockHash)
+									u.clearCatchupAttempts(blockHash)
 									catchupSucceeded = true
 									break
 								} else {
@@ -820,9 +823,7 @@ func (u *Server) Init(ctx context.Context) (err error) {
 					} else {
 						// Success - clear alternatives for this block; reset the attempt
 						// counter so a later unrelated catchup for this hash starts fresh.
-						if u.blockCatchupAttempts != nil {
-							u.blockCatchupAttempts.Delete(*c.block.Hash())
-						}
+						u.clearCatchupAttempts(c.block.Hash())
 						u.catchupAlternatives.Delete(*c.block.Hash())
 						// Clear the processing marker
 						u.processBlockNotify.Delete(*c.block.Hash())
@@ -1773,14 +1774,41 @@ func (u *Server) recordCatchupAttempt(blockHash *chainhash.Hash) int {
 		return 0
 	}
 
-	n := 1
+	// Preserve the ORIGINAL expiry: the cooldown window must run from the first
+	// failure, not be extended by each subsequent one. ttlcache.Set always (re)sets
+	// the TTL, and WithDisableTouchOnHit only stops Get from extending it — so on a
+	// repeat failure we re-Set with the time REMAINING to the original expiry, not a
+	// fresh full window.
 	if item := u.blockCatchupAttempts.Get(*blockHash); item != nil {
-		n = item.Value() + 1
+		remaining := time.Until(item.ExpiresAt())
+		if remaining <= 0 {
+			// Item present but at/past expiry (sub-tick race): fall back to the cache
+			// default window. A negative ttl must never reach Set — ttlcache reads
+			// ttl<0 as NoTTL (pins the entry forever); ttl==0 is DefaultTTL, which is
+			// exactly the fresh-window behaviour we want here.
+			remaining = ttlcache.DefaultTTL
+		}
+
+		n := item.Value() + 1
+		u.blockCatchupAttempts.Set(*blockHash, n, remaining)
+
+		return n
 	}
 
-	u.blockCatchupAttempts.Set(*blockHash, n, ttlcache.DefaultTTL)
+	u.blockCatchupAttempts.Set(*blockHash, 1, ttlcache.DefaultTTL)
 
-	return n
+	return 1
+}
+
+// clearCatchupAttempts resets a block's per-block attempt counter (and its
+// cooldown window). Called on every success path so a block that recovers — via
+// the primary peer, P2P-selected alternatives, or a cached alternative — does not
+// carry accumulated failures into a later, unrelated catchup. Nil-safe for Server
+// literals in tests that don't wire the cache.
+func (u *Server) clearCatchupAttempts(blockHash *chainhash.Hash) {
+	if u.blockCatchupAttempts != nil {
+		u.blockCatchupAttempts.Delete(*blockHash)
+	}
 }
 
 // catchupAttemptsExhausted reports whether a block has reached the per-block
