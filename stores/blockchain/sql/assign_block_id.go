@@ -121,8 +121,18 @@ func (s *SQL) reserveDurableBlockID(ctx context.Context, blockHash *chainhash.Ha
 		return 0, err
 	}
 	if !ok {
-		// Should be unreachable (we just inserted, or someone else did). Fall back to
-		// our own id rather than fail the assignment.
+		// The reservation row vanished between our INSERT and this re-read: a
+		// concurrent winning instance committed the block and StoreBlock deleted its
+		// reservation row in that window. The committed blocks row is now the
+		// authority (resolution priority 1) — returning our own discarded nextval
+		// here would reconstruct a divergent (phantom) id. Re-check committed first;
+		// fall back to the local nextval only if the block genuinely isn't committed.
+		if committedID, committed, cErr := s.blockIDByHash(ctx, blockHash); cErr != nil {
+			return 0, cErr
+		} else if committed {
+			return committedID, nil
+		}
+
 		return id, nil
 	}
 	return stored, nil
