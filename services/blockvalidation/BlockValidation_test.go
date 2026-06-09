@@ -2666,14 +2666,21 @@ func Test_checkOldBlockIDs_inMemoryChainCheck_realStore(t *testing.T) {
 	require.NoError(t, err)
 	maxBlockID := bestMeta.ID
 
-	// The startup on_main_chain rebuild runs asynchronously; until it completes
-	// CheckBlockIsInCurrentChain takes its CTE fallback. Wait until the best block is
-	// classified on-chain so the store answers from its in-memory off-chain set (the
-	// path this route relies on).
+	// Wait until the best block reports on-chain, so the store is in a stable,
+	// queryable state before the differential checks below.
+	//
+	// Note: this does NOT prove the async startup rebuild has finished. While
+	// mainChainRebuilding > 0, CheckBlockIsInCurrentChain takes the CTE fallback
+	// (CheckBlockIsInCurrentChain.go), which already finds the best block on-chain —
+	// so this gate can pass mid-rebuild, before the in-memory off-chain set is the
+	// active path. That's fine: the differential below asserts route == store
+	// regardless of which internal path the store takes, so it holds either way. The
+	// exact "rebuild done" signal was the OffChainBlockIDs rebuilding flag, removed
+	// with that RPC in this PR.
 	require.Eventually(t, func() bool {
 		onChain, e := blockchainClient.CheckBlockIsInCurrentChain(ctx, []uint32{maxBlockID})
 		return e == nil && onChain
-	}, 15*time.Second, 25*time.Millisecond, "store should finish its startup rebuild")
+	}, 15*time.Second, 25*time.Millisecond, "best block should report on-chain")
 
 	// Differential test: for each candidate block id, the route's accept/reject MUST
 	// match the authoritative CheckBlockIsInCurrentChain bool. The above-maxBlockID
