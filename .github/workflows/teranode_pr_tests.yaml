@@ -25,7 +25,6 @@ env:
 jobs:
   golangci-lint:
     name: golangci-lint
-    if: github.head_ref != 'fix/ci-mem' # TEMP #1051 mem-iteration: only the test job runs on this branch to save Action minutes — REVERT before merge
     # arm64-safe: pure Go analysis, no containers (golangci-lint ships arm64).
     runs-on: teranode-runner-8-core-arm
     steps:
@@ -59,13 +58,6 @@ jobs:
 
   test:
     name: test
-    # Reverted from the temporary 32-core/128GB stopgap back to 16-core/64GB now that
-    # #1051's per-package memory reductions have landed: blockassembly 32G->4.5G,
-    # txmetacache 15G->1.5G, model 11G->1.4G, subtreeprocessor 17G->6.1G. The original
-    # OOM was the sql.test + blockassembly double-peak (~34G + ~32G) overlapping past
-    # 64GB; with blockassembly down, that overlap is gone. sql.test still varies up to
-    # ~34G under -race but fits a 64GB runner on its own. Watching the end-of-run peak
-    # table; if it OOMs intermittently, cap `-p` / serialize the heavy binaries.
     runs-on: teranode-runner-16-core-arm
     steps:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
@@ -90,11 +82,11 @@ jobs:
       - name: Run Go tests
         # Tracks each test binary's peak RSS (VmHWM — the kernel's monotonic
         # high-water mark) silently in the background, then prints a top-10
-        # peak-memory table plus the job-wide peak at the END of the run. Lets us
-        # watch unit-test memory come down as #1051 is worked, and justifies the
-        # temporary 32-core runner above. No deps; survives a SIGTERM (the summary
-        # also runs from the EXIT trap). Sampler runs under `set +e` so a
-        # SIGPIPE/no-match can't trip the step's `set -e`; `make test` keeps it.
+        # peak-memory table at the END of the run, so per-binary unit-test memory
+        # stays visible and regressions are caught early. No deps; survives a
+        # SIGTERM (the summary also runs from the EXIT trap). Sampler runs under
+        # `set +e` so a SIGPIPE/no-match can't trip the step's `set -e`; `make test`
+        # keeps it.
         run: |
           TRACK="$(mktemp)"
           track() {
@@ -146,7 +138,6 @@ jobs:
 
   filename-check-report:
     name: filename check report
-    if: github.head_ref != 'fix/ci-mem' # TEMP #1051 mem-iteration: only the test job runs on this branch to save Action minutes — REVERT before merge
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4

@@ -14,7 +14,6 @@ permissions:
 jobs:
   dependency-review:
     name: dependency-review
-    if: github.head_ref != 'fix/ci-mem' # TEMP #1051 mem-iteration: only the test job runs on this branch to save Action minutes — REVERT before merge
     runs-on: ubuntu-latest
     permissions:
       contents: read
