@@ -84,9 +84,10 @@ type MerkleProofConstructor interface {
 	// Returns arrays of block IDs, block heights and corresponding subtree indices
 	FindBlocksContainingSubtree(subtreeHash *chainhash.Hash) ([]uint32, []uint32, []int, error)
 
-	// IsBlockOnMainChain reports whether the given internal block ID is part of
-	// the current best chain.
-	IsBlockOnMainChain(blockID uint32) (bool, error)
+	// IsBlockOnMainChain reports whether the given internal block ID at the given
+	// height is part of the current best chain. The height lets implementations
+	// route the lookup through height-windowed caches.
+	IsBlockOnMainChain(blockID, blockHeight uint32) (bool, error)
 }
 
 // ConstructMerkleProof constructs a complete merkle proof for a given transaction.
@@ -139,7 +140,7 @@ func ConstructMerkleProof(txID *chainhash.Hash, repo MerkleProofConstructor) (*M
 	// should re-fetch on header divergence.
 	mainChainIdx := -1
 	for i, id := range txMeta.BlockIDs {
-		onChain, err := repo.IsBlockOnMainChain(id)
+		onChain, err := repo.IsBlockOnMainChain(id, txMeta.BlockHeights[i])
 		if err != nil {
 			return nil, terr.NewProcessingError("failed to check main chain", err)
 		}

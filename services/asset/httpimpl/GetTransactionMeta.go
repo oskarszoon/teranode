@@ -129,6 +129,13 @@ func (h *HTTP) GetTransactionMeta(mode ReadMode) func(c echo.Context) error {
 				numEntries = len(meta.SubtreeIdxs)
 			}
 		}
+		if len(meta.BlockHeights) != numEntries {
+			h.logger.Warnf("Mismatch in array lengths: %d BlockIDs, %d BlockHeights", len(meta.BlockIDs), len(meta.BlockHeights))
+			// Use the minimum length to avoid index out of bounds
+			if len(meta.BlockHeights) < numEntries {
+				numEntries = len(meta.BlockHeights)
+			}
+		}
 
 		blockHashes := make([]string, numEntries)
 		subtreeHashes := make([]string, numEntries)
@@ -173,7 +180,7 @@ func (h *HTTP) GetTransactionMeta(mode ReadMode) func(c echo.Context) error {
 				err     error
 			)
 			if h.mainChainCache != nil {
-				onChain, err = h.mainChainCache.IsOnMainChain(ctx, blockID)
+				onChain, err = h.mainChainCache.IsOnMainChain(ctx, blockID, meta.BlockHeights[i])
 			} else {
 				onChain, err = h.repository.GetBlockchainClient().CheckBlockIsInCurrentChain(ctx, []uint32{blockID})
 			}

@@ -64,13 +64,14 @@ func (a *merkleProofAdapter) FindBlocksContainingSubtree(subtreeHash *chainhash.
 	return a.repo.FindBlocksContainingSubtree(a.ctx, subtreeHash)
 }
 
-// IsBlockOnMainChain reports whether the given internal block ID is part of the current best chain.
+// IsBlockOnMainChain reports whether the given internal block ID at the given
+// height is part of the current best chain.
 // Uses the in-process cache when available to avoid a gRPC round-trip per request;
 // falls back to a direct CheckBlockIsInCurrentChain call when no cache is wired in
 // (e.g. unit tests that construct the adapter directly).
-func (a *merkleProofAdapter) IsBlockOnMainChain(blockID uint32) (bool, error) {
+func (a *merkleProofAdapter) IsBlockOnMainChain(blockID, blockHeight uint32) (bool, error) {
 	if a.cache != nil {
-		return a.cache.IsOnMainChain(a.ctx, blockID)
+		return a.cache.IsOnMainChain(a.ctx, blockID, blockHeight)
 	}
 	return a.repo.GetBlockchainClient().CheckBlockIsInCurrentChain(a.ctx, []uint32{blockID})
 }

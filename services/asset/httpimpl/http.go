@@ -271,13 +271,15 @@ func New(logger ulogger.Logger, tSettings *settings.Settings, repo *repository.R
 		h.blockAssemblyClient = blockAssemblyClient[0]
 	}
 
-	// In-process cache for CheckBlockIsInCurrentChain lookups. Avoids a gRPC
-	// round-trip on every /merkle_proof and /txmeta request. Lazy-filled on
-	// miss, fully invalidated on every block notification. Falls back to direct
-	// gRPC at the call sites if the cache is nil (e.g. tests that construct
-	// HTTP without a blockchain client).
+	// In-process cache for main-chain membership lookups. Avoids a gRPC
+	// round-trip on every /merkle_proof and /txmeta request: a window of the
+	// last GlobalBlockHeightRetention main-chain block IDs is rebuilt on each
+	// block notification and answers in-window lookups authoritatively; older
+	// blocks use a lazily-filled fallback. Falls back to direct gRPC at the
+	// call sites if the cache is nil (e.g. tests that construct HTTP without
+	// a blockchain client).
 	if repo != nil && repo.BlockchainClient != nil {
-		h.mainChainCache = newMainChainCache(repo.BlockchainClient, logger)
+		h.mainChainCache = newMainChainCache(repo.BlockchainClient, logger, tSettings.GlobalBlockHeightRetention)
 	}
 
 	// add the private key for signing responses

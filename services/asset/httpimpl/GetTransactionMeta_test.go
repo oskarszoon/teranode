@@ -33,14 +33,15 @@ func newTransactionMeta() *meta.Data {
 	}
 
 	return &meta.Data{
-		Tx:          nil,
-		TxInpoints:  ti,
-		BlockIDs:    []uint32{1, 2, 3},
-		SubtreeIdxs: []int{0, 0, 0}, // Add subtree indices
-		Fee:         123,
-		SizeInBytes: 321,
-		IsCoinbase:  false,
-		LockTime:    500000,
+		Tx:           nil,
+		TxInpoints:   ti,
+		BlockIDs:     []uint32{1, 2, 3},
+		BlockHeights: []uint32{100, 101, 102},
+		SubtreeIdxs:  []int{0, 0, 0}, // Add subtree indices
+		Fee:          123,
+		SizeInBytes:  321,
+		IsCoinbase:   false,
+		LockTime:     500000,
 	}
 }
 
@@ -61,7 +62,7 @@ func TestGetTransactionMeta(t *testing.T) {
 		bcMock.On("CheckBlockIsInCurrentChain", mock.Anything, []uint32{2}).Return(true, nil)
 		bcMock.On("CheckBlockIsInCurrentChain", mock.Anything, []uint32{3}).Return(false, nil).Maybe()
 		mockRepo.On("GetBlockchainClient").Return(bcMock).Maybe()
-		httpServer.mainChainCache = newMainChainCache(bcMock, ulogger.TestLogger{})
+		httpServer.mainChainCache = newMainChainCache(bcMock, ulogger.TestLogger{}, 0)
 
 		// Mock GetBlockByID calls for each block ID
 		// Create blocks with proper headers and subtrees
@@ -246,7 +247,7 @@ func TestGetTransactionMeta(t *testing.T) {
 		bcMock := &blockchain.Mock{}
 		bcMock.On("CheckBlockIsInCurrentChain", mock.Anything, mock.Anything).Return(false, nil).Maybe()
 		mockRepo.On("GetBlockchainClient").Return(bcMock).Maybe()
-		httpServer.mainChainCache = newMainChainCache(bcMock, ulogger.TestLogger{})
+		httpServer.mainChainCache = newMainChainCache(bcMock, ulogger.TestLogger{}, 0)
 
 		// set echo context
 		echoContext.SetPath("/tx/meta/:hash")
@@ -302,7 +303,7 @@ func TestGetTransactionMeta(t *testing.T) {
 		bcMock := &blockchain.Mock{}
 		bcMock.On("CheckBlockIsInCurrentChain", mock.Anything, []uint32{42}).Return(false, nil)
 		mockRepo.On("GetBlockchainClient").Return(bcMock).Maybe()
-		httpServer.mainChainCache = newMainChainCache(bcMock, ulogger.TestLogger{})
+		httpServer.mainChainCache = newMainChainCache(bcMock, ulogger.TestLogger{}, 0)
 
 		echoContext.SetPath("/tx/meta/:hash")
 		echoContext.SetParamNames("hash")
@@ -334,7 +335,7 @@ func TestGetTransactionMeta(t *testing.T) {
 
 		bcMock := &blockchain.Mock{}
 		mockRepo.On("GetBlockchainClient").Return(bcMock).Maybe() // loop runs zero times
-		httpServer.mainChainCache = newMainChainCache(bcMock, ulogger.TestLogger{})
+		httpServer.mainChainCache = newMainChainCache(bcMock, ulogger.TestLogger{}, 0)
 
 		echoContext.SetPath("/tx/meta/:hash")
 		echoContext.SetParamNames("hash")
@@ -373,7 +374,7 @@ func TestGetTransactionMeta(t *testing.T) {
 		bcMock.On("CheckBlockIsInCurrentChain", mock.Anything, mock.Anything).
 			Return(false, errors.NewProcessingError("blockchain transient error"))
 		mockRepo.On("GetBlockchainClient").Return(bcMock).Maybe()
-		httpServer.mainChainCache = newMainChainCache(bcMock, ulogger.TestLogger{})
+		httpServer.mainChainCache = newMainChainCache(bcMock, ulogger.TestLogger{}, 0)
 
 		echoContext.SetPath("/tx/meta/:hash")
 		echoContext.SetParamNames("hash")

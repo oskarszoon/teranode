@@ -60,7 +60,7 @@ func (m *MockMerkleProofConstructor) FindBlocksContainingSubtree(subtreeHash *ch
 	return []uint32{1}, []uint32{100}, []int{0}, nil
 }
 
-func (m *MockMerkleProofConstructor) IsBlockOnMainChain(blockID uint32) (bool, error) {
+func (m *MockMerkleProofConstructor) IsBlockOnMainChain(blockID, _ uint32) (bool, error) {
 	if m.mainChainBlockIDs == nil {
 		// Default: all block IDs are on main chain. Preserves behaviour for existing tests
 		// that don't care about main-chain filtering.

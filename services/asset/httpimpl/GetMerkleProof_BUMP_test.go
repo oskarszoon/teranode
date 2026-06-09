@@ -101,7 +101,7 @@ func TestGetMerkleProofBUMPFormats(t *testing.T) {
 			logger:         logger,
 			settings:       tSettings,
 			repository:     mockRepo,
-			mainChainCache: newMainChainCache(bcMock, ulogger.TestLogger{}),
+			mainChainCache: newMainChainCache(bcMock, ulogger.TestLogger{}, 0),
 		}
 
 		// Setup mock expectations
@@ -148,7 +148,7 @@ func TestGetMerkleProofBUMPFormats(t *testing.T) {
 			logger:         logger,
 			settings:       tSettings,
 			repository:     mockRepo,
-			mainChainCache: newMainChainCache(bcMock, ulogger.TestLogger{}),
+			mainChainCache: newMainChainCache(bcMock, ulogger.TestLogger{}, 0),
 		}
 
 		// Setup mock expectations
@@ -198,7 +198,7 @@ func TestGetMerkleProofBUMPFormats(t *testing.T) {
 			logger:         logger,
 			settings:       tSettings,
 			repository:     mockRepo,
-			mainChainCache: newMainChainCache(bcMock, ulogger.TestLogger{}),
+			mainChainCache: newMainChainCache(bcMock, ulogger.TestLogger{}, 0),
 		}
 
 		// Setup mock expectations
@@ -247,7 +247,7 @@ func TestGetMerkleProofBUMPFormats(t *testing.T) {
 			logger:         logger,
 			settings:       tSettings,
 			repository:     mockRepo,
-			mainChainCache: newMainChainCache(bcMock, ulogger.TestLogger{}),
+			mainChainCache: newMainChainCache(bcMock, ulogger.TestLogger{}, 0),
 		}
 
 		// Setup mock expectations (called multiple times)

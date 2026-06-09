@@ -170,7 +170,7 @@ func TestGetMerkleProof(t *testing.T) {
 			logger:         logger,
 			settings:       tSettings,
 			repository:     mockRepo,
-			mainChainCache: newMainChainCache(bcMock, ulogger.TestLogger{}),
+			mainChainCache: newMainChainCache(bcMock, ulogger.TestLogger{}, 0),
 		}
 
 		// Create test data
@@ -418,7 +418,7 @@ func TestGetMerkleProof(t *testing.T) {
 			logger:         logger,
 			settings:       tSettings,
 			repository:     mockRepo,
-			mainChainCache: newMainChainCache(bcMock, ulogger.TestLogger{}),
+			mainChainCache: newMainChainCache(bcMock, ulogger.TestLogger{}, 0),
 		}
 
 		// Create request
@@ -511,7 +511,7 @@ func TestGetMerkleProof_OrphanOnly_Returns404(t *testing.T) {
 		logger:         ulogger.TestLogger{},
 		settings:       &settings.Settings{},
 		repository:     mockRepo,
-		mainChainCache: newMainChainCache(bcMock, ulogger.TestLogger{}),
+		mainChainCache: newMainChainCache(bcMock, ulogger.TestLogger{}, 0),
 	}
 	e := echo.New()
 	req, _ := http.NewRequest("GET", "/api/v1/merkle_proof/"+txHash.String()+"/json", nil)
@@ -636,7 +636,7 @@ func TestGetMerkleProof_ForkPlusMain_ReturnsMainChainProof(t *testing.T) {
 		logger:         ulogger.TestLogger{},
 		settings:       &settings.Settings{},
 		repository:     mockRepo,
-		mainChainCache: newMainChainCache(bcMock, ulogger.TestLogger{}),
+		mainChainCache: newMainChainCache(bcMock, ulogger.TestLogger{}, 0),
 	}
 	e := echo.New()
 	req, _ := http.NewRequest("GET", "/api/v1/merkle_proof/"+txHash.String()+"/json", nil)
