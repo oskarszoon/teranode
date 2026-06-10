@@ -841,13 +841,20 @@ func (u *Server) checkSubtreeFromBlock(ctx context.Context, request *subtreevali
 			validatorOptions = append(validatorOptions, validator.WithAddTXToBlockAssembly(false))
 		}
 
-		// Call the validateSubtreeInternal method
-		// making sure to skip policy checks, since we are validating a block that has already been mined
-		if _, err = u.ValidateSubtreeInternal(
+		blockAccumulator, err := buildInBlockParentAccumulator(request.InBlockParentHashes, request.BlockHeight)
+		if err != nil {
+			return false, errors.NewInvalidArgumentError("[CheckSubtree] Failed to parse in-block parent hash from request", err)
+		}
+
+		// Call the validateSubtreeInternalImpl method with the block-scoped
+		// accumulator, making sure to skip policy checks, since we are
+		// validating a block that has already been mined
+		if _, err = u.validateSubtreeInternalImpl(
 			ctx,
 			v,
 			request.BlockHeight,
 			blockIds,
+			blockAccumulator,
 			validatorOptions...,
 		); err != nil {
 			return false, errors.NewProcessingError("[CheckSubtree] Failed to validate legacy subtree %s", hash.String(), err)

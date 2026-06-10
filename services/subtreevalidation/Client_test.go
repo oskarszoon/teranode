@@ -202,7 +202,7 @@ func TestClient_CheckSubtreeFromBlock_Success(t *testing.T) {
 			string(req.PreviousBlockHash) == string(prevBlockHash[:])
 	}), mock.Anything).Return(response, nil)
 
-	err := client.CheckSubtreeFromBlock(ctx, *subtreeHash, baseURL, blockHeight, blockHash, prevBlockHash)
+	err := client.CheckSubtreeFromBlock(ctx, *subtreeHash, baseURL, blockHeight, blockHash, prevBlockHash, nil)
 
 	assert.NoError(t, err)
 	mockAPIClient.AssertExpectations(t)
@@ -224,7 +224,7 @@ func TestClient_CheckSubtreeFromBlock_GRPCError(t *testing.T) {
 	grpcErr := status.Error(codes.InvalidArgument, "invalid subtree hash")
 	mockAPIClient.On("CheckSubtreeFromBlock", ctx, mock.Anything, mock.Anything).Return(nil, grpcErr)
 
-	err := client.CheckSubtreeFromBlock(ctx, *subtreeHash, baseURL, blockHeight, blockHash, prevBlockHash)
+	err := client.CheckSubtreeFromBlock(ctx, *subtreeHash, baseURL, blockHeight, blockHash, prevBlockHash, nil)
 
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid subtree hash")
@@ -343,6 +343,6 @@ func TestClient_CheckSubtreeFromBlock_WithNilHashes(t *testing.T) {
 	// This should panic due to nil pointer dereference - this tests a bug in the Client code
 	// The code should handle nil hashes gracefully, but currently doesn't
 	assert.Panics(t, func() {
-		_ = client.CheckSubtreeFromBlock(ctx, *subtreeHash, baseURL, blockHeight, nil, nil)
+		_ = client.CheckSubtreeFromBlock(ctx, *subtreeHash, baseURL, blockHeight, nil, nil, nil)
 	})
 }

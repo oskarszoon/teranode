@@ -200,13 +200,19 @@ func (m *MockSubtreeValidationClient) Health(ctx context.Context, checkLiveness 
 	return 0, "MockValidator", nil
 }
 
-func (m *MockSubtreeValidationClient) CheckSubtreeFromBlock(ctx context.Context, subtreeHash chainhash.Hash, baseURL string, blockHeight uint32, blockHash, previousBlockHash *chainhash.Hash) error {
+func (m *MockSubtreeValidationClient) CheckSubtreeFromBlock(ctx context.Context, subtreeHash chainhash.Hash, baseURL string, blockHeight uint32, blockHash, previousBlockHash *chainhash.Hash, inBlockParentHashes []chainhash.Hash) error {
+	var parentHashBytes [][]byte
+	for i := range inBlockParentHashes {
+		parentHashBytes = append(parentHashBytes, inBlockParentHashes[i][:])
+	}
+
 	request := subtreevalidation_api.CheckSubtreeFromBlockRequest{
-		Hash:              subtreeHash.CloneBytes(),
-		BaseUrl:           baseURL,
-		BlockHeight:       blockHeight,
-		BlockHash:         blockHash.CloneBytes(),
-		PreviousBlockHash: previousBlockHash[:],
+		Hash:                subtreeHash.CloneBytes(),
+		BaseUrl:             baseURL,
+		BlockHeight:         blockHeight,
+		BlockHash:           blockHash.CloneBytes(),
+		PreviousBlockHash:   previousBlockHash[:],
+		InBlockParentHashes: parentHashBytes,
 	}
 
 	_, err := m.server.CheckSubtreeFromBlock(ctx, &request)
@@ -1669,7 +1675,7 @@ func Test_validateBlockSubtrees(t *testing.T) {
 		defer deferFunc()
 
 		subtreeValidationClient := &subtreevalidation.MockSubtreeValidation{}
-		subtreeValidationClient.Mock.On("CheckSubtreeFromBlock", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+		subtreeValidationClient.Mock.On("CheckSubtreeFromBlock", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 		subtreeValidationClient.Mock.On("CheckBlockSubtrees", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
 		blockValidation := NewBlockValidation(ctx, ulogger.TestLogger{}, tSettings, nil, subtreeStore, txStore, utxoStore, nil, subtreeValidationClient)

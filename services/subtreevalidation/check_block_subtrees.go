@@ -1439,6 +1439,45 @@ func (a *parentMetadataAccumulator) add(h chainhash.Hash, m *validator.ParentTxM
 	a.delta[h] = m
 }
 
+// buildInBlockParentAccumulator seeds a block-scoped accumulator from the
+// in-block parent hashes carried by a CheckSubtreeFromBlock request, so that
+// children of same-block parents resolve at the candidate block height
+// instead of the unconfirmedParentHeight sentinel (which BDK rejects in
+// consensus mode with bad-txns-unconfirmed-input-in-block; the parent's
+// BlockHeights in the UTXO store stay empty until SetMinedMulti runs after
+// block acceptance).
+//
+// The hint only asserts "this parent is in the same block" — the caller
+// (legacy netsync) has the full block, and a wrong assertion produces a block
+// that fails acceptance, never a wrongly accepted block. Stateless per
+// request: safe with multiple subtreevalidation instances behind load
+// balancing, including cross-subtree parents (the child's request carries the
+// parent hash regardless of which instance validated the parent's subtree).
+//
+// Returns nil for an empty list, preserving the prior nil-accumulator
+// behaviour exactly. Returns an error when a hash is not a valid 32-byte
+// chainhash.
+func buildInBlockParentAccumulator(parentHashes [][]byte, blockHeight uint32) (*parentMetadataAccumulator, error) {
+	if len(parentHashes) == 0 {
+		return nil, nil
+	}
+
+	acc := &parentMetadataAccumulator{
+		delta: make(map[chainhash.Hash]*validator.ParentTxMetadata, len(parentHashes)),
+	}
+
+	for _, parentHashBytes := range parentHashes {
+		parentHash, err := chainhash.NewHash(parentHashBytes)
+		if err != nil {
+			return nil, err
+		}
+
+		acc.add(*parentHash, &validator.ParentTxMetadata{BlockHeight: blockHeight})
+	}
+
+	return acc, nil
+}
+
 // filterParentMetadataForInputs returns the subset of accumulator entries
 // whose hashes appear in this transaction's input prevouts. Used as the
 // per-tx pre-filter step before spawning a validation goroutine, so the

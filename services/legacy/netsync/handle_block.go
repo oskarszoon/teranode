@@ -428,7 +428,7 @@ func (sm *SyncManager) prepareSubtrees(ctx context.Context, block *bsvutil.Block
 	// produced locally, so we can skip the round-trip through subtreeValidation.
 	if !quickValidationMode {
 		for i := 0; i < numSubtrees; i++ {
-			if err = sm.checkSubtreeFromBlock(ctx, block, subtreeSlices[i]); err != nil {
+			if err = sm.checkSubtreeFromBlock(ctx, block, subtreeSlices[i], txMap); err != nil {
 				return nil, 0, err
 			}
 		}
@@ -462,7 +462,8 @@ func (sm *SyncManager) quickValidationAllowed(blockHeight uint32) bool {
 	return blockHeight <= highest
 }
 
-func (sm *SyncManager) checkSubtreeFromBlock(ctx context.Context, block *bsvutil.Block, subtree *subtreepkg.Subtree) error {
+func (sm *SyncManager) checkSubtreeFromBlock(ctx context.Context, block *bsvutil.Block, subtree *subtreepkg.Subtree,
+	txMap *txmap.SyncedMap[chainhash.Hash, *TxMapWrapper]) error {
 	ctx, _, deferFn := tracing.Tracer("netsync").Start(ctx, "checkSubtreeFromBlock",
 		tracing.WithLogMessage(sm.logger, "[checkSubtreeFromBlock][%s] checking subtree for block %s height %d", subtree.RootHash().String(), block.Hash().String(), block.Height()),
 	)
@@ -474,11 +475,62 @@ func (sm *SyncManager) checkSubtreeFromBlock(ctx context.Context, block *bsvutil
 		return err
 	}
 
-	if err := sm.subtreeValidation.CheckSubtreeFromBlock(ctx, *subtree.RootHash(), "legacy", blockHeightUint32, block.Hash(), &block.MsgBlock().Header.PrevBlock); err != nil {
+	inBlockParentHashes := collectInBlockParentHashes(subtree, txMap)
+
+	if err := sm.subtreeValidation.CheckSubtreeFromBlock(ctx, *subtree.RootHash(), "legacy", blockHeightUint32, block.Hash(), &block.MsgBlock().Header.PrevBlock, inBlockParentHashes); err != nil {
 		return errors.NewSubtreeError("failed to check subtree", err)
 	}
 
 	return nil
+}
+
+// collectInBlockParentHashes returns the txids of transactions that are
+// referenced as input parents by this subtree's transactions AND are located
+// in the same block (txMap holds every non-coinbase tx of the block). The
+// subtree validator resolves these parents at the candidate block height; a
+// parent's BlockHeights in the UTXO store stay empty until SetMinedMulti runs
+// after block acceptance, so without this hint the validator stamps the
+// unconfirmed-parent sentinel and BDK rejects the child in consensus mode
+// with bad-txns-unconfirmed-input-in-block. The set is deduplicated and
+// typically tiny — only chained parents, never the whole block.
+func collectInBlockParentHashes(subtree *subtreepkg.Subtree, txMap *txmap.SyncedMap[chainhash.Hash, *TxMapWrapper]) []chainhash.Hash {
+	if subtree == nil || txMap == nil {
+		return nil
+	}
+
+	var (
+		parents []chainhash.Hash
+		seen    map[chainhash.Hash]struct{}
+	)
+
+	for _, node := range subtree.Nodes {
+		// the coinbase placeholder is not part of the txMap
+		txWrapper, found := txMap.Get(node.Hash)
+		if !found {
+			continue
+		}
+
+		for _, input := range txWrapper.Tx.Inputs {
+			parentHash := *input.PreviousTxIDChainHash()
+
+			if _, ok := txMap.Get(parentHash); !ok {
+				continue
+			}
+
+			if seen == nil {
+				seen = make(map[chainhash.Hash]struct{})
+			}
+
+			if _, ok := seen[parentHash]; ok {
+				continue
+			}
+
+			seen[parentHash] = struct{}{}
+			parents = append(parents, parentHash)
+		}
+	}
+
+	return parents
 }
 
 func (sm *SyncManager) writeSubtree(ctx context.Context, block *bsvutil.Block, subtree *subtreepkg.Subtree,
