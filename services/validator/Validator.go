@@ -1564,6 +1564,21 @@ func (v *Validator) validateTransaction(ctx context.Context, tx *bt.Tx, blockHei
 		}
 	}
 
+	// Legacy block-sync resolution: substitute the unconfirmedParentHeight
+	// sentinel with the candidate block height BEFORE any consumer sees it —
+	// both the BDK call in phase 1 (per-input era-flag selection, where the
+	// sentinel would otherwise translate to MEMPOOL_HEIGHT and reject with
+	// bad-txns-unconfirmed-input-in-block) and the BIP68/MTP lookups in
+	// phase 2. On the legacy path an unconfirmed parent IS a same-block
+	// parent, so the candidate height is its true height. See
+	// Options.UnconfirmedParentsAtCandidateHeight for the consensus-safety
+	// contract; the floater backstop is block validation's
+	// checkParentsExistOnChain.
+	if validationOptions.UnconfirmedParentsAtCandidateHeight {
+		// consensus=false selects the policy-style blockHeight substitution
+		utxoHeights = substituteUnconfirmedHeights(utxoHeights, blockHeight, false)
+	}
+
 	// Phase 1: run Teranode-owned checks and BDK transaction validation.
 	if err := v.txValidator.ValidateTransaction(tx, blockHeight, utxoHeights, validationOptions); err != nil {
 		span.RecordError(err)

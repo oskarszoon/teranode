@@ -824,11 +824,31 @@ func (u *Server) checkSubtreeFromBlock(ctx context.Context, request *subtreevali
 		// populated above from the request's PreviousBlockHash so two
 		// peer-priority handlers processing the same subtree cannot diverge
 		// on tip-MTP snapshots.
+		// WithUnconfirmedParentsAtCandidateHeight: a legacy block tx spending a
+		// same-block parent finds that parent in the UTXO store with empty
+		// BlockHeights (SetMinedMulti only runs after block acceptance), and
+		// the consensus-mode sentinel would make BDK reject the legitimate
+		// block with bad-txns-unconfirmed-input-in-block — this wedged testnet
+		// sync at 1730003, the first post-checkpoint block with an in-block tx
+		// chain. On this path the candidate height IS the parent's true
+		// height, so resolving the sentinel to it is exact, including for
+		// cross-subtree parents (no shared state needed — safe with multiple
+		// subtreevalidation instances).
+		//
+		// CONSENSUS SAFETY: fail-open at tx level — a parent that is
+		// unconfirmed and NOT in the block (mempool floater) is no longer
+		// rejected here; the membership backstop is block validation's
+		// checkParentsExistOnChain, which legacy netsync runs on every block
+		// before acceptance. Acceptable on this path only: the block is
+		// locally held and PoW-checked, and block assembly is disabled during
+		// legacy sync (no template contamination). MUST NOT be set on the
+		// peer-facing branch below.
 		validatorOptions := []validator.Option{
 			validator.WithSkipPolicyChecks(true),
 			validator.WithCreateConflicting(true),
 			validator.WithIgnoreLocked(true),
 			validator.WithCandidateParentMedianTime(candidateParentMedianTime),
+			validator.WithUnconfirmedParentsAtCandidateHeight(true),
 		}
 
 		currentState, err := u.blockchainClient.GetFSMCurrentState(ctx)
@@ -841,29 +861,13 @@ func (u *Server) checkSubtreeFromBlock(ctx context.Context, request *subtreevali
 			validatorOptions = append(validatorOptions, validator.WithAddTXToBlockAssembly(false))
 		}
 
-		// NOTE: the hint supplies the parent HEIGHT only, not the parent tx
-		// body. A cross-subtree child validated before its parent's subtree
-		// therefore relies on legacy netsync pre-extending every tx
-		// (extendTransactions) before subtree validation: extend stays false
-		// in getUtxoBlockHeightAndExtendForParentTx and the hinted height is
-		// used without a UTXO-store body fetch. If that pre-extension
-		// invariant ever broke, the not-yet-stored parent's Get would fail
-		// and — unlike CheckBlockSubtrees, which defers missing parents to
-		// its Phase-3 sequential retry — this path fails the subtree hard.
-		blockAccumulator, accErr := buildInBlockParentAccumulator(request.InBlockParentHashes, request.BlockHeight)
-		if accErr != nil {
-			return false, errors.NewInvalidArgumentError("[CheckSubtree] Failed to parse in-block parent hash from request", accErr)
-		}
-
-		// Call the validateSubtreeInternalImpl method with the block-scoped
-		// accumulator, making sure to skip policy checks, since we are
-		// validating a block that has already been mined
-		if _, err = u.validateSubtreeInternalImpl(
+		// Call the validateSubtreeInternal method
+		// making sure to skip policy checks, since we are validating a block that has already been mined
+		if _, err = u.ValidateSubtreeInternal(
 			ctx,
 			v,
 			request.BlockHeight,
 			blockIds,
-			blockAccumulator,
 			validatorOptions...,
 		); err != nil {
 			return false, errors.NewProcessingError("[CheckSubtree] Failed to validate legacy subtree %s", hash.String(), err)

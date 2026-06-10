@@ -335,7 +335,7 @@ func TestHandleBlockDirect_TestnetLargeBlock(t *testing.T) {
 		CurrentHeight: uint32(testnetBlockHeight), //nolint:gosec
 	}, nil)
 
-	subtreeValidation.On("CheckSubtreeFromBlock", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	subtreeValidation.On("CheckSubtreeFromBlock", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
 	tSettings := &settings.Settings{
 		GlobalBlockHeightRetention: 100,

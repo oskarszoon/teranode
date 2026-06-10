@@ -136,23 +136,8 @@ type CheckSubtreeFromBlockRequest struct {
 	BlockHash []byte `protobuf:"bytes,4,opt,name=block_hash,json=blockHash,proto3" json:"block_hash,omitempty"`
 	// previous_block_hash identifies the block preceding the current block
 	PreviousBlockHash []byte `protobuf:"bytes,5,opt,name=previous_block_hash,json=previousBlockHash,proto3" json:"previous_block_hash,omitempty"`
-	// in_block_parent_hashes lists the txids of transactions that are parents of
-	// this subtree's transactions AND are located in the same candidate block
-	// (any subtree of it). The server seeds its in-block-parent metadata from
-	// this list so children resolve those parents at the candidate block height
-	// instead of the unconfirmed-parent sentinel (which BDK rejects in consensus
-	// mode with bad-txns-unconfirmed-input-in-block).
-	//
-	// CONSENSUS SAFETY: the server trusts this list without verification. The
-	// height it implies selects per-input script-validation era flags in BDK, so
-	// a wrong entry can change script validity and split consensus. Callers MUST
-	// populate it exclusively from locally-validated block data (the node's own
-	// parse of a PoW-checked block), never from peer-forwarded or otherwise
-	// untrusted input. Only the legacy sync path populates this; an empty list
-	// preserves the prior behaviour exactly.
-	InBlockParentHashes [][]byte `protobuf:"bytes,6,rep,name=in_block_parent_hashes,json=inBlockParentHashes,proto3" json:"in_block_parent_hashes,omitempty"`
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *CheckSubtreeFromBlockRequest) Reset() {
@@ -216,13 +201,6 @@ func (x *CheckSubtreeFromBlockRequest) GetBlockHash() []byte {
 func (x *CheckSubtreeFromBlockRequest) GetPreviousBlockHash() []byte {
 	if x != nil {
 		return x.PreviousBlockHash
-	}
-	return nil
-}
-
-func (x *CheckSubtreeFromBlockRequest) GetInBlockParentHashes() [][]byte {
-	if x != nil {
-		return x.InBlockParentHashes
 	}
 	return nil
 }
@@ -392,15 +370,14 @@ const file_services_subtreevalidation_subtreevalidation_api_subtreevalidation_ap
 	"\x0eHealthResponse\x12\x0e\n" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x18\n" +
 	"\adetails\x18\x02 \x01(\tR\adetails\x128\n" +
-	"\ttimestamp\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp\"\xf4\x01\n" +
+	"\ttimestamp\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp\"\xbf\x01\n" +
 	"\x1cCheckSubtreeFromBlockRequest\x12\x12\n" +
 	"\x04hash\x18\x01 \x01(\fR\x04hash\x12\x19\n" +
 	"\bbase_url\x18\x02 \x01(\tR\abaseUrl\x12!\n" +
 	"\fblock_height\x18\x03 \x01(\rR\vblockHeight\x12\x1d\n" +
 	"\n" +
 	"block_hash\x18\x04 \x01(\fR\tblockHash\x12.\n" +
-	"\x13previous_block_hash\x18\x05 \x01(\fR\x11previousBlockHash\x123\n" +
-	"\x16in_block_parent_hashes\x18\x06 \x03(\fR\x13inBlockParentHashes\"9\n" +
+	"\x13previous_block_hash\x18\x05 \x01(\fR\x11previousBlockHash\"9\n" +
 	"\x1dCheckSubtreeFromBlockResponse\x12\x18\n" +
 	"\ablessed\x18\x01 \x01(\bR\ablessed\"e\n" +
 	"\x19CheckBlockSubtreesRequest\x12\x14\n" +

@@ -99,6 +99,36 @@ type Options struct {
 	// (see services/legacy/netsync and services/subtreevalidation for the
 	// reference implementations).
 	CandidateParentMedianTime uint32
+
+	// UnconfirmedParentsAtCandidateHeight makes the unconfirmedParentHeight
+	// sentinel resolve to the candidate block height instead of failing closed
+	// (consensus-mode sentinel → MEMPOOL_HEIGHT → BDK rejects with
+	// bad-txns-unconfirmed-input-in-block).
+	//
+	// Exists for the legacy block-sync path: a tx in a mined block that spends
+	// a same-block parent finds that parent in the UTXO store with empty
+	// BlockHeights (SetMinedMulti only runs after block acceptance), so the
+	// validator stamps the sentinel and BDK rejects a legitimate block. On
+	// that path the candidate height IS the parent's true height, so the
+	// substitution is exact — it feeds BDK's per-input protocol-era flag
+	// selection and the BIP68/MTP lookups with the height the parent will be
+	// mined at.
+	//
+	// CONSENSUS SAFETY — fail-open, gate carefully. With this set, a parent
+	// that is genuinely unconfirmed-and-NOT-in-the-block (a mempool floater)
+	// is no longer rejected at tx level; the membership backstop is block
+	// validation's checkParentsExistOnChain, which rejects the block before
+	// acceptance. Setting this flag is therefore only sound when ALL of:
+	//   - the tx comes from a locally-held, PoW-checked block (not a peer
+	//     announcement), AND
+	//   - the full block-level parent-membership check will run before the
+	//     block is accepted, AND
+	//   - mempool/block-assembly contamination vectors are absent or
+	//     acceptable (legacy sync runs with block assembly disabled).
+	// The sole intended setter is the legacy branch of
+	// subtreevalidation.checkSubtreeFromBlock. MUST NOT be set on
+	// peer-facing or mempool-admission paths.
+	UnconfirmedParentsAtCandidateHeight bool
 }
 
 // Option defines a function type for setting options
@@ -275,6 +305,16 @@ func WithCandidateBlockTime(timestamp uint32) Option {
 func WithCandidateParentMedianTime(mtp uint32) Option {
 	return func(o *Options) {
 		o.CandidateParentMedianTime = mtp
+	}
+}
+
+// WithUnconfirmedParentsAtCandidateHeight resolves unconfirmed-parent heights
+// to the candidate block height instead of failing closed in consensus mode.
+// See Options.UnconfirmedParentsAtCandidateHeight for the consensus-safety
+// contract — only the legacy block-sync path may set this.
+func WithUnconfirmedParentsAtCandidateHeight(enabled bool) Option {
+	return func(o *Options) {
+		o.UnconfirmedParentsAtCandidateHeight = enabled
 	}
 }
 

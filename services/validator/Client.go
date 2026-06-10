@@ -255,16 +255,17 @@ func candidateParentMedianTimePtr(opts *Options) *uint32 {
 // representation cannot diverge between any caller.
 func buildValidateTxRequest(transactionData []byte, blockHeight uint32, opts *Options) *validator_api.ValidateTransactionRequest {
 	return &validator_api.ValidateTransactionRequest{
-		TransactionData:           transactionData,
-		BlockHeight:               blockHeight,
-		SkipUtxoCreation:          &opts.SkipUtxoCreation,
-		AddTxToBlockAssembly:      &opts.AddTXToBlockAssembly,
-		SkipPolicyChecks:          &opts.SkipPolicyChecks,
-		CreateConflicting:         &opts.CreateConflicting,
-		SkipTxmetaPublishing:      &opts.SkipTxMetaPublishing,
-		CandidateBlockTime:        candidateBlockTimePtr(opts),
-		CandidateParentMedianTime: candidateParentMedianTimePtr(opts),
-		ParentMetadata:            parentMetadataToWire(opts.ParentMetadata),
+		TransactionData:                     transactionData,
+		BlockHeight:                         blockHeight,
+		SkipUtxoCreation:                    &opts.SkipUtxoCreation,
+		AddTxToBlockAssembly:                &opts.AddTXToBlockAssembly,
+		SkipPolicyChecks:                    &opts.SkipPolicyChecks,
+		CreateConflicting:                   &opts.CreateConflicting,
+		SkipTxmetaPublishing:                &opts.SkipTxMetaPublishing,
+		CandidateBlockTime:                  candidateBlockTimePtr(opts),
+		CandidateParentMedianTime:           candidateParentMedianTimePtr(opts),
+		ParentMetadata:                      parentMetadataToWire(opts.ParentMetadata),
+		UnconfirmedParentsAtCandidateHeight: &opts.UnconfirmedParentsAtCandidateHeight,
 	}
 }
 

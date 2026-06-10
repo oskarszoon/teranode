@@ -121,22 +121,13 @@ func (s *Client) Health(ctx context.Context, checkLiveness bool) (int, string, e
 	return http.StatusOK, res.GetDetails(), nil
 }
 
-func (s *Client) CheckSubtreeFromBlock(ctx context.Context, subtreeHash chainhash.Hash, baseURL string, blockHeight uint32, blockHash, previousBlockHash *chainhash.Hash, inBlockParentHashes []chainhash.Hash) error {
-	var parentHashBytes [][]byte
-	if len(inBlockParentHashes) > 0 {
-		parentHashBytes = make([][]byte, len(inBlockParentHashes))
-		for i := range inBlockParentHashes {
-			parentHashBytes[i] = inBlockParentHashes[i][:]
-		}
-	}
-
+func (s *Client) CheckSubtreeFromBlock(ctx context.Context, subtreeHash chainhash.Hash, baseURL string, blockHeight uint32, blockHash, previousBlockHash *chainhash.Hash) error {
 	req := &subtreevalidation_api.CheckSubtreeFromBlockRequest{
-		Hash:                subtreeHash[:],
-		BaseUrl:             baseURL,
-		BlockHeight:         blockHeight,
-		BlockHash:           blockHash[:],
-		PreviousBlockHash:   previousBlockHash[:],
-		InBlockParentHashes: parentHashBytes,
+		Hash:              subtreeHash[:],
+		BaseUrl:           baseURL,
+		BlockHeight:       blockHeight,
+		BlockHash:         blockHash[:],
+		PreviousBlockHash: previousBlockHash[:],
 	}
 
 	_, err := s.apiClient.CheckSubtreeFromBlock(ctx, req)

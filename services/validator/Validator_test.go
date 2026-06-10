@@ -547,16 +547,16 @@ func TestValidate_ConsensusRejectsUnconfirmedParent(t *testing.T) {
 		"consensus-mode validation must surface the BDK UnconfirmedInputInBlock rejection for unconfirmed parents")
 }
 
-// TestValidate_ConsensusAcceptsHintedInBlockParent is the accept-counterpart
-// of TestValidate_ConsensusRejectsUnconfirmedParent and the validator-level
-// regression for the legacy-sync wedge at testnet 1730003: same fixtures,
-// same unconfirmed parent (BlockHeights empty in the UTXO store), but
-// Options.ParentMetadata covers the parent at the candidate height — the
-// metadata the legacy CheckSubtreeFromBlock path now seeds from the request's
-// in_block_parent_hashes hint. Runs the real TxValidator + GoBDK end to end:
-// proves BDK accepts the child once the parent resolves at the candidate
-// height instead of translating the sentinel to MEMPOOL_HEIGHT.
-func TestValidate_ConsensusAcceptsHintedInBlockParent(t *testing.T) {
+// TestValidate_ConsensusAcceptsUnconfirmedParentAtCandidateHeight is the
+// accept-counterpart of TestValidate_ConsensusRejectsUnconfirmedParent and
+// the validator-level regression for the legacy-sync wedge at testnet
+// 1730003: same fixtures, same unconfirmed parent (BlockHeights empty in the
+// UTXO store), but WithUnconfirmedParentsAtCandidateHeight(true) — the option
+// the legacy CheckSubtreeFromBlock branch sets — resolves the sentinel to the
+// candidate height. Runs the real TxValidator + GoBDK end to end: proves BDK
+// accepts the child once the parent resolves at the candidate height instead
+// of translating the sentinel to MEMPOOL_HEIGHT.
+func TestValidate_ConsensusAcceptsUnconfirmedParentAtCandidateHeight(t *testing.T) {
 	tracing.SetupMockTracer()
 
 	txHex := "010000000000000000ef01febe0cbd7d87d44cbd4b5adac0a5bfcdbd2b672c9113f5d74a6459a2b85569db010000008b48304502207ec38d0a4ef79c3a4286ba3e5a5b6ede1fa678af9242465140d78a901af9e4e0022100c26c377d44b761469cf0bdcdbf4931418f2c5a02ce6b72bbb7af52facd7228c1014104bc9eb4fe4cb53e35df7e7734c4c3cd91c6af7840be80f4a1fff283e2cd6ae8f7713cb263a4590263240e3c01ec36bc603c32281ac08773484dc69b8152e48cecffffffff60b74700000000001976a9148ac9bdc626352d16e18c26f431e834f9aae30e2888ac0230424700000000001976a9148ac9bdc626352d16e18c26f431e834f9aae30e2888ac1027000000000000166a148ac9bdc626352d16e18c26f431e834f9aae30e2800000000"
@@ -582,7 +582,7 @@ func TestValidate_ConsensusAcceptsHintedInBlockParent(t *testing.T) {
 	_ = utxoStore.SetMedianBlockTime(uint32(time.Now().Unix())) //nolint:gosec
 
 	// Parent created WITHOUT WithMinedBlockInfo — BlockHeights stays empty,
-	// identical to the reject test. Only the ParentMetadata below differs.
+	// identical to the reject test. Only the option below differs.
 	_, err = utxoStore.Create(ctx, parentTx, 257726)
 	require.NoError(t, err)
 
@@ -601,12 +601,10 @@ func TestValidate_ConsensusAcceptsHintedInBlockParent(t *testing.T) {
 
 	txMetaData, err := v.Validate(t.Context(), tx, 257727,
 		WithSkipPolicyChecks(true),
-		WithParentMetadata(map[chainhash.Hash]*ParentTxMetadata{
-			*parentTx.TxIDChainHash(): {BlockHeight: 257727},
-		}),
+		WithUnconfirmedParentsAtCandidateHeight(true),
 	)
 	require.NoError(t, err,
-		"with ParentMetadata covering the in-block parent at the candidate height, consensus-mode validation must accept the child")
+		"with UnconfirmedParentsAtCandidateHeight, consensus-mode validation must accept a child of an unconfirmed same-block parent")
 	require.NotNil(t, txMetaData)
 }
 

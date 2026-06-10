@@ -77,19 +77,10 @@ type Interface interface {
 	//   - blockHeight: The height of the block containing the subtree
 	//   - blockHash: Optional hash of the block containing the subtree (can be nil)
 	//   - previousBlockHash: Optional hash of the previous block (can be nil)
-	//   - inBlockParentHashes: txids of parents of this subtree's transactions that
-	//     are located in the same candidate block (any subtree of it). The server
-	//     resolves these parents at the candidate block height instead of the
-	//     unconfirmed-parent sentinel. Nil/empty preserves prior behaviour.
-	//     CONSENSUS SAFETY: the server trusts this list without verification —
-	//     the implied height selects per-input script-era flags in BDK, so a
-	//     wrong entry can change script validity. Populate it exclusively from
-	//     locally-validated block data (the node's own parse of a PoW-checked
-	//     block), never from peer-forwarded or untrusted input.
 	//
 	// Returns:
 	//   - error: Any error encountered during validation, nil if successful
-	CheckSubtreeFromBlock(ctx context.Context, hash chainhash.Hash, baseURL string, blockHeight uint32, blockHash, previousBlockHash *chainhash.Hash, inBlockParentHashes []chainhash.Hash) error
+	CheckSubtreeFromBlock(ctx context.Context, hash chainhash.Hash, baseURL string, blockHeight uint32, blockHash, previousBlockHash *chainhash.Hash) error
 
 	// CheckBlockSubtrees validates all subtrees in a block identified by its hash.
 	// This method delegates the validation of all subtrees within a specific block to the subtree validation service.
@@ -128,8 +119,8 @@ func (mv *MockSubtreeValidation) Health(ctx context.Context, checkLiveness bool)
 	return args.Int(0), args.String(1), args.Error(2)
 }
 
-func (mv *MockSubtreeValidation) CheckSubtreeFromBlock(ctx context.Context, hash chainhash.Hash, baseURL string, blockHeight uint32, blockHash, previousBlockHash *chainhash.Hash, inBlockParentHashes []chainhash.Hash) error {
-	args := mv.Called(ctx, hash, baseURL, blockHeight, blockHash, previousBlockHash, inBlockParentHashes)
+func (mv *MockSubtreeValidation) CheckSubtreeFromBlock(ctx context.Context, hash chainhash.Hash, baseURL string, blockHeight uint32, blockHash, previousBlockHash *chainhash.Hash) error {
+	args := mv.Called(ctx, hash, baseURL, blockHeight, blockHash, previousBlockHash)
 	return args.Error(0)
 }
 

@@ -47,21 +47,6 @@ message CheckSubtreeFromBlockRequest {
   bytes block_hash = 4;
   // previous_block_hash identifies the block preceding the current block
   bytes previous_block_hash = 5;
-  // in_block_parent_hashes lists the txids of transactions that are parents of
-  // this subtree's transactions AND are located in the same candidate block
-  // (any subtree of it). The server seeds its in-block-parent metadata from
-  // this list so children resolve those parents at the candidate block height
-  // instead of the unconfirmed-parent sentinel (which BDK rejects in consensus
-  // mode with bad-txns-unconfirmed-input-in-block).
-  //
-  // CONSENSUS SAFETY: the server trusts this list without verification. The
-  // height it implies selects per-input script-validation era flags in BDK, so
-  // a wrong entry can change script validity and split consensus. Callers MUST
-  // populate it exclusively from locally-validated block data (the node's own
-  // parse of a PoW-checked block), never from peer-forwarded or otherwise
-  // untrusted input. Only the legacy sync path populates this; an empty list
-  // preserves the prior behaviour exactly.
-  repeated bytes in_block_parent_hashes = 6;
 }
 
 // CheckSubtreeFromBlockResponse contains the validation result for a subtree check.
