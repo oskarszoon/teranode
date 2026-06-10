@@ -407,6 +407,14 @@ type SyncManager struct {
 	syncPeerState   *syncPeerState
 	peerStates      *txmap.SyncedMap[*peerpkg.Peer, *peerSyncState]
 
+	// blockBacklog counts blocks sitting in the local processing pipeline:
+	// queued in blockHandler's blockQueue plus the one inside handleBlockMsg.
+	// While it is non-zero the node is backpressuring its own network reads
+	// (OnBlock blocks until the previous block is processed), so the stall
+	// detector must not hold the resulting zero throughput against the sync
+	// peer. Written by the blockHandler goroutines, read by handleCheckSyncPeer.
+	blockBacklog atomic.Int64
+
 	// The following fields are used for headers-first mode.
 	headersFirstMode atomic.Bool // accessed from multiple goroutines, must be atomic
 	headerList       *list.List
@@ -839,6 +847,18 @@ func (sm *SyncManager) handleCheckSyncPeer() {
 
 	// Update network stats at the end of this tick.
 	defer sps.updateNetwork(sp)
+
+	// While blocks are queued or mid-validation locally, OnBlock deliberately
+	// stops reading from the peer (it blocks on blockProcessed), so zero
+	// throughput and a stale last-block-time measure our own validation speed,
+	// not the peer's health. Skip stall checks until the backlog drains — a
+	// genuinely stalled peer keeps failing them afterwards. The deferred
+	// updateNetwork still runs, keeping throughput samples fresh for the next
+	// tick.
+	if backlog := sm.blockBacklog.Load(); backlog > 0 {
+		sm.logger.Debugf("[CheckSyncPeer] sync peer %s check skipped: %d blocks pending local processing", sp.String(), backlog)
+		return
+	}
 
 	headersFirst := sm.headersFirstMode.Load()
 	lastBlockSince := time.Since(sps.getLastBlockTime())
@@ -2066,6 +2086,9 @@ func (sm *SyncManager) blockHandler() {
 				sm.logger.Debugf("[blockHandler][%s] processing block queue message into handleBlockMsg", msg.blockHash)
 
 				err := sm.handleBlockMsg(msg)
+
+				sm.blockBacklog.Add(-1)
+
 				if msg.reply != nil {
 					msg.reply <- err
 				}
@@ -2116,6 +2139,8 @@ out:
 
 			case *blockMsg:
 				sm.logger.Debugf("[blockHandler][%s] queueing block for validation", msg.block.Hash())
+
+				sm.blockBacklog.Add(1)
 
 				blockQueue <- &blockQueueMsg{
 					block:       msg.block.MsgBlock(),

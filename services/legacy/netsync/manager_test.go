@@ -923,6 +923,60 @@ func TestHandleCheckSyncPeer_HeadersFirstMode(t *testing.T) {
 	})
 }
 
+// TestHandleCheckSyncPeer_LocalBacklog verifies the stall detector does not
+// blame the sync peer for backpressure the node inflicts on itself: while
+// blocks are queued or mid-validation locally, OnBlock stops reading from the
+// peer, so zero throughput and a stale last-block-time say nothing about the
+// peer's health.
+func TestHandleCheckSyncPeer_LocalBacklog(t *testing.T) {
+	// Zero throughput (recvBytes == recvBytesLastTick) one violation short of
+	// the rotation threshold, plus a last-block-time far past maxLastBlockTime:
+	// without a backlog this tick rotates the sync peer.
+	newStalledState := func() *syncPeerState {
+		return &syncPeerState{
+			lastBlockTime: time.Now().Add(-10 * time.Minute),
+			ticks:         1,
+			violations:    maxNetworkViolations - 1,
+		}
+	}
+
+	newSyncManager := func(sp *peer.Peer, sps *syncPeerState) *SyncManager {
+		sm := &SyncManager{
+			logger:                  ulogger.TestLogger{},
+			peerStates:              txmap.NewSyncedMap[*peer.Peer, *peerSyncState](),
+			minSyncPeerNetworkSpeed: 51200,
+		}
+		sm.storeSyncPeer(sp, sps)
+		sm.headersFirstMode.Store(false)
+		sm.peerStates.Set(sp, &peerSyncState{})
+
+		return sm
+	}
+
+	t.Run("keeps sync peer and accrues no violation while backlog pending", func(t *testing.T) {
+		sp := &peer.Peer{}
+		sps := newStalledState()
+		sm := newSyncManager(sp, sps)
+
+		sm.blockBacklog.Add(1) // a block is queued or mid-validation locally
+
+		// Rotation would panic in this minimal SyncManager (no blockchain
+		// client), so NotPanics proves the peer was kept.
+		require.NotPanics(t, func() { sm.handleCheckSyncPeer() })
+		assert.Equal(t, sp, sm.loadSyncPeer())
+		assert.Equal(t, maxNetworkViolations-1, sps.getViolations())
+	})
+
+	t.Run("still rotates on zero throughput once backlog drained", func(t *testing.T) {
+		sp := &peer.Peer{}
+		sm := newSyncManager(sp, newStalledState())
+
+		// No local backlog: the same zero-throughput state is a real peer
+		// stall, so the rotation path runs (and panics in this minimal setup).
+		assert.Panics(t, func() { sm.handleCheckSyncPeer() })
+	})
+}
+
 func TestHasHealthyDownloadThroughput(t *testing.T) {
 	const minSpeed = 51200 // 50 KiB/s, matches default minSyncPeerNetworkSpeed
 
