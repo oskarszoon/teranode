@@ -7,6 +7,7 @@ import (
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	subtreepkg "github.com/bsv-blockchain/go-subtree"
 	"github.com/bsv-blockchain/teranode/pkg/fileformat"
+	"github.com/bsv-blockchain/teranode/services/blockchain"
 	"github.com/bsv-blockchain/teranode/services/subtreevalidation/subtreevalidation_api"
 	"github.com/bsv-blockchain/teranode/services/validator"
 	"github.com/bsv-blockchain/teranode/ulogger"
@@ -14,6 +15,20 @@ import (
 	"github.com/bsv-blockchain/teranode/util/test"
 	"github.com/stretchr/testify/require"
 )
+
+// fsmStateOverrideClient wraps a blockchain client and pins GetFSMCurrentState
+// to a fixed state. The LocalClient test double always reports RUNNING, but
+// the legacy branch's option pairing is FSM-gated on
+// LEGACYSYNCING/CATCHINGBLOCKS — tests need to drive both sides of that gate.
+type fsmStateOverrideClient struct {
+	blockchain.ClientI
+	state blockchain.FSMStateType
+}
+
+func (c *fsmStateOverrideClient) GetFSMCurrentState(_ context.Context) (*blockchain.FSMStateType, error) {
+	state := c.state
+	return &state, nil
+}
 
 // TestCheckSubtreeFromBlockLegacyUnconfirmedParents is the subtreevalidation
 // regression for the legacy-sync wedge at testnet 1730003: a tx in a mined
@@ -52,7 +67,7 @@ func TestCheckSubtreeFromBlockLegacyUnconfirmedParents(t *testing.T) {
 		data []byte
 	}
 
-	newServer := func(t *testing.T, fixtures ...subtreeFixture) (*Server, *recordingValidatorClient) {
+	newServerWithFSMState := func(t *testing.T, fsmState blockchain.FSMStateType, fixtures ...subtreeFixture) (*Server, *recordingValidatorClient) {
 		utxoStore, _, txStore, subtreeStore, blockchainClient, deferFunc := setup(t)
 		t.Cleanup(deferFunc)
 
@@ -71,10 +86,16 @@ func TestCheckSubtreeFromBlockLegacyUnconfirmedParents(t *testing.T) {
 		nilConsumer := &kafka.KafkaConsumerGroup{}
 		tSettings := test.CreateBaseTestSettings(t)
 
-		server, err := New(context.Background(), ulogger.TestLogger{}, tSettings, subtreeStore, txStore, utxoStore, recordingClient, blockchainClient, nilConsumer, nilConsumer, nil)
+		fsmClient := &fsmStateOverrideClient{ClientI: blockchainClient, state: fsmState}
+
+		server, err := New(context.Background(), ulogger.TestLogger{}, tSettings, subtreeStore, txStore, utxoStore, recordingClient, fsmClient, nilConsumer, nilConsumer, nil)
 		require.NoError(t, err)
 
 		return server, recordingClient
+	}
+
+	newServer := func(t *testing.T, fixtures ...subtreeFixture) (*Server, *recordingValidatorClient) {
+		return newServerWithFSMState(t, blockchain.FSMStateLEGACYSYNCING, fixtures...)
 	}
 
 	singleNodeSubtree := func(t *testing.T, hash *chainhash.Hash) *subtreepkg.Subtree {
@@ -95,7 +116,7 @@ func TestCheckSubtreeFromBlockLegacyUnconfirmedParents(t *testing.T) {
 		}
 	}
 
-	t.Run("legacy branch sets UnconfirmedParentsAtCandidateHeight", func(t *testing.T) {
+	t.Run("legacy branch sets UnconfirmedParentsAtCandidateHeight during legacy sync", func(t *testing.T) {
 		InitPrometheusMetrics()
 
 		childSubtree := singleNodeSubtree(t, childHash)
@@ -113,6 +134,32 @@ func TestCheckSubtreeFromBlockLegacyUnconfirmedParents(t *testing.T) {
 				"legacy branch must resolve unconfirmed (same-block) parents at the candidate height — without it the sentinel reaches BDK as MEMPOOL_HEIGHT and the block is rejected with bad-txns-unconfirmed-input-in-block")
 			require.False(t, opts.AddTXToBlockAssembly,
 				"legacy branch must pair the resolution flag with assembly disabled — the validator hard-errors on the combination otherwise")
+		}
+	})
+
+	t.Run("RUNNING state preserves pre-existing behaviour: no flag, assembly enabled", func(t *testing.T) {
+		InitPrometheusMetrics()
+
+		// Tip blocks arriving over the legacy bridge while RUNNING also reach
+		// this branch (handleBlockMsg calls HandleBlockDirect
+		// unconditionally). There the fail-open resolution must NOT activate
+		// and blessed txs must still go to block assembly (reorg resilience)
+		// — exactly the pre-change behaviour.
+		childSubtree := singleNodeSubtree(t, childHash)
+		server, recordingClient := newServerWithFSMState(t, blockchain.FSMStateRUNNING, subtreeFixture{childSubtree, childTx.ExtendedBytes()})
+
+		response, err := server.CheckSubtreeFromBlock(context.Background(), legacyRequest(childSubtree))
+		require.NoError(t, err)
+		require.True(t, response.Blessed)
+
+		recorded := recordingClient.recordedOptions(*childHash)
+		require.NotEmpty(t, recorded, "child transaction was not validated")
+
+		for _, opts := range recorded {
+			require.False(t, opts.UnconfirmedParentsAtCandidateHeight,
+				"fail-open resolution must not activate for legacy-bridge blocks in RUNNING state")
+			require.True(t, opts.AddTXToBlockAssembly,
+				"RUNNING-state legacy blocks must keep feeding block assembly (reorg resilience) — pre-change behaviour")
 		}
 	})
 
