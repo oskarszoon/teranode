@@ -838,8 +838,10 @@ func (u *Server) checkSubtreeFromBlock(ctx context.Context, request *subtreevali
 		// CONSENSUS SAFETY: fail-open at tx level — a parent that is
 		// unconfirmed and NOT in the block (mempool floater) is no longer
 		// rejected here; the membership backstop is block validation's
-		// checkParentsExistOnChain (fails the block in validOrderAndBlessed),
-		// which legacy netsync runs on every block before acceptance.
+		// checkParentsExistOnChain (BlockIncompleteError in
+		// validOrderAndBlessed — retry semantics, the block is never
+		// accepted while the floater stays unmined), which legacy netsync
+		// runs on every block before acceptance.
 		// Acceptable on this path only: the block is locally held and
 		// PoW-checked, and block assembly never sees the result. MUST NOT be
 		// set on the peer-facing branch below.

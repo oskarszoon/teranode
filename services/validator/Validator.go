@@ -1586,8 +1586,7 @@ func (v *Validator) validateTransaction(ctx context.Context, tx *bt.Tx, blockHei
 			return errors.NewProcessingError("[validateTransaction][%s] UnconfirmedParentsAtCandidateHeight requires AddTXToBlockAssembly=false", tx.TxIDChainHash().String())
 		}
 
-		// consensus=false selects the policy-style blockHeight substitution
-		utxoHeights = substituteUnconfirmedHeights(utxoHeights, blockHeight, false)
+		utxoHeights = resolveUnconfirmedParentsAtCandidateHeight(utxoHeights, blockHeight)
 	}
 
 	// Phase 1: run Teranode-owned checks and BDK transaction validation.

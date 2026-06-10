@@ -49,6 +49,7 @@ import (
 	"github.com/bsv-blockchain/teranode/stores/txmetacache"
 	utxostore "github.com/bsv-blockchain/teranode/stores/utxo"
 	teranode_aerospike "github.com/bsv-blockchain/teranode/stores/utxo/aerospike"
+	"github.com/bsv-blockchain/teranode/stores/utxo/fields"
 	"github.com/bsv-blockchain/teranode/stores/utxo/meta"
 	"github.com/bsv-blockchain/teranode/stores/utxo/nullstore"
 	"github.com/bsv-blockchain/teranode/stores/utxo/sql"
@@ -620,6 +621,37 @@ func TestValidate_ConsensusAcceptsUnconfirmedParentAtCandidateHeight(t *testing.
 	require.NoError(t, err,
 		"with UnconfirmedParentsAtCandidateHeight, consensus-mode validation must accept a child of an unconfirmed same-block parent")
 	require.NotNil(t, txMetaData)
+
+	// Side-effect contract (deliberate, pinned here so it stays documented):
+	// tx-level blessing mutates the store BEFORE any block-level membership
+	// verdict. From the validator's perspective this scenario is identical to
+	// an external floater (a parent that is unconfirmed and NOT in the block)
+	// — membership is only decided later by block validation's
+	// checkParentsExistOnChain, which returns BlockIncompleteError for an
+	// unmined parent (pinned in model/Block_test.go "parent has no block ID")
+	// so the block is never accepted while the floater stays unmined. The
+	// store state left behind is exactly what a policy-mode mempool-chain
+	// admission of the same txs would produce, and is handled by the same
+	// unmined-tx cleanup machinery:
+	//   - the child's meta exists, unmined (no BlockIDs / BlockHeights yet)
+	//   - the parent's spent output records the child as its spender
+	childMeta, err := utxoStore.Get(ctx, tx.TxIDChainHash(), fields.BlockIDs, fields.BlockHeights)
+	require.NoError(t, err)
+	require.Empty(t, childMeta.BlockIDs, "blessed child must be unmined until block acceptance")
+	require.Empty(t, childMeta.BlockHeights, "blessed child must be unmined until block acceptance")
+
+	spentVout := tx.Inputs[0].PreviousTxOutIndex
+	parentUtxoHash, err := util.UTXOHashFromOutput(parentTx.TxIDChainHash(), parentTx.Outputs[spentVout], spentVout)
+	require.NoError(t, err)
+
+	spendStatus, err := utxoStore.GetSpend(ctx, &utxostore.Spend{
+		TxID:     parentTx.TxIDChainHash(),
+		Vout:     spentVout,
+		UTXOHash: parentUtxoHash,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, spendStatus.SpendingData, "parent output must be marked spent by the blessed child")
+	require.Equal(t, *tx.TxIDChainHash(), *spendStatus.SpendingData.TxID)
 }
 
 func TestValidateTx4da809a914526f0c4770ea19b5f25f89e9acf82a4184e86a0a3ae8ad250e3b80(t *testing.T) {

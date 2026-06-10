@@ -128,8 +128,16 @@ type Options struct {
 	// CONSENSUS SAFETY — fail-open, gate carefully. With this set, a parent
 	// that is genuinely unconfirmed-and-NOT-in-the-block (a mempool floater)
 	// is no longer rejected at tx level; the membership backstop is block
-	// validation's checkParentsExistOnChain (model/Block.go), which fails the
-	// block in validOrderAndBlessed before acceptance. Setting this flag is
+	// validation's checkParentsExistOnChain (model/Block.go), which fails
+	// block acceptance with BlockIncompleteError — retry/catchup-ordering
+	// semantics (issue #1031), NOT an invalid-block marking; pinned by the
+	// "parent has no block ID" case in model/Block_test.go. The block is
+	// never accepted while the floater stays unmined. Tx-level blessing has
+	// already happened by then: the floater child's UTXO spends and txmeta
+	// exist in the store, in exactly the state a policy-mode mempool-chain
+	// admission of the same txs would produce (policy mode substitutes
+	// tip+1 ≈ candidate height) — cleaned up by the same unmined-tx
+	// machinery, no new cleanup obligations. Setting this flag is
 	// therefore only sound when ALL of:
 	//   - the tx comes from a locally-held, PoW-checked block (not a peer
 	//     announcement), AND
