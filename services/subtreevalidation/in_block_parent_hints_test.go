@@ -7,6 +7,7 @@ import (
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	subtreepkg "github.com/bsv-blockchain/go-subtree"
 	"github.com/bsv-blockchain/teranode/pkg/fileformat"
+	"github.com/bsv-blockchain/teranode/services/subtreevalidation/subtreevalidation_api"
 	"github.com/bsv-blockchain/teranode/services/validator"
 	"github.com/bsv-blockchain/teranode/ulogger"
 	"github.com/bsv-blockchain/teranode/util/kafka"
@@ -162,5 +163,98 @@ func TestLegacySubtreeInBlockParentHint(t *testing.T) {
 		for _, opts := range recorded {
 			require.Nil(t, opts.ParentMetadata, "nil accumulator must not produce ParentMetadata")
 		}
+	})
+}
+
+// TestCheckSubtreeFromBlockLegacyParentHints exercises the full gRPC handler
+// path for the legacy branch: the request's in_block_parent_hashes must reach
+// the per-tx validation Options as ParentMetadata at the request's block
+// height, and a malformed parent hash must be rejected as an invalid argument.
+func TestCheckSubtreeFromBlockLegacyParentHints(t *testing.T) {
+	// regtest CSVHeight is 576; stay below it so the handler skips the
+	// candidate-parent MTP fetch, which would require real headers
+	const blockHeight = uint32(100)
+
+	parentHash := parentTx1.TxIDChainHash()
+
+	childTx := tx1.Clone()
+	require.NoError(t, childTx.Inputs[0].PreviousTxIDAdd(parentHash))
+	childTx.Inputs[0].PreviousTxOutIndex = 0
+	childHash := childTx.TxIDChainHash()
+
+	setupServer := func(t *testing.T) (*Server, *recordingValidatorClient, *subtreepkg.Subtree) {
+		utxoStore, _, txStore, subtreeStore, blockchainClient, deferFunc := setup(t)
+		t.Cleanup(deferFunc)
+
+		recordingClient := newRecordingValidatorClient(&validator.MockValidatorClient{UtxoStore: utxoStore})
+
+		st, err := subtreepkg.NewTreeByLeafCount(1)
+		require.NoError(t, err)
+		require.NoError(t, st.AddNode(*childHash, 121, 0))
+
+		// the legacy handler branch reads the FULL subtree serialization
+		// (NewSubtreeFromReader), not just the nodes
+		subtreeBytes, err := st.Serialize()
+		require.NoError(t, err)
+
+		require.NoError(t, subtreeStore.Set(t.Context(), st.RootHash()[:], fileformat.FileTypeSubtreeToCheck, subtreeBytes))
+		require.NoError(t, subtreeStore.Set(t.Context(), st.RootHash()[:], fileformat.FileTypeSubtreeData, childTx.ExtendedBytes()))
+
+		nilConsumer := &kafka.KafkaConsumerGroup{}
+		tSettings := test.CreateBaseTestSettings(t)
+
+		server, err := New(context.Background(), ulogger.TestLogger{}, tSettings, subtreeStore, txStore, utxoStore, recordingClient, blockchainClient, nilConsumer, nilConsumer, nil)
+		require.NoError(t, err)
+
+		return server, recordingClient, st
+	}
+
+	t.Run("request hint reaches per-tx validation options", func(t *testing.T) {
+		InitPrometheusMetrics()
+
+		server, recordingClient, st := setupServer(t)
+
+		request := &subtreevalidation_api.CheckSubtreeFromBlockRequest{
+			Hash:                st.RootHash()[:],
+			BaseUrl:             "legacy",
+			BlockHeight:         blockHeight,
+			BlockHash:           make([]byte, 32),
+			PreviousBlockHash:   make([]byte, 32),
+			InBlockParentHashes: [][]byte{parentHash[:]},
+		}
+
+		response, err := server.CheckSubtreeFromBlock(context.Background(), request)
+		require.NoError(t, err)
+		require.True(t, response.Blessed)
+
+		recorded := recordingClient.recordedOptions(*childHash)
+		require.NotEmpty(t, recorded, "child transaction was not validated")
+
+		for _, opts := range recorded {
+			require.NotNil(t, opts.ParentMetadata)
+
+			parentMeta, found := opts.ParentMetadata[*parentHash]
+			require.True(t, found, "in-block parent missing from ParentMetadata")
+			require.Equal(t, blockHeight, parentMeta.BlockHeight)
+		}
+	})
+
+	t.Run("malformed parent hash is rejected as invalid argument", func(t *testing.T) {
+		InitPrometheusMetrics()
+
+		server, _, st := setupServer(t)
+
+		request := &subtreevalidation_api.CheckSubtreeFromBlockRequest{
+			Hash:                st.RootHash()[:],
+			BaseUrl:             "legacy",
+			BlockHeight:         blockHeight,
+			BlockHash:           make([]byte, 32),
+			PreviousBlockHash:   make([]byte, 32),
+			InBlockParentHashes: [][]byte{{0x01, 0x02}},
+		}
+
+		_, err := server.CheckSubtreeFromBlock(context.Background(), request)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "in-block parent hash")
 	})
 }
