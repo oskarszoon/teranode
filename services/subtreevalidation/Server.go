@@ -841,9 +841,18 @@ func (u *Server) checkSubtreeFromBlock(ctx context.Context, request *subtreevali
 			validatorOptions = append(validatorOptions, validator.WithAddTXToBlockAssembly(false))
 		}
 
-		blockAccumulator, err := buildInBlockParentAccumulator(request.InBlockParentHashes, request.BlockHeight)
-		if err != nil {
-			return false, errors.NewInvalidArgumentError("[CheckSubtree] Failed to parse in-block parent hash from request", err)
+		// NOTE: the hint supplies the parent HEIGHT only, not the parent tx
+		// body. A cross-subtree child validated before its parent's subtree
+		// therefore relies on legacy netsync pre-extending every tx
+		// (extendTransactions) before subtree validation: extend stays false
+		// in getUtxoBlockHeightAndExtendForParentTx and the hinted height is
+		// used without a UTXO-store body fetch. If that pre-extension
+		// invariant ever broke, the not-yet-stored parent's Get would fail
+		// and — unlike CheckBlockSubtrees, which defers missing parents to
+		// its Phase-3 sequential retry — this path fails the subtree hard.
+		blockAccumulator, accErr := buildInBlockParentAccumulator(request.InBlockParentHashes, request.BlockHeight)
+		if accErr != nil {
+			return false, errors.NewInvalidArgumentError("[CheckSubtree] Failed to parse in-block parent hash from request", accErr)
 		}
 
 		// Call the validateSubtreeInternalImpl method with the block-scoped

@@ -141,8 +141,15 @@ type CheckSubtreeFromBlockRequest struct {
 	// (any subtree of it). The server seeds its in-block-parent metadata from
 	// this list so children resolve those parents at the candidate block height
 	// instead of the unconfirmed-parent sentinel (which BDK rejects in consensus
-	// mode with bad-txns-unconfirmed-input-in-block). Only the legacy sync path
-	// populates this; an empty list preserves the prior behaviour exactly.
+	// mode with bad-txns-unconfirmed-input-in-block).
+	//
+	// CONSENSUS SAFETY: the server trusts this list without verification. The
+	// height it implies selects per-input script-validation era flags in BDK, so
+	// a wrong entry can change script validity and split consensus. Callers MUST
+	// populate it exclusively from locally-validated block data (the node's own
+	// parse of a PoW-checked block), never from peer-forwarded or otherwise
+	// untrusted input. Only the legacy sync path populates this; an empty list
+	// preserves the prior behaviour exactly.
 	InBlockParentHashes [][]byte `protobuf:"bytes,6,rep,name=in_block_parent_hashes,json=inBlockParentHashes,proto3" json:"in_block_parent_hashes,omitempty"`
 	unknownFields       protoimpl.UnknownFields
 	sizeCache           protoimpl.SizeCache

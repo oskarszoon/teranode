@@ -493,6 +493,13 @@ func (sm *SyncManager) checkSubtreeFromBlock(ctx context.Context, block *bsvutil
 // unconfirmed-parent sentinel and BDK rejects the child in consensus mode
 // with bad-txns-unconfirmed-input-in-block. The set is deduplicated and
 // typically tiny — only chained parents, never the whole block.
+//
+// CONSENSUS SAFETY: the subtree validator trusts these hashes without
+// verification — the implied height selects per-input script-era flags in
+// BDK. This derivation is safe because txMap is the node's OWN parse of a
+// PoW-checked block (createTxMap), so a txid's presence genuinely means
+// "transaction of this block at this height". Never populate the hint from
+// peer-forwarded or otherwise untrusted data.
 func collectInBlockParentHashes(subtree *subtreepkg.Subtree, txMap *txmap.SyncedMap[chainhash.Hash, *TxMapWrapper]) []chainhash.Hash {
 	if subtree == nil || txMap == nil {
 		return nil

@@ -81,6 +81,11 @@ type Interface interface {
 	//     are located in the same candidate block (any subtree of it). The server
 	//     resolves these parents at the candidate block height instead of the
 	//     unconfirmed-parent sentinel. Nil/empty preserves prior behaviour.
+	//     CONSENSUS SAFETY: the server trusts this list without verification —
+	//     the implied height selects per-input script-era flags in BDK, so a
+	//     wrong entry can change script validity. Populate it exclusively from
+	//     locally-validated block data (the node's own parse of a PoW-checked
+	//     block), never from peer-forwarded or untrusted input.
 	//
 	// Returns:
 	//   - error: Any error encountered during validation, nil if successful

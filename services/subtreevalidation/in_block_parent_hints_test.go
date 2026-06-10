@@ -239,6 +239,82 @@ func TestCheckSubtreeFromBlockLegacyParentHints(t *testing.T) {
 		}
 	})
 
+	// cross-subtree sequencing: parent in subtree 0, child in subtree 1,
+	// validated through two sequential handler calls exactly as legacy
+	// netsync issues them. The child's own request carries the parent hash,
+	// so resolution does not depend on which instance validated subtree 0.
+	t.Run("cross-subtree parent resolves across two sequential calls", func(t *testing.T) {
+		InitPrometheusMetrics()
+
+		utxoStore, _, txStore, subtreeStore, blockchainClient, deferFunc := setup(t)
+		t.Cleanup(deferFunc)
+
+		recordingClient := newRecordingValidatorClient(&validator.MockValidatorClient{UtxoStore: utxoStore})
+
+		// subtree 0: the parent
+		parentSubtree, err := subtreepkg.NewTreeByLeafCount(1)
+		require.NoError(t, err)
+		require.NoError(t, parentSubtree.AddNode(*parentHash, 121, 0))
+
+		parentSubtreeBytes, err := parentSubtree.Serialize()
+		require.NoError(t, err)
+		require.NoError(t, subtreeStore.Set(t.Context(), parentSubtree.RootHash()[:], fileformat.FileTypeSubtreeToCheck, parentSubtreeBytes))
+		require.NoError(t, subtreeStore.Set(t.Context(), parentSubtree.RootHash()[:], fileformat.FileTypeSubtreeData, parentTx1.ExtendedBytes()))
+
+		// subtree 1: the child spending the parent's output
+		childSubtree, err := subtreepkg.NewTreeByLeafCount(1)
+		require.NoError(t, err)
+		require.NoError(t, childSubtree.AddNode(*childHash, 121, 0))
+
+		childSubtreeBytes, err := childSubtree.Serialize()
+		require.NoError(t, err)
+		require.NoError(t, subtreeStore.Set(t.Context(), childSubtree.RootHash()[:], fileformat.FileTypeSubtreeToCheck, childSubtreeBytes))
+		require.NoError(t, subtreeStore.Set(t.Context(), childSubtree.RootHash()[:], fileformat.FileTypeSubtreeData, childTx.ExtendedBytes()))
+
+		nilConsumer := &kafka.KafkaConsumerGroup{}
+		tSettings := test.CreateBaseTestSettings(t)
+
+		server, err := New(context.Background(), ulogger.TestLogger{}, tSettings, subtreeStore, txStore, utxoStore, recordingClient, blockchainClient, nilConsumer, nilConsumer, nil)
+		require.NoError(t, err)
+
+		// call 1: parent's subtree — no in-block parents of its own
+		response, err := server.CheckSubtreeFromBlock(context.Background(), &subtreevalidation_api.CheckSubtreeFromBlockRequest{
+			Hash:              parentSubtree.RootHash()[:],
+			BaseUrl:           "legacy",
+			BlockHeight:       blockHeight,
+			BlockHash:         make([]byte, 32),
+			PreviousBlockHash: make([]byte, 32),
+		})
+		require.NoError(t, err)
+		require.True(t, response.Blessed)
+
+		// call 2: child's subtree — request carries the cross-subtree parent.
+		// The parent now exists in the UTXO store (validated by call 1) but
+		// its BlockHeights are empty: without the hint this is exactly the
+		// sentinel case.
+		response, err = server.CheckSubtreeFromBlock(context.Background(), &subtreevalidation_api.CheckSubtreeFromBlockRequest{
+			Hash:                childSubtree.RootHash()[:],
+			BaseUrl:             "legacy",
+			BlockHeight:         blockHeight,
+			BlockHash:           make([]byte, 32),
+			PreviousBlockHash:   make([]byte, 32),
+			InBlockParentHashes: [][]byte{parentHash[:]},
+		})
+		require.NoError(t, err)
+		require.True(t, response.Blessed)
+
+		recorded := recordingClient.recordedOptions(*childHash)
+		require.NotEmpty(t, recorded, "child transaction was not validated")
+
+		for _, opts := range recorded {
+			require.NotNil(t, opts.ParentMetadata)
+
+			parentMeta, found := opts.ParentMetadata[*parentHash]
+			require.True(t, found, "cross-subtree in-block parent missing from ParentMetadata")
+			require.Equal(t, blockHeight, parentMeta.BlockHeight)
+		}
+	})
+
 	t.Run("malformed parent hash is rejected as invalid argument", func(t *testing.T) {
 		InitPrometheusMetrics()
 

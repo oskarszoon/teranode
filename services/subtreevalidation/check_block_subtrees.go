@@ -1447,12 +1447,23 @@ func (a *parentMetadataAccumulator) add(h chainhash.Hash, m *validator.ParentTxM
 // BlockHeights in the UTXO store stay empty until SetMinedMulti runs after
 // block acceptance).
 //
-// The hint only asserts "this parent is in the same block" — the caller
-// (legacy netsync) has the full block, and a wrong assertion produces a block
-// that fails acceptance, never a wrongly accepted block. Stateless per
-// request: safe with multiple subtreevalidation instances behind load
-// balancing, including cross-subtree parents (the child's request carries the
-// parent hash regardless of which instance validated the parent's subtree).
+// CONSENSUS SAFETY — the hint is trusted, not verified. The supplied height
+// feeds BDK's per-input protocol-era selection (CalculateFlags →
+// InputScriptVerifyFlags): a hash wrongly asserted to be in-block would
+// validate that input under the wrong era's script flags, which can change
+// script validity and diverge from svnode. Nothing downstream re-checks the
+// assertion — the merkle root commits to transaction content, not to which
+// flags validation used. The field is safe ONLY because the sole producer
+// (legacy netsync collectInBlockParentHashes) derives it locally from the
+// node's own txMap of a PoW-checked block, where a txid's presence genuinely
+// means "transaction of this block at this height". Any future caller MUST
+// likewise populate it exclusively from locally-validated block data — never
+// from a peer-forwarded or otherwise untrusted source.
+//
+// Stateless per request: safe with multiple subtreevalidation instances
+// behind load balancing, including cross-subtree parents (the child's request
+// carries the parent hash regardless of which instance validated the parent's
+// subtree).
 //
 // Returns nil for an empty list, preserving the prior nil-accumulator
 // behaviour exactly. Returns an error when a hash is not a valid 32-byte
