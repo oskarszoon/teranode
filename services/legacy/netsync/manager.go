@@ -2815,6 +2815,15 @@ func (sm *SyncManager) processTXmetaBatchMessage(data []byte) error {
 				continue
 			}
 
+			// Never announce mined transactions. The txmeta topic also carries
+			// txs validated from already-mined blocks (block validation, legacy
+			// sync pre-warm) to populate the subtree-validation cache; relaying
+			// those as fresh mempool txs floods peers with getdata for
+			// long-mined — and often already pruned — transactions.
+			if txMeta.Mined {
+				continue
+			}
+
 			sm.txAnnounceBatcher.Put(&TxHashAndFee{
 				TxHash: hash,
 				Fee:    txMeta.Fee,

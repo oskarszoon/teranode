@@ -58,6 +58,61 @@ func inpointsVouts(ti subtree.TxInpoints, i int) []uint32 {
 	return v
 }
 
+// Test_MinedFlagRoundtrip verifies the Mined flag survives both serialization
+// formats. Mined marks txmeta published from mined-block validation paths
+// (block validation, legacy sync) so relay consumers of the txmeta Kafka topic
+// can tell them apart from fresh mempool transactions and skip announcing them.
+func Test_MinedFlagRoundtrip(t *testing.T) {
+	t.Run("MetaBytes carries Mined", func(t *testing.T) {
+		data := &Data{
+			Fee:         100,
+			SizeInBytes: 200,
+			TxInpoints:  testInpointsHash3Hash4,
+			Mined:       true,
+		}
+
+		b, err := data.MetaBytes()
+		require.NoError(t, err)
+
+		var d Data
+		require.NoError(t, NewMetaDataFromBytes(b, &d))
+		assert.True(t, d.Mined)
+		assert.False(t, d.IsCoinbase)
+	})
+
+	t.Run("MetaBytes default is not mined", func(t *testing.T) {
+		data := &Data{
+			Fee:         100,
+			SizeInBytes: 200,
+			TxInpoints:  testInpointsHash3Hash4,
+		}
+
+		b, err := data.MetaBytes()
+		require.NoError(t, err)
+
+		var d Data
+		require.NoError(t, NewMetaDataFromBytes(b, &d))
+		assert.False(t, d.Mined)
+	})
+
+	t.Run("Bytes/NewDataFromBytes carries Mined", func(t *testing.T) {
+		data := &Data{
+			Fee:         100,
+			SizeInBytes: 200,
+			TxInpoints:  testInpointsHash3Hash4,
+			Tx:          &bt.Tx{},
+			Mined:       true,
+		}
+
+		b, err := data.Bytes()
+		require.NoError(t, err)
+
+		d, err := NewDataFromBytes(b)
+		require.NoError(t, err)
+		assert.True(t, d.Mined)
+	})
+}
+
 func Test_NewDataFromBytes(t *testing.T) {
 	t.Run("test simple", func(t *testing.T) {
 		data := &Data{
