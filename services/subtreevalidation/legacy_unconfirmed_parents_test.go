@@ -111,6 +111,8 @@ func TestCheckSubtreeFromBlockLegacyUnconfirmedParents(t *testing.T) {
 		for _, opts := range recorded {
 			require.True(t, opts.UnconfirmedParentsAtCandidateHeight,
 				"legacy branch must resolve unconfirmed (same-block) parents at the candidate height — without it the sentinel reaches BDK as MEMPOOL_HEIGHT and the block is rejected with bad-txns-unconfirmed-input-in-block")
+			require.False(t, opts.AddTXToBlockAssembly,
+				"legacy branch must pair the resolution flag with assembly disabled — the validator hard-errors on the combination otherwise")
 		}
 	})
 

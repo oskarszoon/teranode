@@ -599,9 +599,23 @@ func TestValidate_ConsensusAcceptsUnconfirmedParentAtCandidateHeight(t *testing.
 		rejectedTxKafkaProducerClient: kafka.NewKafkaAsyncProducerMock(),
 	}
 
+	// Guard first (it fails before any UTXO spend, leaving the store intact
+	// for the accepting call below): the fail-open resolution must never feed
+	// block assembly. The default Options leave AddTXToBlockAssembly=true, so
+	// a caller setting only the resolution flag must hard-error instead of
+	// silently blessing a guessed-height tx into our own block template.
 	txMetaData, err := v.Validate(t.Context(), tx, 257727,
 		WithSkipPolicyChecks(true),
 		WithUnconfirmedParentsAtCandidateHeight(true),
+	)
+	require.Error(t, err)
+	require.Nil(t, txMetaData)
+	require.Contains(t, err.Error(), "requires AddTXToBlockAssembly=false")
+
+	txMetaData, err = v.Validate(t.Context(), tx, 257727,
+		WithSkipPolicyChecks(true),
+		WithUnconfirmedParentsAtCandidateHeight(true),
+		WithAddTXToBlockAssembly(false),
 	)
 	require.NoError(t, err,
 		"with UnconfirmedParentsAtCandidateHeight, consensus-mode validation must accept a child of an unconfirmed same-block parent")

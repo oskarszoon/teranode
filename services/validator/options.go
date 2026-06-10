@@ -114,20 +114,34 @@ type Options struct {
 	// selection and the BIP68/MTP lookups with the height the parent will be
 	// mined at.
 	//
+	// Why "unconfirmed implies same-block" holds on the legacy path: the
+	// sentinel fires for ANY empty-BlockHeights parent, which in general also
+	// covers a parent mined in block N−1 whose asynchronous SetMinedMulti has
+	// not landed yet (it would wrongly resolve to N instead of N−1). Legacy
+	// netsync closes that window before validation starts:
+	// waitForPreviousBlockMined (services/legacy/netsync/handle_block.go)
+	// blocks until the previous block's mined-set completes, and since every
+	// block waits on its parent, all ancestors' BlockHeights are recorded by
+	// induction. Callers on other paths do NOT automatically get this
+	// invariant and must establish it themselves before setting the flag.
+	//
 	// CONSENSUS SAFETY — fail-open, gate carefully. With this set, a parent
 	// that is genuinely unconfirmed-and-NOT-in-the-block (a mempool floater)
 	// is no longer rejected at tx level; the membership backstop is block
-	// validation's checkParentsExistOnChain, which rejects the block before
-	// acceptance. Setting this flag is therefore only sound when ALL of:
+	// validation's checkParentsExistOnChain (model/Block.go), which fails the
+	// block in validOrderAndBlessed before acceptance. Setting this flag is
+	// therefore only sound when ALL of:
 	//   - the tx comes from a locally-held, PoW-checked block (not a peer
 	//     announcement), AND
 	//   - the full block-level parent-membership check will run before the
 	//     block is accepted, AND
-	//   - mempool/block-assembly contamination vectors are absent or
-	//     acceptable (legacy sync runs with block assembly disabled).
+	//   - the result cannot feed block assembly — enforced, not advisory:
+	//     validateTransaction errors when this flag is combined with
+	//     AddTXToBlockAssembly=true.
 	// The sole intended setter is the legacy branch of
-	// subtreevalidation.checkSubtreeFromBlock. MUST NOT be set on
-	// peer-facing or mempool-admission paths.
+	// subtreevalidation.checkSubtreeFromBlock (which always pairs it with
+	// AddTXToBlockAssembly=false). MUST NOT be set on peer-facing or
+	// mempool-admission paths.
 	UnconfirmedParentsAtCandidateHeight bool
 }
 

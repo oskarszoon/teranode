@@ -1575,6 +1575,17 @@ func (v *Validator) validateTransaction(ctx context.Context, tx *bt.Tx, blockHei
 	// contract; the floater backstop is block validation's
 	// checkParentsExistOnChain.
 	if validationOptions.UnconfirmedParentsAtCandidateHeight {
+		// Guard, enforced here so it covers both the in-process validator and
+		// the gRPC/HTTP server (which reconstructs Options and lands in this
+		// same function): the fail-open resolution must never feed block
+		// assembly. A caller combining the flag with assembly enabled could
+		// bless a consensus-mode tx under a guessed height straight into our
+		// own block template. Fail closed and loudly — silently ignoring the
+		// flag would reintroduce the legacy-sync wedge with no signal.
+		if validationOptions.AddTXToBlockAssembly {
+			return errors.NewProcessingError("[validateTransaction][%s] UnconfirmedParentsAtCandidateHeight requires AddTXToBlockAssembly=false", tx.TxIDChainHash().String())
+		}
+
 		// consensus=false selects the policy-style blockHeight substitution
 		utxoHeights = substituteUnconfirmedHeights(utxoHeights, blockHeight, false)
 	}

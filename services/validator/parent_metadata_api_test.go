@@ -353,6 +353,8 @@ func TestUnconfirmedParentsAtCandidateHeight_WireRoundTrip(t *testing.T) {
 		opts := ProcessOptions()
 
 		req := buildValidateTxRequest([]byte{1, 2, 3}, 1730003, opts)
+		require.Nil(t, req.UnconfirmedParentsAtCandidateHeight,
+			"unset flag must not be put on the wire at all")
 
 		bytesOut, err := proto.Marshal(req)
 		require.NoError(t, err)

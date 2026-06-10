@@ -838,27 +838,27 @@ func (u *Server) checkSubtreeFromBlock(ctx context.Context, request *subtreevali
 		// CONSENSUS SAFETY: fail-open at tx level — a parent that is
 		// unconfirmed and NOT in the block (mempool floater) is no longer
 		// rejected here; the membership backstop is block validation's
-		// checkParentsExistOnChain, which legacy netsync runs on every block
-		// before acceptance. Acceptable on this path only: the block is
-		// locally held and PoW-checked, and block assembly is disabled during
-		// legacy sync (no template contamination). MUST NOT be set on the
-		// peer-facing branch below.
+		// checkParentsExistOnChain (fails the block in validOrderAndBlessed),
+		// which legacy netsync runs on every block before acceptance.
+		// Acceptable on this path only: the block is locally held and
+		// PoW-checked, and block assembly never sees the result. MUST NOT be
+		// set on the peer-facing branch below.
+		//
+		// WithAddTXToBlockAssembly(false) is unconditional here, replacing the
+		// previous FSM-conditional append (LEGACYSYNCING/CATCHINGBLOCKS): the
+		// validator hard-errors when UnconfirmedParentsAtCandidateHeight is
+		// combined with assembly enabled, and this branch's only caller is
+		// legacy netsync, which only runs during legacy sync — the FSM check
+		// was a per-subtree gRPC round-trip to derive a value that is always
+		// false here. Mined-block txs do not belong in our own template on
+		// any FSM state this branch can run under.
 		validatorOptions := []validator.Option{
 			validator.WithSkipPolicyChecks(true),
 			validator.WithCreateConflicting(true),
 			validator.WithIgnoreLocked(true),
 			validator.WithCandidateParentMedianTime(candidateParentMedianTime),
 			validator.WithUnconfirmedParentsAtCandidateHeight(true),
-		}
-
-		currentState, err := u.blockchainClient.GetFSMCurrentState(ctx)
-		if err != nil {
-			return false, errors.NewProcessingError("[CheckSubtree] Failed to get FSM current state", err)
-		}
-
-		// During legacy syncing or catching up, disable adding transactions to block assembly
-		if *currentState == blockchain.FSMStateLEGACYSYNCING || *currentState == blockchain.FSMStateCATCHINGBLOCKS {
-			validatorOptions = append(validatorOptions, validator.WithAddTXToBlockAssembly(false))
+			validator.WithAddTXToBlockAssembly(false),
 		}
 
 		// Call the validateSubtreeInternal method
