@@ -1361,12 +1361,18 @@ func (sm *SyncManager) handleBlockMsg(bmsg *blockQueueMsg) error {
 	// promote block to the block validation via kafka (p2p -> blockvalidation message),
 	// without calling HandleBlockDirect. Such that it doesn't interfere with the operation of block validation.
 	if err = sm.HandleBlockDirect(sm.ctx, bmsg.peer, bmsg.blockHash, bmsg.block); err != nil {
-		if (legacySyncMode || catchingBlocks) && errors.Is(err, errors.ErrBlockNotFound) {
-			// previous block not found? Probably a new block message from our syncPeer while we are still syncing
-			sm.logger.Errorf("Failed to process new block in legacy mode %v: %v", bmsg.blockHash, err)
-			return nil
-		} else if errors.Is(err, errors.ErrBlockNotFound) {
-			// We don't have the parent of this block/header, so we'll request it.
+		if errors.Is(err, errors.ErrBlockNotFound) {
+			// We don't have the parent of this block. During legacy sync /
+			// catching blocks this is typically the peer announcing its tip
+			// while we are still behind — and in the legacy sync protocol that
+			// orphan tip doubles as the batch-continuation signal: the peer
+			// pushes its tip inv after delivering a getblocks batch and waits
+			// for the next getblocks before sending more. Swallowing the
+			// orphan here stalls the sync until the stall detector rotates
+			// the peer, so always answer with a getblocks from our best
+			// block. PushGetBlocksMsg filters duplicate requests and the peer
+			// only invs blocks past the locator fork point, so a redundant
+			// request costs one inv message at most.
 			sm.logger.Infof("Block %v has missing parent %v, requesting missing blocks",
 				bmsg.blockHash, bmsg.block.Header.PrevBlock)
 

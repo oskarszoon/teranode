@@ -16,6 +16,7 @@ import (
 	txmap "github.com/bsv-blockchain/go-tx-map"
 	"github.com/bsv-blockchain/go-wire"
 	"github.com/bsv-blockchain/teranode/errors"
+	"github.com/bsv-blockchain/teranode/model"
 	"github.com/bsv-blockchain/teranode/services/blockassembly"
 	blockchain2 "github.com/bsv-blockchain/teranode/services/blockchain"
 	"github.com/bsv-blockchain/teranode/services/blockvalidation"
@@ -28,6 +29,7 @@ import (
 	blockchainstore "github.com/bsv-blockchain/teranode/stores/blockchain"
 	"github.com/bsv-blockchain/teranode/stores/utxo/sql"
 	"github.com/bsv-blockchain/teranode/ulogger"
+	"github.com/bsv-blockchain/teranode/util/expiringmap"
 	"github.com/bsv-blockchain/teranode/util/kafka"
 	kafkamessage "github.com/bsv-blockchain/teranode/util/kafka/kafka_message"
 	"github.com/bsv-blockchain/teranode/util/test"
@@ -921,6 +923,71 @@ func TestHandleCheckSyncPeer_HeadersFirstMode(t *testing.T) {
 		// (which panics in this minimal SyncManager).
 		assert.Panics(t, func() { sm.handleCheckSyncPeer() })
 	})
+}
+
+// TestHandleBlockMsg_OrphanDuringCatchup verifies a block with an unknown
+// parent arriving during legacy sync / catching blocks triggers a getblocks
+// continuation request instead of being silently dropped. In the legacy sync
+// protocol the peer announces its tip after delivering a getblocks batch; that
+// orphan tip is the only signal to request the next batch, so swallowing it
+// stalls the sync until the stall detector rotates the peer.
+func TestHandleBlockMsg_OrphanDuringCatchup(t *testing.T) {
+	prevHash := chainhash.Hash{0x01}
+
+	msgBlock := wire.NewMsgBlock(wire.NewBlockHeader(1, &prevHash, &chainhash.Hash{}, 0, 0))
+	blockHash := msgBlock.Header.BlockHash()
+
+	catchingBlocks := blockchain2.FSMStateCATCHINGBLOCKS
+
+	bestHeader := &model.BlockHeader{
+		HashPrevBlock:  &chainhash.Hash{},
+		HashMerkleRoot: &chainhash.Hash{},
+	}
+
+	blockchainClient := &blockchain2.Mock{}
+	blockchainClient.On("GetFSMCurrentState", mock.Anything).Return(&catchingBlocks, nil)
+	blockchainClient.On("GetBlockExists", mock.Anything, mock.Anything).Return(false, nil)
+	// Parent header lookup fails — the block is an orphan to us.
+	blockchainClient.On("GetBlockHeader", mock.Anything, mock.Anything).Return(nil, nil, errors.NewBlockNotFoundError("not found"))
+	blockchainClient.On("GetBestBlockHeader", mock.Anything).Return(bestHeader, &model.BlockHeaderMeta{Height: 100}, nil)
+	blockchainClient.On("GetBlockLocator", mock.Anything, mock.Anything, mock.Anything).Return([]*chainhash.Hash{bestHeader.Hash()}, nil)
+
+	// Real (unconnected) peer: PushGetBlocksMsg needs a logger, and
+	// QueueMessage is a no-op on a disconnected peer.
+	p := peer.NewInboundPeer(ulogger.TestLogger{}, test.CreateBaseTestSettings(t), &peer.Config{})
+
+	state := &peerSyncState{
+		requestedTxns:   expiringmap.New[chainhash.Hash, struct{}](10 * time.Second),
+		requestedBlocks: expiringmap.New[chainhash.Hash, struct{}](time.Minute),
+	}
+	defer state.requestedTxns.Stop()
+	defer state.requestedBlocks.Stop()
+	state.requestedBlocks.Set(blockHash, struct{}{})
+
+	sm := &SyncManager{
+		ctx:              context.Background(),
+		logger:           ulogger.TestLogger{},
+		blockchainClient: blockchainClient,
+		peerStates:       txmap.NewSyncedMap[*peer.Peer, *peerSyncState](),
+		requestedBlocks:  expiringmap.New[chainhash.Hash, struct{}](time.Minute),
+	}
+	defer sm.requestedBlocks.Stop()
+	sm.peerStates.Set(p, state)
+	sm.requestedBlocks.Set(blockHash, struct{}{})
+
+	err := sm.handleBlockMsg(&blockQueueMsg{
+		block:       msgBlock,
+		blockHash:   blockHash,
+		blockHeight: 101,
+		peer:        p,
+	})
+
+	// The orphan is dropped without error or peer disconnect...
+	require.NoError(t, err)
+
+	// ...but it must trigger the batch-continuation request: a block locator
+	// from our best block, pushed to the peer as getblocks.
+	blockchainClient.AssertCalled(t, "GetBlockLocator", mock.Anything, mock.Anything, mock.Anything)
 }
 
 // TestHandleCheckSyncPeer_LocalBacklog verifies the stall detector does not
