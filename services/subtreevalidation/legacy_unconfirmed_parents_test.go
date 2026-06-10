@@ -133,18 +133,19 @@ func TestCheckSubtreeFromBlockLegacyUnconfirmedParents(t *testing.T) {
 			require.True(t, opts.UnconfirmedParentsAtCandidateHeight,
 				"legacy branch must resolve unconfirmed (same-block) parents at the candidate height — without it the sentinel reaches BDK as MEMPOOL_HEIGHT and the block is rejected with bad-txns-unconfirmed-input-in-block")
 			require.False(t, opts.AddTXToBlockAssembly,
-				"legacy branch must pair the resolution flag with assembly disabled — the validator hard-errors on the combination otherwise")
+				"during legacy sync, bulk-history txs must not feed block assembly (upstream behaviour)")
 		}
 	})
 
-	t.Run("RUNNING state preserves pre-existing behaviour: no flag, assembly enabled", func(t *testing.T) {
+	t.Run("RUNNING state: flag stays on, assembly stays enabled", func(t *testing.T) {
 		InitPrometheusMetrics()
 
 		// Tip blocks arriving over the legacy bridge while RUNNING also reach
-		// this branch (handleBlockMsg calls HandleBlockDirect
-		// unconditionally). There the fail-open resolution must NOT activate
-		// and blessed txs must still go to block assembly (reorg resilience)
-		// — exactly the pre-change behaviour.
+		// this branch — a restarted node has its FSM restored to RUNNING and
+		// catches up over the legacy bridge (this wedged testnet at 1740437
+		// when the flag was FSM-gated). The resolution flag must be active in
+		// EVERY FSM state, while blessed txs keep feeding block assembly
+		// (reorg resilience — upstream behaviour).
 		childSubtree := singleNodeSubtree(t, childHash)
 		server, recordingClient := newServerWithFSMState(t, blockchain.FSMStateRUNNING, subtreeFixture{childSubtree, childTx.ExtendedBytes()})
 
@@ -156,10 +157,10 @@ func TestCheckSubtreeFromBlockLegacyUnconfirmedParents(t *testing.T) {
 		require.NotEmpty(t, recorded, "child transaction was not validated")
 
 		for _, opts := range recorded {
-			require.False(t, opts.UnconfirmedParentsAtCandidateHeight,
-				"fail-open resolution must not activate for legacy-bridge blocks in RUNNING state")
+			require.True(t, opts.UnconfirmedParentsAtCandidateHeight,
+				"resolution flag must be active in RUNNING too — FSM-gating it wedged testnet catch-up at 1740437")
 			require.True(t, opts.AddTXToBlockAssembly,
-				"RUNNING-state legacy blocks must keep feeding block assembly (reorg resilience) — pre-change behaviour")
+				"RUNNING-state legacy blocks must keep feeding block assembly (reorg resilience) — upstream behaviour")
 		}
 	})
 

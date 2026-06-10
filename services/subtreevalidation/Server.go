@@ -824,11 +824,49 @@ func (u *Server) checkSubtreeFromBlock(ctx context.Context, request *subtreevali
 		// populated above from the request's PreviousBlockHash so two
 		// peer-priority handlers processing the same subtree cannot diverge
 		// on tip-MTP snapshots.
+		// WithUnconfirmedParentsAtCandidateHeight is set UNCONDITIONALLY for
+		// the legacy branch — deliberately NOT gated on FSM state. A legacy
+		// block tx spending a same-block parent finds that parent in the
+		// UTXO store with empty BlockHeights (SetMinedMulti only runs after
+		// block acceptance), and the consensus-mode sentinel would make BDK
+		// reject the legitimate block with bad-txns-unconfirmed-input-in-block.
+		// This wedged testnet sync twice: at 1730003 during LEGACYSYNCING
+		// (the first post-checkpoint block with an in-block tx chain), and at
+		// 1740437 during RUNNING — a node restarts with its FSM restored to
+		// RUNNING and catches up a few blocks over the legacy bridge
+		// (handleBlockMsg → HandleBlockDirect runs in every FSM state), so
+		// an FSM gate here re-wedges exactly the blocks it was meant to fix.
+		// On a node whose only peers are legacy nodes there is no
+		// CheckBlockSubtrees fallback path either.
+		//
+		// The candidate height IS the parent's true height on this branch:
+		// netsync's waitForPreviousBlockMined guarantees all prior-block
+		// parents are mined-set before validation starts, so an unconfirmed
+		// parent is a same-block parent. Per-request, no shared state — safe
+		// with multiple subtreevalidation instances.
+		//
+		// CONSENSUS SAFETY: fail-open at tx level — a parent that is
+		// unconfirmed and NOT in the block (floater) is no longer rejected
+		// here; the membership backstop is block validation's
+		// checkParentsExistOnChain (BlockIncompleteError in
+		// validOrderAndBlessed — retry semantics, the block is never
+		// accepted while the floater stays unmined), which legacy netsync
+		// runs on every block before acceptance. MUST NOT be set on the
+		// peer-facing branch below.
+		//
+		// Block assembly interaction (why the flag is safe with assembly
+		// enabled in RUNNING): a floater child blessed at the candidate
+		// height and added to assembly is the same transaction policy-mode
+		// admission would have accepted into assembly anyway (policy
+		// substitutes tip+1 for unconfirmed parents — equal to the candidate
+		// height at the tip, and era flags cannot differ post-Genesis).
+		// Accepted-block txs are mined-removed from assembly as always.
 		validatorOptions := []validator.Option{
 			validator.WithSkipPolicyChecks(true),
 			validator.WithCreateConflicting(true),
 			validator.WithIgnoreLocked(true),
 			validator.WithCandidateParentMedianTime(candidateParentMedianTime),
+			validator.WithUnconfirmedParentsAtCandidateHeight(true),
 		}
 
 		currentState, err := u.blockchainClient.GetFSMCurrentState(ctx)
@@ -836,46 +874,13 @@ func (u *Server) checkSubtreeFromBlock(ctx context.Context, request *subtreevali
 			return false, errors.NewProcessingError("[CheckSubtree] Failed to get FSM current state", err)
 		}
 
-		// During legacy syncing or catching up, two options are paired:
-		//
-		// WithUnconfirmedParentsAtCandidateHeight: a legacy block tx spending
-		// a same-block parent finds that parent in the UTXO store with empty
-		// BlockHeights (SetMinedMulti only runs after block acceptance), and
-		// the consensus-mode sentinel would make BDK reject the legitimate
-		// block with bad-txns-unconfirmed-input-in-block — this wedged
-		// testnet sync at 1730003, the first post-checkpoint block with an
-		// in-block tx chain. During legacy sync the candidate height IS the
-		// parent's true height (netsync's waitForPreviousBlockMined
-		// guarantees all prior-block parents are mined-set), so resolving
-		// the sentinel to it is exact, including for cross-subtree parents
-		// (no shared state needed — safe with multiple subtreevalidation
-		// instances). CONSENSUS SAFETY: fail-open at tx level — the floater
-		// backstop is block validation's checkParentsExistOnChain
-		// (BlockIncompleteError in validOrderAndBlessed — retry semantics,
-		// the block is never accepted while the floater stays unmined),
-		// which legacy netsync runs on every block before acceptance. MUST
-		// NOT be set on the peer-facing branch below.
-		//
-		// WithAddTXToBlockAssembly(false): mined-block txs validated during
-		// sync/catchup do not belong in our own template; also required by
-		// the validator, which hard-errors when the resolution flag is
-		// combined with assembly enabled.
-		//
-		// NOT in RUNNING state: this branch is also reachable for tip blocks
-		// arriving over the legacy bridge while RUNNING (handleBlockMsg
-		// calls HandleBlockDirect unconditionally). There the pre-existing
-		// behaviour is preserved exactly: blessed txs go to block assembly
-		// (reorg resilience — they must survive in the mempool if the block
-		// loses), and the sentinel stays fail-closed. An in-block tx chain
-		// in such a block still fails this branch — same as before this
-		// change — and the authoritative tip path is blockvalidation's
-		// CheckBlockSubtrees, which resolves in-block parents via its
-		// accumulator.
+		// During legacy syncing or catching up, disable adding transactions
+		// to block assembly (upstream behaviour, unchanged): bulk-history
+		// txs do not belong in our template. In RUNNING, assembly stays
+		// enabled so txs from a legacy-bridge tip block survive in the
+		// mempool if the block loses a reorg — also upstream behaviour.
 		if *currentState == blockchain.FSMStateLEGACYSYNCING || *currentState == blockchain.FSMStateCATCHINGBLOCKS {
-			validatorOptions = append(validatorOptions,
-				validator.WithUnconfirmedParentsAtCandidateHeight(true),
-				validator.WithAddTXToBlockAssembly(false),
-			)
+			validatorOptions = append(validatorOptions, validator.WithAddTXToBlockAssembly(false))
 		}
 
 		// Call the validateSubtreeInternal method

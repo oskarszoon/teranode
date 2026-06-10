@@ -138,18 +138,25 @@ type Options struct {
 	// admission of the same txs would produce (policy mode substitutes
 	// tip+1 ≈ candidate height) — cleaned up by the same unmined-tx
 	// machinery, no new cleanup obligations. Setting this flag is
-	// therefore only sound when ALL of:
+	// therefore only sound when BOTH:
 	//   - the tx comes from a locally-held, PoW-checked block (not a peer
 	//     announcement), AND
 	//   - the full block-level parent-membership check will run before the
-	//     block is accepted, AND
-	//   - the result cannot feed block assembly — enforced, not advisory:
-	//     validateTransaction errors when this flag is combined with
-	//     AddTXToBlockAssembly=true.
+	//     block is accepted.
+	//
+	// Block assembly: the flag is compatible with AddTXToBlockAssembly=true
+	// (an earlier revision hard-errored on the combination; that broke
+	// RUNNING-state legacy catch-up, where assembly must stay enabled for
+	// reorg resilience). A floater child blessed at the candidate height
+	// and added to assembly is the same tx policy-mode admission would have
+	// accepted into assembly — policy substitutes tip+1 for unconfirmed
+	// parents, equal to the candidate height at the tip, and era flags
+	// cannot differ post-Genesis. Accepted-block txs are mined-removed from
+	// assembly as always.
+	//
 	// The sole intended setter is the legacy branch of
-	// subtreevalidation.checkSubtreeFromBlock (which always pairs it with
-	// AddTXToBlockAssembly=false). MUST NOT be set on peer-facing or
-	// mempool-admission paths.
+	// subtreevalidation.checkSubtreeFromBlock, in every FSM state. MUST NOT
+	// be set on peer-facing or mempool-admission paths.
 	UnconfirmedParentsAtCandidateHeight bool
 }
 

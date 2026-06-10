@@ -1574,18 +1574,17 @@ func (v *Validator) validateTransaction(ctx context.Context, tx *bt.Tx, blockHei
 	// Options.UnconfirmedParentsAtCandidateHeight for the consensus-safety
 	// contract; the floater backstop is block validation's
 	// checkParentsExistOnChain.
+	// No AddTXToBlockAssembly guard here, deliberately (an earlier revision
+	// hard-errored on flag+assembly): the legacy branch must set this flag in
+	// EVERY FSM state — a restarted node with FSM restored to RUNNING catches
+	// up over the legacy bridge and wedges without it — while assembly stays
+	// enabled in RUNNING for reorg resilience. The combination is safe: a
+	// floater child blessed at the candidate height and added to assembly is
+	// the same tx policy-mode admission would have accepted into assembly
+	// (policy substitutes tip+1 for unconfirmed parents — equal to the
+	// candidate height at the tip; era flags cannot differ post-Genesis), and
+	// accepted-block txs are mined-removed from assembly as always.
 	if validationOptions.UnconfirmedParentsAtCandidateHeight {
-		// Guard, enforced here so it covers both the in-process validator and
-		// the gRPC/HTTP server (which reconstructs Options and lands in this
-		// same function): the fail-open resolution must never feed block
-		// assembly. A caller combining the flag with assembly enabled could
-		// bless a consensus-mode tx under a guessed height straight into our
-		// own block template. Fail closed and loudly — silently ignoring the
-		// flag would reintroduce the legacy-sync wedge with no signal.
-		if validationOptions.AddTXToBlockAssembly {
-			return errors.NewProcessingError("[validateTransaction][%s] UnconfirmedParentsAtCandidateHeight requires AddTXToBlockAssembly=false", tx.TxIDChainHash().String())
-		}
-
 		utxoHeights = resolveUnconfirmedParentsAtCandidateHeight(utxoHeights, blockHeight)
 	}
 
