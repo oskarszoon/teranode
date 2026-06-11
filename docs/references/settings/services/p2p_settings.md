@@ -15,7 +15,7 @@
 | AdvertiseAddresses | []string | [] | p2p_advertise_addresses | Address advertisement to peers |
 | ListenMode | string | "full" | listen_mode | Node operation mode ("full" or "listen_only") |
 | PeerID | string | "" | p2p_peer_id | Peer network identifier |
-| Port | int | 9906 (Code default; settings.conf ships with 9905 via `P2P_PORT`) | p2p_port | Default P2P communication port |
+| Port | int | 9905 | p2p_port | Default P2P communication port (multiaddrs in ListenAddresses/AdvertiseAddresses are the source of truth) |
 | PrivateKey | string | "" | p2p_private_key | **CRITICAL** - Cryptographic peer identity |
 | BlockTopic | string | "" | p2p_block_topic | Block propagation topic |
 | NodeStatusTopic | string | "" | p2p_node_status_topic | Node status communication topic |
