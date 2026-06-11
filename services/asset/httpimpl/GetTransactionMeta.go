@@ -121,20 +121,17 @@ func (h *HTTP) GetTransactionMeta(mode ReadMode) func(c echo.Context) error {
 		// Note: We assume BlockIDs, SubtreeIdxs, and BlockHeights have the same length and correspond to each other
 		h.logger.Debugf("Transaction %s has BlockIDs: %v, SubtreeIdxs: %v", hash.String(), meta.BlockIDs, meta.SubtreeIdxs)
 
+		// The three arrays are parallel: index i across BlockIDs, SubtreeIdxs and
+		// BlockHeights describes one (block, subtree) placement. A length mismatch
+		// means the stored tx meta is corrupt — fail loudly rather than serving a
+		// silently-truncated response built from misaligned data. (Matching the
+		// guard in merkleproof.ConstructMerkleProof.)
 		numEntries := len(meta.BlockIDs)
-		if len(meta.SubtreeIdxs) != numEntries {
-			h.logger.Warnf("Mismatch in array lengths: %d BlockIDs, %d SubtreeIdxs", numEntries, len(meta.SubtreeIdxs))
-			// Use the minimum length to avoid index out of bounds
-			if len(meta.SubtreeIdxs) < numEntries {
-				numEntries = len(meta.SubtreeIdxs)
-			}
-		}
-		if len(meta.BlockHeights) != numEntries {
-			h.logger.Warnf("Mismatch in array lengths: %d BlockIDs, %d BlockHeights", len(meta.BlockIDs), len(meta.BlockHeights))
-			// Use the minimum length to avoid index out of bounds
-			if len(meta.BlockHeights) < numEntries {
-				numEntries = len(meta.BlockHeights)
-			}
+		if len(meta.SubtreeIdxs) != numEntries || len(meta.BlockHeights) != numEntries {
+			h.logger.Errorf("Corrupt tx meta for %s: %d BlockIDs, %d SubtreeIdxs, %d BlockHeights",
+				hash.String(), numEntries, len(meta.SubtreeIdxs), len(meta.BlockHeights))
+			return echo.NewHTTPError(http.StatusInternalServerError,
+				errors.NewProcessingError("malformed tx meta: parallel arrays length mismatch").Error())
 		}
 
 		blockHashes := make([]string, numEntries)

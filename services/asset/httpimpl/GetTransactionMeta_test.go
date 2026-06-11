@@ -387,4 +387,34 @@ func TestGetTransactionMeta(t *testing.T) {
 		require.NoError(t, json.Unmarshal(responseRecorder.Body.Bytes(), &response))
 		assert.Equal(t, float64(-1), response["mainChainIndex"])
 	})
+
+	t.Run("Corrupt tx meta — parallel array mismatch returns 500", func(t *testing.T) {
+		httpServer, mockRepo, echoContext, _ := GetMockHTTP(t, nil)
+
+		corruptMeta := &meta.Data{
+			Tx:           nil,
+			TxInpoints:   transactionMeta.TxInpoints,
+			BlockIDs:     []uint32{1, 2, 3},
+			BlockHeights: []uint32{100}, // length mismatch — corrupt record
+			SubtreeIdxs:  []int{0, 0, 0},
+			Fee:          transactionMeta.Fee,
+			SizeInBytes:  transactionMeta.SizeInBytes,
+			IsCoinbase:   false,
+			LockTime:     transactionMeta.LockTime,
+		}
+		mockRepo.On("GetTxMeta", mock.Anything, mock.Anything).Return(corruptMeta, nil)
+
+		echoContext.SetPath("/tx/meta/:hash")
+		echoContext.SetParamNames("hash")
+		echoContext.SetParamValues("9d45ad79ad3c6baecae872c0e35022d60c3bbbd024ccce06690321ece15ea995")
+
+		err := httpServer.GetTransactionMeta(JSON)(echoContext)
+		echoErr := &echo.HTTPError{}
+		require.True(t, errors.As(err, &echoErr))
+		assert.Equal(t, http.StatusInternalServerError, echoErr.Code)
+		assert.Contains(t, echoErr.Message.(string), "parallel arrays length mismatch")
+
+		// No partial data calls: the guard must fire before any per-block work.
+		mockRepo.AssertNotCalled(t, "GetBlockByID", mock.Anything)
+	})
 }
