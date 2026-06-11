@@ -863,6 +863,7 @@ func (u *Server) checkSubtreeFromBlock(ctx context.Context, request *subtreevali
 		// Accepted-block txs are mined-removed from assembly as always.
 		validatorOptions := []validator.Option{
 			validator.WithSkipPolicyChecks(true),
+			validator.WithInBlock(true),
 			validator.WithCreateConflicting(true),
 			validator.WithIgnoreLocked(true),
 			validator.WithCandidateParentMedianTime(candidateParentMedianTime),
@@ -918,6 +919,7 @@ func (u *Server) checkSubtreeFromBlock(ctx context.Context, request *subtreevali
 		request.BlockHeight,
 		blockIds,
 		validator.WithSkipPolicyChecks(true),
+		validator.WithInBlock(true),
 		validator.WithCreateConflicting(true),
 		validator.WithIgnoreLocked(true),
 		validator.WithCandidateParentMedianTime(candidateParentMedianTime),
