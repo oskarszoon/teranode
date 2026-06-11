@@ -5,12 +5,15 @@
 package netsync
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"net/url"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/bsv-blockchain/go-batcher/v2"
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	"github.com/bsv-blockchain/go-chaincfg"
 	txmap "github.com/bsv-blockchain/go-tx-map"
@@ -27,6 +30,8 @@ import (
 	"github.com/bsv-blockchain/teranode/services/validator"
 	blob_memory "github.com/bsv-blockchain/teranode/stores/blob/memory"
 	blockchainstore "github.com/bsv-blockchain/teranode/stores/blockchain"
+	"github.com/bsv-blockchain/teranode/stores/txmetacache"
+	"github.com/bsv-blockchain/teranode/stores/utxo/meta"
 	"github.com/bsv-blockchain/teranode/stores/utxo/sql"
 	"github.com/bsv-blockchain/teranode/ulogger"
 	"github.com/bsv-blockchain/teranode/util/expiringmap"
@@ -1042,6 +1047,71 @@ func TestHandleCheckSyncPeer_LocalBacklog(t *testing.T) {
 		// stall, so the rotation path runs (and panics in this minimal setup).
 		assert.Panics(t, func() { sm.handleCheckSyncPeer() })
 	})
+}
+
+// TestProcessTXmetaBatchMessage_SkipsInBlockTx verifies the tx announce path
+// drops txmeta entries flagged InBlock. The txmeta Kafka topic carries every
+// validated transaction — including those that arrived as part of a block or
+// announced subtree (block validation, subtree validation, legacy sync, which
+// feed the subtree-validation cache) — and announcing those as fresh mempool
+// txs floods peers with getdata for transactions that are long mined and
+// often already pruned.
+func TestProcessTXmetaBatchMessage_SkipsInBlockTx(t *testing.T) {
+	inBlockHash := chainhash.Hash{0xAA}
+	mempoolHash := chainhash.Hash{0xBB}
+
+	inBlockBytes, err := (&meta.Data{Fee: 1, SizeInBytes: 100, InBlock: true}).MetaBytes()
+	require.NoError(t, err)
+
+	mempoolBytes, err := (&meta.Data{Fee: 2, SizeInBytes: 200}).MetaBytes()
+	require.NoError(t, err)
+
+	// Build a v1 wire message with both entries.
+	buf := new(bytes.Buffer)
+	require.NoError(t, binary.Write(buf, binary.LittleEndian, uint32(2)))
+
+	for _, entry := range []struct {
+		hash    chainhash.Hash
+		content []byte
+	}{
+		{inBlockHash, inBlockBytes},
+		{mempoolHash, mempoolBytes},
+	} {
+		buf.Write(entry.hash[:])
+		buf.WriteByte(txmetacache.WireActionADD)
+		require.NoError(t, binary.Write(buf, binary.LittleEndian, uint32(len(entry.content))))
+		buf.Write(entry.content)
+	}
+
+	var (
+		mu        sync.Mutex
+		announced []chainhash.Hash
+	)
+
+	sm := &SyncManager{logger: ulogger.TestLogger{}}
+	sm.txAnnounceBatcher = batcher.NewWithDeduplicationAndPool[TxHashAndFee](10, 10*time.Millisecond, func(batch []*TxHashAndFee) {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, item := range batch {
+			announced = append(announced, item.TxHash)
+		}
+	}, true)
+
+	require.NoError(t, sm.processTXmetaBatchMessage(buf.Bytes()))
+
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(announced) > 0
+	}, 2*time.Second, 10*time.Millisecond, "expected the mempool tx to be announced")
+
+	// Give the batcher one more flush window so a wrongly-announced in-block
+	// tx would have surfaced.
+	time.Sleep(50 * time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, []chainhash.Hash{mempoolHash}, announced, "only the mempool tx must be announced")
 }
 
 func TestHasHealthyDownloadThroughput(t *testing.T) {
