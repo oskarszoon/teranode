@@ -1571,6 +1571,30 @@ func (v *Validator) validateTransaction(ctx context.Context, tx *bt.Tx, blockHei
 		}
 	}
 
+	// Legacy block-sync resolution: substitute the unconfirmedParentHeight
+	// sentinel with the candidate block height BEFORE any consumer sees it —
+	// both the BDK call in phase 1 (per-input era-flag selection, where the
+	// sentinel would otherwise translate to MEMPOOL_HEIGHT and reject with
+	// bad-txns-unconfirmed-input-in-block) and the BIP68/MTP lookups in
+	// phase 2. On the legacy path an unconfirmed parent IS a same-block
+	// parent, so the candidate height is its true height. See
+	// Options.UnconfirmedParentsAtCandidateHeight for the consensus-safety
+	// contract; the floater backstop is block validation's
+	// checkParentsExistOnChain.
+	// No AddTXToBlockAssembly guard here, deliberately (an earlier revision
+	// hard-errored on flag+assembly): the legacy branch must set this flag in
+	// EVERY FSM state — a restarted node with FSM restored to RUNNING catches
+	// up over the legacy bridge and wedges without it — while assembly stays
+	// enabled in RUNNING for reorg resilience. The combination is safe: a
+	// floater child blessed at the candidate height and added to assembly is
+	// the same tx policy-mode admission would have accepted into assembly
+	// (policy substitutes tip+1 for unconfirmed parents — equal to the
+	// candidate height at the tip; era flags cannot differ post-Genesis), and
+	// accepted-block txs are mined-removed from assembly as always.
+	if validationOptions.UnconfirmedParentsAtCandidateHeight {
+		utxoHeights = resolveUnconfirmedParentsAtCandidateHeight(utxoHeights, blockHeight)
+	}
+
 	// Phase 1: run Teranode-owned checks and BDK transaction validation.
 	if err := v.txValidator.ValidateTransaction(tx, blockHeight, utxoHeights, validationOptions); err != nil {
 		span.RecordError(err)

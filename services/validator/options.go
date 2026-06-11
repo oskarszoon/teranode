@@ -107,6 +107,65 @@ type Options struct {
 	// (see services/legacy/netsync and services/subtreevalidation for the
 	// reference implementations).
 	CandidateParentMedianTime uint32
+
+	// UnconfirmedParentsAtCandidateHeight makes the unconfirmedParentHeight
+	// sentinel resolve to the candidate block height instead of failing closed
+	// (consensus-mode sentinel → MEMPOOL_HEIGHT → BDK rejects with
+	// bad-txns-unconfirmed-input-in-block).
+	//
+	// Exists for the legacy block-sync path: a tx in a mined block that spends
+	// a same-block parent finds that parent in the UTXO store with empty
+	// BlockHeights (SetMinedMulti only runs after block acceptance), so the
+	// validator stamps the sentinel and BDK rejects a legitimate block. On
+	// that path the candidate height IS the parent's true height, so the
+	// substitution is exact — it feeds BDK's per-input protocol-era flag
+	// selection and the BIP68/MTP lookups with the height the parent will be
+	// mined at.
+	//
+	// Why "unconfirmed implies same-block" holds on the legacy path: the
+	// sentinel fires for ANY empty-BlockHeights parent, which in general also
+	// covers a parent mined in block N−1 whose asynchronous SetMinedMulti has
+	// not landed yet (it would wrongly resolve to N instead of N−1). Legacy
+	// netsync closes that window before validation starts:
+	// waitForPreviousBlockMined (services/legacy/netsync/handle_block.go)
+	// blocks until the previous block's mined-set completes, and since every
+	// block waits on its parent, all ancestors' BlockHeights are recorded by
+	// induction. Callers on other paths do NOT automatically get this
+	// invariant and must establish it themselves before setting the flag.
+	//
+	// CONSENSUS SAFETY — fail-open, gate carefully. With this set, a parent
+	// that is genuinely unconfirmed-and-NOT-in-the-block (a mempool floater)
+	// is no longer rejected at tx level; the membership backstop is block
+	// validation's checkParentsExistOnChain (model/Block.go), which fails
+	// block acceptance with BlockIncompleteError — retry/catchup-ordering
+	// semantics (issue #1031), NOT an invalid-block marking; pinned by the
+	// "parent has no block ID" case in model/Block_test.go. The block is
+	// never accepted while the floater stays unmined. Tx-level blessing has
+	// already happened by then: the floater child's UTXO spends and txmeta
+	// exist in the store, in exactly the state a policy-mode mempool-chain
+	// admission of the same txs would produce (policy mode substitutes
+	// tip+1 ≈ candidate height) — cleaned up by the same unmined-tx
+	// machinery, no new cleanup obligations. Setting this flag is
+	// therefore only sound when BOTH:
+	//   - the tx comes from a locally-held, PoW-checked block (not a peer
+	//     announcement), AND
+	//   - the full block-level parent-membership check will run before the
+	//     block is accepted.
+	//
+	// Block assembly: the flag is compatible with AddTXToBlockAssembly=true
+	// (an earlier revision hard-errored on the combination; that broke
+	// RUNNING-state legacy catch-up, where assembly must stay enabled for
+	// reorg resilience). A floater child blessed at the candidate height
+	// and added to assembly is the same tx policy-mode admission would have
+	// accepted into assembly — policy substitutes tip+1 for unconfirmed
+	// parents, equal to the candidate height at the tip, and era flags
+	// cannot differ post-Genesis. Accepted-block txs are mined-removed from
+	// assembly as always.
+	//
+	// The sole intended setter is the legacy branch of
+	// subtreevalidation.checkSubtreeFromBlock, in every FSM state. MUST NOT
+	// be set on peer-facing or mempool-admission paths.
+	UnconfirmedParentsAtCandidateHeight bool
 }
 
 // Option defines a function type for setting options
@@ -299,6 +358,16 @@ func WithCandidateBlockTime(timestamp uint32) Option {
 func WithCandidateParentMedianTime(mtp uint32) Option {
 	return func(o *Options) {
 		o.CandidateParentMedianTime = mtp
+	}
+}
+
+// WithUnconfirmedParentsAtCandidateHeight resolves unconfirmed-parent heights
+// to the candidate block height instead of failing closed in consensus mode.
+// See Options.UnconfirmedParentsAtCandidateHeight for the consensus-safety
+// contract — only the legacy block-sync path may set this.
+func WithUnconfirmedParentsAtCandidateHeight(enabled bool) Option {
+	return func(o *Options) {
+		o.UnconfirmedParentsAtCandidateHeight = enabled
 	}
 }
 

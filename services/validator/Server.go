@@ -486,6 +486,10 @@ func optionsFromValidateRequest(req *validator_api.ValidateTransactionRequest) (
 		opts.CandidateParentMedianTime = *req.CandidateParentMedianTime
 	}
 
+	if req.UnconfirmedParentsAtCandidateHeight != nil {
+		opts.UnconfirmedParentsAtCandidateHeight = *req.UnconfirmedParentsAtCandidateHeight
+	}
+
 	parentMetadata, err := parentMetadataFromWire(req.ParentMetadata)
 	if err != nil {
 		return nil, err
