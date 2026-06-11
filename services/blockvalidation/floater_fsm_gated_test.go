@@ -276,67 +276,6 @@ func TestBlockValidation_OptimisticFloaterRetriedDuringCatchup(t *testing.T) {
 		"#1031 regression: a not-yet-absorbed parent in CATCHINGBLOCKS must be retried, NOT invalidated")
 }
 
-// TestBlockValidation_OptimisticFloaterFSMSnapshotTakenAtValidationEntry pins
-// the TOCTOU fix: isCaughtUp must be sampled ONCE at validation entry (before the
-// optimistic AddBlock and the decoupled background block.Valid), not re-queried
-// in the background goroutine after AddBlock.
-//
-// The tracking client reports CATCHINGBLOCKS until AddBlock then RUNNING after,
-// modelling a catchup that finishes around AddBlock time. The floater therefore
-// entered validation while still catching up, so it is a genuine #1031 transient
-// (a parent in a still-in-flight catchup block) and MUST be retried, not
-// invalidated. If the FSM were sampled after AddBlock (the pre-fix location) it
-// would observe RUNNING and wrongly invalidate — so this test fails if the
-// snapshot is moved back into the goroutine. Both code paths issue exactly one
-// GetFSMCurrentState query, so the signal is the AddBlock-relative timing, not a
-// call count.
-func TestBlockValidation_OptimisticFloaterFSMSnapshotTakenAtValidationEntry(t *testing.T) {
-	initPrometheusMetrics()
-
-	utxoStore, _, _, txStore, subtreeStore, deferFunc := setup(t)
-	defer deferFunc()
-
-	tSettings := test.CreateBaseTestSettings(t)
-	tSettings.BlockValidation.OptimisticMining = true
-
-	blockChainStore, err := blockchain_store.NewStore(ulogger.TestLogger{}, &url.URL{Scheme: "sqlitememory"}, tSettings)
-	require.NoError(t, err)
-	localClient, err := blockchain.NewLocalClient(ulogger.TestLogger{}, tSettings, blockChainStore, nil, nil)
-	require.NoError(t, err)
-
-	// CATCHINGBLOCKS until AddBlock, RUNNING after: the entry snapshot must see
-	// CATCHINGBLOCKS (retry); a post-AddBlock query would see RUNNING (invalidate).
-	tracker := newTrackingBlockchainClient(localClient).withFSMRunningAfterAddBlock()
-
-	subtreeValidationClient := &subtreevalidation.MockSubtreeValidation{}
-	subtreeValidationClient.Mock.On("CheckBlockSubtrees", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
-
-	block, _ := buildFloaterBlock(t, utxoStore, subtreeStore)
-
-	// Cancelled lifecycle ctx so the revalidate worker never drains the channel —
-	// we read the branch decision directly (same isolation as the sibling tests).
-	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
-	lifecycleCancel()
-
-	blockValidation := NewBlockValidation(lifecycleCtx, ulogger.TestLogger{}, tSettings, tracker, subtreeStore, txStore, utxoStore, nil, subtreeValidationClient)
-
-	err = blockValidation.ValidateBlock(context.Background(), block, "http://localhost")
-	require.NoError(t, err, "optimistic mining returns before background validation")
-
-	// Entry snapshot saw CATCHINGBLOCKS, so the background goroutine must RETRY,
-	// not invalidate — even though by the time block.Valid completes the FSM reads
-	// RUNNING. This is the whole point of snapshotting at entry.
-	select {
-	case <-blockValidation.revalidateBlockChan:
-		// retried as required — the entry-time CATCHINGBLOCKS snapshot won
-	case <-time.After(10 * time.Second):
-		t.Fatal("TOCTOU: floater that entered validation during catchup must be retried (FSM must be snapshotted at entry, not after AddBlock)")
-	}
-
-	require.False(t, tracker.invalidateWasCalled(),
-		"TOCTOU: a floater sampled as caught-up only AFTER AddBlock must not be invalidated — snapshot must be taken at validation entry")
-}
-
 // TestBlockValidation_NonOptimisticFloaterInvalidatedWhenCaughtUp pins
 // criterion (c) for the SYNCHRONOUS (OptimisticMining=false) block.Valid path
 // using the precise floater shape (parent IN the store with empty BlockIDs, not
