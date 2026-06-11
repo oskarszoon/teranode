@@ -4,7 +4,7 @@ Last modified: 11-June-2026
 
 ## Why This Matters
 
-Teranode's P2P layer (libp2p) needs inbound TCP connections on the P2P port (default `9905`) to accept direct peer connections. A node that can only dial out still works, but it contributes far less to network health: it cannot be dialed by other peers, cannot serve as a DHT server, and cannot join the BSV Association bootstrap pool (see [Joining the DNS Bootstrap Pool](#joining-the-dns-bootstrap-pool)).
+Teranode's P2P layer (libp2p) needs inbound TCP connections on the P2P port (`9905` in the shipped configuration) to accept direct peer connections. The port peers actually dial is whatever your `p2p_listen_addresses` / `p2p_advertise_addresses` multiaddrs specify — the load balancer listener port must match the port in your advertise multiaddr. A node that can only dial out still works, but it contributes far less to network health: it cannot be dialed by other peers, cannot serve as a DHT server, and cannot join the BSV Association bootstrap pool (see [Joining the DNS Bootstrap Pool](#joining-the-dns-bootstrap-pool)).
 
 Inside Kubernetes this is not automatic. Pod IPs are not routable from the internet, and the default Service behaviour (`externalTrafficPolicy: Cluster`) breaks libp2p in subtle ways described below. This guide shows a working pattern for AWS/EKS; the principles carry over to other cloud providers.
 
@@ -13,6 +13,8 @@ Inside Kubernetes this is not automatic. Pod IPs are not routable from the inter
 Use a **Network Load Balancer (NLB)**, not an ALB or Classic ELB. libp2p speaks a raw TCP protocol with its own multiplexing and encryption — an L7 load balancer cannot proxy it. The NLB operates at L4 and passes TCP streams through untouched.
 
 ### Service Manifest
+
+The example below uses [AWS Load Balancer Controller](https://kubernetes-sigs.github.io/aws-load-balancer-controller/) annotations (`aws-load-balancer-type: "external"`, `aws-load-balancer-nlb-target-type`) — install the controller in your cluster as a prerequisite. Adapt the `selector` to whatever labels your peer pod actually carries.
 
 ```yaml
 apiVersion: v1
@@ -91,7 +93,10 @@ Then confirm peers are dialing in: inbound connections appear in the P2P service
 | `client` | Queries the DHT for discovery but does not advertise or store records | Still connects to 100+ peers for DHT routing. Suitable for development and home networks. |
 | `off` | No DHT. Topic-only network: connects to bootstrap peers and topic peers, exchanging addresses via the bootstrap servers | Most lightweight — no DHT crawling, no random connections. |
 
-Set `p2p_dht_mode = server` when you have completed the NLB setup above and want to strengthen the P2P layer with as many direct connections as possible. A `server` node behind a broken or missing public exposure actively *harms* discovery: it advertises addresses into the DHT that nobody can dial.
+Set `p2p_dht_mode = server` when you have completed the NLB setup above and want to strengthen the P2P layer with as many direct connections as possible.
+
+!!! note "Operator-managed deployments"
+    Deployments managed by the teranode-operator use the `.operator` settings context, which already defaults to `p2p_dht_mode = server` (`p2p_dht_mode.operator = server` in `settings.conf`). You only need to set the mode explicitly to *opt out* of server mode on such deployments. A `server` node behind a broken or missing public exposure actively *harms* discovery: it advertises addresses into the DHT that nobody can dial.
 
 !!! warning "Abuse-sensitive hosting providers (Hetzner, OVH, …)"
     `server` and `client` modes connect to 100+ semi-random IPs as part of normal DHT operation. Some hosting providers (notably Hetzner and OVH) flag this pattern as network scanning and may send abuse warnings or suspend the server. On such providers, run `p2p_dht_mode = off` — the node still participates fully in block and transaction propagation via topics, using peer address exchange through the bootstrap servers instead of DHT crawling.
