@@ -815,11 +815,12 @@ func (v *Validator) validateInternal(ctx context.Context, tx *bt.Tx, blockHeight
 	// been validated, spent, and created in the UTXO store — returning an error would
 	// cause callers to treat an accepted tx as failed and trigger duplicate retries.
 	if v.txmetaKafkaProducerClient != nil && !validationOptions.SkipTxMetaPublishing {
-		// SkipPolicyChecks is only set when validating transactions from an
-		// already-mined block (block validation, legacy sync). Mark the
-		// published txmeta so relay consumers (legacy netsync) never announce
-		// mined transactions as fresh mempool txs.
-		txMetaData.Mined = validationOptions.SkipPolicyChecks
+		// SkipPolicyChecks is set when the transaction arrived as part of a
+		// block or announced subtree (block validation, subtree validation,
+		// legacy sync) rather than via mempool submission. Mark the published
+		// txmeta so relay consumers (legacy netsync) don't announce it as a
+		// fresh mempool tx.
+		txMetaData.InBlock = validationOptions.SkipPolicyChecks
 
 		if txMetaErr := v.sendTxMetaToKafka(txMetaData, tx.TxIDChainHash()); txMetaErr != nil {
 			v.logger.Errorf("[Validate][%s] failed to serialize/enqueue txmeta for kafka, continuing to 2PC: %v", txID, txMetaErr)

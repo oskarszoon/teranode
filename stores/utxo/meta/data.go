@@ -82,11 +82,12 @@ type Data struct {
 	// Locked is a flag indicating if the transaction is locked and not spendable
 	Locked bool `json:"locked"`
 
-	// Mined is a flag indicating the metadata was produced while validating a
-	// transaction from an already-mined block (block validation, legacy sync)
-	// rather than a fresh mempool transaction. Relay consumers of the txmeta
-	// Kafka topic must not announce mined transactions to peers.
-	Mined bool `json:"mined"`
+	// InBlock is a flag indicating the metadata was produced while validating a
+	// transaction that arrived as part of a block or announced subtree (block
+	// validation, subtree validation, legacy sync) rather than via mempool
+	// submission. Relay consumers of the txmeta Kafka topic must not announce
+	// these transactions to peers.
+	InBlock bool `json:"inBlock"`
 
 	// Creating indicates the transaction is still being created (multi-record 2-phase commit)
 	// When true, the transaction is incomplete and should trigger re-processing for auto-recovery
@@ -103,10 +104,10 @@ type Data struct {
 // The binary format is as follows:
 //   - [0:8]   - 8 bytes for Fee (uint64, little-endian)
 //   - [8:16]  - 8 bytes for SizeInBytes (uint64, little-endian)
-//   - [16]    - 1 byte for flags (bit 0: IsCoinbase, bit 1: Frozen, bit 2: Conflicting, bit 3: Locked, bit 4: Mined)
+//   - [16]    - 1 byte for flags (bit 0: IsCoinbase, bit 1: Frozen, bit 2: Conflicting, bit 3: Locked, bit 4: InBlock)
 //   - [17:21] - 4 bytes for number of ParentTxHashes (uint32, little-endian)
 //   - [21+]   - 32 bytes for each ParentTxHash, then per parent a 4-byte
-//               vout-count followed by 4 bytes per vout (uint32, little-endian)
+//     vout-count followed by 4 bytes per vout (uint32, little-endian)
 //
 // Parameters:
 //   - dataBytes: Pointer to a byte slice containing the serialized metadata
@@ -126,7 +127,7 @@ func NewMetaDataFromBytes(dataBytes []byte, d *Data) (err error) {
 	d.Frozen = (dataBytes[16] & 0b10) == 0b10
 	d.Conflicting = (dataBytes[16] & 0b100) == 0b100
 	d.Locked = (dataBytes[16] & 0b1000) == 0b1000
-	d.Mined = (dataBytes[16] & 0b10000) == 0b10000
+	d.InBlock = (dataBytes[16] & 0b10000) == 0b10000
 
 	d.TxInpoints, err = subtree.NewTxInpointsFromBytes(dataBytes[17:])
 
@@ -140,10 +141,10 @@ func NewMetaDataFromBytes(dataBytes []byte, d *Data) (err error) {
 // The binary format is as follows:
 //   - [0:8]   - 8 bytes for Fee (uint64, little-endian)
 //   - [8:16]  - 8 bytes for SizeInBytes (uint64, little-endian)
-//   - [16]    - 1 byte for flags (bit 0: IsCoinbase, bit 1: Frozen, bit 2: Conflicting, bit 3: Locked, bit 4: Mined)
+//   - [16]    - 1 byte for flags (bit 0: IsCoinbase, bit 1: Frozen, bit 2: Conflicting, bit 3: Locked, bit 4: InBlock)
 //   - [17:21] - 4 bytes for number of ParentTxHashes (uint32, little-endian)
 //   - [21+]   - 32 bytes for each ParentTxHash, then per parent a 4-byte
-//               vout-count followed by 4 bytes per vout (uint32, little-endian)
+//     vout-count followed by 4 bytes per vout (uint32, little-endian)
 //   - [...]   - Variable-length transaction data (full transaction)
 //   - [...]   - Remainder: block IDs as 4-byte integers (uint32, little-endian)
 //
@@ -174,7 +175,7 @@ func NewDataFromBytes(dataBytes []byte) (d *Data, err error) {
 	d.Frozen = dataBytes[16]&0b10 == 0b10
 	d.Conflicting = dataBytes[16]&0b100 == 0b100
 	d.Locked = dataBytes[16]&0b1000 == 0b1000
-	d.Mined = dataBytes[16]&0b10000 == 0b10000
+	d.InBlock = dataBytes[16]&0b10000 == 0b10000
 
 	buf := bytes.NewReader(dataBytes[17:])
 
@@ -220,10 +221,10 @@ func NewDataFromBytes(dataBytes []byte) (d *Data, err error) {
 // The binary format is as follows:
 //   - [0:8]   - 8 bytes for Fee (uint64, little-endian)
 //   - [8:16]  - 8 bytes for SizeInBytes (uint64, little-endian)
-//   - [16]    - 1 byte for flags (bit 0: IsCoinbase, bit 1: Frozen, bit 2: Conflicting, bit 3: Locked, bit 4: Mined)
+//   - [16]    - 1 byte for flags (bit 0: IsCoinbase, bit 1: Frozen, bit 2: Conflicting, bit 3: Locked, bit 4: InBlock)
 //   - [17:21] - 4 bytes for number of ParentTxHashes (uint32, little-endian)
 //   - [21+]   - 32 bytes for each ParentTxHash, then per parent a 4-byte
-//               vout-count followed by 4 bytes per vout (uint32, little-endian)
+//     vout-count followed by 4 bytes per vout (uint32, little-endian)
 //   - [...]   - Variable-length transaction data (full transaction)
 //   - [...]   - Remainder: block IDs as 4-byte integers (uint32, little-endian)
 //
@@ -254,7 +255,7 @@ func (d *Data) Bytes() ([]byte, error) {
 		buf[16] |= 0b1000
 	}
 
-	if d.Mined {
+	if d.InBlock {
 		buf[16] |= 0b10000
 	}
 
@@ -287,10 +288,10 @@ func (d *Data) Bytes() ([]byte, error) {
 // The binary format is as follows:
 //   - [0:8]   - 8 bytes for Fee (uint64, little-endian)
 //   - [8:16]  - 8 bytes for SizeInBytes (uint64, little-endian)
-//   - [16]    - 1 byte for flags (bit 0: IsCoinbase, bit 1: Frozen, bit 2: Conflicting, bit 3: Locked, bit 4: Mined)
+//   - [16]    - 1 byte for flags (bit 0: IsCoinbase, bit 1: Frozen, bit 2: Conflicting, bit 3: Locked, bit 4: InBlock)
 //   - [17:21] - 4 bytes for number of ParentTxHashes (uint32, little-endian)
 //   - [21+]   - 32 bytes for each ParentTxHash, then per parent a 4-byte
-//               vout-count followed by 4 bytes per vout (uint32, little-endian)
+//     vout-count followed by 4 bytes per vout (uint32, little-endian)
 //
 // Returns:
 //   - Byte slice containing the serialized metadata (without transaction or block IDs)
@@ -331,7 +332,7 @@ func (d *Data) MetaBytes() ([]byte, error) {
 		buf[16] |= 0b1000
 	}
 
-	if d.Mined {
+	if d.InBlock {
 		buf[16] |= 0b10000
 	}
 

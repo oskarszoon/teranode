@@ -1049,20 +1049,21 @@ func TestHandleCheckSyncPeer_LocalBacklog(t *testing.T) {
 	})
 }
 
-// TestProcessTXmetaBatchMessage_SkipsMinedTx verifies the tx announce path
-// drops txmeta entries flagged as mined. The txmeta Kafka topic carries every
-// validated transaction — including those validated from already-mined blocks
-// by block validation and legacy sync (which feed the subtree-validation
-// cache) — and announcing those as fresh mempool txs floods peers with
-// getdata for transactions that are long mined and often already pruned.
-func TestProcessTXmetaBatchMessage_SkipsMinedTx(t *testing.T) {
-	minedHash := chainhash.Hash{0xAA}
-	unminedHash := chainhash.Hash{0xBB}
+// TestProcessTXmetaBatchMessage_SkipsInBlockTx verifies the tx announce path
+// drops txmeta entries flagged InBlock. The txmeta Kafka topic carries every
+// validated transaction — including those that arrived as part of a block or
+// announced subtree (block validation, subtree validation, legacy sync, which
+// feed the subtree-validation cache) — and announcing those as fresh mempool
+// txs floods peers with getdata for transactions that are long mined and
+// often already pruned.
+func TestProcessTXmetaBatchMessage_SkipsInBlockTx(t *testing.T) {
+	inBlockHash := chainhash.Hash{0xAA}
+	mempoolHash := chainhash.Hash{0xBB}
 
-	minedBytes, err := (&meta.Data{Fee: 1, SizeInBytes: 100, Mined: true}).MetaBytes()
+	inBlockBytes, err := (&meta.Data{Fee: 1, SizeInBytes: 100, InBlock: true}).MetaBytes()
 	require.NoError(t, err)
 
-	unminedBytes, err := (&meta.Data{Fee: 2, SizeInBytes: 200}).MetaBytes()
+	mempoolBytes, err := (&meta.Data{Fee: 2, SizeInBytes: 200}).MetaBytes()
 	require.NoError(t, err)
 
 	// Build a v1 wire message with both entries.
@@ -1073,8 +1074,8 @@ func TestProcessTXmetaBatchMessage_SkipsMinedTx(t *testing.T) {
 		hash    chainhash.Hash
 		content []byte
 	}{
-		{minedHash, minedBytes},
-		{unminedHash, unminedBytes},
+		{inBlockHash, inBlockBytes},
+		{mempoolHash, mempoolBytes},
 	} {
 		buf.Write(entry.hash[:])
 		buf.WriteByte(txmetacache.WireActionADD)
@@ -1102,16 +1103,17 @@ func TestProcessTXmetaBatchMessage_SkipsMinedTx(t *testing.T) {
 		mu.Lock()
 		defer mu.Unlock()
 		return len(announced) > 0
-	}, 2*time.Second, 10*time.Millisecond, "expected the unmined tx to be announced")
+	}, 2*time.Second, 10*time.Millisecond, "expected the mempool tx to be announced")
 
-	// Give the batcher one more flush window so a wrongly-announced mined tx
-	// would have surfaced.
+	// Give the batcher one more flush window so a wrongly-announced in-block
+	// tx would have surfaced.
 	time.Sleep(50 * time.Millisecond)
 
 	mu.Lock()
 	defer mu.Unlock()
-	assert.Equal(t, []chainhash.Hash{unminedHash}, announced, "only the unmined tx must be announced")
+	assert.Equal(t, []chainhash.Hash{mempoolHash}, announced, "only the mempool tx must be announced")
 }
+
 func TestHasHealthyDownloadThroughput(t *testing.T) {
 	const minSpeed = 51200 // 50 KiB/s, matches default minSyncPeerNetworkSpeed
 
