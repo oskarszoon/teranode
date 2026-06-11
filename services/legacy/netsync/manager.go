@@ -407,6 +407,14 @@ type SyncManager struct {
 	syncPeerState   *syncPeerState
 	peerStates      *txmap.SyncedMap[*peerpkg.Peer, *peerSyncState]
 
+	// blockBacklog counts blocks sitting in the local processing pipeline:
+	// queued in blockHandler's blockQueue plus the one inside handleBlockMsg.
+	// While it is non-zero the node is backpressuring its own network reads
+	// (OnBlock blocks until the previous block is processed), so the stall
+	// detector must not hold the resulting zero throughput against the sync
+	// peer. Written by the blockHandler goroutines, read by handleCheckSyncPeer.
+	blockBacklog atomic.Int64
+
 	// The following fields are used for headers-first mode.
 	headersFirstMode atomic.Bool // accessed from multiple goroutines, must be atomic
 	headerList       *list.List
@@ -839,6 +847,18 @@ func (sm *SyncManager) handleCheckSyncPeer() {
 
 	// Update network stats at the end of this tick.
 	defer sps.updateNetwork(sp)
+
+	// While blocks are queued or mid-validation locally, OnBlock deliberately
+	// stops reading from the peer (it blocks on blockProcessed), so zero
+	// throughput and a stale last-block-time measure our own validation speed,
+	// not the peer's health. Skip stall checks until the backlog drains — a
+	// genuinely stalled peer keeps failing them afterwards. The deferred
+	// updateNetwork still runs, keeping throughput samples fresh for the next
+	// tick.
+	if backlog := sm.blockBacklog.Load(); backlog > 0 {
+		sm.logger.Debugf("[CheckSyncPeer] sync peer %s check skipped: %d blocks pending local processing", sp.String(), backlog)
+		return
+	}
 
 	headersFirst := sm.headersFirstMode.Load()
 	lastBlockSince := time.Since(sps.getLastBlockTime())
@@ -1331,17 +1351,22 @@ func (sm *SyncManager) handleBlockMsg(bmsg *blockQueueMsg) error {
 
 	sm.logger.Debugf("[handleBlockMsg][%s] calling HandleBlockDirect", bmsg.blockHash)
 
-	// Process the block directly. A missing-parent error (ErrBlockNotFound) while
-	// catching up just means the sync peer sent a block newer than our current
-	// tip — handled as a no-op below; any other missing-parent triggers a request
-	// for the missing blocks so block validation can proceed in order.
+	// Process the block directly. A missing-parent error (ErrBlockNotFound)
+	// always triggers a getblocks request from our best block so block
+	// validation can proceed in order — see the orphan-continuation note below.
 	if err = sm.HandleBlockDirect(sm.ctx, bmsg.peer, bmsg.blockHash, bmsg.block); err != nil {
-		if catchingBlocks && errors.Is(err, errors.ErrBlockNotFound) {
-			// previous block not found? Probably a new block message from our syncPeer while we are still syncing
-			sm.logger.Errorf("Failed to process new block %v while catching up: %v", bmsg.blockHash, err)
-			return nil
-		} else if errors.Is(err, errors.ErrBlockNotFound) {
-			// We don't have the parent of this block/header, so we'll request it.
+		if errors.Is(err, errors.ErrBlockNotFound) {
+			// We don't have the parent of this block. While catching blocks
+			// this is typically the peer announcing its tip while we are
+			// still behind — and in the legacy sync protocol that orphan tip
+			// doubles as the batch-continuation signal: the peer pushes its
+			// tip inv after delivering a getblocks batch and waits for the
+			// next getblocks before sending more. Swallowing the orphan here
+			// stalls the sync until the stall detector rotates the peer, so
+			// always answer with a getblocks from our best block.
+			// PushGetBlocksMsg filters duplicate requests and the peer only
+			// invs blocks past the locator fork point, so a redundant
+			// request costs one inv message at most.
 			sm.logger.Infof("Block %v has missing parent %v, requesting missing blocks",
 				bmsg.blockHash, bmsg.block.Header.PrevBlock)
 
@@ -2061,6 +2086,9 @@ func (sm *SyncManager) blockHandler() {
 				sm.logger.Debugf("[blockHandler][%s] processing block queue message into handleBlockMsg", msg.blockHash)
 
 				err := sm.handleBlockMsg(msg)
+
+				sm.blockBacklog.Add(-1)
+
 				if msg.reply != nil {
 					msg.reply <- err
 				}
@@ -2111,6 +2139,8 @@ out:
 
 			case *blockMsg:
 				sm.logger.Debugf("[blockHandler][%s] queueing block for validation", msg.block.Hash())
+
+				sm.blockBacklog.Add(1)
 
 				blockQueue <- &blockQueueMsg{
 					block:       msg.block.MsgBlock(),
@@ -2777,6 +2807,16 @@ func (sm *SyncManager) processTXmetaBatchMessage(data []byte) error {
 			}
 
 			if txMeta.IsCoinbase {
+				continue
+			}
+
+			// Never announce transactions that arrived as part of a block or
+			// announced subtree. The txmeta topic also carries those (block
+			// validation, subtree validation, legacy sync pre-warm) to populate
+			// the subtree-validation cache; relaying them as fresh mempool txs
+			// floods peers with getdata for transactions that are long mined —
+			// and often already pruned.
+			if txMeta.InBlock {
 				continue
 			}
 
