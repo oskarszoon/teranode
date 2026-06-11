@@ -23,6 +23,7 @@ import (
 	"net/url"
 	"regexp"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -47,6 +48,7 @@ import (
 	blobmemory "github.com/bsv-blockchain/teranode/stores/blob/memory"
 	"github.com/bsv-blockchain/teranode/stores/blob/options"
 	blockchain_store "github.com/bsv-blockchain/teranode/stores/blockchain"
+	bcoptions "github.com/bsv-blockchain/teranode/stores/blockchain/options"
 	utxostore "github.com/bsv-blockchain/teranode/stores/utxo"
 	"github.com/bsv-blockchain/teranode/stores/utxo/sql"
 	"github.com/bsv-blockchain/teranode/test/utils/transactions"
@@ -156,6 +158,17 @@ type trackingBlockchainClient struct {
 	// (or an error) through BlockValidation.isCaughtUp.
 	fsmStateOverride    *blockchain.FSMStateType
 	fsmStateOverrideErr error
+
+	// fsmRunningAfterAddBlock, when true, makes GetFSMCurrentState report
+	// CATCHINGBLOCKS until AddBlock has been called and RUNNING afterwards. This
+	// simulates a catchup that completes around AddBlock time and lets a test pin
+	// WHEN isCaughtUp is sampled: a snapshot taken at validation entry (before
+	// AddBlock) observes CATCHINGBLOCKS and retries; a query taken later in the
+	// background goroutine (after AddBlock) would observe RUNNING and wrongly
+	// invalidate. Tied to the AddBlock event, not a call counter, because both the
+	// fixed and the regressed code issue exactly one GetFSMCurrentState query.
+	fsmRunningAfterAddBlock bool
+	addBlockSeen            atomic.Bool
 }
 
 func newTrackingBlockchainClient(client blockchain.ClientI) *trackingBlockchainClient {
@@ -202,12 +215,33 @@ func (t *trackingBlockchainClient) withFSMError(err error) *trackingBlockchainCl
 	return t
 }
 
+// withFSMRunningAfterAddBlock makes GetFSMCurrentState report CATCHINGBLOCKS
+// until AddBlock is called and RUNNING after, so a test can pin that the floater
+// classification samples the FSM at validation entry (before AddBlock), not in
+// the background goroutine (after AddBlock). See fsmRunningAfterAddBlock.
+func (t *trackingBlockchainClient) withFSMRunningAfterAddBlock() *trackingBlockchainClient {
+	t.fsmRunningAfterAddBlock = true
+	return t
+}
+
+func (t *trackingBlockchainClient) AddBlock(ctx context.Context, block *model.Block, peerID string, opts ...bcoptions.StoreBlockOption) error {
+	t.addBlockSeen.Store(true)
+	return t.ClientI.AddBlock(ctx, block, peerID, opts...)
+}
+
 func (t *trackingBlockchainClient) GetFSMCurrentState(ctx context.Context) (*blockchain.FSMStateType, error) {
 	if t.fsmStateOverrideErr != nil {
 		return nil, t.fsmStateOverrideErr
 	}
 	if t.fsmStateOverride != nil {
 		return t.fsmStateOverride, nil
+	}
+	if t.fsmRunningAfterAddBlock {
+		state := blockchain.FSMStateCATCHINGBLOCKS
+		if t.addBlockSeen.Load() {
+			state = blockchain.FSMStateRUNNING
+		}
+		return &state, nil
 	}
 	return t.ClientI.GetFSMCurrentState(ctx)
 }

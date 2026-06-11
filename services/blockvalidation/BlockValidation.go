@@ -1453,6 +1453,17 @@ func (u *BlockValidation) ValidateBlockWithOptions(ctx context.Context, block *m
 			}
 		}
 
+		// Snapshot the caught-up FSM state ONCE here, at validation entry, on the
+		// request context — before the optimistic AddBlock and the decoupled
+		// background block.Valid. A floater (ErrBlockIncomplete) is classified
+		// relative to whether we were caught up when this block entered validation.
+		// Re-querying the FSM later in the background goroutine could observe a
+		// catchup->RUNNING transition that completed mid-validation and misclassify a
+		// genuine #1031 transient (parent in a still-in-flight catchup block) as a
+		// permanent floater, triggering a wrongful InvalidateBlock cascade. Capturing
+		// here keeps the fail-safe direction (sync state => retry) and closes the TOCTOU.
+		caughtUpAtValidation := u.isCaughtUp(ctx)
+
 		// validate all the subtrees in the block
 		ctxLogger.Infof("[ValidateBlock][%s] validating %d subtrees", block.Hash().String(), len(block.Subtrees))
 
@@ -1554,7 +1565,7 @@ func (u *BlockValidation) ValidateBlockWithOptions(ctx context.Context, block *m
 							// we should try again to re-validate the block, as we failed to mark it as invalid
 							u.ReValidateBlock(block, baseURL)
 						}
-					} else if errors.Is(err, errors.ErrBlockIncomplete) && u.isCaughtUp(decoupledCtx) {
+					} else if errors.Is(err, errors.ErrBlockIncomplete) && caughtUpAtValidation {
 						// RUNNING: a not-in-block parent with empty/absent BlockIDs is a floater that
 						// will never confirm (SetMinedMulti->MinedSet invariant: all accepted-ancestor
 						// txs are durably stamped before waitForPreviousBlocksToBeProcessed returns).
@@ -1666,7 +1677,7 @@ func (u *BlockValidation) ValidateBlockWithOptions(ctx context.Context, block *m
 				//     parent we have not absorbed yet — stay incomplete so catchup
 				//     retries another peer; never poison the DB.
 				if errors.Is(err, errors.ErrBlockIncomplete) {
-					if u.isCaughtUp(ctx) {
+					if caughtUpAtValidation {
 						if !opts.IsRevalidation {
 							u.storeInvalidBlock(ctx, block, opts.PeerID, "floater: parent not in block and not on chain: "+err.Error())
 						}
