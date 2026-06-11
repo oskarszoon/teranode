@@ -2815,6 +2815,16 @@ func (sm *SyncManager) processTXmetaBatchMessage(data []byte) error {
 				continue
 			}
 
+			// Never announce transactions that arrived as part of a block or
+			// announced subtree. The txmeta topic also carries those (block
+			// validation, subtree validation, legacy sync pre-warm) to populate
+			// the subtree-validation cache; relaying them as fresh mempool txs
+			// floods peers with getdata for transactions that are long mined —
+			// and often already pruned.
+			if txMeta.InBlock {
+				continue
+			}
+
 			sm.txAnnounceBatcher.Put(&TxHashAndFee{
 				TxHash: hash,
 				Fee:    txMeta.Fee,
