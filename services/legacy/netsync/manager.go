@@ -1357,10 +1357,23 @@ func (sm *SyncManager) handleBlockMsg(bmsg *blockQueueMsg) error {
 
 	sm.logger.Debugf("[handleBlockMsg][%s] calling HandleBlockDirect", bmsg.blockHash)
 
+	// Hand sole ownership of the decoded block to HandleBlockDirect. The
+	// blockHandler goroutine keeps *bmsg alive until the reply is sent, so
+	// leaving the field set would pin the multi-GB wire block (and its decode
+	// arena) for the whole minutes-long processing of a big block. Copy the
+	// parent hash first — the missing-parent error path below needs it.
+	msgBlock := bmsg.block
+	if msgBlock == nil {
+		return errors.NewProcessingError("[handleBlockMsg][%s] block message carries no block", bmsg.blockHash)
+	}
+
+	prevBlockHash := msgBlock.Header.PrevBlock
+	bmsg.block = nil
+
 	// if not in Legacy Sync mode, we need to potentially download the block,
 	// promote block to the block validation via kafka (p2p -> blockvalidation message),
 	// without calling HandleBlockDirect. Such that it doesn't interfere with the operation of block validation.
-	if err = sm.HandleBlockDirect(sm.ctx, bmsg.peer, bmsg.blockHash, bmsg.block); err != nil {
+	if err = sm.HandleBlockDirect(sm.ctx, bmsg.peer, bmsg.blockHash, msgBlock); err != nil {
 		if errors.Is(err, errors.ErrBlockNotFound) {
 			// We don't have the parent of this block. During legacy sync /
 			// catching blocks this is typically the peer announcing its tip
@@ -1374,7 +1387,7 @@ func (sm *SyncManager) handleBlockMsg(bmsg *blockQueueMsg) error {
 			// only invs blocks past the locator fork point, so a redundant
 			// request costs one inv message at most.
 			sm.logger.Infof("Block %v has missing parent %v, requesting missing blocks",
-				bmsg.blockHash, bmsg.block.Header.PrevBlock)
+				bmsg.blockHash, prevBlockHash)
 
 			bestBlockHeader, bestBlockHeaderMeta, err := sm.blockchainClient.GetBestBlockHeader(sm.ctx)
 			if err != nil {
