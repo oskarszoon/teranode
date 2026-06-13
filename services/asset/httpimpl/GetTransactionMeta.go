@@ -50,9 +50,12 @@ import (
 //	    "subtreeHashes": [            // Subtree hash for each entry
 //	      "<hex>", ...
 //	    ],
-//	    "mainChainIndex": <int>,      // Index into the parallel arrays for
-//	                                   // the main-chain entry, or -1 if the
-//	                                   // tx is only in orphans / mempool
+//	    "mainChainIndex": <int>,      // Index into the parallel arrays for the
+//	                                   // main-chain entry, or -1 if the tx is only
+//	                                   // in orphans/mempool. -1 is NOT authoritative:
+//	                                   // a transient blockchain-client error during
+//	                                   // the per-block check also yields -1, so it
+//	                                   // means "not on main chain or undetermined".
 //	    "fee": <uint64>,              // Transaction fee in satoshis
 //	    "sizeInBytes": <uint64>,      // Transaction size in bytes
 //	    "isCoinbase": <boolean>,      // Whether this is a coinbase transaction
