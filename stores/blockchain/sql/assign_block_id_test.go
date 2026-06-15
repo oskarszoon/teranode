@@ -140,6 +140,51 @@ func TestAssignBlockID_TwoPathRace_NoPhantom(t *testing.T) {
 	require.Equal(t, storedID, got)
 }
 
+// TestReserveDurableBlockID_NextValError covers reserveDurableBlockID's allocation
+// error path: if GetNextBlockID fails it must surface the error, not persist or
+// return a bogus reservation. Calling it on a closed store makes the nextval fail.
+func TestReserveDurableBlockID_NextValError(t *testing.T) {
+	tSettings := test.CreateBaseTestSettings(t)
+	storeURL, err := url.Parse("sqlitememory:///")
+	require.NoError(t, err)
+
+	s, err := New(ulogger.TestLogger{}, storeURL, tSettings)
+	require.NoError(t, err)
+	require.NoError(t, s.Close()) // closed DB → GetNextBlockID fails
+
+	h := chainhash.HashH([]byte("block-nextval-error"))
+	_, err = s.reserveDurableBlockID(context.Background(), &h)
+	require.Error(t, err, "reserveDurableBlockID must surface a nextval allocation failure")
+}
+
+// TestAssignBlockID_DurableLookupError covers the L2 (durable-table) lookup error
+// path: if the SELECT against block_id_reservations fails for a reason other than
+// "no row", AssignBlockID must surface that storage error rather than silently
+// minting a fresh id (which could diverge from a reservation it failed to read).
+// Dropping the table makes the SELECT fail with a real DB error.
+func TestAssignBlockID_DurableLookupError(t *testing.T) {
+	tSettings := test.CreateBaseTestSettings(t)
+	storeURL, err := url.Parse("sqlitememory:///")
+	require.NoError(t, err)
+
+	s, err := New(ulogger.TestLogger{}, storeURL, tSettings)
+	require.NoError(t, err)
+	defer s.Close()
+
+	ctx := context.Background()
+
+	// Drop the durable table so the L2 lookup (durableReservationID) errors. The
+	// blocks table is untouched, so the committed-id checks still succeed (no row),
+	// and the flow reaches the durable lookup.
+	_, err = s.db.ExecContext(ctx, `DROP TABLE block_id_reservations`)
+	require.NoError(t, err)
+
+	h := chainhash.HashH([]byte("block-l2-error"))
+	_, err = s.AssignBlockID(ctx, &h)
+	require.Error(t, err, "a durable-lookup storage error must propagate, not be swallowed")
+	require.NotContains(t, err.Error(), "no row")
+}
+
 // TestAssignBlockID_SurvivesTTLExpiry is the #1056 core regression: a reservation
 // must survive the in-memory ttlcache TTL window. If block processing outlasts
 // blockIDReservationTTL (a multi-GB block on slow hardware during IBD), the cache
