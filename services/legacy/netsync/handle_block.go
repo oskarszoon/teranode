@@ -406,6 +406,14 @@ func (sm *SyncManager) prepareSubtrees(ctx context.Context, block *bsvutil.Block
 		return nil, 0, err
 	}
 
+	// createTxMap is the only writer of txMap and it runs single-threaded; every
+	// stage below only reads it (concurrently, from many goroutines in extend /
+	// createUtxos / pre-validate). Freeze it so those reads skip the RWMutex —
+	// the per-read reader-counter atomic becomes a cache-line contention point
+	// across cores on a large block. After Freeze any txMap write panics, which
+	// is the intended guard since nothing should mutate it past this point.
+	txMap.Freeze()
+
 	if err = sm.extendTransactions(ctx, bi, txOrder, txMap); err != nil {
 		return nil, 0, err
 	}
