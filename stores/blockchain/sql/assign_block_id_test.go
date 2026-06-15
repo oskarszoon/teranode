@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	"github.com/bsv-blockchain/teranode/stores/blockchain/options"
@@ -138,6 +139,45 @@ func TestAssignBlockID_TwoPathRace_NoPhantom(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Equal(t, storedID, got)
+}
+
+// TestReservationSweep_RunsWithInMemoryChainCheckDisabled is the #1056 review
+// regression: block_id_reservations is written by AssignBlockID regardless of
+// blockchain_use_in_memory_chain_check, so the age-based sweep must run regardless
+// too. The sweep loop used to be started only inside the useInMemory branch
+// (backgroundRefreshLoop), so a default (toggle-off) node never reclaimed
+// reservations for blocks that got an id but never committed — unbounded growth.
+// Here the toggle is off (the default) and the dedicated sweeper must still reclaim
+// a stale row.
+func TestReservationSweep_RunsWithInMemoryChainCheckDisabled(t *testing.T) {
+	oldInterval := reservationSweepInterval
+	reservationSweepInterval = 50 * time.Millisecond
+	defer func() { reservationSweepInterval = oldInterval }()
+
+	tSettings := test.CreateBaseTestSettings(t)
+	tSettings.BlockChain.UseInMemoryChainCheck = false // the default — sweep must still run
+
+	storeURL, err := url.Parse("sqlitememory:///")
+	require.NoError(t, err)
+
+	s, err := New(ulogger.TestLogger{}, storeURL, tSettings)
+	require.NoError(t, err)
+	defer s.Close()
+
+	ctx := context.Background()
+
+	// A stale reservation, older than staleReservationSweepAge.
+	staleHash := chainhash.HashH([]byte("toggle-off-stale"))
+	_, err = s.db.ExecContext(ctx,
+		`INSERT INTO block_id_reservations (hash, block_id, reserved_at) VALUES ($1, $2, datetime('now','-2 hours'))`,
+		staleHash[:], uint64(7777))
+	require.NoError(t, err)
+
+	// The dedicated sweeper (started independent of the toggle) must reclaim it.
+	require.Eventually(t, func() bool {
+		_, ok, e := s.durableReservationID(ctx, &staleHash)
+		return e == nil && !ok
+	}, 5*time.Second, 50*time.Millisecond, "stale reservation must be swept even with in-memory chain check disabled")
 }
 
 // TestReserveDurableBlockID_NextValError covers reserveDurableBlockID's allocation

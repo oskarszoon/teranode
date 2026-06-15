@@ -60,7 +60,7 @@ const chainWalkCacheTTL = 10 * time.Minute
 const blockIDReservationTTL = 10 * time.Minute
 
 // staleReservationSweepAge bounds how long a durable block-id reservation
-// (block_id_reservations) survives without a commit before backgroundRefreshLoop
+// (block_id_reservations) survives without a commit before reservationSweepLoop
 // sweeps it. Set well above any plausible single-block processing time (and above
 // blockIDReservationTTL) so an in-flight block is never swept mid-processing; only
 // genuinely abandoned reservations (fetched but never committed — e.g. a block
@@ -361,6 +361,10 @@ func New(logger ulogger.Logger, storeURL *url.URL, tSettings *settings.Settings)
 		// event-driven rebuilds) without requiring a process restart.
 		go s.backgroundRefreshLoop()
 	}
+
+	// Always reclaim abandoned durable block-id reservations: the table is written
+	// regardless of useInMemoryChainCheck, so its sweep must run regardless too.
+	go s.reservationSweepLoop()
 
 	return s, nil
 }
@@ -1716,6 +1720,36 @@ func (s *SQL) backgroundRefreshLoop() {
 			} else {
 				s.lastSuccessfulRebuild.Store(time.Now().Unix())
 			}
+			cancel()
+		}
+	}
+}
+
+// reservationSweepInterval is how often reservationSweepLoop reclaims abandoned
+// durable block-id reservations. Frequent relative to staleReservationSweepAge
+// (1h) is fine — the table is tiny and each sweep is a single indexed DELETE. A
+// var (not const) only so tests can shorten it; production never reassigns it.
+var reservationSweepInterval = 10 * time.Minute
+
+// reservationSweepLoop periodically reclaims abandoned durable block-id
+// reservations. It runs INDEPENDENTLY of blockchain_use_in_memory_chain_check:
+// block_id_reservations is written by AssignBlockID on every ingestion path
+// regardless of that toggle, so its sweep must run regardless too. (The
+// off-chain-set backgroundRefreshLoop is toggle-gated because the off-chain set
+// only matters when the toggle is on; that gating must not also disable this
+// sweep, or a toggle-off node would never reclaim reservations for blocks that get
+// an id but never commit — failed validation, crash-before-commit, abandoned
+// forks — letting the table grow unbounded.)
+func (s *SQL) reservationSweepLoop() {
+	ticker := time.NewTicker(reservationSweepInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.backgroundDone:
+			return
+		case <-ticker.C:
+			ctx, cancel := context.WithTimeout(context.Background(), rebuildOffChainSetTimeout)
 			s.sweepStaleReservations(ctx)
 			cancel()
 		}
