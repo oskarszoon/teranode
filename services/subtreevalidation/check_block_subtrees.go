@@ -185,14 +185,14 @@ func (u *Server) CheckBlockSubtrees(ctx context.Context, request *subtreevalidat
 	// it for both the per-batch processTransactionsInLevels pass and the
 	// validateSubtree closure below. Querying it twice (once per pipeline) could
 	// straddle an FSM transition and give the two pipelines divergent
-	// WithAddTXToBlockAssembly settings for the same block. During legacy syncing
-	// or catching up, transactions must NOT be added to block assembly.
+	// WithAddTXToBlockAssembly settings for the same block. While catching up
+	// blocks, transactions must NOT be added to block assembly.
 	currentState, err := u.blockchainClient.GetFSMCurrentState(ctx)
 	if err != nil {
 		return nil, errors.WrapGRPC(errors.NewProcessingError("[CheckBlockSubtrees] Failed to get FSM current state", err))
 	}
 
-	addTXToBlockAssembly := *currentState != blockchain.FSMStateLEGACYSYNCING && *currentState != blockchain.FSMStateCATCHINGBLOCKS
+	addTXToBlockAssembly := *currentState != blockchain.FSMStateCATCHINGBLOCKS
 
 	// BATCHED SUBTREE LOADING: Get blockIds once before batching
 	blockHeaderIDs, err := u.blockchainClient.GetBlockHeaderIDs(ctx, block.Header.HashPrevBlock, uint64(u.settings.GetUtxoStoreBlockHeightRetention()*2))
@@ -576,10 +576,10 @@ func (u *Server) CheckBlockSubtrees(ctx context.Context, request *subtreevalidat
 	//       ErrBlockIncomplete; the backstop is block-validation's FSM-gated
 	//       handling of that error (BlockValidation.isCaughtUp): in a caught-up
 	//       state the floater block is invalidated/rolled back (including the
-	//       optimistically-added block), in LEGACYSYNCING/CATCHINGBLOCKS it
+	//       optimistically-added block), in CATCHINGBLOCKS it
 	//       stays incomplete and is retried (preserving #1031);
 	//   (c) block-assembly contamination — FSM-gated off in
-	//       LEGACYSYNCING/CATCHINGBLOCKS (both this closure and
+	//       CATCHINGBLOCKS (both this closure and
 	//       processTransactionsInLevels gate on the same addTXToBlockAssembly
 	//       captured once above);
 	//       in RUNNING the substitution is byte-identical to the everyday
@@ -1022,8 +1022,8 @@ func (u *Server) processTransactionsInLevels(ctx context.Context, allTransaction
 
 	// addTXToBlockAssembly is captured once by the caller (CheckBlockSubtrees)
 	// from a single FSM read, so this pass and the validateSubtree closure cannot
-	// diverge across an FSM transition. During legacy syncing or catching up it is
-	// false, disabling adding transactions to block assembly.
+	// diverge across an FSM transition. While catching up blocks it is false,
+	// disabling adding transactions to block assembly.
 	if !addTXToBlockAssembly {
 		validatorOptions = append(validatorOptions, validator.WithAddTXToBlockAssembly(false))
 	}

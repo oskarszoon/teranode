@@ -488,7 +488,7 @@ func (v *Validator) ValidateWithOptions(ctx context.Context, tx *bt.Tx, blockHei
 						return
 					}
 
-					if *state == blockchain_api.FSMStateType_CATCHINGBLOCKS || *state == blockchain_api.FSMStateType_LEGACYSYNCING {
+					if *state == blockchain_api.FSMStateType_CATCHINGBLOCKS {
 						// ignore notifications while syncing or catching up
 						return
 					}
@@ -537,8 +537,8 @@ func (v *Validator) publishPolicyRejectedTx(ctx context.Context, ctxLogger ulogg
 		return
 	}
 
-	// Stay quiet while syncing or catching up, mirroring the rejected-tx producer above.
-	// During CATCHINGBLOCKS/LEGACYSYNCING the node replays large volumes of historical
+	// Stay quiet while catching up, mirroring the rejected-tx producer above.
+	// During CATCHINGBLOCKS the node replays large volumes of historical
 	// transactions; publishing a policy-rejected message for every one would flood the
 	// topic with cache entries that subtree validation does not need yet.
 	if v.blockchainClient != nil {
@@ -548,7 +548,7 @@ func (v *Validator) publishPolicyRejectedTx(ctx context.Context, ctxLogger ulogg
 			return
 		}
 
-		if *state == blockchain_api.FSMStateType_CATCHINGBLOCKS || *state == blockchain_api.FSMStateType_LEGACYSYNCING {
+		if *state == blockchain_api.FSMStateType_CATCHINGBLOCKS {
 			return
 		}
 	}

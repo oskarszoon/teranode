@@ -129,7 +129,7 @@ type Options struct {
 	// (BlockValidation.go: the optimistic background goroutine, the
 	// non-optimistic path, and reValidateBlock, all via isCaughtUp): in a
 	// caught-up state the floater block is invalidated/rolled back, in
-	// CATCHINGBLOCKS/LEGACYSYNCING it stays incomplete and is retried
+	// CATCHINGBLOCKS it stays incomplete and is retried
 	// (preserving #1031). Setting this flag is therefore only sound when ALL of:
 	//   - the tx comes from a locally-held, PoW-checked block (not a peer
 	//     announcement), AND

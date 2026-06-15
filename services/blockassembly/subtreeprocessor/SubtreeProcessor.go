@@ -125,8 +125,8 @@ type resetBlocks struct {
 	// responseCh receives the reset operation response
 	responseCh chan ResetResponse
 
-	// isLegacySync indicates whether this is a legacy synchronization operation
-	isLegacySync bool
+	// useFastForwardReset indicates whether to use fast-forward reset (coinbase-only UTXO processing) for checkpoint-trusted blocks
+	useFastForwardReset bool
 
 	// postProcess is an optional function to execute after the reset
 	postProcess func() error
@@ -828,7 +828,7 @@ func (stp *SubtreeProcessor) Start(ctx context.Context) {
 					stp.setCurrentRunningState(StateResetBlocks)
 
 					err = stp.reset(resetBlocksMsg.blockHeader, resetBlocksMsg.moveBackBlocks, resetBlocksMsg.moveForwardBlocks,
-						resetBlocksMsg.isLegacySync, resetBlocksMsg.postProcess)
+						resetBlocksMsg.useFastForwardReset, resetBlocksMsg.postProcess)
 
 					if resetBlocksMsg.responseCh != nil {
 						resetBlocksMsg.responseCh <- ResetResponse{Err: err}
@@ -1186,26 +1186,26 @@ func (stp *SubtreeProcessor) GetCurrentLength() int {
 //   - blockHeader: New block header to reset to
 //   - moveBackBlocks: Blocks to move down in the chain
 //   - moveForwardBlocks: Blocks to move up in the chain
-//   - isLegacySync: Whether this is a legacy sync operation
+//   - useFastForwardReset: Whether to use fast-forward reset (coinbase-only UTXO processing) for checkpoint-trusted blocks
 //
 // Returns:
 //   - ResetResponse: Response containing any errors encountered
-func (stp *SubtreeProcessor) Reset(blockHeader *model.BlockHeader, moveBackBlocks []*model.Block, moveForwardBlocks []*model.Block, isLegacySync bool, postProcess func() error) ResetResponse {
+func (stp *SubtreeProcessor) Reset(blockHeader *model.BlockHeader, moveBackBlocks []*model.Block, moveForwardBlocks []*model.Block, useFastForwardReset bool, postProcess func() error) ResetResponse {
 	responseCh := make(chan ResetResponse)
 	stp.resetCh <- &resetBlocks{
-		blockHeader:       blockHeader,
-		moveBackBlocks:    moveBackBlocks,
-		moveForwardBlocks: moveForwardBlocks,
-		responseCh:        responseCh,
-		isLegacySync:      isLegacySync,
-		postProcess:       postProcess,
+		blockHeader:         blockHeader,
+		moveBackBlocks:      moveBackBlocks,
+		moveForwardBlocks:   moveForwardBlocks,
+		responseCh:          responseCh,
+		useFastForwardReset: useFastForwardReset,
+		postProcess:         postProcess,
 	}
 
 	return <-responseCh
 }
 
 func (stp *SubtreeProcessor) reset(blockHeader *model.BlockHeader, moveBackBlocks []*model.Block, moveForwardBlocks []*model.Block,
-	isLegacySync bool, postProcess func() error) error {
+	useFastForwardReset bool, postProcess func() error) error {
 	_, _, deferFn := tracing.Tracer("subtreeprocessor").Start(context.Background(), "reset",
 		tracing.WithParentStat(stp.stats),
 		tracing.WithHistogram(prometheusSubtreeProcessorReset),
@@ -1319,8 +1319,8 @@ func (stp *SubtreeProcessor) reset(blockHeader *model.BlockHeader, moveBackBlock
 		_ = g.Wait()
 	}
 
-	// optimized version for legacy sync
-	if isLegacySync {
+	// fast-forward reset: coinbase-only UTXO processing for checkpoint-trusted blocks
+	if useFastForwardReset {
 		coinbaseTxsAdded := sync.Map{}
 
 		g, gCtx := errgroup.WithContext(context.Background())
@@ -1354,7 +1354,11 @@ func (stp *SubtreeProcessor) reset(blockHeader *model.BlockHeader, moveBackBlock
 		// Mark processed_at for all blocks. For intermediate blocks use a lightweight
 		// direct SetBlockProcessedAt call to avoid running adjustSubtreeSize and
 		// updatePrecomputedMiningData on stale stats repeatedly during fast-forward.
-		// Only the final block gets full finalizeBlockProcessing.
+		// Only the final block gets full finalizeBlockProcessing. This is intentional
+		// and safe in the fast-forward path (callers gate it on checkpoint-trusted
+		// blocks): per-block precomputed-mining-data is irrelevant while catching up,
+		// only the resulting tip needs the full refresh. Do not "fix" by finalizing
+		// every block — that reintroduces the per-block cost this path avoids.
 		for i, block := range moveForwardBlocks {
 			if i < len(moveForwardBlocks)-1 {
 				if err := stp.blockchainClient.SetBlockProcessedAt(ctx, block.Header.Hash()); err != nil {
@@ -1426,8 +1430,11 @@ func (stp *SubtreeProcessor) reset(blockHeader *model.BlockHeader, moveBackBlock
 
 		// Mark processed_at for all blocks. For intermediate blocks use a lightweight
 		// direct SetBlockProcessedAt call to avoid running adjustSubtreeSize and
-		// updatePrecomputedMiningData on stale stats repeatedly during fast-forward.
-		// Only the final block gets full finalizeBlockProcessing.
+		// updatePrecomputedMiningData on stale stats repeatedly while moving forward.
+		// Only the final block gets full finalizeBlockProcessing. This applies to all
+		// resets regardless of checkpoint trust: per-block precomputed-mining-data is
+		// irrelevant mid-reset, only the resulting tip needs the full refresh. Do not
+		// "fix" by finalizing every block — that reintroduces the per-block cost.
 		for i, block := range moveForwardBlocks {
 			if i < len(moveForwardBlocks)-1 {
 				if err := stp.blockchainClient.SetBlockProcessedAt(ctx, block.Header.Hash()); err != nil {
@@ -5506,6 +5513,18 @@ func (stp *SubtreeProcessor) CreateTransactionMap(ctx context.Context, blockSubt
 
 	conflictingNodesPerSubtree := make([][]chainhash.Hash, totalSubtreesInBlock)
 
+	// Single-writer-per-bucket insert pipeline: the subtree goroutines below
+	// only deserialize and submit; each bucket is written by exactly one
+	// inserter worker, so the per-bucket mutex is never contended (the old
+	// shape — every subtree goroutine spawning one goroutine per bucket —
+	// serialized on the 1024 bucket mutexes and plateaued at ~15M inserts/s
+	// on a 192-core node).
+	// GOMAXPROCS(0), not NumCPU(): the inserter workers are CPU-bound, so size
+	// the pool to runnable parallelism. Under a cgroup CPU quota (the normal
+	// container/k8s deployment) NumCPU() reports host cores and would
+	// oversubscribe. Matches map.go and the errgroup limit at line ~2292.
+	inserter := newBucketInserter(transactionMap, runtime.GOMAXPROCS(0))
+
 	g, ctx := errgroup.WithContext(ctx)
 	util.SafeSetLimit(stp.logger, g, concurrentSubtreeReads)
 
@@ -5569,19 +5588,8 @@ func (stp *SubtreeProcessor) CreateTransactionMap(ctx context.Context, blockSubt
 				return errors.NewProcessingError("error deserializing subtree: %s", st.String(), err)
 			}
 
-			bucketG := errgroup.Group{}
-
-			for bucket, hashes := range txHashBuckets {
-				bucket := bucket
-				hashes := hashes
-				// put the hashes into the transaction map in parallel, it has already been split into the correct buckets
-				bucketG.Go(func() error {
-					return transactionMap.PutMultiBucket(bucket, hashes)
-				})
-			}
-
-			if err = bucketG.Wait(); err != nil {
-				return errors.NewProcessingError("error putting hashes into transaction map", err)
+			if err = inserter.submit(txHashBuckets); err != nil {
+				return errors.NewProcessingError("error submitting hashes to transaction map inserter", err)
 			}
 
 			conflictingNodesPerSubtree[subtreeIdx] = conflictingNodes
@@ -5590,9 +5598,25 @@ func (stp *SubtreeProcessor) CreateTransactionMap(ctx context.Context, blockSubt
 		})
 	}
 
-	if err := g.Wait(); err != nil {
+	// closeAndWait must run even when g.Wait() errors: the inserter workers
+	// hold open channels and must be joined before the pooled map is reused.
+	// All submitters have returned once g.Wait() returns, so closing is safe.
+	err := g.Wait()
+	insertErr := inserter.closeAndWait()
+
+	if err != nil {
 		return nil, nil, errors.NewProcessingError("error getting subtrees", err)
 	}
+
+	if insertErr != nil {
+		return nil, nil, errors.NewProcessingError("error putting hashes into transaction map", insertErr)
+	}
+
+	// The map is fully built and has no further writers until the next
+	// block's Clear(): freeze it so the ~hundreds of millions of Exists
+	// probes in processRemainderTxHashes and dequeueDuringBlockMovement
+	// skip the per-bucket read lock.
+	transactionMap.Freeze()
 
 	conflictingNodesPerSubtreeCount := 0
 	for _, subtreeConflictingNodes := range conflictingNodesPerSubtree {
