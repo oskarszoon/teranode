@@ -912,18 +912,6 @@ type ClientI interface {
 	// - Error if the notification fails
 	ReportPeerFailure(ctx context.Context, hash *chainhash.Hash, peerID string, failureType string, reason string) error
 
-	// LegacySync performs a legacy synchronization process.
-	//
-	// This method initiates a blockchain synchronization using the legacy synchronization
-	// protocol, which may be needed for compatibility with older network nodes.
-	//
-	// Parameters:
-	// - ctx: Context for the operation with timeout and cancellation support
-	//
-	// Returns:
-	// - Error if the legacy synchronization process fails
-	LegacySync(ctx context.Context) error
-
 	// Idle transitions the blockchain service to an idle state.
 	//
 	// This method puts the blockchain service into an idle state where it maintains

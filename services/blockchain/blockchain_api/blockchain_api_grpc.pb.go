@@ -78,7 +78,6 @@ const (
 	BlockchainAPI_WaitUntilFSMTransitionFromIdleState_FullMethodName  = "/blockchain_api.BlockchainAPI/WaitUntilFSMTransitionFromIdleState"
 	BlockchainAPI_Run_FullMethodName                                  = "/blockchain_api.BlockchainAPI/Run"
 	BlockchainAPI_CatchUpBlocks_FullMethodName                        = "/blockchain_api.BlockchainAPI/CatchUpBlocks"
-	BlockchainAPI_LegacySync_FullMethodName                           = "/blockchain_api.BlockchainAPI/LegacySync"
 	BlockchainAPI_Idle_FullMethodName                                 = "/blockchain_api.BlockchainAPI/Idle"
 	BlockchainAPI_ReportPeerFailure_FullMethodName                    = "/blockchain_api.BlockchainAPI/ReportPeerFailure"
 	BlockchainAPI_GetBlockLocator_FullMethodName                      = "/blockchain_api.BlockchainAPI/GetBlockLocator"
@@ -216,8 +215,6 @@ type BlockchainAPIClient interface {
 	Run(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// CatchUpBlocks initiates block catch-up process.
 	CatchUpBlocks(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*emptypb.Empty, error)
-	// LegacySync initiates legacy synchronization process.
-	LegacySync(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Idle marks the service as idle.
 	Idle(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// ReportPeerFailure notifies about peer download failures (catchup, subtree, block, etc).
@@ -818,16 +815,6 @@ func (c *blockchainAPIClient) CatchUpBlocks(ctx context.Context, in *emptypb.Emp
 	return out, nil
 }
 
-func (c *blockchainAPIClient) LegacySync(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*emptypb.Empty, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(emptypb.Empty)
-	err := c.cc.Invoke(ctx, BlockchainAPI_LegacySync_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
 func (c *blockchainAPIClient) Idle(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*emptypb.Empty, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(emptypb.Empty)
@@ -1089,8 +1076,6 @@ type BlockchainAPIServer interface {
 	Run(context.Context, *emptypb.Empty) (*emptypb.Empty, error)
 	// CatchUpBlocks initiates block catch-up process.
 	CatchUpBlocks(context.Context, *emptypb.Empty) (*emptypb.Empty, error)
-	// LegacySync initiates legacy synchronization process.
-	LegacySync(context.Context, *emptypb.Empty) (*emptypb.Empty, error)
 	// Idle marks the service as idle.
 	Idle(context.Context, *emptypb.Empty) (*emptypb.Empty, error)
 	// ReportPeerFailure notifies about peer download failures (catchup, subtree, block, etc).
@@ -1296,9 +1281,6 @@ func (UnimplementedBlockchainAPIServer) Run(context.Context, *emptypb.Empty) (*e
 }
 func (UnimplementedBlockchainAPIServer) CatchUpBlocks(context.Context, *emptypb.Empty) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method CatchUpBlocks not implemented")
-}
-func (UnimplementedBlockchainAPIServer) LegacySync(context.Context, *emptypb.Empty) (*emptypb.Empty, error) {
-	return nil, status.Error(codes.Unimplemented, "method LegacySync not implemented")
 }
 func (UnimplementedBlockchainAPIServer) Idle(context.Context, *emptypb.Empty) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method Idle not implemented")
@@ -2346,24 +2328,6 @@ func _BlockchainAPI_CatchUpBlocks_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
-func _BlockchainAPI_LegacySync_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(emptypb.Empty)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(BlockchainAPIServer).LegacySync(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: BlockchainAPI_LegacySync_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(BlockchainAPIServer).LegacySync(ctx, req.(*emptypb.Empty))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
 func _BlockchainAPI_Idle_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(emptypb.Empty)
 	if err := dec(in); err != nil {
@@ -2838,10 +2802,6 @@ var BlockchainAPI_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CatchUpBlocks",
 			Handler:    _BlockchainAPI_CatchUpBlocks_Handler,
-		},
-		{
-			MethodName: "LegacySync",
-			Handler:    _BlockchainAPI_LegacySync_Handler,
 		},
 		{
 			MethodName: "Idle",

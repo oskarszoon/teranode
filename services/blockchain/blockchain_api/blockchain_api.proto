@@ -183,9 +183,6 @@ service BlockchainAPI {
   // CatchUpBlocks initiates block catch-up process.
   rpc CatchUpBlocks(google.protobuf.Empty) returns (google.protobuf.Empty) {}
 
-  // LegacySync initiates legacy synchronization process.
-  rpc LegacySync(google.protobuf.Empty) returns (google.protobuf.Empty) {}
-
   // Idle marks the service as idle.
   rpc Idle(google.protobuf.Empty) returns (google.protobuf.Empty) {}
 
@@ -668,7 +665,8 @@ enum FSMEventType {
   STOP = 0;
   RUN = 1;
   CATCHUPBLOCKS = 2;
-  LEGACYSYNC = 3;
+  reserved 3;
+  reserved "LEGACYSYNC";
 }
 
 // TransportType distinguishes how to communicate with a peer during catchup.
@@ -933,7 +931,8 @@ enum FSMStateType {
   IDLE = 0;           // Service is idle
   RUNNING = 1;        // Service is running normally
   CATCHINGBLOCKS = 2; // Service is catching up blocks
-  LEGACYSYNCING = 3;  // Service is in legacy sync mode
+  reserved 3;
+  reserved "LEGACYSYNCING";
 }
 
 // GetBlockLocatorRequest requests a block locator.
