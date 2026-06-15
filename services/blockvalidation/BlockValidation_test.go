@@ -2769,8 +2769,10 @@ func BenchmarkCheckOldBlockIDs(b *testing.B) {
 		b.Run(fmt.Sprintf("in-memory-chain-check/%d", numTxs), func(b *testing.B) {
 			mockClient := &blockchain.Mock{}
 			// Post-#1055 this route defers every distinct parent-set to the
-			// authoritative CheckBlockIsInCurrentChain (the dedupe cache collapses the
-			// 64 distinct parents to one lookup); measures that delegated cost.
+			// authoritative CheckBlockIsInCurrentChain. buildMap spreads the N txs
+			// across 64 distinct single-parent sets ({1}…{64}), so the dedupe cache
+			// collapses the N txs to one lookup per distinct set (64 lookups), not one;
+			// measures that delegated cost.
 			mockClient.On("CheckBlockIsInCurrentChain", mock.Anything, mock.Anything).Return(true, nil)
 
 			s := &settings.Settings{}
