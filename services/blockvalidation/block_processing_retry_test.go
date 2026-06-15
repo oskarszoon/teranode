@@ -322,6 +322,73 @@ func TestProcessCatchupChItem(t *testing.T) {
 	})
 }
 
+// TestCatchupCap_BoundsReentry is the integration-level proof of the #1057 bound
+// (requested in review): it drives the real consumer handler (processCatchupChItem,
+// what the catchupCh goroutine calls per item) with a catchup that ALWAYS fails,
+// re-entering it far more times than the cap, and asserts catchup() is invoked at
+// most CatchupMaxAttemptsPerBlock times — after the cap the dequeue gate skips the
+// block. Validates the livelock is actually bounded, not just the helpers.
+func TestCatchupCap_BoundsReentry(t *testing.T) {
+	initPrometheusMetrics()
+
+	const (
+		maxAttempts = 5
+		reentries   = 20 // far more than the cap: simulate 20 re-announcements
+	)
+
+	testBlock := func() *model.Block {
+		prev := chainhash.HashH([]byte("prev"))
+		mr := chainhash.HashH([]byte("merkle"))
+		return &model.Block{Header: &model.BlockHeader{HashPrevBlock: &prev, HashMerkleRoot: &mr}}
+	}
+
+	// run drives processCatchupChItem reentries times with a catchup that always
+	// returns catchupErr, and returns how many times catchup was actually invoked.
+	run := func(t *testing.T, catchupErr error) int {
+		t.Helper()
+		tSettings := test.CreateBaseTestSettings(t)
+		tSettings.BlockValidation.CatchupMaxAttemptsPerBlock = maxAttempts
+
+		mockBC := &blockchain.Mock{}
+		mockBC.On("ReportPeerFailure", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
+
+		calls := 0
+		u := &Server{
+			settings:            tSettings,
+			logger:              ulogger.TestLogger{},
+			blockchainClient:    mockBC,
+			processBlockNotify:  ttlcache.New[chainhash.Hash, bool](),
+			catchupAlternatives: ttlcache.New[chainhash.Hash, []processBlockCatchup](),
+			blockCatchupAttempts: ttlcache.New[chainhash.Hash, int](
+				ttlcache.WithTTL[chainhash.Hash, int](10*time.Minute),
+				ttlcache.WithDisableTouchOnHit[chainhash.Hash, int](),
+			),
+		}
+		u.catchupFunc = func(_ context.Context, _ *model.Block, _, _ string) error {
+			calls++
+			return catchupErr
+		}
+
+		c := processBlockCatchup{block: testBlock(), peerID: "", baseURL: ""}
+		for i := 0; i < reentries; i++ {
+			u.processCatchupChItem(context.Background(), c)
+		}
+		return calls
+	}
+
+	t.Run("persistent service error is bounded", func(t *testing.T) {
+		calls := run(t, errors.NewServiceError("blockchain unavailable"))
+		require.LessOrEqualf(t, calls, maxAttempts, "catchup must run at most %d times over %d re-entries, got %d", maxAttempts, reentries, calls)
+		require.Equal(t, maxAttempts, calls, "catchup runs exactly the cap, then the dequeue gate skips")
+	})
+
+	t.Run("all-peers-exhausted (ErrBlockIncomplete) is bounded", func(t *testing.T) {
+		calls := run(t, errors.ErrBlockIncomplete)
+		require.LessOrEqualf(t, calls, maxAttempts, "catchup must run at most %d times over %d re-entries, got %d", maxAttempts, reentries, calls)
+		require.Equal(t, maxAttempts, calls, "catchup runs exactly the cap, then the dequeue gate skips")
+	})
+}
+
 // TestBlockProcessingWithRetry tests the retry mechanism when block fetching fails
 func TestBlockProcessingWithRetry(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
