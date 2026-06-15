@@ -51,6 +51,12 @@ const (
 	// rejected to maintain the integrity of the monetary system and prevent inflation attacks.
 	MaxSatoshis = 21_000_000_00_000_000
 
+	// maxAggregatedSpendErrs caps how many per-spend errors are wrapped into the
+	// aggregate attached to a failed-validation error. The failure count scales
+	// with the tx's input count; an uncapped chain makes error construction and
+	// every errors.Is on it quadratic. See errors.JoinCapped.
+	maxAggregatedSpendErrs = 10
+
 	// coinbaseTxID represents the special transaction ID used for coinbase transactions.
 	// Coinbase transactions are the first transaction in each block and create new bitcoins as mining rewards.
 	// This constant is used to identify and handle coinbase transactions differently from regular transactions
@@ -743,7 +749,11 @@ func (v *Validator) validateInternal(ctx context.Context, tx *bt.Tx, blockHeight
 		if errors.Is(err, errors.ErrUtxoError) {
 			saveAsConflicting := false
 
-			var spendErrs *errors.Error
+			// Collect failed spends and attach a capped aggregate to the
+			// returned error. The failure count scales with the tx's input
+			// count; an uncapped chain makes every subsequent errors.Is on it
+			// walk the full chain (mainnet IBD stall, block 820116).
+			failedSpends := make([]error, 0, 8)
 
 			for _, spend := range spentUtxos {
 				if spend.Err != nil {
@@ -751,20 +761,13 @@ func (v *Validator) validateInternal(ctx context.Context, tx *bt.Tx, blockHeight
 						saveAsConflicting = true
 					}
 
-					var spendErr *errors.Error
-					if errors.As(spend.Err, &spendErr) {
-						if spendErrs == nil {
-							spendErrs = errors.New(spendErr.Code(), spendErr.Message(), spendErr)
-						} else {
-							spendErrs = errors.New(spendErrs.Code(), spendErrs.Message(), spendErr)
-						}
-					}
+					failedSpends = append(failedSpends, spend.Err)
 				}
 			}
 
-			if spendErrs != nil {
+			if len(failedSpends) > 0 {
 				if errors.As(err, &tErr) {
-					tErr.SetWrappedErr(spendErrs)
+					tErr.SetWrappedErr(errors.JoinCapped(maxAggregatedSpendErrs, failedSpends...))
 				}
 			}
 
