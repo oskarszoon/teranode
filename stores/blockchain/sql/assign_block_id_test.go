@@ -141,6 +141,39 @@ func TestAssignBlockID_TwoPathRace_NoPhantom(t *testing.T) {
 	require.Equal(t, storedID, got)
 }
 
+// TestReserveDurableBlockID_CommittedDuringReserveReturnsCommittedID is the #1056
+// review regression for the cross-process "we won the INSERT" race: an instance
+// can pass AssignBlockID's under-lock committed-check, then another instance
+// commits the block (under a different id) and StoreBlock deletes its reservation
+// row, so this instance's own nextval wins the INSERT and the re-read returns it —
+// a divergent (phantom) id for an already-committed hash. reserveDurableBlockID's
+// final committed-recheck must catch this and return the committed id instead.
+//
+// Deterministic stand-in: commit the block (clears its reservation), then call
+// reserveDurableBlockID directly for that committed hash — its INSERT succeeds
+// (no row) but the committed-recheck must still return the committed id.
+func TestReserveDurableBlockID_CommittedDuringReserveReturnsCommittedID(t *testing.T) {
+	tSettings := test.CreateBaseTestSettings(t)
+	storeURL, err := url.Parse("sqlitememory:///")
+	require.NoError(t, err)
+
+	s, err := New(ulogger.TestLogger{}, storeURL, tSettings)
+	require.NoError(t, err)
+	defer s.Close()
+
+	ctx := context.Background()
+
+	reserved, err := s.AssignBlockID(ctx, block1.Hash())
+	require.NoError(t, err)
+	committedID, _, err := s.StoreBlock(ctx, block1, "test", options.WithID(reserved))
+	require.NoError(t, err)
+	require.Equal(t, reserved, committedID)
+
+	got, err := s.reserveDurableBlockID(ctx, block1.Hash())
+	require.NoError(t, err)
+	require.Equal(t, committedID, got, "must return the committed id, not a divergent fresh reservation")
+}
+
 // TestReservationSweep_RunsWithInMemoryChainCheckDisabled is the #1056 review
 // regression: block_id_reservations is written by AssignBlockID regardless of
 // blockchain_use_in_memory_chain_check, so the age-based sweep must run regardless

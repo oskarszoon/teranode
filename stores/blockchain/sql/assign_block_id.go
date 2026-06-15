@@ -120,21 +120,30 @@ func (s *SQL) reserveDurableBlockID(ctx context.Context, blockHash *chainhash.Ha
 	if err != nil {
 		return 0, err
 	}
-	if !ok {
-		// The reservation row vanished between our INSERT and this re-read: a
-		// concurrent winning instance committed the block and StoreBlock deleted its
-		// reservation row in that window. The committed blocks row is now the
-		// authority (resolution priority 1) — returning our own discarded nextval
-		// here would reconstruct a divergent (phantom) id. Re-check committed first;
-		// fall back to the local nextval only if the block genuinely isn't committed.
-		if committedID, committed, cErr := s.blockIDByHash(ctx, blockHash); cErr != nil {
-			return 0, cErr
-		} else if committed {
-			return committedID, nil
-		}
 
+	// Final committed-check (resolution priority 1). A concurrent instance can
+	// commit this hash (under a different id) AND have StoreBlock delete its
+	// reservation row during our reserve — after AssignBlockID's under-lock
+	// committed-check passed but before/around our L2 read. That surfaces two ways,
+	// both of which would otherwise return a divergent (phantom) id for an
+	// already-committed hash:
+	//   - the delete lands after our INSERT  → our re-read finds no row (!ok);
+	//   - the delete lands before our INSERT → our own nextval wins the INSERT and
+	//     the re-read returns it (ok, stored == id).
+	// In both cases the committed blocks row is the authority, so re-check it before
+	// trusting either result. (One extra SELECT, only on the reserve slow path.)
+	if committedID, committed, cErr := s.blockIDByHash(ctx, blockHash); cErr != nil {
+		return 0, cErr
+	} else if committed {
+		return committedID, nil
+	}
+
+	if !ok {
+		// Unreachable in practice (we just inserted, or someone else did, and the
+		// block isn't committed) — never mint a bare nextval that wasn't persisted.
 		return id, nil
 	}
+
 	return stored, nil
 }
 

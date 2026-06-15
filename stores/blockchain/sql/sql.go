@@ -612,7 +612,7 @@ func createPostgresSchemaUnlocked(db *usql.DB, withIndexes bool) error {
 	// block_id_reservations durably backs the in-memory AssignBlockID cache so a
 	// reservation survives the cache TTL, a restart, and a second instance. No FK
 	// to blocks: a reservation exists BEFORE the block row does. Cleared on commit
-	// (StoreBlock) and swept by age (backgroundRefreshLoop).
+	// (StoreBlock) and swept by age (reservationSweepLoop).
 	if _, err := db.Exec(`
       CREATE TABLE IF NOT EXISTS block_id_reservations (
         hash         BYTEA   NOT NULL PRIMARY KEY
