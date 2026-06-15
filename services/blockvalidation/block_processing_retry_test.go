@@ -10,6 +10,7 @@ import (
 
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	"github.com/bsv-blockchain/teranode/errors"
+	"github.com/bsv-blockchain/teranode/model"
 	"github.com/bsv-blockchain/teranode/services/blockchain"
 	"github.com/bsv-blockchain/teranode/services/blockvalidation/testhelpers"
 	"github.com/bsv-blockchain/teranode/services/validator"
@@ -23,6 +24,7 @@ import (
 	"github.com/jellydator/ttlcache/v3"
 	"github.com/ordishs/gocore"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -147,6 +149,177 @@ func TestCatchupAttemptCap_ClearedOnSuccess(t *testing.T) {
 	require.Nil(t, u.blockCatchupAttempts.Get(h), "counter must be gone after success")
 	require.False(t, u.catchupAttemptsExhausted(&h))
 	require.Equal(t, 1, u.recordCatchupAttempt(&h), "next failure starts a fresh count")
+}
+
+// TestProcessCatchupChItem exercises the catchup-consumer per-item handler
+// (extracted from the Init goroutine so its #1057 cap branches are unit-testable
+// via the injected catchupFunc). Covers: cooldown skip, success reset, the
+// service-error count, the progress-aware reset (the review nit — a cycle that
+// advanced the chain must not count toward the cap), state-error/in-progress
+// no-count paths, the all-peers-exhausted count, and the invalid-block path.
+func TestProcessCatchupChItem(t *testing.T) {
+	initPrometheusMetrics()
+
+	testBlock := func() *model.Block {
+		prev := chainhash.HashH([]byte("prev"))
+		mr := chainhash.HashH([]byte("merkle"))
+		return &model.Block{Header: &model.BlockHeader{HashPrevBlock: &prev, HashMerkleRoot: &mr}}
+	}
+
+	// newServer wires just enough for processCatchupChItem: the three caches, an
+	// injected catchupFunc (records call count + returns catchupErr), and a
+	// blockchain mock for the generic-failure ReportPeerFailure. p2pClient is nil
+	// and peerID is "" in items, so isPeerBad/isPeerMalicious/reportCatchup* are
+	// no-ops and tryAlternativePeersForCatchup returns false.
+	newServer := func(maxAttempts int, catchupErr error) (*Server, *int) {
+		tSettings := test.CreateBaseTestSettings(t)
+		tSettings.BlockValidation.CatchupMaxAttemptsPerBlock = maxAttempts
+
+		mockBC := &blockchain.Mock{}
+		mockBC.On("ReportPeerFailure", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
+
+		calls := 0
+		u := &Server{
+			settings:            tSettings,
+			logger:              ulogger.TestLogger{},
+			blockchainClient:    mockBC,
+			processBlockNotify:  ttlcache.New[chainhash.Hash, bool](),
+			catchupAlternatives: ttlcache.New[chainhash.Hash, []processBlockCatchup](),
+			blockCatchupAttempts: ttlcache.New[chainhash.Hash, int](
+				ttlcache.WithTTL[chainhash.Hash, int](10*time.Minute),
+				ttlcache.WithDisableTouchOnHit[chainhash.Hash, int](),
+			),
+		}
+		u.catchupFunc = func(_ context.Context, _ *model.Block, _, _ string) error {
+			calls++
+			return catchupErr
+		}
+		return u, &calls
+	}
+
+	ctx := context.Background()
+	item := func(b *model.Block) processBlockCatchup {
+		return processBlockCatchup{block: b, peerID: "", baseURL: ""}
+	}
+
+	t.Run("success clears guards and resets counter", func(t *testing.T) {
+		u, calls := newServer(3, nil)
+		b := testBlock()
+		u.processBlockNotify.Set(*b.Hash(), true, ttlcache.DefaultTTL)
+
+		u.processCatchupChItem(ctx, item(b))
+
+		require.Equal(t, 1, *calls)
+		require.Nil(t, u.processBlockNotify.Get(*b.Hash()))
+		require.Nil(t, u.blockCatchupAttempts.Get(*b.Hash()))
+	})
+
+	t.Run("service error with no progress counts toward cap", func(t *testing.T) {
+		u, _ := newServer(3, errors.NewServiceError("blockchain unavailable"))
+		b := testBlock()
+
+		u.processCatchupChItem(ctx, item(b))
+
+		it := u.blockCatchupAttempts.Get(*b.Hash())
+		require.NotNil(t, it)
+		require.Equal(t, 1, it.Value())
+		require.Nil(t, u.processBlockNotify.Get(*b.Hash()))
+	})
+
+	t.Run("failure that advanced the chain resets the counter (does not count)", func(t *testing.T) {
+		u, _ := newServer(3, errors.NewServiceError("dropped mid-batch"))
+		b := testBlock()
+		u.recordCatchupAttempt(b.Hash()) // a prior failed cycle
+		u.blocksValidated.Store(2)       // but THIS cycle validated 2 blocks before erroring
+
+		u.processCatchupChItem(ctx, item(b))
+
+		require.Nil(t, u.blockCatchupAttempts.Get(*b.Hash()), "a progress-making cycle must reset the cap counter")
+	})
+
+	t.Run("state error clears without counting", func(t *testing.T) {
+		u, _ := newServer(3, errors.NewStateError("not running"))
+		b := testBlock()
+
+		u.processCatchupChItem(ctx, item(b))
+
+		require.Nil(t, u.blockCatchupAttempts.Get(*b.Hash()))
+		require.Nil(t, u.processBlockNotify.Get(*b.Hash()))
+	})
+
+	t.Run("catchup-in-progress keeps the guard and does not count", func(t *testing.T) {
+		u, _ := newServer(3, errors.ErrCatchupInProgress)
+		b := testBlock()
+		u.processBlockNotify.Set(*b.Hash(), true, ttlcache.DefaultTTL)
+
+		u.processCatchupChItem(ctx, item(b))
+
+		require.Nil(t, u.blockCatchupAttempts.Get(*b.Hash()))
+		require.NotNil(t, u.processBlockNotify.Get(*b.Hash()), "in-progress requeue must keep the processing guard")
+	})
+
+	t.Run("all peers exhausted counts and clears", func(t *testing.T) {
+		u, _ := newServer(3, errors.ErrBlockIncomplete)
+		b := testBlock()
+
+		u.processCatchupChItem(ctx, item(b))
+
+		it := u.blockCatchupAttempts.Get(*b.Hash())
+		require.NotNil(t, it)
+		require.Equal(t, 1, it.Value())
+		require.Nil(t, u.processBlockNotify.Get(*b.Hash()))
+	})
+
+	t.Run("recovers via cached alternative peer", func(t *testing.T) {
+		u, _ := newServer(3, nil)
+		b := testBlock()
+
+		call := 0
+		u.catchupFunc = func(_ context.Context, _ *model.Block, _, _ string) error {
+			call++
+			if call == 1 {
+				return errors.ErrBlockIncomplete // primary peer can't complete it
+			}
+			return nil // cached alternative succeeds
+		}
+
+		// Seed a cached alternative under a different peer id (the loop skips the
+		// just-failed peer, which is "").
+		u.catchupAlternatives.Set(*b.Hash(), []processBlockCatchup{{block: b, peerID: "altpeer", baseURL: "http://alt"}}, ttlcache.DefaultTTL)
+		u.processBlockNotify.Set(*b.Hash(), true, ttlcache.DefaultTTL)
+
+		u.processCatchupChItem(ctx, item(b))
+
+		require.Equal(t, 2, call, "primary peer then the cached alternative")
+		require.Nil(t, u.processBlockNotify.Get(*b.Hash()), "guard cleared on alternative success")
+		require.Nil(t, u.blockCatchupAttempts.Get(*b.Hash()), "counter reset on alternative success")
+		require.Nil(t, u.catchupAlternatives.Get(*b.Hash()), "alternatives cleared on success")
+	})
+
+	t.Run("invalid block clears notify without counting toward cap", func(t *testing.T) {
+		u, _ := newServer(3, errors.NewBlockInvalidError("bad block"))
+		b := testBlock()
+		u.processBlockNotify.Set(*b.Hash(), true, ttlcache.DefaultTTL)
+
+		u.processCatchupChItem(ctx, item(b))
+
+		require.Nil(t, u.blockCatchupAttempts.Get(*b.Hash()), "an invalid block is not a retry-cap candidate")
+		require.Nil(t, u.processBlockNotify.Get(*b.Hash()))
+	})
+
+	t.Run("exhausted cap skips catchup entirely", func(t *testing.T) {
+		u, calls := newServer(2, errors.NewServiceError("svc"))
+		b := testBlock()
+		u.recordCatchupAttempt(b.Hash())
+		u.recordCatchupAttempt(b.Hash())
+		require.True(t, u.catchupAttemptsExhausted(b.Hash()))
+		u.processBlockNotify.Set(*b.Hash(), true, ttlcache.DefaultTTL)
+
+		u.processCatchupChItem(ctx, item(b))
+
+		require.Equal(t, 0, *calls, "catchup must be skipped while the block is in cooldown")
+		require.Nil(t, u.processBlockNotify.Get(*b.Hash()), "guard cleared on cooldown skip")
+	})
 }
 
 // TestBlockProcessingWithRetry tests the retry mechanism when block fetching fails
