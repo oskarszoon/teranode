@@ -1787,25 +1787,26 @@ func (u *BlockValidation) ValidateBlockWithOptions(ctx context.Context, block *m
 	})
 }
 
-// isCaughtUp reports whether the node is in a steady (non-sync) FSM state.
+// isCaughtUp reports whether the node is provably in the steady RUNNING state.
 //
-// It returns true only when the FSM is not CATCHINGBLOCKS. This is the
-// distinguishing signal between a genuine floater (a not-in-block parent with
-// empty/absent BlockIDs that surfaces as ErrBlockIncomplete in RUNNING — provably
-// permanent via the SetMinedMulti->MinedSet invariant) and a legitimate #1031
-// catchup-ordering parent (transient during sync, must be retried, never
-// persisted invalid).
+// It returns true ONLY for FSMStateRUNNING. This is the distinguishing signal
+// between a genuine floater (a not-in-block parent with empty/absent BlockIDs
+// that surfaces as ErrBlockIncomplete in RUNNING — provably permanent via the
+// SetMinedMulti->MinedSet invariant) and a legitimate #1031 catchup-ordering
+// parent (transient during sync, must be retried, never persisted invalid).
 //
-// It fails safe: on a GetFSMCurrentState error or nil state it returns false
-// (treat as catchup => retry, never wrongly invalidate), so an FSM-query hiccup
-// during catchup cannot misclassify a #1031 block as invalid.
+// Matching only RUNNING (rather than "!= CATCHINGBLOCKS") keeps every other
+// state on the fail-safe side: IDLE, a GetFSMCurrentState error or nil state, and
+// any future FSM enum addition all return false (treat as not-caught-up => retry,
+// never wrongly invalidate). Only the one state we can prove is caught up
+// authorizes invalidating a floater.
 func (u *BlockValidation) isCaughtUp(ctx context.Context) bool {
 	st, err := u.blockchainClient.GetFSMCurrentState(ctx)
 	if err != nil || st == nil {
 		return false
 	}
 
-	return *st != blockchain.FSMStateCATCHINGBLOCKS
+	return *st == blockchain.FSMStateRUNNING
 }
 
 func (u *BlockValidation) markBlockAsInvalid(ctx context.Context, block *model.Block, reason string) error {
