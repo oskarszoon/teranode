@@ -773,3 +773,56 @@ func TestWithSampleRate_ChildSpanInheritsOverride(t *testing.T) {
 	defer endChild()
 	assert.True(t, childSpan.IsRecording(), "child should be recording due to inherited context override")
 }
+
+// TestStart_DisabledSkipsStatCreation verifies that when tracing is disabled the
+// per-span gocore.Stat is not created/injected (it is the dominant unconditional
+// cost on the hot sync path), while StartTime is still injected because downstream
+// services (e.g. blockvalidation catchup status) read it from the context.
+func TestStart_DisabledSkipsStatCreation(t *testing.T) {
+	originalState := IsTracingEnabled()
+	defer SetTracingEnabled(originalState)
+
+	SetTracingEnabled(false)
+
+	tracer := Tracer("test-service")
+	ctx := context.Background()
+
+	newCtx, _, endFn := tracer.Start(ctx, "op",
+		WithTag("key", "value"),
+		WithParentStat(gocore.NewStat("parent")),
+	)
+	defer endFn()
+
+	// No gocore.Stat should be injected when tracing is disabled.
+	require.Nil(t, newCtx.Value(statsKey{}), "no gocore.Stat should be injected when tracing disabled")
+
+	// StartTime must still be present (read by blockvalidation catchup status).
+	st := newCtx.Value(StartTime)
+	require.NotNil(t, st, "StartTime must be injected even when tracing disabled")
+
+	_, ok := st.(time.Time)
+	require.True(t, ok, "StartTime should be a time.Time")
+}
+
+// BenchmarkStart_Disabled measures per-span allocation on the disabled hot path
+// (the legacy sync path creates millions of these per block).
+func BenchmarkStart_Disabled(b *testing.B) {
+	originalState := IsTracingEnabled()
+	defer SetTracingEnabled(originalState)
+
+	SetTracingEnabled(false)
+
+	tracer := Tracer("bench")
+	ctx := context.Background()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		_, _, endFn := tracer.Start(ctx, "op",
+			WithTag("txid", "abc123"),
+			WithTag("height", "875800"),
+		)
+		endFn()
+	}
+}

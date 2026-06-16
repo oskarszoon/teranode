@@ -216,6 +216,13 @@ func WithParentStat(stat *gocore.Stat) Options {
 // WithTag adds a key-value tag to the trace
 func WithTag(key, value string) Options {
 	return func(s *TraceOptions) {
+		// Tags are only consumed when building OpenTelemetry span attributes, which
+		// is skipped entirely when tracing is disabled. Avoid the slice allocation
+		// (and append growth) on the disabled hot path.
+		if !tracingEnabled.Load() {
+			return
+		}
+
 		if s.Tags == nil {
 			s.Tags = make([]tracingTag, 0)
 		}
@@ -386,19 +393,31 @@ func (u *UTracer) Start(ctx context.Context, spanName string, opts ...Options) (
 		ctx, cancelFunc = context.WithTimeout(ctx, options.Timeout)
 	}
 
-	// Create gocore.Stat (only if enabled)
+	// Create gocore.Stat (only when tracing is enabled).
+	//
+	// The gocore.Stat tree is consumed by the /stats perf endpoint via
+	// WithParentStat. Creating it allocates a Stat (each with its own RWMutex and
+	// child sync.Map) and takes the parent's child-map lock on every span. On the
+	// hot sync path the validator opens several spans per transaction across
+	// millions of transactions per block, so this allocation + lock is a dominant,
+	// contended cost. When tracing is disabled (the documented "zero overhead"
+	// state) skip it; start is still needed for metrics/log durations and StartTime.
 	var (
 		start time.Time
 		stat  *gocore.Stat
 	)
 
-	if options.ParentStat != nil {
-		start, stat, ctx = NewStatFromContext(ctx, spanName, options.ParentStat)
+	if tracingEnabled {
+		if options.ParentStat != nil {
+			start, stat, ctx = NewStatFromContext(ctx, spanName, options.ParentStat)
+		} else {
+			start, stat, ctx = NewStatFromContext(ctx, spanName, defaultStat)
+		}
 	} else {
-		start, stat, ctx = NewStatFromContext(ctx, spanName, defaultStat)
+		start = gocore.CurrentTime()
 	}
 
-	// add the start time to the context
+	// add the start time to the context (read downstream, e.g. blockvalidation catchup status)
 	ctx = context.WithValue(ctx, StartTime, start)
 
 	// inject sample rate override into context for the custom sampler
