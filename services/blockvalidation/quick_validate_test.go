@@ -5,6 +5,7 @@ import (
 
 	"github.com/bsv-blockchain/go-bt/v2"
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
+	"github.com/bsv-blockchain/go-chaincfg"
 	subtreepkg "github.com/bsv-blockchain/go-subtree"
 	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/model"
@@ -425,4 +426,45 @@ func filterCalls(calls []*mock.Call, methodToRemove string) []*mock.Call {
 		}
 	}
 	return filtered
+}
+
+// setCheckpoints replaces the checkpoint set on the suite's settings with a single
+// checkpoint at the given height. It copies ChainCfgParams first so it never mutates
+// the shared (global) chaincfg.Params.
+func setCheckpoints(t *testing.T, s *CatchupTestSuite, height uint32) {
+	t.Helper()
+	require.NotNil(t, s.Server.blockValidation.settings.ChainCfgParams)
+	params := *s.Server.blockValidation.settings.ChainCfgParams
+	params.Checkpoints = []chaincfg.Checkpoint{{Height: int32(height)}}
+	s.Server.blockValidation.settings.ChainCfgParams = &params
+}
+
+func TestQuickValidateSkipsUtxoLock(t *testing.T) {
+	tests := []struct {
+		name         string
+		settingOn    bool
+		checkpointAt uint32
+		blockHeight  uint32
+		want         bool
+	}{
+		{name: "setting off", settingOn: false, checkpointAt: 1000, blockHeight: 100, want: false},
+		{name: "on, height below checkpoint", settingOn: true, checkpointAt: 1000, blockHeight: 100, want: true},
+		{name: "on, height equal to checkpoint", settingOn: true, checkpointAt: 1000, blockHeight: 1000, want: true},
+		{name: "on, height above checkpoint", settingOn: true, checkpointAt: 50, blockHeight: 100, want: false},
+		{name: "on, no checkpoints configured", settingOn: true, checkpointAt: 0, blockHeight: 100, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			suite := NewCatchupTestSuite(t)
+			defer suite.Cleanup()
+
+			suite.Server.blockValidation.settings.BlockValidation.QuickValidateSkipUtxoLock = tt.settingOn
+			setCheckpoints(t, suite, tt.checkpointAt)
+
+			block := &model.Block{Height: tt.blockHeight}
+			got := suite.Server.blockValidation.quickValidateSkipsUtxoLock(block)
+			require.Equal(t, tt.want, got)
+		})
+	}
 }
