@@ -415,7 +415,8 @@ func (u *UTracer) Start(ctx context.Context, spanName string, opts ...Options) (
 	// hot sync path the validator opens several spans per transaction across
 	// millions of transactions per block, so this allocation + lock is a dominant,
 	// contended cost. When tracing is disabled (the documented "zero overhead"
-	// state) skip it; start is still needed for metrics/log durations and StartTime.
+	// state) skip it; start is still computed for metrics/log durations and for the
+	// StartTime context value when a caller opts in via WithStartTime.
 	var (
 		start time.Time
 		stat  *gocore.Stat

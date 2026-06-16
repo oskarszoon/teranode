@@ -776,8 +776,8 @@ func TestWithSampleRate_ChildSpanInheritsOverride(t *testing.T) {
 
 // TestStart_DisabledSkipsStatCreation verifies that when tracing is disabled the
 // per-span gocore.Stat is not created/injected (it is the dominant unconditional
-// cost on the hot sync path), while StartTime is still injected because downstream
-// services (e.g. blockvalidation catchup status) read it from the context.
+// cost on the hot sync path), and that StartTime is not injected by default
+// (it is opt-in via WithStartTime; see TestStart_StartTimeOptIn).
 func TestStart_DisabledSkipsStatCreation(t *testing.T) {
 	originalState := IsTracingEnabled()
 	defer SetTracingEnabled(originalState)
