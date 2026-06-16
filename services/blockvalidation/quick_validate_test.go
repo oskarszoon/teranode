@@ -599,3 +599,81 @@ func TestQuickValidateBlock_UtxoLockGating(t *testing.T) {
 		suite.MockUTXOStore.AssertCalled(t, "SetLocked", mock.Anything, mock.Anything, false)
 	})
 }
+
+func TestQuickValidateBlockAsync_UtxoLockGating(t *testing.T) {
+	t.Run("setting off: UTXOs locked then unlocked", func(t *testing.T) {
+		suite := NewCatchupTestSuite(t)
+		defer suite.Cleanup()
+		setupQuickValidateMocks(suite)
+
+		block := buildOneSubtreeBlock(t, suite, 100)
+
+		writeJobsChan := make(chan *SubtreeWriteJob, 16)
+		done := make(chan struct{})
+		go func() {
+			for range writeJobsChan {
+			}
+			close(done)
+		}()
+
+		err := suite.Server.blockValidation.quickValidateBlockAsync(suite.Ctx, block, "test", "", writeJobsChan)
+		close(writeJobsChan)
+		<-done
+		require.NoError(t, err)
+
+		assertCreatedLocked(t, suite.MockUTXOStore, true)
+		suite.MockUTXOStore.AssertCalled(t, "SetLocked", mock.Anything, mock.Anything, false)
+	})
+
+	t.Run("setting on, height <= checkpoint: unlocked, no unlock pass", func(t *testing.T) {
+		suite := NewCatchupTestSuite(t)
+		defer suite.Cleanup()
+		setupQuickValidateMocks(suite)
+		suite.Server.blockValidation.settings.BlockValidation.QuickValidateSkipUtxoLock = true
+		setCheckpoints(t, suite, 1000)
+
+		block := buildOneSubtreeBlock(t, suite, 100)
+
+		writeJobsChan := make(chan *SubtreeWriteJob, 16)
+		done := make(chan struct{})
+		go func() {
+			for range writeJobsChan {
+			}
+			close(done)
+		}()
+
+		err := suite.Server.blockValidation.quickValidateBlockAsync(suite.Ctx, block, "test", "", writeJobsChan)
+		close(writeJobsChan)
+		<-done
+		require.NoError(t, err)
+
+		assertCreatedLocked(t, suite.MockUTXOStore, false)
+		suite.MockUTXOStore.AssertNotCalled(t, "SetLocked", mock.Anything, mock.Anything, false)
+	})
+
+	t.Run("setting on, height > checkpoint: lock still applied", func(t *testing.T) {
+		suite := NewCatchupTestSuite(t)
+		defer suite.Cleanup()
+		setupQuickValidateMocks(suite)
+		suite.Server.blockValidation.settings.BlockValidation.QuickValidateSkipUtxoLock = true
+		setCheckpoints(t, suite, 50)
+
+		block := buildOneSubtreeBlock(t, suite, 100)
+
+		writeJobsChan := make(chan *SubtreeWriteJob, 16)
+		done := make(chan struct{})
+		go func() {
+			for range writeJobsChan {
+			}
+			close(done)
+		}()
+
+		err := suite.Server.blockValidation.quickValidateBlockAsync(suite.Ctx, block, "test", "", writeJobsChan)
+		close(writeJobsChan)
+		<-done
+		require.NoError(t, err)
+
+		assertCreatedLocked(t, suite.MockUTXOStore, true)
+		suite.MockUTXOStore.AssertCalled(t, "SetLocked", mock.Anything, mock.Anything, false)
+	})
+}

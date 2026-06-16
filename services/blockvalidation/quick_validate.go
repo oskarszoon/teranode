@@ -469,10 +469,13 @@ func (u *BlockValidation) processBlockSubtreesSequential(ctx context.Context, bl
 // Error Handling:
 // If any stage encounters an error, the errgroup context is cancelled, stopping all stages.
 // Partial UTXO state changes are safe because:
-//   - All UTXOs are created with WithLocked(true), preventing other operations from using them
-//   - If processing fails, locked UTXOs remain in the UTXO store until unlockSubtreeTransactions
-//   - Since unlockSubtreeTransactions is never called on error, partial changes are effectively rolled back
-//   - On retry, Create() returns ErrTxExists, and SetMinedMulti() updates the correct BlockID
+//   - By default, UTXOs are created with WithLocked(true), preventing other operations from using them.
+//     If processing fails, unlockSubtreeTransactions is never called, so the locked UTXOs remain locked
+//     and the partial changes are effectively rolled back.
+//   - When QuickValidateSkipUtxoLock is enabled (blocks at or below the highest checkpoint), UTXOs are
+//     created unlocked, so this lock-based rollback barrier does not apply; recovery instead relies on
+//     retry convergence below.
+//   - On retry, Create() returns ErrTxExists, and SetMinedMulti() updates the correct BlockID.
 func (u *BlockValidation) processBlockSubtreesPipeline(ctx context.Context, block *model.Block, prefetchDepth int) (uint64, error) {
 	numSubtrees := len(block.Subtrees)
 	block.SubtreeSlices = make([]*subtreepkg.Subtree, numSubtrees)
