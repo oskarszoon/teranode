@@ -428,30 +428,38 @@ func filterCalls(calls []*mock.Call, methodToRemove string) []*mock.Call {
 	return filtered
 }
 
-// setCheckpoints replaces the checkpoint set on the suite's settings with a single
-// checkpoint at the given height. It copies ChainCfgParams first so it never mutates
-// the shared (global) chaincfg.Params.
-func setCheckpoints(t *testing.T, s *CatchupTestSuite, height uint32) {
+// setCheckpointSlice replaces the checkpoint set on the suite's settings with the given
+// slice. It copies ChainCfgParams first so it never mutates the shared (global) chaincfg.Params.
+func setCheckpointSlice(t *testing.T, s *CatchupTestSuite, cps []chaincfg.Checkpoint) {
 	t.Helper()
 	require.NotNil(t, s.Server.blockValidation.settings.ChainCfgParams)
 	params := *s.Server.blockValidation.settings.ChainCfgParams
-	params.Checkpoints = []chaincfg.Checkpoint{{Height: int32(height)}}
+	params.Checkpoints = cps
 	s.Server.blockValidation.settings.ChainCfgParams = &params
+}
+
+// setCheckpoints replaces the checkpoint set on the suite's settings with a single
+// checkpoint at the given height.
+func setCheckpoints(t *testing.T, s *CatchupTestSuite, height uint32) {
+	t.Helper()
+	setCheckpointSlice(t, s, []chaincfg.Checkpoint{{Height: int32(height)}})
 }
 
 func TestQuickValidateSkipsUtxoLock(t *testing.T) {
 	tests := []struct {
-		name         string
-		settingOn    bool
-		checkpointAt uint32
-		blockHeight  uint32
-		want         bool
+		name             string
+		settingOn        bool
+		emptyCheckpoints bool
+		checkpointAt     uint32
+		blockHeight      uint32
+		want             bool
 	}{
 		{name: "setting off", settingOn: false, checkpointAt: 1000, blockHeight: 100, want: false},
 		{name: "on, height below checkpoint", settingOn: true, checkpointAt: 1000, blockHeight: 100, want: true},
 		{name: "on, height equal to checkpoint", settingOn: true, checkpointAt: 1000, blockHeight: 1000, want: true},
 		{name: "on, height above checkpoint", settingOn: true, checkpointAt: 50, blockHeight: 100, want: false},
-		{name: "on, no checkpoints configured", settingOn: true, checkpointAt: 0, blockHeight: 100, want: false},
+		{name: "on, checkpoint at height 0", settingOn: true, checkpointAt: 0, blockHeight: 100, want: false},
+		{name: "on, empty checkpoint list", settingOn: true, emptyCheckpoints: true, blockHeight: 100, want: false},
 	}
 
 	for _, tt := range tests {
@@ -460,7 +468,11 @@ func TestQuickValidateSkipsUtxoLock(t *testing.T) {
 			defer suite.Cleanup()
 
 			suite.Server.blockValidation.settings.BlockValidation.QuickValidateSkipUtxoLock = tt.settingOn
-			setCheckpoints(t, suite, tt.checkpointAt)
+			if tt.emptyCheckpoints {
+				setCheckpointSlice(t, suite, []chaincfg.Checkpoint{})
+			} else {
+				setCheckpoints(t, suite, tt.checkpointAt)
+			}
 
 			block := &model.Block{Height: tt.blockHeight}
 			got := suite.Server.blockValidation.quickValidateSkipsUtxoLock(block)
