@@ -608,17 +608,12 @@ func TestQuickValidateBlockAsync_UtxoLockGating(t *testing.T) {
 
 		block := buildOneSubtreeBlock(t, suite, 100)
 
+		// Buffered large enough that quickValidateBlockAsync never blocks queuing write
+		// jobs (one job per subtree; the test block has a single subtree), so no consumer
+		// goroutine is needed.
 		writeJobsChan := make(chan *SubtreeWriteJob, 16)
-		done := make(chan struct{})
-		go func() {
-			for range writeJobsChan {
-			}
-			close(done)
-		}()
 
 		err := suite.Server.blockValidation.quickValidateBlockAsync(suite.Ctx, block, "test", "", writeJobsChan)
-		close(writeJobsChan)
-		<-done
 		require.NoError(t, err)
 
 		assertCreatedLocked(t, suite.MockUTXOStore, true)
@@ -634,17 +629,12 @@ func TestQuickValidateBlockAsync_UtxoLockGating(t *testing.T) {
 
 		block := buildOneSubtreeBlock(t, suite, 100)
 
+		// Buffered large enough that quickValidateBlockAsync never blocks queuing write
+		// jobs (one job per subtree; the test block has a single subtree), so no consumer
+		// goroutine is needed.
 		writeJobsChan := make(chan *SubtreeWriteJob, 16)
-		done := make(chan struct{})
-		go func() {
-			for range writeJobsChan {
-			}
-			close(done)
-		}()
 
 		err := suite.Server.blockValidation.quickValidateBlockAsync(suite.Ctx, block, "test", "", writeJobsChan)
-		close(writeJobsChan)
-		<-done
 		require.NoError(t, err)
 
 		assertCreatedLocked(t, suite.MockUTXOStore, false)
@@ -660,17 +650,12 @@ func TestQuickValidateBlockAsync_UtxoLockGating(t *testing.T) {
 
 		block := buildOneSubtreeBlock(t, suite, 100)
 
+		// Buffered large enough that quickValidateBlockAsync never blocks queuing write
+		// jobs (one job per subtree; the test block has a single subtree), so no consumer
+		// goroutine is needed.
 		writeJobsChan := make(chan *SubtreeWriteJob, 16)
-		done := make(chan struct{})
-		go func() {
-			for range writeJobsChan {
-			}
-			close(done)
-		}()
 
 		err := suite.Server.blockValidation.quickValidateBlockAsync(suite.Ctx, block, "test", "", writeJobsChan)
-		close(writeJobsChan)
-		<-done
 		require.NoError(t, err)
 
 		assertCreatedLocked(t, suite.MockUTXOStore, true)
