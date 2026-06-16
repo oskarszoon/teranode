@@ -796,12 +796,36 @@ func TestStart_DisabledSkipsStatCreation(t *testing.T) {
 	// No gocore.Stat should be injected when tracing is disabled.
 	require.Nil(t, newCtx.Value(statsKey{}), "no gocore.Stat should be injected when tracing disabled")
 
-	// StartTime must still be present (read by blockvalidation catchup status).
-	st := newCtx.Value(StartTime)
-	require.NotNil(t, st, "StartTime must be injected even when tracing disabled")
+	// StartTime is opt-in (WithStartTime) and must not be injected by default.
+	require.Nil(t, newCtx.Value(StartTime), "StartTime should not be injected without WithStartTime")
+}
+
+// TestStart_StartTimeOptIn verifies StartTime is injected into the context only
+// when WithStartTime is supplied (blockvalidation catchup reads it), and is absent
+// otherwise — avoiding the per-span context.WithValue boxing on the hot path.
+func TestStart_StartTimeOptIn(t *testing.T) {
+	originalState := IsTracingEnabled()
+	defer SetTracingEnabled(originalState)
+
+	SetTracingEnabled(false)
+
+	tracer := Tracer("test-service")
+
+	// Without WithStartTime: absent.
+	ctxNo, _, endNo := tracer.Start(context.Background(), "no-opt")
+	require.Nil(t, ctxNo.Value(StartTime), "StartTime should be absent without WithStartTime")
+
+	endNo()
+
+	// With WithStartTime: present and a time.Time.
+	ctxYes, _, endYes := tracer.Start(context.Background(), "opt", WithStartTime())
+	st := ctxYes.Value(StartTime)
+	require.NotNil(t, st, "StartTime should be injected with WithStartTime")
 
 	_, ok := st.(time.Time)
 	require.True(t, ok, "StartTime should be a time.Time")
+
+	endYes()
 }
 
 // BenchmarkStart_Disabled measures per-span allocation on the disabled hot path

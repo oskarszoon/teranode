@@ -69,6 +69,7 @@ type TraceOptions struct {
 	LogMessages      []logMessage            // log messages to be added to the span
 	Timeout          time.Duration           // timeout for the span, if set
 	SampleRate       *float64                // per-span sample rate override (nil = use default)
+	InjectStartTime  bool                    // inject the span start time into the context under StartTime
 }
 
 // addLogMessage adds a log message to the trace options
@@ -210,6 +211,19 @@ func WithContextTimeout(timeout time.Duration) Options {
 func WithParentStat(stat *gocore.Stat) Options {
 	return func(s *TraceOptions) {
 		s.ParentStat = stat
+	}
+}
+
+// WithStartTime injects the span's start time into the returned context under the
+// StartTime key, so callers can read it back via ctx.Value(tracing.StartTime).
+//
+// This is opt-in because injecting it costs a context.WithValue (and boxing the
+// time.Time) on every span, and only a few call sites read it. The hot validation
+// path opens many spans per transaction and does not need it, so it must not pay
+// the cost by default.
+func WithStartTime() Options {
+	return func(s *TraceOptions) {
+		s.InjectStartTime = true
 	}
 }
 
@@ -417,8 +431,12 @@ func (u *UTracer) Start(ctx context.Context, spanName string, opts ...Options) (
 		start = gocore.CurrentTime()
 	}
 
-	// add the start time to the context (read downstream, e.g. blockvalidation catchup status)
-	ctx = context.WithValue(ctx, StartTime, start)
+	// add the start time to the context only when a caller opts in (read downstream,
+	// e.g. blockvalidation catchup). Skipped by default to avoid the context.WithValue
+	// boxing on the hot path, where many spans are opened per transaction.
+	if options.InjectStartTime {
+		ctx = context.WithValue(ctx, StartTime, start)
+	}
 
 	// inject sample rate override into context for the custom sampler
 	if options.SampleRate != nil {
