@@ -238,13 +238,9 @@ func (u *BlockValidation) quickValidateBlock(ctx context.Context, block *model.B
 		return errors.NewProcessingError("[quickValidateBlock][%s] failed to add block to blockchain", block.Hash().String(), err)
 	}
 
-	// Unlock all UTXOs - final commit point.
-	// Skipped when QuickValidateSkipUtxoLock is enabled for blocks <= highest checkpoint:
-	// in that case UTXOs were never locked at create time (#1103).
-	if !u.quickValidateSkipsUtxoLock(block) {
-		if err = u.unlockSubtreeTransactions(ctx, block.SubtreeSlices); err != nil {
-			return errors.NewProcessingError("[quickValidateBlock][%s] failed to unlock UTXOs", block.Hash().String(), err)
-		}
+	// Unlock all UTXOs - final commit point (no-op when the lock was never taken; #1103).
+	if err = u.unlockSubtreeTransactionsIfNeeded(ctx, block, "quickValidateBlock"); err != nil {
+		return err
 	}
 
 	// Update subtrees DAH and send BlockSubtreesSet notification
@@ -331,13 +327,9 @@ func (u *BlockValidation) quickValidateBlockAsync(ctx context.Context, block *mo
 		return errors.NewProcessingError("[quickValidateBlockAsync][%s] failed to add block to blockchain", block.Hash().String(), err)
 	}
 
-	// Unlock all UTXOs - final commit point.
-	// Skipped when QuickValidateSkipUtxoLock is enabled for blocks <= highest checkpoint:
-	// in that case UTXOs were never locked at create time (#1103).
-	if !u.quickValidateSkipsUtxoLock(block) {
-		if err = u.unlockSubtreeTransactions(ctx, block.SubtreeSlices); err != nil {
-			return errors.NewProcessingError("[quickValidateBlockAsync][%s] failed to unlock UTXOs", block.Hash().String(), err)
-		}
+	// Unlock all UTXOs - final commit point (no-op when the lock was never taken; #1103).
+	if err = u.unlockSubtreeTransactionsIfNeeded(ctx, block, "quickValidateBlockAsync"); err != nil {
+		return err
 	}
 
 	// Update subtrees DAH and send BlockSubtreesSet notification
@@ -929,6 +921,23 @@ func (u *BlockValidation) writeSubtreeFilesFromTxs(ctx context.Context, block *m
 	// - SetTxInpointsFromTx processing for each transaction
 	// - Serialization and storage of subtree meta
 	// The subtree meta can be regenerated on-demand if needed for merkle proof serving.
+
+	return nil
+}
+
+// unlockSubtreeTransactionsIfNeeded runs the post-AddBlock unlock pass that clears the
+// per-tx lock taken during quick validation — unless the QuickValidateSkipUtxoLock
+// optimization applies to this block, in which case the UTXOs were never locked at create
+// time and there is nothing to unlock. callerTag identifies the caller in error messages.
+// Shared by quickValidateBlock and quickValidateBlockAsync. See issue #1103.
+func (u *BlockValidation) unlockSubtreeTransactionsIfNeeded(ctx context.Context, block *model.Block, callerTag string) error {
+	if u.quickValidateSkipsUtxoLock(block) {
+		return nil
+	}
+
+	if err := u.unlockSubtreeTransactions(ctx, block.SubtreeSlices); err != nil {
+		return errors.NewProcessingError("[%s][%s] failed to unlock UTXOs", callerTag, block.Hash().String(), err)
+	}
 
 	return nil
 }
