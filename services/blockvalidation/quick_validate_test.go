@@ -408,6 +408,14 @@ func TestQuickValidateBlock_IncompleteBlockNilCoinbase(t *testing.T) {
 	})
 }
 
+func TestQuickValidateSkipUtxoLockSetting_DefaultsOff(t *testing.T) {
+	suite := NewCatchupTestSuite(t)
+	defer suite.Cleanup()
+
+	require.False(t, suite.Server.blockValidation.settings.BlockValidation.QuickValidateSkipUtxoLock,
+		"QuickValidateSkipUtxoLock must default to false")
+}
+
 // filterCalls removes mock expectations for a specific method
 func filterCalls(calls []*mock.Call, methodToRemove string) []*mock.Call {
 	filtered := make([]*mock.Call, 0)
