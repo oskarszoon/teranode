@@ -169,6 +169,26 @@ func ShouldStoreOutputAsUTXO(isCoinbase bool, output *bt.Output, blockHeight uin
 	return !(opReturn || opFalseOpReturn)
 }
 
+// HasNoSpendableOutputs reports whether the transaction has no spendable outputs
+// - i.e. every output is unspendable (a zero-value OP_RETURN / OP_FALSE OP_RETURN).
+// Such a transaction can never be spent, so it never becomes "all spent". Coinbase
+// transactions always have a spendable output and return false, as do transactions
+// with no outputs. A nil output slot is treated as not spendable, consistent with
+// how the stores skip nil outputs when recording UTXOs.
+func HasNoSpendableOutputs(tx *bt.Tx, isCoinbase bool, blockHeight uint32) bool {
+	if isCoinbase || len(tx.Outputs) == 0 {
+		return false
+	}
+
+	for _, output := range tx.Outputs {
+		if output != nil && ShouldStoreOutputAsUTXO(isCoinbase, output, blockHeight) {
+			return false
+		}
+	}
+
+	return true
+}
+
 // GetSpends creates Spend objects for all inputs of a transaction.
 // Each Spend represents a UTXO being consumed by the transaction.
 //

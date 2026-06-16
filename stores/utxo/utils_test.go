@@ -163,6 +163,54 @@ func TestGetUtxoHashes_ValuesUnchanged(t *testing.T) {
 	}
 }
 
+func TestHasNoSpendableOutputs(t *testing.T) {
+	const h = uint32(100)
+
+	t.Run("op_return only returns true", func(t *testing.T) {
+		tx := bt.NewTx()
+		require.NoError(t, tx.AddOpReturnOutput([]byte("data")))
+		assert.True(t, HasNoSpendableOutputs(tx, false, h))
+	})
+
+	t.Run("spendable output returns false", func(t *testing.T) {
+		tx := bt.NewTx()
+		tx.AddOutput(&bt.Output{Satoshis: 1000, LockingScript: &bscript.Script{}})
+		assert.False(t, HasNoSpendableOutputs(tx, false, h))
+	})
+
+	t.Run("mixed spendable and op_return returns false", func(t *testing.T) {
+		tx := bt.NewTx()
+		tx.AddOutput(&bt.Output{Satoshis: 1000, LockingScript: &bscript.Script{}})
+		require.NoError(t, tx.AddOpReturnOutput([]byte("data")))
+		assert.False(t, HasNoSpendableOutputs(tx, false, h))
+	})
+
+	t.Run("coinbase returns false", func(t *testing.T) {
+		tx := bt.NewTx()
+		require.NoError(t, tx.AddOpReturnOutput([]byte("data")))
+		assert.False(t, HasNoSpendableOutputs(tx, true, h))
+	})
+
+	t.Run("no outputs returns false", func(t *testing.T) {
+		tx := bt.NewTx()
+		assert.False(t, HasNoSpendableOutputs(tx, false, h))
+	})
+
+	t.Run("nil output slot treated as not spendable", func(t *testing.T) {
+		tx := bt.NewTx()
+		tx.Outputs = []*bt.Output{nil}
+		assert.True(t, HasNoSpendableOutputs(tx, false, h))
+	})
+
+	t.Run("bare op_return returns true", func(t *testing.T) {
+		s, err := bscript.NewFromASM("OP_RETURN")
+		require.NoError(t, err)
+		tx := bt.NewTx()
+		tx.AddOutput(&bt.Output{Satoshis: 0, LockingScript: s})
+		assert.True(t, HasNoSpendableOutputs(tx, false, h))
+	})
+}
+
 func BenchmarkGetUtxoHashes(b *testing.B) {
 	txs := make([]*bt.Tx, b.N)
 
