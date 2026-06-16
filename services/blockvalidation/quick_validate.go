@@ -238,9 +238,13 @@ func (u *BlockValidation) quickValidateBlock(ctx context.Context, block *model.B
 		return errors.NewProcessingError("[quickValidateBlock][%s] failed to add block to blockchain", block.Hash().String(), err)
 	}
 
-	// Unlock all UTXOs - final commit point
-	if err = u.unlockSubtreeTransactions(ctx, block.SubtreeSlices); err != nil {
-		return errors.NewProcessingError("[quickValidateBlock][%s] failed to unlock UTXOs", block.Hash().String(), err)
+	// Unlock all UTXOs - final commit point.
+	// Skipped when QuickValidateSkipUtxoLock is enabled for blocks <= highest checkpoint:
+	// in that case UTXOs were never locked at create time (#1103).
+	if !u.quickValidateSkipsUtxoLock(block) {
+		if err = u.unlockSubtreeTransactions(ctx, block.SubtreeSlices); err != nil {
+			return errors.NewProcessingError("[quickValidateBlock][%s] failed to unlock UTXOs", block.Hash().String(), err)
+		}
 	}
 
 	// Update subtrees DAH and send BlockSubtreesSet notification
@@ -327,9 +331,13 @@ func (u *BlockValidation) quickValidateBlockAsync(ctx context.Context, block *mo
 		return errors.NewProcessingError("[quickValidateBlockAsync][%s] failed to add block to blockchain", block.Hash().String(), err)
 	}
 
-	// Unlock all UTXOs - final commit point
-	if err = u.unlockSubtreeTransactions(ctx, block.SubtreeSlices); err != nil {
-		return errors.NewProcessingError("[quickValidateBlockAsync][%s] failed to unlock UTXOs", block.Hash().String(), err)
+	// Unlock all UTXOs - final commit point.
+	// Skipped when QuickValidateSkipUtxoLock is enabled for blocks <= highest checkpoint:
+	// in that case UTXOs were never locked at create time (#1103).
+	if !u.quickValidateSkipsUtxoLock(block) {
+		if err = u.unlockSubtreeTransactions(ctx, block.SubtreeSlices); err != nil {
+			return errors.NewProcessingError("[quickValidateBlockAsync][%s] failed to unlock UTXOs", block.Hash().String(), err)
+		}
 	}
 
 	// Update subtrees DAH and send BlockSubtreesSet notification
@@ -1146,6 +1154,8 @@ func (u *BlockValidation) createAndSpendUTXOsForBatch(ctx context.Context, block
 		return nil
 	}
 
+	lockUTXOs := !u.quickValidateSkipsUtxoLock(block)
+
 	// Phase 1: Create UTXOs in parallel, collecting any that already exist
 	createG, createCtx := errgroup.WithContext(ctx)
 	// Set concurrency to 8x StoreBatcherSize to allow sufficient parallelism while the
@@ -1174,7 +1184,7 @@ func (u *BlockValidation) createAndSpendUTXOsForBatch(ctx context.Context, block
 					BlockID:     block.ID,
 					BlockHeight: block.Height,
 					SubtreeIdx:  sIdx,
-				}), utxo.WithLocked(true))
+				}), utxo.WithLocked(lockUTXOs))
 				if err != nil {
 					if errors.Is(err, errors.ErrTxExists) {
 						// Transaction already exists - collect it for mined info update

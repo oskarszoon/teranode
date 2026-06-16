@@ -480,3 +480,122 @@ func TestQuickValidateSkipsUtxoLock(t *testing.T) {
 		})
 	}
 }
+
+// assertCreatedLocked asserts every recorded Create call used the expected WithLocked flag.
+func assertCreatedLocked(t *testing.T, m *utxo.MockUtxostore, wantLocked bool) {
+	t.Helper()
+	found := false
+	for _, c := range m.Calls {
+		if c.Method != "Create" {
+			continue
+		}
+		opts, ok := c.Arguments.Get(3).([]utxo.CreateOption)
+		require.True(t, ok, "Create 4th arg should be []utxo.CreateOption")
+		o := &utxo.CreateOptions{}
+		for _, opt := range opts {
+			opt(o)
+		}
+		require.Equal(t, wantLocked, o.Locked, "Create WithLocked flag mismatch")
+		found = true
+	}
+	require.True(t, found, "expected at least one Create call")
+}
+
+// buildOneSubtreeBlock builds a block with one subtree (coinbase + 2 txs) and stores its
+// subtree + subtree-data files in the suite's subtree store. Mirrors the existing
+// "block with 1 subtree and 2 txs" setup in TestQuickValidateBlock.
+func buildOneSubtreeBlock(t *testing.T, s *CatchupTestSuite, height uint32) *model.Block {
+	t.Helper()
+	txs := transactions.CreateTestTransactionChainWithCount(t, 4)
+	coinbaseTx := txs[0]
+	regularTxs := txs[1:]
+
+	block := testhelpers.CreateTestBlocks(t, 1)[0]
+	block.Height = height
+	block.CoinbaseTx = coinbaseTx
+
+	subtree, err := subtreepkg.NewIncompleteTreeByLeafCount(3)
+	require.NoError(t, err)
+	require.NoError(t, subtree.AddCoinbaseNode())
+	require.NoError(t, subtree.AddNode(*regularTxs[0].TxIDChainHash(), 1, 1))
+	require.NoError(t, subtree.AddNode(*regularTxs[1].TxIDChainHash(), 2, 2))
+
+	subtreeBytes, err := subtree.Serialize()
+	require.NoError(t, err)
+	require.NoError(t, s.Server.subtreeStore.Set(t.Context(), subtree.RootHash()[:], fileformat.FileTypeSubtreeToCheck, subtreeBytes))
+
+	subtreeData := subtreepkg.NewSubtreeData(subtree)
+	require.NoError(t, subtreeData.AddTx(coinbaseTx, 0))
+	require.NoError(t, subtreeData.AddTx(regularTxs[0], 1))
+	require.NoError(t, subtreeData.AddTx(regularTxs[1], 2))
+	subtreeDataBytes, err := subtreeData.Serialize()
+	require.NoError(t, err)
+	require.NoError(t, s.Server.subtreeStore.Set(t.Context(), subtree.RootHash()[:], fileformat.FileTypeSubtreeData, subtreeDataBytes))
+
+	block.Subtrees = []*chainhash.Hash{subtree.RootHash()}
+	block.TransactionCount = 3
+	block.Header.HashMerkleRoot, err = subtree.RootHashWithReplaceRootNode(coinbaseTx.TxIDChainHash(), 0, 0)
+	require.NoError(t, err)
+	return block
+}
+
+// setupQuickValidateMocks registers the common UTXO/blockchain/validator mock
+// expectations needed to run quickValidateBlock for a one-subtree block.
+func setupQuickValidateMocks(s *CatchupTestSuite) {
+	s.MockBlockchain.On("AssignBlockID", mock.Anything, mock.Anything).Return(uint64(1), nil).Maybe()
+	s.MockBlockchain.On("AddBlock", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
+	s.MockBlockchain.On("SetBlockSubtreesSet", mock.Anything, mock.Anything).Return(nil).Maybe()
+	s.MockUTXOStore.On("Get", mock.Anything, mock.Anything, mock.Anything).Return((*meta.Data)(nil), errors.NewNotFoundError("not found"))
+	s.MockUTXOStore.On("Create", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(&meta.Data{}, nil)
+	s.MockUTXOStore.On("Spend", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return([]*utxo.Spend{}, nil)
+	s.MockUTXOStore.On("SetLocked", mock.Anything, mock.Anything, false).Return(nil).Maybe()
+	s.MockValidator.Errors = []error{nil, nil, nil}
+}
+
+func TestQuickValidateBlock_UtxoLockGating(t *testing.T) {
+	t.Run("setting off: UTXOs locked then unlocked", func(t *testing.T) {
+		suite := NewCatchupTestSuite(t)
+		defer suite.Cleanup()
+		setupQuickValidateMocks(suite)
+
+		block := buildOneSubtreeBlock(t, suite, 100)
+
+		err := suite.Server.blockValidation.quickValidateBlock(suite.Ctx, block, "test", "")
+		require.NoError(t, err)
+
+		assertCreatedLocked(t, suite.MockUTXOStore, true)
+		suite.MockUTXOStore.AssertCalled(t, "SetLocked", mock.Anything, mock.Anything, false)
+	})
+
+	t.Run("setting on, height <= checkpoint: unlocked, no unlock pass", func(t *testing.T) {
+		suite := NewCatchupTestSuite(t)
+		defer suite.Cleanup()
+		setupQuickValidateMocks(suite)
+		suite.Server.blockValidation.settings.BlockValidation.QuickValidateSkipUtxoLock = true
+		setCheckpoints(t, suite, 1000)
+
+		block := buildOneSubtreeBlock(t, suite, 100)
+
+		err := suite.Server.blockValidation.quickValidateBlock(suite.Ctx, block, "test", "")
+		require.NoError(t, err)
+
+		assertCreatedLocked(t, suite.MockUTXOStore, false)
+		suite.MockUTXOStore.AssertNotCalled(t, "SetLocked", mock.Anything, mock.Anything, false)
+	})
+
+	t.Run("setting on, height > checkpoint: lock still applied", func(t *testing.T) {
+		suite := NewCatchupTestSuite(t)
+		defer suite.Cleanup()
+		setupQuickValidateMocks(suite)
+		suite.Server.blockValidation.settings.BlockValidation.QuickValidateSkipUtxoLock = true
+		setCheckpoints(t, suite, 50)
+
+		block := buildOneSubtreeBlock(t, suite, 100)
+
+		err := suite.Server.blockValidation.quickValidateBlock(suite.Ctx, block, "test", "")
+		require.NoError(t, err)
+
+		assertCreatedLocked(t, suite.MockUTXOStore, true)
+		suite.MockUTXOStore.AssertCalled(t, "SetLocked", mock.Anything, mock.Anything, false)
+	})
+}
