@@ -2045,6 +2045,19 @@ func (u *BlockValidation) reValidateBlock(blockData revalidateBlockData) error {
 	return u.checkOldBlockIDs(ctx, oldBlockIDsMap, blockData.block)
 }
 
+// quickValidateSkipsUtxoLock reports whether quick validation should create UTXOs
+// unlocked and skip the post-AddBlock unlock pass for this block. Gated by the
+// BlockValidation.QuickValidateSkipUtxoLock setting (default off) AND restricted to
+// blocks at or below the highest checkpoint. Uses the standard chain-config checkpoints
+// (not the catchup override) so it fails safe — keeping the lock for any block above the
+// real checkpoint. See issue #1103.
+func (u *BlockValidation) quickValidateSkipsUtxoLock(block *model.Block) bool {
+	if !u.settings.BlockValidation.QuickValidateSkipUtxoLock {
+		return false
+	}
+	return block.Height <= blockchain.HighestCheckpointHeight(u.settings.ChainCfgParams.Checkpoints)
+}
+
 // updateSubtreesDAH marks block subtrees as properly set in the blockchain.
 // Subtrees retain their finite DAH from assembly/validation — the block persister
 // will promote them to permanent (DAH=0) when the block is confirmed on the main chain.
