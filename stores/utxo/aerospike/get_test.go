@@ -86,6 +86,7 @@ func TestStore_GetTxFromExternalStore(t *testing.T) {
 
 	t.Run("TestStore_GetTxFromExternalStore concurrent", func(t *testing.T) {
 		s := &teranode_aerospike.Store{}
+		s.SetSettings(test.CreateBaseTestSettings(t)) // getExternalOutpoints reads ChainCfgParams.GenesisActivationHeight
 		s.SetExternalStore(memory.New())
 		s.SetClient(client)
 		s.SetNamespace(aerospikeNamespace)
@@ -109,7 +110,7 @@ func TestStore_GetTxFromExternalStore(t *testing.T) {
 		g := errgroup.Group{}
 		for i := 0; i < 100; i++ {
 			g.Go(func() error {
-				fetchedTx, err := s.GetOutpointsFromExternalStore(ctx, *txHash)
+				fetchedTx, err := s.GetOutpointsFromExternalStore(ctx, *txHash, 0)
 				if err != nil {
 					return err
 				}
