@@ -620,9 +620,18 @@ func (stp *SubtreeProcessor) Start(ctx context.Context) {
 		stp.setCurrentRunningState(StateRunning)
 
 		go func() {
-			// Recover from panics (e.g., send on closed channel during shutdown)
+			// Recover from panics (e.g., send on closed channel during shutdown).
+			// Cancel the lifecycle context on EVERY exit path - clean ctx-done,
+			// panic recovery, fall-through - so callers blocked on
+			// processorContext().Done() (the entry-point shutdown-wedge guards
+			// below) unblock fast. Without the cancel, a panicked exit left
+			// stopped=true but processorContext() still live, so subsequent
+			// Reorg/MoveForwardBlock/Reset/CheckSubtreeProcessor calls would
+			// block forever on the request send despite the dispatcher being
+			// dead. cancel() is idempotent with the one in Stop().
 			defer func() {
 				stp.stopped.Store(true) // Must be set on any exit so Stop() does not hang
+				cancel()
 				if r := recover(); r != nil {
 					logger.Warnf("[SubtreeProcessor] goroutine recovered from panic: %v", r)
 				}
@@ -1191,8 +1200,10 @@ func (stp *SubtreeProcessor) GetCurrentLength() int {
 // Returns:
 //   - ResetResponse: Response containing any errors encountered
 func (stp *SubtreeProcessor) Reset(blockHeader *model.BlockHeader, moveBackBlocks []*model.Block, moveForwardBlocks []*model.Block, useFastForwardReset bool, postProcess func() error) ResetResponse {
-	responseCh := make(chan ResetResponse)
-	stp.resetCh <- &resetBlocks{
+	ctx := stp.processorContext()
+
+	responseCh := make(chan ResetResponse, 1)
+	req := &resetBlocks{
 		blockHeader:         blockHeader,
 		moveBackBlocks:      moveBackBlocks,
 		moveForwardBlocks:   moveForwardBlocks,
@@ -1201,7 +1212,18 @@ func (stp *SubtreeProcessor) Reset(blockHeader *model.BlockHeader, moveBackBlock
 		postProcess:         postProcess,
 	}
 
-	return <-responseCh
+	select {
+	case stp.resetCh <- req:
+	case <-ctx.Done():
+		return ResetResponse{Err: errors.NewProcessingError("[SubtreeProcessor] Reset aborted: processor stopped before request delivered", ctx.Err())}
+	}
+
+	select {
+	case resp := <-responseCh:
+		return resp
+	case <-ctx.Done():
+		return ResetResponse{Err: errors.NewProcessingError("[SubtreeProcessor] Reset aborted: processor stopped while waiting for response", ctx.Err())}
+	}
 }
 
 func (stp *SubtreeProcessor) reset(blockHeader *model.BlockHeader, moveBackBlocks []*model.Block, moveForwardBlocks []*model.Block,
@@ -2789,11 +2811,30 @@ func (stp *SubtreeProcessor) reChainSubtrees(fromIndex int) error {
 // Returns:
 //   - error: Any error encountered during the check
 func (stp *SubtreeProcessor) CheckSubtreeProcessor() error {
-	errCh := make(chan error)
+	ctx := stp.processorContext()
 
-	stp.checkSubtreeProcessorCh <- errCh
+	// NOTE: cap-1 here makes the response-receive side ctx-cancellable, but it
+	// does NOT eliminate the dispatcher-side wedge that exists pre-#1110: the
+	// dispatcher's checkSubtreeProcessor handler can send multiple values on
+	// errCh (one per detected inconsistency, plus a final nil), and only the
+	// first send completes - any second send blocks because the caller has
+	// read once and returned. PR #1110 refactors checkSubtreeProcessor to
+	// return a single error so the dispatcher relays exactly one value;
+	// once that lands, the cap-1 buffer is sufficient.
+	errCh := make(chan error, 1)
 
-	return <-errCh
+	select {
+	case stp.checkSubtreeProcessorCh <- errCh:
+	case <-ctx.Done():
+		return errors.NewProcessingError("[SubtreeProcessor] CheckSubtreeProcessor aborted: processor stopped before request delivered", ctx.Err())
+	}
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		return errors.NewProcessingError("[SubtreeProcessor] CheckSubtreeProcessor aborted: processor stopped while waiting for response", ctx.Err())
+	}
 }
 
 // checkSubtreeProcessor performs a check on the subtree processor's state.
@@ -2946,14 +2987,26 @@ func (stp *SubtreeProcessor) updatePrecomputedMiningData() {
 // Returns:
 //   - error: Any error encountered during processing
 func (stp *SubtreeProcessor) MoveForwardBlock(block *model.Block) error {
-	errChan := make(chan error)
+	ctx := stp.processorContext()
 
-	stp.moveForwardBlockChan <- moveBlockRequest{
+	errChan := make(chan error, 1)
+	req := moveBlockRequest{
 		block:   block,
 		errChan: errChan,
 	}
 
-	return <-errChan
+	select {
+	case stp.moveForwardBlockChan <- req:
+	case <-ctx.Done():
+		return errors.NewProcessingError("[SubtreeProcessor] MoveForwardBlock aborted: processor stopped before request delivered", ctx.Err())
+	}
+
+	select {
+	case err := <-errChan:
+		return err
+	case <-ctx.Done():
+		return errors.NewProcessingError("[SubtreeProcessor] MoveForwardBlock aborted: processor stopped while waiting for response", ctx.Err())
+	}
 }
 
 // Reorg handles blockchain reorganization by processing moved blocks.
@@ -2965,14 +3018,27 @@ func (stp *SubtreeProcessor) MoveForwardBlock(block *model.Block) error {
 // Returns:
 //   - error: Any error encountered during reorganization
 func (stp *SubtreeProcessor) Reorg(moveBackBlocks []*model.Block, moveForwardBlocks []*model.Block) error {
-	errChan := make(chan error)
-	stp.reorgBlockChan <- reorgBlocksRequest{
+	ctx := stp.processorContext()
+
+	errChan := make(chan error, 1)
+	req := reorgBlocksRequest{
 		moveBackBlocks:    moveBackBlocks,
 		moveForwardBlocks: moveForwardBlocks,
 		errChan:           errChan,
 	}
 
-	return <-errChan
+	select {
+	case stp.reorgBlockChan <- req:
+	case <-ctx.Done():
+		return errors.NewProcessingError("[SubtreeProcessor] Reorg aborted: processor stopped before request delivered", ctx.Err())
+	}
+
+	select {
+	case err := <-errChan:
+		return err
+	case <-ctx.Done():
+		return errors.NewProcessingError("[SubtreeProcessor] Reorg aborted: processor stopped while waiting for response", ctx.Err())
+	}
 }
 
 // reorgBlocks performs an incremental blockchain reorganization by processing blocks efficiently.
