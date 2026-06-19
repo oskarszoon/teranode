@@ -72,10 +72,11 @@ var (
 	blockQueueSkipCount prometheus.Histogram
 	blockQueueWaitTime  prometheus.Histogram
 
-	// setMinedChan retry tracking. These stay label-free to avoid unbounded
-	// Prometheus cardinality: a per-blockhash label adds a permanent time series
-	// for every distinct block that ever retries or is dropped. The offending
-	// block hash is recorded in the logs instead.
+	// setMinedChan retry tracking. These are aggregate counters with no
+	// per-blockhash label: using the block hash as a label value would create
+	// unbounded Prometheus cardinality (one permanent series per distinct hash
+	// over the node's lifetime). The specific block hash is recorded in the
+	// accompanying log lines for manual repair.
 	prometheusBlockValidationSetMinedRetries prometheus.Counter
 	prometheusBlockValidationSetMinedDrops   prometheus.Counter
 )
@@ -222,7 +223,7 @@ func _initPrometheusMetrics() {
 			Namespace: "teranode",
 			Subsystem: "blockvalidation",
 			Name:      "setmined_retry_total",
-			Help:      "Total number of setTxMined retries across all blocks. The offending block hash is recorded in the logs. A sustained rise indicates blocks with historical-corrupt state that need manual repair.",
+			Help:      "Total number of setTxMined retries across all blocks. A rising rate indicates blocks with historical-corrupt state that need manual repair; the specific block hash is recorded in the logs.",
 		},
 	)
 
@@ -231,7 +232,7 @@ func _initPrometheusMetrics() {
 			Namespace: "teranode",
 			Subsystem: "blockvalidation",
 			Name:      "setmined_drops_total",
-			Help:      "Number of blocks dropped from the setTxMined retry loop after exceeding the retry ceiling. Non-zero values are page-worthy and require manual intervention.",
+			Help:      "Total number of blocks dropped from the setTxMined retry loop after exceeding the retry ceiling. Non-zero values are page-worthy and require manual intervention; the specific block hash is recorded in the logs.",
 		},
 	)
 
