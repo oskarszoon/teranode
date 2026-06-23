@@ -20,5 +20,5 @@ func shouldSkipUnspendableCreate(lockUTXOs bool, s *settings.Settings, tx *bt.Tx
 		return false
 	}
 
-	return utxo.HasNoSpendableOutputs(tx, tx.IsCoinbase(), blockHeight)
+	return utxo.HasNoSpendableOutputs(tx, tx.IsCoinbase(), blockHeight, s.ChainCfgParams.GenesisActivationHeight)
 }
