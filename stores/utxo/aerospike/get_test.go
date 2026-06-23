@@ -110,6 +110,9 @@ func TestStore_GetTxFromExternalStore(t *testing.T) {
 		g := errgroup.Group{}
 		for i := 0; i < 100; i++ {
 			g.Go(func() error {
+				// creationHeight 0 (pre-Genesis era) is not "don't care" — it
+				// selects an era for the unspendable predicate. It is irrelevant
+				// here: this subtest only asserts concurrency safety of the fetch.
 				fetchedTx, err := s.GetOutpointsFromExternalStore(ctx, *txHash, 0)
 				if err != nil {
 					return err

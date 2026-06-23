@@ -1421,8 +1421,23 @@ func (s *Store) sendOutpointBatch(batch []*batchOutpoint) {
 // GetOutpointsFromExternalStore reconstructs an externally-stored parent tx's
 // spendable outputs for outpoint resolution. creationHeight is the parent's
 // mining height, used to apply the era-aware unspendable rule (see
-// getExternalOutpoints). The era-filtered result is fixed per tx, so caching by
-// txid stays correct.
+// getExternalOutpoints).
+//
+// The reconstruction is cached by txid (externalTxCache). That is correct
+// because the era-filtered output set is fixed per tx once the parent is mined,
+// and an unmined parent is necessarily post-Genesis on production networks
+// (mainnet/testnet/teratestnet activation heights sit far below any live tip),
+// so the unmined fallback and a real mining at that height resolve to the same
+// era.
+//
+// Known, accepted seam on low-activation networks only (regtest=10000, stn=100):
+// there a node can be at a genuinely pre-Genesis height with an unmined external
+// parent. The fallback then classifies it post-Genesis and caches that set; if
+// the parent later mines at a pre-Genesis height, nothing re-derives the era or
+// evicts the entry, so the stale post-Genesis (over-retaining) reconstruction
+// persists. This only ever over-retains a provably-unspendable output, never
+// over-excludes a spendable one, so it cannot orphan a valid spend; it is
+// unreachable on production networks.
 func (s *Store) GetOutpointsFromExternalStore(ctx context.Context, previousTxHash chainhash.Hash, creationHeight uint32) (*bt.Tx, error) {
 	ctx, _, _ = tracing.Tracer("aerospike").Start(ctx, "GetOutpointsFromExternalStore",
 		tracing.WithHistogram(prometheusTxMetaAerospikeMapGetExternal),
@@ -1457,8 +1472,13 @@ func (s *Store) GetOutpointsFromExternalStore(ctx context.Context, previousTxHas
 
 // creationHeightFromBlockHeights returns the era height used to reconstruct an
 // externally-stored parent's spendable outputs: the earliest block the tx was
-// mined in. An unmined parent (no recorded block heights) is necessarily
-// post-Genesis, so it falls back to the Genesis activation height.
+// mined in. An unmined parent (no recorded block heights) falls back to the
+// Genesis activation height (post-Genesis). On production networks this is exact
+// — a live unmined parent is always post-Genesis. On low-activation networks
+// (regtest=10000, stn=100) the fallback can misclassify a genuinely pre-Genesis
+// unmined parent as post-Genesis; this only over-retains a provably-unspendable
+// output (never over-excludes a spendable one), so it is safe and accepted. See
+// GetOutpointsFromExternalStore for the matching cache-coherence note.
 func creationHeightFromBlockHeights(blockHeights []uint32, genesisActivationHeight uint32) uint32 {
 	minHeight := uint32(0)
 	found := false
