@@ -27,16 +27,18 @@ type catchupPeersP2PMock struct{ peers []*p2p.PeerInfo }
 func (m *catchupPeersP2PMock) GetPeersForCatchup(context.Context) ([]*p2p.PeerInfo, error) {
 	return m.peers, nil
 }
-func (m *catchupPeersP2PMock) RecordCatchupAttempt(context.Context, string) error      { return nil }
+func (m *catchupPeersP2PMock) RecordCatchupAttempt(context.Context, string) error        { return nil }
 func (m *catchupPeersP2PMock) RecordCatchupSuccess(context.Context, string, int64) error { return nil }
-func (m *catchupPeersP2PMock) RecordCatchupFailure(context.Context, string) error      { return nil }
-func (m *catchupPeersP2PMock) RecordCatchupMalicious(context.Context, string) error    { return nil }
-func (m *catchupPeersP2PMock) UpdateCatchupError(context.Context, string, string) error { return nil }
+func (m *catchupPeersP2PMock) RecordCatchupFailure(context.Context, string) error        { return nil }
+func (m *catchupPeersP2PMock) RecordCatchupMalicious(context.Context, string) error      { return nil }
+func (m *catchupPeersP2PMock) UpdateCatchupError(context.Context, string, string) error  { return nil }
 func (m *catchupPeersP2PMock) UpdateCatchupReputation(context.Context, string, float64) error {
 	return nil
 }
-func (m *catchupPeersP2PMock) GetPeer(context.Context, string) (*p2p.PeerInfo, error) { return nil, nil }
-func (m *catchupPeersP2PMock) ReportValidBlock(context.Context, string, string) error  { return nil }
+func (m *catchupPeersP2PMock) GetPeer(context.Context, string) (*p2p.PeerInfo, error) {
+	return nil, nil
+}
+func (m *catchupPeersP2PMock) ReportValidBlock(context.Context, string, string) error   { return nil }
 func (m *catchupPeersP2PMock) ReportValidSubtree(context.Context, string, string) error { return nil }
 func (m *catchupPeersP2PMock) IsPeerMalicious(context.Context, string) (bool, string, error) {
 	return false, "", nil

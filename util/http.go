@@ -3,7 +3,6 @@ package util
 import (
 	"bytes"
 	"context"
-	stderrors "errors"
 	"io"
 	"math/rand/v2"
 	"net"
@@ -709,7 +708,7 @@ func readBodyWithRetryAfter(ctx context.Context, url string, maxBytes int64, req
 		// (e.g. node shutdown) — keep it local so a peer isn't blamed for our own
 		// teardown. A deadline means the overall fetch budget was exceeded (the peer
 		// was too slow) — attribute that to the peer via a network timeout.
-		if stderrors.Is(ctx.Err(), context.Canceled) {
+		if errors.Is(ctx.Err(), context.Canceled) {
 			return nil, 0, errors.NewContextCanceledError("http request [%s] canceled while reading body", url, context.Canceled)
 		}
 		return nil, 0, errors.NewNetworkTimeoutError("http request [%s] timed out while reading body", url)
@@ -720,12 +719,11 @@ func readBodyWithRetryAfter(ctx context.Context, url string, maxBytes int64, req
 			// here as a context-deadline read error. A peer stalling mid-stream is the
 			// peer's fault, so classify it as a (non-local) network timeout rather than a
 			// generic ServiceError whose wrapped context string would be misread as local.
-			// Use stdlib errors.Is on the raw readErr, before teranode wrapping flattens
-			// the sentinel to a string.
-			if stderrors.Is(readErr, context.DeadlineExceeded) {
+			// errors.Is is checked on the raw readErr, before any teranode wrapping.
+			if errors.Is(readErr, context.DeadlineExceeded) {
 				return nil, 0, errors.NewNetworkTimeoutError("http request [%s] timed out while reading body", url)
 			}
-			if stderrors.Is(readErr, context.Canceled) {
+			if errors.Is(readErr, context.Canceled) {
 				return nil, 0, errors.NewContextCanceledError("http request [%s] canceled while reading body", url, context.Canceled)
 			}
 			return nil, 0, errors.NewServiceError("http request [%s] failed to read body", url, readErr)
