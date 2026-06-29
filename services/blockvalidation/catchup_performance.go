@@ -14,6 +14,15 @@ import (
 	"github.com/bsv-blockchain/teranode/ulogger"
 )
 
+// isPrunedPeer reports whether a peer announced pruned storage and will therefore
+// 404 on archival subtree / subtree_data fetches during IBD (the second wedge cause
+// in issue #1174). Peers with empty Storage ("" = legacy/unknown version) are NOT
+// treated as pruned, to avoid excluding older archival peers; if such a peer turns
+// out to lack the data, the fetch fails over (with backoff) rather than wedging.
+func isPrunedPeer(storage string) bool {
+	return storage == "pruned"
+}
+
 // P2PClientForParallelFetch is a subset of P2PClientI needed for parallel fetch operations
 type P2PClientForParallelFetch interface {
 	GetPeersForCatchup(ctx context.Context) ([]*p2p.PeerInfo, error)
@@ -355,6 +364,11 @@ func SelectAlternativePeer(
 			continue
 		}
 
+		// Skip pruned peers: they 404 on archival subtree data during IBD.
+		if isPrunedPeer(peer.Storage) {
+			continue
+		}
+
 		// Select peer with best reputation and speed
 		if bestPeer == nil {
 			bestPeer = peer
@@ -442,6 +456,11 @@ func GetPeersAtMaxHeight(
 
 		// Skip peers with very low reputation
 		if peer.ReputationScore < 20.0 {
+			continue
+		}
+
+		// Skip pruned peers: they 404 on archival subtree data during IBD.
+		if isPrunedPeer(peer.Storage) {
 			continue
 		}
 

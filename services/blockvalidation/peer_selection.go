@@ -65,6 +65,13 @@ func (u *Server) selectBestPeersForCatchup(ctx context.Context, targetHeight uin
 			continue
 		}
 
+		// Skip pruned peers as catchup primaries: they 404 on archival subtree
+		// data during IBD, wasting a fetch attempt per block before failover.
+		if isPrunedPeer(p.Storage) {
+			u.logger.Debugf("[peer_selection] Skipping peer %s (pruned storage - lacks archival data)", p.ID.String())
+			continue
+		}
+
 		peers = append(peers, PeerForCatchup{
 			ID:                     p.ID.String(),
 			Storage:                p.Storage,

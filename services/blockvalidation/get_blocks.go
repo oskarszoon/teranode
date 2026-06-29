@@ -20,7 +20,50 @@ import (
 	"github.com/bsv-blockchain/teranode/util"
 	"github.com/bsv-blockchain/teranode/util/tracing"
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/time/rate"
 )
+
+// peerFetchLimiter returns the per-peer client-side rate limiter for baseURL,
+// lazily creating it from settings. Returns nil when per-peer pacing is disabled
+// (PerPeerFetchRate <= 0), in which case callers skip the wait. Keyed by baseURL
+// (the actual HTTP target) so two peers can't share a bucket and one peer's limit
+// can't throttle another.
+func (u *Server) peerFetchLimiter(baseURL string) *rate.Limiter {
+	r := u.settings.BlockValidation.PerPeerFetchRate
+	if r <= 0 {
+		return nil
+	}
+
+	u.peerFetchLimitersMu.Lock()
+	defer u.peerFetchLimitersMu.Unlock()
+
+	if u.peerFetchLimiters == nil {
+		u.peerFetchLimiters = make(map[string]*rate.Limiter)
+	}
+
+	lim, ok := u.peerFetchLimiters[baseURL]
+	if !ok {
+		// rate == burst: allow a short burst up to the rate, then pace to it.
+		lim = rate.NewLimiter(rate.Limit(r), r)
+		u.peerFetchLimiters[baseURL] = lim
+	}
+
+	return lim
+}
+
+// awaitPeerFetchSlot blocks until the per-peer rate limiter grants a token (or ctx
+// is done), pacing heavy-fetch request issuance to baseURL so the catchup fan-out
+// can't burst into the peer's asset heavy-route limiter. No-op when pacing is
+// disabled. The wait holds nothing across the subsequent download, so it cannot
+// deadlock or pin a slot for the lifetime of a slow stream.
+func (u *Server) awaitPeerFetchSlot(ctx context.Context, baseURL string) error {
+	lim := u.peerFetchLimiter(baseURL)
+	if lim == nil {
+		return nil
+	}
+
+	return lim.Wait(ctx)
+}
 
 // Work item represents a block with its position for ordered delivery
 type workItem struct {
@@ -565,6 +608,14 @@ func (u *Server) fetchAndStoreSubtreeData(ctx context.Context, block *model.Bloc
 	// the original ctx, so a pre-cancelled call still exits early.
 	//
 	// See companion fix in services/subtreevalidation/check_block_subtrees.go.
+	//
+	// Pace request issuance to this peer BEFORE detaching, so the rate-limit wait
+	// stays cancellable (e.g. on shutdown). The detach below intentionally only
+	// protects the in-flight download+store, not the token wait.
+	if err := u.awaitPeerFetchSlot(ctx, baseURL); err != nil {
+		return errors.NewProcessingError("[catchup:fetchAndStoreSubtreeData] aborted waiting for peer fetch slot for %s", subtreeHash.String(), err)
+	}
+
 	ctx = context.WithoutCancel(ctx)
 
 	subtreeDataReader, err := u.fetchSubtreeDataFromPeer(ctx, subtreeHash, peerID, baseURL)
@@ -724,8 +775,14 @@ func (u *Server) fetchSubtreeFromPeer(ctx context.Context, subtreeHash *chainhas
 	// only controls what *this node* assembles; peers may legitimately produce larger subtrees.
 	maxSubtreeBytes := u.settings.SubtreeValidation.MaxIncomingSubtreeBytes
 
-	// Use the existing HTTP utility to fetch subtree
-	subtreeBytes, err := util.DoHTTPRequestBounded(ctx, url, maxSubtreeBytes)
+	// Pace request issuance to this peer (see peerFetchLimiter).
+	if err := u.awaitPeerFetchSlot(ctx, baseURL); err != nil {
+		return nil, errors.NewServiceError("[catchup:fetchSubtreeFromPeer] aborted waiting for peer fetch slot for %s", url, err)
+	}
+
+	// Use the existing HTTP utility to fetch subtree. WithRetry backs off on 429/503
+	// (peer rate limiting / admission control) rather than failing the whole fetch.
+	subtreeBytes, err := util.DoHTTPRequestBoundedWithRetry(ctx, url, maxSubtreeBytes)
 	if err != nil {
 		return nil, errors.NewServiceError("[catchup:fetchSubtreeFromPeer] failed to fetch subtree from %s", url, err)
 	}
@@ -779,9 +836,13 @@ func (u *Server) fetchSubtreeDataFromPeer(ctx context.Context, subtreeHash *chai
 
 	u.logger.Debugf("[catchup:fetchSubtreeDataFromPeer] fetching subtree data from %s", url)
 
-	// Retry on 503 — peer's asset service may reject under admission control while it
-	// generates the file on-demand from Aerospike. The retry loop honors the peer's
-	// Retry-After header.
+	// Note: per-peer rate pacing (awaitPeerFetchSlot) is applied by the caller
+	// (fetchAndStoreSubtreeData) before it detaches the context, so the wait stays
+	// cancellable. Do not pace here — ctx may already be context.WithoutCancel.
+	//
+	// Retry on 503/429 — peer's asset service may reject under admission control while
+	// it generates the file on-demand from Aerospike, or rate-limit the heavy route.
+	// The retry loop backs off (honoring Retry-After when present).
 	subtreeDataReader, err := util.DoHTTPRequestBodyReaderWithRetry(ctx, url)
 	if err != nil {
 		return nil, errors.NewServiceError("[catchup:fetchSubtreeDataFromPeer] failed to fetch subtree data from %s", url, err)
@@ -823,7 +884,13 @@ func (u *Server) fetchBlocksBatch(ctx context.Context, hash *chainhash.Hash, n u
 	)
 	defer deferFn()
 
-	blockBytes, err := util.DoHTTPRequest(ctx, fmt.Sprintf("%s/blocks/%s?n=%d", baseURL, hash.String(), n))
+	// Pace request issuance to this peer (see peerFetchLimiter).
+	if err := u.awaitPeerFetchSlot(ctx, baseURL); err != nil {
+		return nil, errors.NewProcessingError("[catchup:fetchBlocksBatch][%s] aborted waiting for peer fetch slot", hash.String(), err)
+	}
+
+	// WithRetry backs off on 429/503 instead of failing the whole batch.
+	blockBytes, err := util.DoHTTPRequestWithRetry(ctx, fmt.Sprintf("%s/blocks/%s?n=%d", baseURL, hash.String(), n))
 	if err != nil {
 		return nil, errors.NewProcessingError("[catchup:fetchBlocksBatch][%s] failed to get blocks from peer", hash.String(), err)
 	}
@@ -872,7 +939,13 @@ func (u *Server) fetchSingleBlock(ctx context.Context, hash *chainhash.Hash, pee
 	)
 	defer deferFn()
 
-	blockBytes, err := util.DoHTTPRequest(ctx, fmt.Sprintf("%s/block/%s", baseURL, hash.String()))
+	// Pace request issuance to this peer (see peerFetchLimiter).
+	if err := u.awaitPeerFetchSlot(ctx, baseURL); err != nil {
+		return nil, errors.NewProcessingError("[catchup:fetchSingleBlock][%s] aborted waiting for peer fetch slot", hash.String(), err)
+	}
+
+	// WithRetry backs off on 429/503 (peer rate limiting) instead of failing.
+	blockBytes, err := util.DoHTTPRequestWithRetry(ctx, fmt.Sprintf("%s/block/%s", baseURL, hash.String()))
 	if err != nil {
 		return nil, errors.NewProcessingError("[catchup:fetchSingleBlock][%s] failed to get block from peer", hash.String(), err)
 	}

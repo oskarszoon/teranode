@@ -48,6 +48,7 @@ import (
 	"github.com/ordishs/gocore"
 	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/time/rate"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -211,6 +212,15 @@ type Server struct {
 	// When true, indicates that a catchup operation is currently in progress.
 	// This flag ensures only one catchup can run at a time to prevent resource contention.
 	isCatchingUp atomic.Bool
+
+	// peerFetchLimiters holds a per-peer (keyed by data-hub baseURL) client-side
+	// rate limiter that paces catchup heavy fetches (subtree, subtree_data, block
+	// batches) so the combined fan-out cannot burst into a peer's asset heavy-route
+	// limiter and wedge IBD (see issue #1174). Lazily populated by peerFetchLimiter;
+	// guarded by peerFetchLimitersMu. The catchup peer set is small, so the map is
+	// not actively evicted.
+	peerFetchLimiters   map[string]*rate.Limiter
+	peerFetchLimitersMu sync.Mutex
 
 	// catchupStatsMu protects concurrent access to lastCatchupTime and lastCatchupResult.
 	// Always acquire this mutex when reading or writing these fields.
@@ -1961,8 +1971,10 @@ func (u *Server) addBlockToPriorityQueue(ctx context.Context, blockFound process
 		u.logger.Errorf("[addBlockToPriorityQueue] Failed to fetch block %s: %v", blockFound.hash.String(), err)
 
 		// Report peer failure to P2P service for reputation tracking
-		// This ensures peers with misconfigured asset servers (e.g., 401 errors) have their reputation degraded
-		if blockFound.peerID != "" {
+		// This ensures peers with misconfigured asset servers (e.g., 401 errors) have their reputation degraded.
+		// Skip reporting for local errors (e.g. our own fetch-context timeout or per-peer rate-wait cancellation)
+		// so a local stall is not blamed on the peer.
+		if blockFound.peerID != "" && !errors.IsLocalError(err) {
 			u.reportCatchupFailure(ctx, blockFound.peerID)
 			u.reportCatchupError(ctx, blockFound.peerID, err.Error())
 		}

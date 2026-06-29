@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/url"
@@ -445,13 +446,15 @@ func executeHTTPRequest(ctx context.Context, cancelFn context.CancelFunc, rawURL
 // The error type is chosen to let callers branch with errors.Is:
 //   - 404 → ErrNotFound
 //   - 503 → ErrServiceUnavailable (typically retryable; see DoHTTPRequestBodyReaderWithRetry)
+//   - 429 → ErrServiceUnavailable (rate limited; same retryable class so the retry
+//     helpers back off rather than fail the caller — see the *WithRetry helpers)
 //   - other → generic ServiceError
 func buildHTTPError(resp *http.Response, rawURL string) error {
 	errFn := errors.NewServiceError
 	switch resp.StatusCode {
 	case http.StatusNotFound:
 		errFn = errors.NewNotFoundError
-	case http.StatusServiceUnavailable:
+	case http.StatusServiceUnavailable, http.StatusTooManyRequests:
 		errFn = errors.NewServiceUnavailableError
 	}
 
@@ -505,51 +508,57 @@ var defaultRetryConfig = retryConfig{
 	maxDelay:     5 * time.Second,
 }
 
-// DoHTTPRequestBodyReaderWithRetry behaves like DoHTTPRequestBodyReader but retries on
-// HTTP 503 (Service Unavailable) with exponential backoff. Used for endpoints where the
-// server signals admission-control rejection (e.g. asset /subtree_data) and the right
-// behavior is to back off and retry rather than fail the caller.
-//
-// Behavior:
-//   - Retries only on errors satisfying errors.Is(err, errors.ErrServiceUnavailable).
-//   - Other errors (404, 500, network errors) are returned immediately — they are not
-//     transient admission rejections.
-//   - Backoff is exponential starting at 250ms, doubling, capped at 5s. Up to 6 attempts.
-//   - Honors the server's Retry-After header on each 503 (clamped to maxDelay).
-//   - ctx cancellation aborts the retry loop and returns the parent ctx error.
-//
-// Each attempt is a fresh GET — for POST callers passing requestBody, the body is re-sent
-// each time. Make sure that's idempotent before using this helper for non-GET workloads.
-func DoHTTPRequestBodyReaderWithRetry(ctx context.Context, url string, requestBody ...[]byte) (io.ReadCloser, error) {
-	return doHTTPRequestBodyReaderWithRetry(ctx, url, defaultRetryConfig, requestBody...)
+// jitterDelay returns a randomised duration in [d/2, d] (full jitter on the
+// upper half of the computed backoff). De-synchronising the backoff matters
+// during p2p catchup: many heavy fetches hit the same per-peer rate limiter at
+// once, so without jitter every retry wakes on the same tick and re-bursts into
+// the limiter. Guarded so rand.Int64N never receives 0.
+func jitterDelay(d time.Duration) time.Duration {
+	half := d / 2
+	if half <= 0 {
+		return d
+	}
+	return half + time.Duration(rand.Int64N(int64(half)+1))
 }
 
-func doHTTPRequestBodyReaderWithRetry(ctx context.Context, url string, cfg retryConfig, requestBody ...[]byte) (io.ReadCloser, error) {
+// retryHTTP runs attempt with exponential backoff + full jitter, retrying only
+// while attempt returns an error of the retryable transient class
+// (errors.Is(err, errors.ErrServiceUnavailable) — which buildHTTPError assigns
+// to both HTTP 503 and HTTP 429). Any other error is returned immediately.
+//
+// attempt returns its result T, an optional server Retry-After hint (0 if none),
+// and an error. A positive Retry-After (within maxDelay) is honored verbatim;
+// otherwise the jittered exponential backoff is used. ctx cancellation aborts
+// the loop and returns the ctx error.
+func retryHTTP[T any](ctx context.Context, cfg retryConfig, attempt func(context.Context) (T, time.Duration, error)) (T, error) {
+	var zero T
 	delay := cfg.initialDelay
 	var lastErr error
 
-	for attempt := 1; attempt <= cfg.maxAttempts; attempt++ {
-		body, retryAfter, err := doHTTPRequestForStreamingWithRetryAfter(ctx, url, requestBody...)
+	for n := 1; n <= cfg.maxAttempts; n++ {
+		res, retryAfter, err := attempt(ctx)
 		if err == nil {
-			return body, nil
+			return res, nil
 		}
 		if !errors.Is(err, errors.ErrServiceUnavailable) {
-			return nil, err
+			return zero, err
 		}
 		lastErr = err
 
-		if attempt == cfg.maxAttempts {
+		if n == cfg.maxAttempts {
 			break
 		}
 
-		sleepFor := delay
+		sleepFor := jitterDelay(delay)
 		if retryAfter > 0 && retryAfter <= cfg.maxDelay {
+			// Server named an exact time — honor it as-is (don't jitter an
+			// explicit instruction).
 			sleepFor = retryAfter
 		}
 
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return zero, ctx.Err()
 		case <-time.After(sleepFor):
 		}
 
@@ -559,15 +568,110 @@ func doHTTPRequestBodyReaderWithRetry(ctx context.Context, url string, cfg retry
 		}
 	}
 
-	return nil, errors.NewServiceUnavailableError("http request [%s] still 503 after %d attempts: %v", url, cfg.maxAttempts, lastErr)
+	return zero, errors.NewServiceUnavailableError("http request still failing after %d attempts: %v", cfg.maxAttempts, lastErr)
+}
+
+// DoHTTPRequestBodyReaderWithRetry behaves like DoHTTPRequestBodyReader but retries on
+// HTTP 503/429 with exponential backoff. Used for endpoints where the server signals
+// admission-control rejection or rate limiting (e.g. asset /subtree_data) and the right
+// behavior is to back off and retry rather than fail the caller.
+//
+// Behavior:
+//   - Retries only on errors satisfying errors.Is(err, errors.ErrServiceUnavailable)
+//     (HTTP 503 and 429).
+//   - Other errors (404, 500, network errors) are returned immediately — they are not
+//     transient admission rejections.
+//   - Backoff is exponential starting at 250ms, doubling, capped at 5s, with full jitter.
+//     Up to 6 attempts.
+//   - Honors the server's Retry-After header when present (clamped to maxDelay).
+//   - ctx cancellation aborts the retry loop and returns the parent ctx error.
+//
+// Each attempt is a fresh GET — for POST callers passing requestBody, the body is re-sent
+// each time. Make sure that's idempotent before using this helper for non-GET workloads.
+func DoHTTPRequestBodyReaderWithRetry(ctx context.Context, url string, requestBody ...[]byte) (io.ReadCloser, error) {
+	return doHTTPRequestBodyReaderWithRetry(ctx, url, defaultRetryConfig, requestBody...)
+}
+
+func doHTTPRequestBodyReaderWithRetry(ctx context.Context, url string, cfg retryConfig, requestBody ...[]byte) (io.ReadCloser, error) {
+	return retryHTTP(ctx, cfg, func(c context.Context) (io.ReadCloser, time.Duration, error) {
+		return doHTTPRequestForStreamingWithRetryAfter(c, url, requestBody...)
+	})
+}
+
+// DoHTTPRequestWithRetry behaves like DoHTTPRequest (reads the full body into memory)
+// but retries on HTTP 503/429 with jittered exponential backoff. Intended for catchup
+// heavy fetches (e.g. /blocks batches, single blocks) that must back off when a peer's
+// asset endpoint rate-limits, instead of re-bursting and re-tripping the limiter.
+func DoHTTPRequestWithRetry(ctx context.Context, url string, requestBody ...[]byte) ([]byte, error) {
+	return doHTTPRequestWithRetry(ctx, url, defaultRetryConfig, requestBody...)
+}
+
+func doHTTPRequestWithRetry(ctx context.Context, url string, cfg retryConfig, requestBody ...[]byte) ([]byte, error) {
+	return retryHTTP(ctx, cfg, func(c context.Context) ([]byte, time.Duration, error) {
+		return readBodyWithRetryAfter(c, url, -1, requestBody...)
+	})
+}
+
+// DoHTTPRequestBoundedWithRetry behaves like DoHTTPRequestBounded (caps the body at
+// maxBytes) but retries on HTTP 503/429 with jittered exponential backoff. Intended for
+// catchup subtree fetches against peer-controlled asset endpoints.
+func DoHTTPRequestBoundedWithRetry(ctx context.Context, url string, maxBytes int64, requestBody ...[]byte) ([]byte, error) {
+	return doHTTPRequestBoundedWithRetry(ctx, url, maxBytes, defaultRetryConfig, requestBody...)
+}
+
+func doHTTPRequestBoundedWithRetry(ctx context.Context, url string, maxBytes int64, cfg retryConfig, requestBody ...[]byte) ([]byte, error) {
+	return retryHTTP(ctx, cfg, func(c context.Context) ([]byte, time.Duration, error) {
+		return readBodyWithRetryAfter(c, url, maxBytes, requestBody...)
+	})
+}
+
+// readBodyWithRetryAfter performs a single HTTP request and reads the full response body
+// into memory, returning any server Retry-After hint alongside the error so retryHTTP can
+// honor it. maxBytes < 0 means unbounded (io.ReadAll); maxBytes >= 0 caps the body and
+// returns ErrExternal if the peer streams more than the cap (mirrors DoHTTPRequestBounded).
+func readBodyWithRetryAfter(ctx context.Context, url string, maxBytes int64, requestBody ...[]byte) ([]byte, time.Duration, error) {
+	// Use the standard request timeout (not the streaming timeout) to preserve the
+	// behavior of the non-retry DoHTTPRequest/DoHTTPRequestBounded these helpers replace.
+	reader, retryAfter, err := doRequestReaderWithRetryAfter(ctx, time.Duration(httpRequestTimeout)*time.Millisecond, url, requestBody...)
+	if err != nil {
+		return nil, retryAfter, err
+	}
+	defer func() { _ = reader.Close() }()
+
+	if maxBytes < 0 {
+		b, readErr := io.ReadAll(reader)
+		if readErr != nil {
+			return nil, 0, errors.NewServiceError("http request [%s] failed to read body", url, readErr)
+		}
+		return b, 0, nil
+	}
+
+	b, readErr := io.ReadAll(io.LimitReader(reader, maxBytes+1))
+	if readErr != nil {
+		return nil, 0, errors.NewServiceError("http request [%s] failed to read body", url, readErr)
+	}
+	if int64(len(b)) > maxBytes {
+		return nil, 0, errors.NewExternalError("http request [%s] response body exceeds %d bytes", url, maxBytes)
+	}
+	return b, 0, nil
 }
 
 // doHTTPRequestForStreamingWithRetryAfter is doHTTPRequestForStreaming + extracts
 // the Retry-After header on non-OK responses. On success returns (body, 0, nil).
+// Uses the longer streaming timeout, appropriate for large body-reader downloads.
 func doHTTPRequestForStreamingWithRetryAfter(ctx context.Context, rawURL string, requestBody ...[]byte) (io.ReadCloser, time.Duration, error) {
+	return doRequestReaderWithRetryAfter(ctx, time.Duration(httpStreamingTimeout)*time.Millisecond, rawURL, requestBody...)
+}
+
+// doRequestReaderWithRetryAfter performs a single GET/POST and returns the body
+// reader plus any server Retry-After hint (extracted on non-OK responses). The
+// timeout is applied only when ctx has no deadline. Callers choose the timeout so
+// streaming downloads get the longer http_streaming_timeout while bounded/whole-body
+// byte fetches keep the shorter http_timeout they had before retries were added.
+func doRequestReaderWithRetryAfter(ctx context.Context, timeout time.Duration, rawURL string, requestBody ...[]byte) (io.ReadCloser, time.Duration, error) {
 	cancelFn := func() {}
 	if _, ok := ctx.Deadline(); !ok {
-		ctx, cancelFn = context.WithTimeout(ctx, time.Duration(httpStreamingTimeout)*time.Millisecond)
+		ctx, cancelFn = context.WithTimeout(ctx, timeout)
 	}
 
 	if err := ValidateURL(rawURL); err != nil {
@@ -583,7 +687,10 @@ func doHTTPRequestForStreamingWithRetryAfter(ctx context.Context, rawURL string,
 	if len(requestBody) > 0 && requestBody[0] != nil {
 		req.Body = io.NopCloser(bytes.NewReader(requestBody[0]))
 		req.Method = http.MethodPost
-		req.Header.Set("Content-Type", "application/json")
+		// octet-stream (not application/json) for the same reason as executeHTTPRequest:
+		// a ModSecurity WAF in front of asset runs the JSON body parser on application/json,
+		// fails on the binary payload, and rejects with HTTP 400. See lines 408-416.
+		req.Header.Set("Content-Type", "application/octet-stream")
 	}
 
 	resp, err := httpClient.Do(req)
