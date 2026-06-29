@@ -1523,7 +1523,7 @@ func TestSubtreeFunctions(t *testing.T) {
 			fmt.Sprintf("http://test-peer/subtree_data/%s", subtreeHash.String()),
 			httpmock.NewBytesResponder(200, expectedData))
 
-		reader, err := suite.Server.fetchSubtreeDataFromPeer(suite.Ctx, subtreeHash, "test-peer-id", "http://test-peer")
+		reader, err := suite.Server.fetchSubtreeDataFromPeer(suite.Ctx, subtreeHash, "test-peer-id", "http://test-peer", nil)
 		assert.NoError(t, err)
 		assert.NotNil(t, reader)
 		defer reader.Close()
@@ -1547,7 +1547,7 @@ func TestSubtreeFunctions(t *testing.T) {
 			fmt.Sprintf("http://test-peer/subtree_data/%s", subtreeHash.String()),
 			httpmock.NewStringResponder(404, "Not Found"))
 
-		result, err := suite.Server.fetchSubtreeDataFromPeer(suite.Ctx, subtreeHash, "test-peer-id", "http://test-peer")
+		result, err := suite.Server.fetchSubtreeDataFromPeer(suite.Ctx, subtreeHash, "test-peer-id", "http://test-peer", nil)
 		assert.Error(t, err)
 		assert.Nil(t, result)
 		assert.Contains(t, err.Error(), "failed to fetch subtree data from")
@@ -1566,7 +1566,7 @@ func TestSubtreeFunctions(t *testing.T) {
 			fmt.Sprintf("http://test-peer/subtree_data/%s", subtreeHash.String()),
 			httpmock.NewBytesResponder(200, []byte{}))
 
-		reader, err := suite.Server.fetchSubtreeDataFromPeer(suite.Ctx, subtreeHash, "test-peer-id", "http://test-peer")
+		reader, err := suite.Server.fetchSubtreeDataFromPeer(suite.Ctx, subtreeHash, "test-peer-id", "http://test-peer", nil)
 		// Empty response is not an error for the fetcher - it just returns an empty reader
 		assert.NoError(t, err)
 		assert.NotNil(t, reader)
@@ -2614,7 +2614,7 @@ func TestFetchSubtreeDataFromPeer(t *testing.T) {
 		httpmock.RegisterResponder("GET", subtreeDataURL,
 			httpmock.NewBytesResponder(200, expectedData))
 
-		reader, err := server.fetchSubtreeDataFromPeer(ctx, subtreeHash, "test-peer-id", baseURL)
+		reader, err := server.fetchSubtreeDataFromPeer(ctx, subtreeHash, "test-peer-id", baseURL, nil)
 		assert.NoError(t, err)
 		assert.NotNil(t, reader)
 		defer reader.Close()
@@ -2632,7 +2632,7 @@ func TestFetchSubtreeDataFromPeer(t *testing.T) {
 		httpmock.RegisterResponder("GET", subtreeDataURL,
 			httpmock.NewErrorResponder(errors.NewNetworkError("HTTP request failed")))
 
-		data, err := server.fetchSubtreeDataFromPeer(ctx, subtreeHash, "test-peer-id", baseURL)
+		data, err := server.fetchSubtreeDataFromPeer(ctx, subtreeHash, "test-peer-id", baseURL, nil)
 		assert.Error(t, err)
 		assert.Nil(t, data)
 		assert.Contains(t, err.Error(), "failed to fetch subtree data from")
@@ -2645,7 +2645,7 @@ func TestFetchSubtreeDataFromPeer(t *testing.T) {
 		httpmock.RegisterResponder("GET", subtreeDataURL,
 			httpmock.NewBytesResponder(200, []byte{})) // Empty response
 
-		reader, err := server.fetchSubtreeDataFromPeer(ctx, subtreeHash, "test-peer-id", baseURL)
+		reader, err := server.fetchSubtreeDataFromPeer(ctx, subtreeHash, "test-peer-id", baseURL, nil)
 		// Empty response is not an error for the fetcher - it just returns an empty reader
 		assert.NoError(t, err)
 		assert.NotNil(t, reader)
@@ -2677,7 +2677,7 @@ func TestFetchSubtreeDataFromPeer(t *testing.T) {
 		cancelCtx, cancel := context.WithCancel(ctx)
 		cancel() // Cancel immediately
 
-		data, err := server.fetchSubtreeDataFromPeer(cancelCtx, subtreeHash, "test-peer-id", baseURL)
+		data, err := server.fetchSubtreeDataFromPeer(cancelCtx, subtreeHash, "test-peer-id", baseURL, nil)
 		assert.Error(t, err)
 		assert.Nil(t, data)
 		// Check for either context canceled or the wrapped error containing context cancellation

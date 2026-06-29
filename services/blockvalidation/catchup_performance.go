@@ -459,7 +459,10 @@ func GetPeersAtMaxHeight(
 			continue
 		}
 
-		// Skip pruned peers: they 404 on archival subtree data during IBD.
+		// Skip pruned peers: they 404 on archival subtree data during IBD, so there is
+		// no point including them for subtree fetches / distribution. (Primary/header
+		// selection in selectBestPeersForCatchup keeps a pruned fallback to avoid
+		// stranding; subtree fetches do not, because pruned peers cannot serve them.)
 		if isPrunedPeer(peer.Storage) {
 			continue
 		}

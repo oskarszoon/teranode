@@ -3,6 +3,7 @@ package util
 import (
 	"bytes"
 	"context"
+	stderrors "errors"
 	"io"
 	"math/rand/v2"
 	"net"
@@ -393,15 +394,22 @@ func isBlockedIP(ip net.IP) bool {
 	return false
 }
 
-// executeHTTPRequest performs the actual HTTP request with the given context.
-func executeHTTPRequest(ctx context.Context, cancelFn context.CancelFunc, rawURL string, requestBody ...[]byte) (io.ReadCloser, context.CancelFunc, error) {
+// newSignedRequest builds a validated, optionally-signed *http.Request for rawURL.
+// GET by default; POST with an octet-stream body when requestBody is provided.
+//
+// This is the single request-builder shared by both the one-shot (executeHTTPRequest)
+// and retrying (doRequestReaderWithRetryAfter) paths, so request signing, body
+// Content-Type, and URL validation can never diverge between them — a divergence
+// previously sent retrying catchup fetches unsigned and lost the peer rate-limit
+// exemption.
+func newSignedRequest(ctx context.Context, rawURL string, requestBody ...[]byte) (*http.Request, error) {
 	if err := ValidateURL(rawURL); err != nil {
-		return nil, cancelFn, err
+		return nil, err
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return nil, cancelFn, errors.NewServiceError("failed to create http request", err)
+		return nil, errors.NewServiceError("failed to create http request", err)
 	}
 
 	// If there is a request body assume we want a POST and write request body.
@@ -420,6 +428,16 @@ func executeHTTPRequest(ctx context.Context, cancelFn context.CancelFunc, rawURL
 	// Sign the request if a signer is configured (silently skip on error)
 	if signer := loadHTTPRequestSigner(); signer != nil {
 		_ = signer.SignRequest(req)
+	}
+
+	return req, nil
+}
+
+// executeHTTPRequest performs the actual HTTP request with the given context.
+func executeHTTPRequest(ctx context.Context, cancelFn context.CancelFunc, rawURL string, requestBody ...[]byte) (io.ReadCloser, context.CancelFunc, error) {
+	req, err := newSignedRequest(ctx, rawURL, requestBody...)
+	if err != nil {
+		return nil, cancelFn, err
 	}
 
 	var resp *http.Response
@@ -550,10 +568,15 @@ func retryHTTP[T any](ctx context.Context, cfg retryConfig, attempt func(context
 		}
 
 		sleepFor := jitterDelay(delay)
-		if retryAfter > 0 && retryAfter <= cfg.maxDelay {
-			// Server named an exact time — honor it as-is (don't jitter an
-			// explicit instruction).
+		if retryAfter > 0 {
+			// Server named a time — honor it (don't jitter an explicit instruction),
+			// clamped to maxDelay so a large or hostile hint can't stall us, but never
+			// discarded: a hint above maxDelay still pins the wait at maxDelay rather
+			// than falling back to the smaller jittered backoff and re-hitting early.
 			sleepFor = retryAfter
+			if sleepFor > cfg.maxDelay {
+				sleepFor = cfg.maxDelay
+			}
 		}
 
 		select {
@@ -589,11 +612,23 @@ func retryHTTP[T any](ctx context.Context, cfg retryConfig, attempt func(context
 // Each attempt is a fresh GET — for POST callers passing requestBody, the body is re-sent
 // each time. Make sure that's idempotent before using this helper for non-GET workloads.
 func DoHTTPRequestBodyReaderWithRetry(ctx context.Context, url string, requestBody ...[]byte) (io.ReadCloser, error) {
-	return doHTTPRequestBodyReaderWithRetry(ctx, url, defaultRetryConfig, requestBody...)
+	return doHTTPRequestBodyReaderWithRetry(ctx, url, defaultRetryConfig, nil, requestBody...)
 }
 
-func doHTTPRequestBodyReaderWithRetry(ctx context.Context, url string, cfg retryConfig, requestBody ...[]byte) (io.ReadCloser, error) {
+// DoHTTPRequestBodyReaderWithRetryFunc is DoHTTPRequestBodyReaderWithRetry with a
+// per-attempt hook (e.g. a per-peer rate-limit wait) run before every attempt, so the
+// limiter meters retries too, not just the first issuance. A nil hook is a no-op.
+func DoHTTPRequestBodyReaderWithRetryFunc(ctx context.Context, url string, beforeAttempt func(context.Context) error, requestBody ...[]byte) (io.ReadCloser, error) {
+	return doHTTPRequestBodyReaderWithRetry(ctx, url, defaultRetryConfig, beforeAttempt, requestBody...)
+}
+
+func doHTTPRequestBodyReaderWithRetry(ctx context.Context, url string, cfg retryConfig, beforeAttempt func(context.Context) error, requestBody ...[]byte) (io.ReadCloser, error) {
 	return retryHTTP(ctx, cfg, func(c context.Context) (io.ReadCloser, time.Duration, error) {
+		if beforeAttempt != nil {
+			if err := beforeAttempt(c); err != nil {
+				return nil, 0, err
+			}
+		}
 		return doHTTPRequestForStreamingWithRetryAfter(c, url, requestBody...)
 	})
 }
@@ -602,12 +637,18 @@ func doHTTPRequestBodyReaderWithRetry(ctx context.Context, url string, cfg retry
 // but retries on HTTP 503/429 with jittered exponential backoff. Intended for catchup
 // heavy fetches (e.g. /blocks batches, single blocks) that must back off when a peer's
 // asset endpoint rate-limits, instead of re-bursting and re-tripping the limiter.
-func DoHTTPRequestWithRetry(ctx context.Context, url string, requestBody ...[]byte) ([]byte, error) {
-	return doHTTPRequestWithRetry(ctx, url, defaultRetryConfig, requestBody...)
+// beforeAttempt (nil = no-op) runs before every attempt, e.g. a per-peer rate-limit wait.
+func DoHTTPRequestWithRetry(ctx context.Context, url string, beforeAttempt func(context.Context) error, requestBody ...[]byte) ([]byte, error) {
+	return doHTTPRequestWithRetry(ctx, url, defaultRetryConfig, beforeAttempt, requestBody...)
 }
 
-func doHTTPRequestWithRetry(ctx context.Context, url string, cfg retryConfig, requestBody ...[]byte) ([]byte, error) {
+func doHTTPRequestWithRetry(ctx context.Context, url string, cfg retryConfig, beforeAttempt func(context.Context) error, requestBody ...[]byte) ([]byte, error) {
 	return retryHTTP(ctx, cfg, func(c context.Context) ([]byte, time.Duration, error) {
+		if beforeAttempt != nil {
+			if err := beforeAttempt(c); err != nil {
+				return nil, 0, err
+			}
+		}
 		return readBodyWithRetryAfter(c, url, -1, requestBody...)
 	})
 }
@@ -615,20 +656,31 @@ func doHTTPRequestWithRetry(ctx context.Context, url string, cfg retryConfig, re
 // DoHTTPRequestBoundedWithRetry behaves like DoHTTPRequestBounded (caps the body at
 // maxBytes) but retries on HTTP 503/429 with jittered exponential backoff. Intended for
 // catchup subtree fetches against peer-controlled asset endpoints.
-func DoHTTPRequestBoundedWithRetry(ctx context.Context, url string, maxBytes int64, requestBody ...[]byte) ([]byte, error) {
-	return doHTTPRequestBoundedWithRetry(ctx, url, maxBytes, defaultRetryConfig, requestBody...)
+// beforeAttempt (nil = no-op) runs before every attempt, e.g. a per-peer rate-limit wait.
+func DoHTTPRequestBoundedWithRetry(ctx context.Context, url string, maxBytes int64, beforeAttempt func(context.Context) error, requestBody ...[]byte) ([]byte, error) {
+	return doHTTPRequestBoundedWithRetry(ctx, url, maxBytes, defaultRetryConfig, beforeAttempt, requestBody...)
 }
 
-func doHTTPRequestBoundedWithRetry(ctx context.Context, url string, maxBytes int64, cfg retryConfig, requestBody ...[]byte) ([]byte, error) {
+func doHTTPRequestBoundedWithRetry(ctx context.Context, url string, maxBytes int64, cfg retryConfig, beforeAttempt func(context.Context) error, requestBody ...[]byte) ([]byte, error) {
 	return retryHTTP(ctx, cfg, func(c context.Context) ([]byte, time.Duration, error) {
+		if beforeAttempt != nil {
+			if err := beforeAttempt(c); err != nil {
+				return nil, 0, err
+			}
+		}
 		return readBodyWithRetryAfter(c, url, maxBytes, requestBody...)
 	})
 }
 
 // readBodyWithRetryAfter performs a single HTTP request and reads the full response body
 // into memory, returning any server Retry-After hint alongside the error so retryHTTP can
-// honor it. maxBytes < 0 means unbounded (io.ReadAll); maxBytes >= 0 caps the body and
-// returns ErrExternal if the peer streams more than the cap (mirrors DoHTTPRequestBounded).
+// honor it. maxBytes < 0 means unbounded; maxBytes >= 0 caps the body and returns
+// ErrExternal if the peer streams more than the cap (mirrors DoHTTPRequestBounded).
+//
+// The body read is guarded by ctx.Done() (mirroring DoHTTPRequest/DoHTTPRequestBounded):
+// a context timeout/cancel during the read returns NewNetworkTimeoutError — a non-local
+// error — so a peer stalling mid-stream is correctly attributed to the peer rather than
+// classified as a local error and silently absolved.
 func readBodyWithRetryAfter(ctx context.Context, url string, maxBytes int64, requestBody ...[]byte) ([]byte, time.Duration, error) {
 	// Use the standard request timeout (not the streaming timeout) to preserve the
 	// behavior of the non-retry DoHTTPRequest/DoHTTPRequestBounded these helpers replace.
@@ -638,22 +690,51 @@ func readBodyWithRetryAfter(ctx context.Context, url string, maxBytes int64, req
 	}
 	defer func() { _ = reader.Close() }()
 
-	if maxBytes < 0 {
-		b, readErr := io.ReadAll(reader)
+	var r io.Reader = reader
+	if maxBytes >= 0 {
+		r = io.LimitReader(reader, maxBytes+1)
+	}
+
+	done := make(chan struct{})
+	var b []byte
+	var readErr error
+	go func() {
+		b, readErr = io.ReadAll(r)
+		close(done)
+	}()
+
+	select {
+	case <-ctx.Done():
+		// The parent context ended while reading. A cancel is a local condition
+		// (e.g. node shutdown) — keep it local so a peer isn't blamed for our own
+		// teardown. A deadline means the overall fetch budget was exceeded (the peer
+		// was too slow) — attribute that to the peer via a network timeout.
+		if stderrors.Is(ctx.Err(), context.Canceled) {
+			return nil, 0, errors.NewContextCanceledError("http request [%s] canceled while reading body", url, context.Canceled)
+		}
+		return nil, 0, errors.NewNetworkTimeoutError("http request [%s] timed out while reading body", url)
+	case <-done:
 		if readErr != nil {
+			// The per-request transport timeout (httpRequestTimeout) fires on the
+			// derived request context, which this select does not observe — it surfaces
+			// here as a context-deadline read error. A peer stalling mid-stream is the
+			// peer's fault, so classify it as a (non-local) network timeout rather than a
+			// generic ServiceError whose wrapped context string would be misread as local.
+			// Use stdlib errors.Is on the raw readErr, before teranode wrapping flattens
+			// the sentinel to a string.
+			if stderrors.Is(readErr, context.DeadlineExceeded) {
+				return nil, 0, errors.NewNetworkTimeoutError("http request [%s] timed out while reading body", url)
+			}
+			if stderrors.Is(readErr, context.Canceled) {
+				return nil, 0, errors.NewContextCanceledError("http request [%s] canceled while reading body", url, context.Canceled)
+			}
 			return nil, 0, errors.NewServiceError("http request [%s] failed to read body", url, readErr)
+		}
+		if maxBytes >= 0 && int64(len(b)) > maxBytes {
+			return nil, 0, errors.NewExternalError("http request [%s] response body exceeds %d bytes", url, maxBytes)
 		}
 		return b, 0, nil
 	}
-
-	b, readErr := io.ReadAll(io.LimitReader(reader, maxBytes+1))
-	if readErr != nil {
-		return nil, 0, errors.NewServiceError("http request [%s] failed to read body", url, readErr)
-	}
-	if int64(len(b)) > maxBytes {
-		return nil, 0, errors.NewExternalError("http request [%s] response body exceeds %d bytes", url, maxBytes)
-	}
-	return b, 0, nil
 }
 
 // doHTTPRequestForStreamingWithRetryAfter is doHTTPRequestForStreaming + extracts
@@ -674,23 +755,12 @@ func doRequestReaderWithRetryAfter(ctx context.Context, timeout time.Duration, r
 		ctx, cancelFn = context.WithTimeout(ctx, timeout)
 	}
 
-	if err := ValidateURL(rawURL); err != nil {
-		cancelFn()
-		return nil, 0, err
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	// Shared builder: validates, sets body Content-Type, and signs (the retry path
+	// must sign too, or peers reject the request and we lose the rate-limit exemption).
+	req, err := newSignedRequest(ctx, rawURL, requestBody...)
 	if err != nil {
 		cancelFn()
-		return nil, 0, errors.NewServiceError("failed to create http request", err)
-	}
-	if len(requestBody) > 0 && requestBody[0] != nil {
-		req.Body = io.NopCloser(bytes.NewReader(requestBody[0]))
-		req.Method = http.MethodPost
-		// octet-stream (not application/json) for the same reason as executeHTTPRequest:
-		// a ModSecurity WAF in front of asset runs the JSON body parser on application/json,
-		// fails on the binary payload, and rejects with HTTP 400. See lines 408-416.
-		req.Header.Set("Content-Type", "application/octet-stream")
+		return nil, 0, err
 	}
 
 	resp, err := httpClient.Do(req)

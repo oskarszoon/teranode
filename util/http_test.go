@@ -2,6 +2,7 @@ package util
 
 import (
 	"context"
+	crand "crypto/rand"
 	"encoding/json"
 	"io"
 	"net"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/bsv-blockchain/teranode/errors"
+	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1070,7 +1072,7 @@ func TestDoHTTPRequestBodyReaderWithRetry_SuccessOnFirstTry(t *testing.T) {
 	}))
 	defer server.Close()
 
-	body, err := doHTTPRequestBodyReaderWithRetry(context.Background(), server.URL, testRetryConfig)
+	body, err := doHTTPRequestBodyReaderWithRetry(context.Background(), server.URL, testRetryConfig, nil)
 	require.NoError(t, err)
 	defer body.Close()
 
@@ -1096,7 +1098,7 @@ func TestDoHTTPRequestBodyReaderWithRetry_RetriesOn503ThenSucceeds(t *testing.T)
 	}))
 	defer server.Close()
 
-	body, err := doHTTPRequestBodyReaderWithRetry(context.Background(), server.URL, testRetryConfig)
+	body, err := doHTTPRequestBodyReaderWithRetry(context.Background(), server.URL, testRetryConfig, nil)
 	require.NoError(t, err)
 	defer body.Close()
 
@@ -1114,7 +1116,7 @@ func TestDoHTTPRequestBodyReaderWithRetry_ExhaustsAttemptsOnPersistent503(t *tes
 	}))
 	defer server.Close()
 
-	body, err := doHTTPRequestBodyReaderWithRetry(context.Background(), server.URL, testRetryConfig)
+	body, err := doHTTPRequestBodyReaderWithRetry(context.Background(), server.URL, testRetryConfig, nil)
 	require.Error(t, err)
 	assert.Nil(t, body)
 	assert.True(t, errors.Is(err, errors.ErrServiceUnavailable),
@@ -1142,7 +1144,7 @@ func TestDoHTTPRequestBodyReaderWithRetry_HonorsRetryAfter(t *testing.T) {
 	cfg := retryConfig{maxAttempts: 4, initialDelay: 10 * time.Millisecond, maxDelay: 5 * time.Second}
 
 	start := time.Now()
-	body, err := doHTTPRequestBodyReaderWithRetry(context.Background(), server.URL, cfg)
+	body, err := doHTTPRequestBodyReaderWithRetry(context.Background(), server.URL, cfg, nil)
 	elapsed := time.Since(start)
 
 	require.NoError(t, err)
@@ -1171,7 +1173,7 @@ func TestDoHTTPRequestBodyReaderWithRetry_NoRetryOnNon503(t *testing.T) {
 			}))
 			defer server.Close()
 
-			_, err := doHTTPRequestBodyReaderWithRetry(context.Background(), server.URL, testRetryConfig)
+			_, err := doHTTPRequestBodyReaderWithRetry(context.Background(), server.URL, testRetryConfig, nil)
 			require.Error(t, err)
 			assert.Equal(t, int32(1), atomic.LoadInt32(&attempts),
 				"non-503 status %d must fail immediately, not retry", tc.code)
@@ -1197,7 +1199,7 @@ func TestDoHTTPRequestBodyReaderWithRetry_ContextCancelAbortsRetries(t *testing.
 	}()
 
 	start := time.Now()
-	_, err := doHTTPRequestBodyReaderWithRetry(ctx, server.URL, cfg)
+	_, err := doHTTPRequestBodyReaderWithRetry(ctx, server.URL, cfg, nil)
 	elapsed := time.Since(start)
 
 	require.Error(t, err)
@@ -1225,7 +1227,7 @@ func TestDoHTTPRequestBodyReaderWithRetry_RetriesOn429ThenSucceeds(t *testing.T)
 	}))
 	defer server.Close()
 
-	body, err := doHTTPRequestBodyReaderWithRetry(context.Background(), server.URL, testRetryConfig)
+	body, err := doHTTPRequestBodyReaderWithRetry(context.Background(), server.URL, testRetryConfig, nil)
 	require.NoError(t, err)
 	defer body.Close()
 
@@ -1243,7 +1245,7 @@ func TestDoHTTPRequestBodyReaderWithRetry_ExhaustsAttemptsOnPersistent429(t *tes
 	}))
 	defer server.Close()
 
-	body, err := doHTTPRequestBodyReaderWithRetry(context.Background(), server.URL, testRetryConfig)
+	body, err := doHTTPRequestBodyReaderWithRetry(context.Background(), server.URL, testRetryConfig, nil)
 	require.Error(t, err)
 	assert.Nil(t, body)
 	assert.True(t, errors.Is(err, errors.ErrServiceUnavailable),
@@ -1281,7 +1283,7 @@ func TestDoHTTPRequestWithRetry_RetriesOn429ThenSucceeds(t *testing.T) {
 	}))
 	defer server.Close()
 
-	got, err := doHTTPRequestWithRetry(context.Background(), server.URL, testRetryConfig)
+	got, err := doHTTPRequestWithRetry(context.Background(), server.URL, testRetryConfig, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "batch-ok", string(got))
 	assert.Equal(t, int32(2), atomic.LoadInt32(&attempts))
@@ -1295,7 +1297,7 @@ func TestDoHTTPRequestWithRetry_NoRetryOn404(t *testing.T) {
 	}))
 	defer server.Close()
 
-	_, err := doHTTPRequestWithRetry(context.Background(), server.URL, testRetryConfig)
+	_, err := doHTTPRequestWithRetry(context.Background(), server.URL, testRetryConfig, nil)
 	require.Error(t, err)
 	assert.Equal(t, int32(1), atomic.LoadInt32(&attempts), "404 must not be retried (peer lacks data)")
 }
@@ -1313,7 +1315,7 @@ func TestDoHTTPRequestBoundedWithRetry_RetriesOn429ThenSucceeds(t *testing.T) {
 	}))
 	defer server.Close()
 
-	got, err := doHTTPRequestBoundedWithRetry(context.Background(), server.URL, 1024, testRetryConfig)
+	got, err := doHTTPRequestBoundedWithRetry(context.Background(), server.URL, 1024, testRetryConfig, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "subtree-bytes", string(got))
 	assert.Equal(t, int32(2), atomic.LoadInt32(&attempts))
@@ -1326,9 +1328,110 @@ func TestDoHTTPRequestBoundedWithRetry_EnforcesCap(t *testing.T) {
 	}))
 	defer server.Close()
 
-	_, err := doHTTPRequestBoundedWithRetry(context.Background(), server.URL, 4, testRetryConfig)
+	_, err := doHTTPRequestBoundedWithRetry(context.Background(), server.URL, 4, testRetryConfig, nil)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, errors.ErrExternal), "over-cap body must return ErrExternal; got %v", err)
+}
+
+// TestReadBodyWithRetry_MidStreamStallIsPeerFault proves a peer that stalls mid-body
+// (tripping the per-request transport timeout) surfaces as a NON-local error, so the
+// catchup reputation gate attributes it to the peer rather than silently absolving it.
+func TestReadBodyWithRetry_MidStreamStallIsPeerFault(t *testing.T) {
+	// Shrink the per-request timeout for the duration of this test.
+	saved := httpRequestTimeout
+	httpRequestTimeout = 150 // ms
+	t.Cleanup(func() { httpRequestTimeout = saved })
+
+	release := make(chan struct{})
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("partial"))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-release // hang past the transport timeout
+	}))
+	// LIFO: close(release) runs before server.Close(), so the parked handler exits and
+	// Close() (which waits for outstanding connections) doesn't deadlock.
+	defer server.Close()
+	defer close(release)
+
+	// No parent deadline → the transport timeout (httpRequestTimeout) governs the read.
+	_, err := DoHTTPRequestWithRetry(context.Background(), server.URL, nil)
+	require.Error(t, err)
+	assert.False(t, errors.IsLocalError(err),
+		"a peer stalling mid-body must be a peer fault (non-local), not absolved as local; got %T: %v", err, err)
+}
+
+// TestReadBodyWithRetry_ShutdownCancelIsLocal proves the opposite-direction case:
+// a parent-context CANCEL mid-body-read (e.g. node shutdown) is a LOCAL condition,
+// not a peer fault, so it must not ding peer reputation.
+func TestReadBodyWithRetry_ShutdownCancelIsLocal(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("partial"))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-release
+	}))
+	defer server.Close()
+	defer close(release)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel() // simulate shutdown mid-read
+	}()
+
+	_, err := DoHTTPRequestWithRetry(ctx, server.URL, nil)
+	require.Error(t, err)
+	assert.True(t, errors.IsLocalError(err),
+		"a shutdown cancel mid-read must be local (not a peer fault); got %T: %v", err, err)
+}
+
+// TestWithRetryHelpers_SignRequests guards against the regression where the retry
+// request-builder diverged from executeHTTPRequest and dropped request signing —
+// which would send every catchup fetch unsigned, losing the asset rate-limit
+// exemption. All *WithRetry helpers must sign when a signer is configured.
+func TestWithRetryHelpers_SignRequests(t *testing.T) {
+	privKey, _, err := crypto.GenerateEd25519Key(crand.Reader)
+	require.NoError(t, err)
+	SetHTTPRequestSigner(NewEd25519RequestSigner(privKey))
+	// Reset to a no-op signer afterwards so later tests aren't affected.
+	t.Cleanup(func() { SetHTTPRequestSigner(NewEd25519RequestSigner(nil)) })
+
+	var gotSig atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Peer-Signature") != "" && r.Header.Get("X-Peer-PubKey") != "" {
+			gotSig.Store(true)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer server.Close()
+
+	t.Run("DoHTTPRequestWithRetry", func(t *testing.T) {
+		gotSig.Store(false)
+		_, err := DoHTTPRequestWithRetry(context.Background(), server.URL, nil)
+		require.NoError(t, err)
+		assert.True(t, gotSig.Load(), "DoHTTPRequestWithRetry must sign the request")
+	})
+	t.Run("DoHTTPRequestBoundedWithRetry", func(t *testing.T) {
+		gotSig.Store(false)
+		_, err := DoHTTPRequestBoundedWithRetry(context.Background(), server.URL, 1024, nil)
+		require.NoError(t, err)
+		assert.True(t, gotSig.Load(), "DoHTTPRequestBoundedWithRetry must sign the request")
+	})
+	t.Run("DoHTTPRequestBodyReaderWithRetry", func(t *testing.T) {
+		gotSig.Store(false)
+		body, err := DoHTTPRequestBodyReaderWithRetry(context.Background(), server.URL)
+		require.NoError(t, err)
+		_ = body.Close()
+		assert.True(t, gotSig.Load(), "DoHTTPRequestBodyReaderWithRetry must sign the request")
+	})
 }
 
 func TestParseRetryAfter(t *testing.T) {

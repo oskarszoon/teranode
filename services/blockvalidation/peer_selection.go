@@ -51,6 +51,7 @@ func (u *Server) selectBestPeersForCatchup(ctx context.Context, targetHeight uin
 
 	// Convert PeerInfo to our internal type
 	peers := make([]PeerForCatchup, 0, len(peerInfos))
+	var prunedFallback []PeerForCatchup // pruned peers held back, used only if no others qualify
 	for _, p := range peerInfos {
 		// Filter out peers that don't have the target height yet
 		// (we only want peers that are at or above our target)
@@ -65,14 +66,7 @@ func (u *Server) selectBestPeersForCatchup(ctx context.Context, targetHeight uin
 			continue
 		}
 
-		// Skip pruned peers as catchup primaries: they 404 on archival subtree
-		// data during IBD, wasting a fetch attempt per block before failover.
-		if isPrunedPeer(p.Storage) {
-			u.logger.Debugf("[peer_selection] Skipping peer %s (pruned storage - lacks archival data)", p.ID.String())
-			continue
-		}
-
-		peers = append(peers, PeerForCatchup{
+		candidate := PeerForCatchup{
 			ID:                     p.ID.String(),
 			Storage:                p.Storage,
 			DataHubURL:             p.DataHubURL,
@@ -82,7 +76,24 @@ func (u *Server) selectBestPeersForCatchup(ctx context.Context, targetHeight uin
 			CatchupAttempts:        p.InteractionAttempts,
 			CatchupSuccesses:       p.InteractionSuccesses,
 			CatchupFailures:        p.InteractionFailures,
-		})
+		}
+
+		// Deprioritise pruned peers as catchup primaries: they 404 on archival subtree
+		// data during IBD, wasting a fetch attempt per block before failover. They are
+		// held back as a fallback rather than hard-excluded, so an all-pruned peer set
+		// still gets an attempt (and a diagnosable 404) instead of stranding the node.
+		if isPrunedPeer(p.Storage) {
+			prunedFallback = append(prunedFallback, candidate)
+			continue
+		}
+
+		peers = append(peers, candidate)
+	}
+
+	// Fall back to pruned peers only when no full/unknown peer qualifies.
+	if len(peers) == 0 && len(prunedFallback) > 0 {
+		u.logger.Warnf("[peer_selection] No non-pruned peers for catchup; falling back to %d pruned peer(s)", len(prunedFallback))
+		peers = prunedFallback
 	}
 
 	u.logger.Infof("[peer_selection] Selected %d peers for catchup (from %d total)", len(peers), len(peerInfos))
