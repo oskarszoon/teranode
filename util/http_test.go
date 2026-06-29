@@ -1392,6 +1392,28 @@ func TestReadBodyWithRetry_ShutdownCancelIsLocal(t *testing.T) {
 		"a shutdown cancel mid-read must be local (not a peer fault); got %T: %v", err, err)
 }
 
+// TestReadBodyWithRetry_PreResponseStallIsPeerFault proves a peer that stalls BEFORE
+// sending response headers (connect/TLS/header phase) is attributed to the peer
+// (non-local), not absolved as local — otherwise the failover gate's break-on-local
+// would halt all alternative-peer attempts and re-wedge catchup.
+func TestReadBodyWithRetry_PreResponseStallIsPeerFault(t *testing.T) {
+	saved := httpRequestTimeout
+	httpRequestTimeout = 150 // ms
+	t.Cleanup(func() { httpRequestTimeout = saved })
+
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release // hang before writing any header/status
+	}))
+	defer server.Close()
+	defer close(release)
+
+	_, err := DoHTTPRequestWithRetry(context.Background(), server.URL, nil)
+	require.Error(t, err)
+	assert.False(t, errors.IsLocalError(err),
+		"a peer stalling before headers must be a peer fault (non-local); got %T: %v", err, err)
+}
+
 // TestWithRetryHelpers_SignRequests guards against the regression where the retry
 // request-builder diverged from executeHTTPRequest and dropped request signing —
 // which would send every catchup fetch unsigned, losing the asset rate-limit

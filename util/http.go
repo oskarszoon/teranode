@@ -780,6 +780,17 @@ func doRequestReaderWithRetryAfter(ctx context.Context, timeout time.Duration, r
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		cancelFn()
+		// Classify context-derived failures the same way as the body-read path: a
+		// deadline before the response (connect/TLS/header stall) means the peer was
+		// too slow — a peer fault, surfaced as a non-local network timeout so the
+		// reputation gate blames the peer and catchup keeps failing over. A cancel
+		// (e.g. node shutdown) is local. Other Do errors stay generic ServiceErrors.
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, 0, errors.NewNetworkTimeoutError("http request [%s] timed out before response", rawURL)
+		}
+		if errors.Is(err, context.Canceled) {
+			return nil, 0, errors.NewContextCanceledError("http request [%s] canceled before response", rawURL, context.Canceled)
+		}
 		return nil, 0, errors.NewServiceError("failed to do http request", err)
 	}
 
