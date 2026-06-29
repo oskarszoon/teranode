@@ -148,7 +148,7 @@ func TestDoHTTPRequestNotFound(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "404")
-	assert.Contains(t, err.Error(), "not found")
+	assert.NotContains(t, err.Error(), "not found", "peer-controlled body must not be echoed into the classified error")
 }
 
 func TestDoHTTPRequestServerError(t *testing.T) {
@@ -164,7 +164,7 @@ func TestDoHTTPRequestServerError(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "500")
-	assert.Contains(t, err.Error(), "internal server error")
+	assert.NotContains(t, err.Error(), "internal server error", "peer-controlled body must not be echoed into the classified error")
 }
 
 func TestDoHTTPRequestServerErrorNoBody(t *testing.T) {
@@ -179,8 +179,8 @@ func TestDoHTTPRequestServerErrorNoBody(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "400")
-	// When body is empty, it still shows "with body []"
-	assert.Contains(t, err.Error(), "with body []")
+	// An empty body adds no "(N body bytes...)" suffix and never echoes body content.
+	assert.NotContains(t, err.Error(), "with body")
 }
 
 func TestDoHTTPRequestHTMLResponse(t *testing.T) {
@@ -474,7 +474,7 @@ func TestDoHTTPRequestServerErrorWithNilBody(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "500")
 	// Should not contain "with body" since body is effectively nil
-	assert.Contains(t, err.Error(), "with body []")
+	assert.NotContains(t, err.Error(), "with body")
 }
 
 func TestDoHTTPRequestLargeResponse(t *testing.T) {
@@ -750,7 +750,7 @@ func TestDoHTTPRequest_ErrorResponseBodyReadError(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "500")
-	assert.Contains(t, err.Error(), "server error")
+	assert.NotContains(t, err.Error(), "server error", "peer-controlled body must not be echoed into the classified error")
 }
 
 func TestDoHTTPRequest_NilFirstRequestBody(t *testing.T) {
@@ -783,8 +783,8 @@ func TestDoHTTPRequest_ErrorResponseNilBody(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "400")
-	// Empty body still creates "with body []" message
-	assert.Contains(t, err.Error(), "with body []")
+	// An empty body adds no "(N body bytes...)" suffix and never echoes body content.
+	assert.NotContains(t, err.Error(), "with body")
 }
 
 func TestDoHTTPRequest_CreateRequestError(t *testing.T) {
@@ -1216,8 +1216,9 @@ func TestDoHTTPRequestBodyReaderWithRetry_RetriesOn429ThenSucceeds(t *testing.T)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := atomic.AddInt32(&attempts, 1)
 		if n < 3 {
-			// First two attempts: 429 rate limited (no Retry-After header, the
-			// asset heavy-route limiter doesn't set one — exercise the backoff path).
+			// First two attempts: 429 rate limited with no Retry-After header, exercising
+			// the jittered exponential-backoff path (the Retry-After path is covered
+			// separately by TestRetryHTTP_RetryAfterAboveMaxDelayClamps / _HonorsRetryAfter).
 			w.WriteHeader(http.StatusTooManyRequests)
 			_, _ = w.Write([]byte(`{"message":"rate limit exceeded"}`))
 			return
@@ -1422,8 +1423,18 @@ func TestWithRetryHelpers_SignRequests(t *testing.T) {
 	privKey, _, err := crypto.GenerateEd25519Key(crand.Reader)
 	require.NoError(t, err)
 	SetHTTPRequestSigner(NewEd25519RequestSigner(privKey))
-	// Reset to a no-op signer afterwards so later tests aren't affected.
-	t.Cleanup(func() { SetHTTPRequestSigner(NewEd25519RequestSigner(nil)) })
+	// Restore the prior signer afterwards so this test doesn't leak its signer into the
+	// package-global atomic.Value and affect later tests.
+	orig := loadHTTPRequestSigner()
+	t.Cleanup(func() {
+		if orig != nil {
+			SetHTTPRequestSigner(orig)
+			return
+		}
+		// No signer before this test; SetHTTPRequestSigner ignores nil, so install a
+		// no-op (nil-key) signer — its SignRequest returns immediately, adding no headers.
+		SetHTTPRequestSigner(NewEd25519RequestSigner(nil))
+	})
 
 	var gotSig atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1458,59 +1469,63 @@ func TestWithRetryHelpers_SignRequests(t *testing.T) {
 
 // TestRetryHTTP_DeadlineAfterPeerFaultIsPeerError proves that when the context deadline
 // expires while backing off from a real retryable peer fault (503/429), the error is
-// attributed to the peer (ErrServiceUnavailable) — not a bare local context error — so a
-// peer that stalls us out cannot evade a reputation penalty.
+// attributed to the peer (non-local network timeout, matched by error CODE) — not a bare
+// local context error — so a peer that stalls us out cannot evade a reputation penalty.
+// Driven white-box with an instant attempt so the deadline can only land during the
+// backoff sleep (deterministic), not mid-HTTP-call (which would be flaky).
 func TestRetryHTTP_DeadlineAfterPeerFaultIsPeerError(t *testing.T) {
-	var attempts int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&attempts, 1)
-		w.WriteHeader(http.StatusServiceUnavailable) // always retryable
-	}))
-	defer server.Close()
-
-	// Backoff (200ms) outlives the 80ms deadline, so the deadline lands mid-sleep AFTER
-	// attempt 1 recorded a 503 (lastErr != nil).
-	cfg := retryConfig{maxAttempts: 6, initialDelay: 200 * time.Millisecond, maxDelay: time.Second}
-	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	cfg := retryConfig{maxAttempts: 6, initialDelay: 500 * time.Millisecond, maxDelay: time.Second}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
-	_, err := doHTTPRequestBodyReaderWithRetry(ctx, server.URL, cfg, nil)
+	attempt := func(context.Context) (int, time.Duration, error) {
+		return 0, 0, errors.NewServiceUnavailableError("peer 503") // instant retryable fault
+	}
+	_, err := retryHTTP(ctx, cfg, attempt)
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, errors.ErrServiceUnavailable),
-		"deadline after a peer 503 must be a peer fault (ErrServiceUnavailable), not bare ctx error; got %T: %v", err, err)
+	assert.False(t, errors.IsLocalError(err),
+		"deadline after a peer fault must be a peer fault (non-local); got %T: %v", err, err)
+	assert.True(t, errors.IsNetworkError(err),
+		"should classify as a network timeout (peer fault) by code; got %T: %v", err, err)
 }
 
 // TestRetryHTTP_CancelStaysLocal proves the complementary case: an explicit cancel
 // (e.g. shutdown), even after a peer fault, stays a local context error so the peer is
 // not blamed for our teardown.
 func TestRetryHTTP_CancelStaysLocal(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusServiceUnavailable)
-	}))
-	defer server.Close()
-
-	cfg := retryConfig{maxAttempts: 6, initialDelay: 200 * time.Millisecond, maxDelay: time.Second}
+	cfg := retryConfig{maxAttempts: 6, initialDelay: 500 * time.Millisecond, maxDelay: time.Second}
 	ctx, cancel := context.WithCancel(context.Background())
-	go func() { time.Sleep(50 * time.Millisecond); cancel() }()
+	go func() { time.Sleep(20 * time.Millisecond); cancel() }()
 
-	_, err := doHTTPRequestBodyReaderWithRetry(ctx, server.URL, cfg, nil)
+	attempt := func(context.Context) (int, time.Duration, error) {
+		return 0, 0, errors.NewServiceUnavailableError("peer 503")
+	}
+	_, err := retryHTTP(ctx, cfg, attempt)
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, context.Canceled), "an explicit cancel must stay local; got %T: %v", err, err)
+	assert.True(t, errors.IsLocalError(err), "an explicit cancel must stay local; got %T: %v", err, err)
+	assert.True(t, errors.Is(err, context.Canceled), "should be the canceled sentinel; got %T: %v", err, err)
 }
 
-// TestBuildHTTPError_BoundsErrorBody proves a hostile peer cannot force an unbounded
-// allocation by returning a huge body on a non-OK response.
-func TestBuildHTTPError_BoundsErrorBody(t *testing.T) {
-	huge := strings.Repeat("A", 1<<20) // 1 MiB
+// TestBuildHTTPError_DoesNotEchoOrTrustPeerBody proves a non-OK response body is neither
+// echoed into the error (no unbounded allocation) NOR allowed to forge the error
+// classification: a peer whose body contains "context deadline exceeded" must NOT make the
+// HTTP error classify as local — otherwise it would clear its reputation penalty and halt
+// catchup failover (a #1174 regression / availability DoS).
+func TestBuildHTTPError_DoesNotEchoOrTrustPeerBody(t *testing.T) {
+	// A body that both is huge AND contains the context-sentinel poison token.
+	body := "context deadline exceeded " + strings.Repeat("A", 1<<20)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(huge))
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(body))
 	}))
 	defer server.Close()
 
 	_, err := DoHTTPRequest(context.Background(), server.URL)
 	require.Error(t, err)
-	assert.Less(t, len(err.Error()), 1<<20, "error-body must be bounded, not echo the full 1MiB response")
+	assert.Less(t, len(err.Error()), maxErrorBodyBytes, "error must not echo the peer body")
+	assert.NotContains(t, err.Error(), "context deadline exceeded", "peer body must not reach the classified message")
+	assert.False(t, errors.IsLocalError(err),
+		"a peer's HTTP error must never classify as local, even if its body contains context-sentinel text; got %v", err)
 }
 
 // TestRetryHTTP_RetryAfterAboveMaxDelayClamps proves a Retry-After hint larger than

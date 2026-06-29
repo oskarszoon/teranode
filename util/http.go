@@ -458,9 +458,9 @@ func executeHTTPRequest(ctx context.Context, cancelFn context.CancelFunc, rawURL
 	return resp.Body, cancelFn, nil
 }
 
-// maxErrorBodyBytes caps how much of a non-OK response body is read into the error
-// message. The body is peer-controlled and only used for diagnostics, so a few KB is
-// plenty and prevents a hostile peer from forcing large allocations on error paths.
+// maxErrorBodyBytes caps how much of a non-OK response body is drained on error paths.
+// The body is peer-controlled and is NOT embedded in the error message (see buildHTTPError),
+// so this only bounds the drain read used to keep the connection reusable.
 const maxErrorBodyBytes = 4 << 10 // 4 KiB
 
 // buildHTTPError constructs an appropriate error from a non-OK HTTP response.
@@ -485,16 +485,17 @@ func buildHTTPError(resp *http.Response, rawURL string) error {
 			_ = resp.Body.Close()
 		}()
 
-		// Bound the error-body read: the body is peer-controlled and only used to enrich
-		// the error message, so cap it to avoid a hostile peer forcing an unbounded
-		// allocation on every non-OK response (amplified by the retry path).
-		b, readErr := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
-		if readErr != nil {
-			return errFn("http request [%s] returned status code [%d]", rawURL, resp.StatusCode, readErr)
-		}
-
-		if b != nil {
-			return errFn("http request [%s] returned status code [%d] with body [%s]", rawURL, resp.StatusCode, string(b))
+		// Drain a bounded amount of the body (helps keep-alive connection reuse) but do
+		// NOT embed the peer-controlled content in the error message. This error feeds
+		// substring-based classification at the catchup reputation gates (IsContextError /
+		// releaseCatchupLock's strings.Contains checks). A hostile or unlucky peer whose
+		// body contained e.g. "context deadline exceeded" or "block assembly is behind"
+		// could otherwise forge a "local" classification — clearing its reputation penalty
+		// AND halting failover to honest peers, re-opening the #1174 wedge. Only the
+		// (trusted) status code and body length go into the message.
+		n, _ := io.Copy(io.Discard, io.LimitReader(resp.Body, maxErrorBodyBytes))
+		if n > 0 {
+			return errFn("http request [%s] returned status code [%d] (%d body bytes, omitted)", rawURL, resp.StatusCode, n)
 		}
 	}
 
@@ -594,7 +595,11 @@ func retryHTTP[T any](ctx context.Context, cfg retryConfig, attempt func(context
 			// until our fetch budget runs out evades any reputation penalty. A cancel
 			// (e.g. shutdown), or a deadline with no prior peer fault, stays local.
 			if lastErr != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				return zero, errors.NewServiceUnavailableError("http request aborted after %d attempt(s): %v", n, lastErr)
+				// Peer too slow / rate-limiting ran out our budget. Use a network-timeout
+				// (classified as a peer fault by error CODE, not by a fragile message
+				// substring) so the reputation gates blame the peer. lastErr is carried as
+				// the wrapped error, so no trailing format verb (would render %!v(MISSING)).
+				return zero, errors.NewNetworkTimeoutError("http request aborted after %d attempt(s) (peer too slow or rate-limiting)", n, lastErr)
 			}
 			return zero, ctx.Err()
 		case <-time.After(sleepFor):
@@ -606,7 +611,7 @@ func retryHTTP[T any](ctx context.Context, cfg retryConfig, attempt func(context
 		}
 	}
 
-	return zero, errors.NewServiceUnavailableError("http request still failing after %d attempts: %v", cfg.maxAttempts, lastErr)
+	return zero, errors.NewServiceUnavailableError("http request still failing after %d attempts", cfg.maxAttempts, lastErr)
 }
 
 // DoHTTPRequestBodyReaderWithRetry behaves like DoHTTPRequestBodyReader but retries on

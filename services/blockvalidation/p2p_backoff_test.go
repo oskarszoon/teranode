@@ -16,7 +16,6 @@ import (
 	"github.com/bsv-blockchain/teranode/util"
 	"github.com/jarcoal/httpmock"
 	"github.com/libp2p/go-libp2p/core/peer"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -96,8 +95,8 @@ func TestFetchSubtreeFromPeer_BacksOffOn429(t *testing.T) {
 
 	result, err := suite.Server.fetchSubtreeFromPeer(suite.Ctx, subtreeHash, "test-peer-id", "http://test-peer")
 	require.NoError(t, err)
-	assert.Equal(t, expectedData, result)
-	assert.GreaterOrEqual(t, atomic.LoadInt32(&attempts), int32(2), "429 must trigger a backoff+retry, not a hard failure")
+	require.Equal(t, expectedData, result)
+	require.GreaterOrEqual(t, atomic.LoadInt32(&attempts), int32(2), "429 must trigger a backoff+retry, not a hard failure")
 }
 
 // TestFetchBlocksBatch_BacksOffOn429 proves the block-batch fetch path retries on 429.
@@ -127,8 +126,8 @@ func TestFetchBlocksBatch_BacksOffOn429(t *testing.T) {
 	got, err := suite.Server.fetchBlocksBatch(suite.Ctx, target.Header.Hash(), 1, "test-peer-id", "http://test-peer")
 	require.NoError(t, err)
 	require.Len(t, got, 1)
-	assert.Equal(t, target.Header.Hash().String(), got[0].Header.Hash().String())
-	assert.GreaterOrEqual(t, atomic.LoadInt32(&attempts), int32(2), "429 must trigger a backoff+retry")
+	require.Equal(t, target.Header.Hash().String(), got[0].Header.Hash().String())
+	require.GreaterOrEqual(t, atomic.LoadInt32(&attempts), int32(2), "429 must trigger a backoff+retry")
 }
 
 // TestPeerFetchLimiter_KeyedByBaseURL proves the per-peer heavy-fetch rate limiter
@@ -142,16 +141,16 @@ func TestPeerFetchLimiter_KeyedByBaseURL(t *testing.T) {
 
 	limA := suite.Server.peerFetchLimiter("http://peer-a")
 	require.NotNil(t, limA)
-	assert.Equal(t, 8.0, float64(limA.Limit()))
-	assert.Equal(t, 8, limA.Burst())
+	require.Equal(t, 8.0, float64(limA.Limit()))
+	require.Equal(t, 8, limA.Burst())
 
 	// Same baseURL → same limiter instance (shared bucket).
-	assert.Same(t, limA, suite.Server.peerFetchLimiter("http://peer-a"))
+	require.Same(t, limA, suite.Server.peerFetchLimiter("http://peer-a"))
 
 	// Different baseURL → independent bucket.
 	limB := suite.Server.peerFetchLimiter("http://peer-b")
 	require.NotNil(t, limB)
-	assert.NotSame(t, limA, limB)
+	require.NotSame(t, limA, limB)
 }
 
 func TestPeerFetchLimiter_DisabledWhenNonPositive(t *testing.T) {
@@ -159,7 +158,7 @@ func TestPeerFetchLimiter_DisabledWhenNonPositive(t *testing.T) {
 	defer suite.Cleanup()
 
 	suite.Server.settings.BlockValidation.PerPeerFetchRate = 0
-	assert.Nil(t, suite.Server.peerFetchLimiter("http://peer-a"), "rate <= 0 disables the limiter (no pacing)")
+	require.Nil(t, suite.Server.peerFetchLimiter("http://peer-a"), "rate <= 0 disables the limiter (no pacing)")
 }
 
 // TestAwaitPeerFetchSlot_RateWaitErrorIsLocal proves a rate-limiter wait that can't
@@ -180,14 +179,14 @@ func TestAwaitPeerFetchSlot_RateWaitErrorIsLocal(t *testing.T) {
 	defer cancel()
 	err := suite.Server.awaitPeerFetchSlot(ctx, "http://peer-a")
 	require.Error(t, err)
-	assert.True(t, errors.IsLocalError(err), "rate-wait failure must be a local error; got %T: %v", err, err)
+	require.True(t, errors.IsLocalError(err), "rate-wait failure must be a local error; got %T: %v", err, err)
 
 	// The reputation gate sees the error only AFTER callers wrap it. It must still
 	// classify local through the production wrap chains (single-block: ProcessingError;
 	// subtree: ServiceError -> ServiceError) — a bare ErrContextCanceled would not.
-	assert.True(t, errors.IsLocalError(errors.NewProcessingError("failed to get block", err)),
+	require.True(t, errors.IsLocalError(errors.NewProcessingError("failed to get block", err)),
 		"must stay local when wrapped in ProcessingError (tip/block path)")
-	assert.True(t, errors.IsLocalError(errors.NewServiceError("outer", errors.NewServiceError("inner", err))),
+	require.True(t, errors.IsLocalError(errors.NewServiceError("outer", errors.NewServiceError("inner", err))),
 		"must stay local when double-wrapped in ServiceError (subtree path)")
 }
 
@@ -205,7 +204,7 @@ func TestSelectBestPeersForCatchup_PrunedFallback(t *testing.T) {
 		peers, err := suite.Server.selectBestPeersForCatchup(context.Background(), 100)
 		require.NoError(t, err)
 		require.Len(t, peers, 1)
-		assert.Equal(t, "full", peers[0].Storage)
+		require.Equal(t, "full", peers[0].Storage)
 	})
 
 	t.Run("falls back to pruned when no other", func(t *testing.T) {
@@ -217,7 +216,7 @@ func TestSelectBestPeersForCatchup_PrunedFallback(t *testing.T) {
 		peers, err := suite.Server.selectBestPeersForCatchup(context.Background(), 100)
 		require.NoError(t, err)
 		require.Len(t, peers, 1, "must fall back to the pruned peer rather than strand")
-		assert.Equal(t, "pruned", peers[0].Storage)
+		require.Equal(t, "pruned", peers[0].Storage)
 	})
 }
 
@@ -246,7 +245,7 @@ func TestReleaseCatchupLock_LocalErrorNotBlamedOnPeer(t *testing.T) {
 	suite.Server.releaseCatchupLock(cctx, &e)
 
 	require.NotNil(t, suite.Server.previousCatchupAttempt)
-	assert.Equal(t, "local_error", suite.Server.previousCatchupAttempt.ErrorType,
+	require.Equal(t, "local_error", suite.Server.previousCatchupAttempt.ErrorType,
 		"a local rate-wait/shutdown error must classify as local_error, not network_error (which would degrade the peer)")
 }
 
@@ -267,11 +266,11 @@ func TestGetPeersAtMaxHeight_SkipsPrunedPeers(t *testing.T) {
 	urls := map[string]bool{}
 	for _, p := range peers {
 		urls[p.DataHubURL] = true
-		assert.NotEqual(t, "pruned", p.Storage, "pruned peers must be skipped")
+		require.NotEqual(t, "pruned", p.Storage, "pruned peers must be skipped")
 	}
-	assert.True(t, urls["http://full-1"], "full peers stay eligible")
-	assert.True(t, urls["http://legacy-1"], "empty/unknown storage stays eligible (don't exclude old archival peers)")
-	assert.False(t, urls["http://pruned-1"], "pruned peers must be skipped")
+	require.True(t, urls["http://full-1"], "full peers stay eligible")
+	require.True(t, urls["http://legacy-1"], "empty/unknown storage stays eligible (don't exclude old archival peers)")
+	require.False(t, urls["http://pruned-1"], "pruned peers must be skipped")
 }
 
 // TestSelectAlternativePeer_SkipsPrunedPeers proves the peer-switch path won't rotate
@@ -295,7 +294,7 @@ func TestDistributeSubtreesAcrossPeers_SkipsPrunedPeers(t *testing.T) {
 	res, err := DistributeSubtreesAcrossPeers(context.Background(), ulogger.TestLogger{}, client, "primary", "http://primary", 4)
 	require.NoError(t, err)
 	for _, p := range res {
-		assert.NotEqual(t, "http://pruned-1", p.BaseURL, "pruned peer must not be assigned subtrees")
-		assert.Equal(t, "http://primary", p.BaseURL, "only the (non-pruned) primary should remain")
+		require.NotEqual(t, "http://pruned-1", p.BaseURL, "pruned peer must not be assigned subtrees")
+		require.Equal(t, "http://primary", p.BaseURL, "only the (non-pruned) primary should remain")
 	}
 }
