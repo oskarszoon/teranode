@@ -1745,8 +1745,10 @@ func (u *Server) processCatchupChItem(ctx context.Context, c processBlockCatchup
 			return
 		}
 
-		// Local infrastructure/service failure (e.g. blockchain service unavailable) — not a peer issue
-		if errors.Is(err, errors.ErrServiceError) {
+		// Local infrastructure/service failure (e.g. blockchain service unavailable), or a
+		// local error such as our own per-peer rate-wait budget expiring / shutdown cancel —
+		// not a peer issue, so don't degrade the peer's reputation for it.
+		if errors.Is(err, errors.ErrServiceError) || errors.IsLocalError(err) {
 			// #1057: count this cycle toward the per-block cap (unless it made
 			// progress) so a persistent local service error cannot drive unbounded
 			// re-entry.
@@ -1825,6 +1827,11 @@ func (u *Server) processCatchupChItem(ctx context.Context, c processBlockCatchup
 					u.catchupAlternatives.Delete(*blockHash)
 					u.clearCatchupAttempts(blockHash)
 					catchupSucceeded = true
+					break
+				} else if errors.IsLocalError(altErr) {
+					// Local error (our rate-wait budget / shutdown) — not the peer's fault,
+					// and another peer won't help; stop trying alternatives.
+					u.logger.Warnf("[catchup] Local error trying cached alternative peer %s for block %s, not blaming peer: %v", alt.peerID, blockHash.String(), altErr)
 					break
 				} else {
 					u.logger.Warnf("[catchup] Alternative peer %s also failed for block %s: %v", alt.peerID, blockHash.String(), altErr)

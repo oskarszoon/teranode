@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
+	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/model"
 )
 
@@ -144,6 +145,13 @@ func (u *Server) tryAlternativePeersForCatchup(ctx context.Context, block *model
 			u.processBlockNotify.Delete(*blockHash)
 			u.catchupAlternatives.Delete(*blockHash)
 			return true
+		}
+
+		// Local error (our rate-wait budget / shutdown) — not the peer's fault, and
+		// another peer won't help; stop trying alternatives without degrading reputation.
+		if errors.IsLocalError(altErr) {
+			u.logger.Warnf("[catchup] Local error trying peer %s for block %s, not blaming peer, stopping alternatives: %v", bestPeer.ID, blockHash.String(), altErr)
+			break
 		}
 
 		u.logger.Warnf("[catchup] Peer %s failed for block %s: %v", bestPeer.ID, blockHash.String(), altErr)

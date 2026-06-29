@@ -458,6 +458,11 @@ func executeHTTPRequest(ctx context.Context, cancelFn context.CancelFunc, rawURL
 	return resp.Body, cancelFn, nil
 }
 
+// maxErrorBodyBytes caps how much of a non-OK response body is read into the error
+// message. The body is peer-controlled and only used for diagnostics, so a few KB is
+// plenty and prevents a hostile peer from forcing large allocations on error paths.
+const maxErrorBodyBytes = 4 << 10 // 4 KiB
+
 // buildHTTPError constructs an appropriate error from a non-OK HTTP response.
 //
 // The error type is chosen to let callers branch with errors.Is:
@@ -480,7 +485,10 @@ func buildHTTPError(resp *http.Response, rawURL string) error {
 			_ = resp.Body.Close()
 		}()
 
-		b, readErr := io.ReadAll(resp.Body)
+		// Bound the error-body read: the body is peer-controlled and only used to enrich
+		// the error message, so cap it to avoid a hostile peer forcing an unbounded
+		// allocation on every non-OK response (amplified by the retry path).
+		b, readErr := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
 		if readErr != nil {
 			return errFn("http request [%s] returned status code [%d]", rawURL, resp.StatusCode, readErr)
 		}
@@ -580,6 +588,14 @@ func retryHTTP[T any](ctx context.Context, cfg retryConfig, attempt func(context
 
 		select {
 		case <-ctx.Done():
+			// If the deadline expired while we were backing off from a real retryable
+			// peer fault, attribute it to the peer (it stalled us out) rather than
+			// returning a bare local context error — otherwise a peer that 429-spams us
+			// until our fetch budget runs out evades any reputation penalty. A cancel
+			// (e.g. shutdown), or a deadline with no prior peer fault, stays local.
+			if lastErr != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return zero, errors.NewServiceUnavailableError("http request aborted after %d attempt(s): %v", n, lastErr)
+			}
 			return zero, ctx.Err()
 		case <-time.After(sleepFor):
 		}

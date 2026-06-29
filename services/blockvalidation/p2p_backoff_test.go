@@ -221,6 +221,35 @@ func TestSelectBestPeersForCatchup_PrunedFallback(t *testing.T) {
 	})
 }
 
+// TestReleaseCatchupLock_LocalErrorNotBlamedOnPeer proves the catchup reputation gate
+// classifies a local error (our per-peer rate-wait budget / shutdown) as local rather
+// than a peer/network error — even though its message contains a URL ("http...") that
+// would otherwise trip the IsNetworkError substring case and degrade a good peer.
+func TestReleaseCatchupLock_LocalErrorNotBlamedOnPeer(t *testing.T) {
+	suite := NewCatchupTestSuite(t)
+	defer suite.Cleanup()
+
+	blocks := testhelpers.CreateTestBlockChain(t, 1)
+	cctx := &CatchupContext{
+		blockUpTo: blocks[0],
+		peerID:    "peer-1",
+		baseURL:   "http://peer-1",
+		startTime: time.Now(),
+	}
+
+	// Production-shape local error: ServiceError wrapping the rate-wait ContextCanceled
+	// that embeds context.DeadlineExceeded, message carrying a URL.
+	var e error = errors.NewServiceError("[catchup:fetchSubtreeFromPeer] failed to fetch subtree from http://peer-1",
+		errors.NewContextCanceledError("[peerFetchLimiter] wait aborted for http://peer-1", context.DeadlineExceeded))
+	require.True(t, errors.IsLocalError(e), "precondition: the crafted error must be local")
+
+	suite.Server.releaseCatchupLock(cctx, &e)
+
+	require.NotNil(t, suite.Server.previousCatchupAttempt)
+	assert.Equal(t, "local_error", suite.Server.previousCatchupAttempt.ErrorType,
+		"a local rate-wait/shutdown error must classify as local_error, not network_error (which would degrade the peer)")
+}
+
 // TestGetPeersAtMaxHeight_SkipsPrunedPeers proves archival-aware selection: pruned
 // peers (which 404 on archival subtree data and re-wedge IBD per #1174) are excluded,
 // while full and legacy/empty-storage peers remain eligible.

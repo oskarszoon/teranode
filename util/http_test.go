@@ -1434,6 +1434,92 @@ func TestWithRetryHelpers_SignRequests(t *testing.T) {
 	})
 }
 
+// TestRetryHTTP_DeadlineAfterPeerFaultIsPeerError proves that when the context deadline
+// expires while backing off from a real retryable peer fault (503/429), the error is
+// attributed to the peer (ErrServiceUnavailable) — not a bare local context error — so a
+// peer that stalls us out cannot evade a reputation penalty.
+func TestRetryHTTP_DeadlineAfterPeerFaultIsPeerError(t *testing.T) {
+	var attempts int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&attempts, 1)
+		w.WriteHeader(http.StatusServiceUnavailable) // always retryable
+	}))
+	defer server.Close()
+
+	// Backoff (200ms) outlives the 80ms deadline, so the deadline lands mid-sleep AFTER
+	// attempt 1 recorded a 503 (lastErr != nil).
+	cfg := retryConfig{maxAttempts: 6, initialDelay: 200 * time.Millisecond, maxDelay: time.Second}
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+
+	_, err := doHTTPRequestBodyReaderWithRetry(ctx, server.URL, cfg, nil)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, errors.ErrServiceUnavailable),
+		"deadline after a peer 503 must be a peer fault (ErrServiceUnavailable), not bare ctx error; got %T: %v", err, err)
+}
+
+// TestRetryHTTP_CancelStaysLocal proves the complementary case: an explicit cancel
+// (e.g. shutdown), even after a peer fault, stays a local context error so the peer is
+// not blamed for our teardown.
+func TestRetryHTTP_CancelStaysLocal(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	cfg := retryConfig{maxAttempts: 6, initialDelay: 200 * time.Millisecond, maxDelay: time.Second}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(50 * time.Millisecond); cancel() }()
+
+	_, err := doHTTPRequestBodyReaderWithRetry(ctx, server.URL, cfg, nil)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, context.Canceled), "an explicit cancel must stay local; got %T: %v", err, err)
+}
+
+// TestBuildHTTPError_BoundsErrorBody proves a hostile peer cannot force an unbounded
+// allocation by returning a huge body on a non-OK response.
+func TestBuildHTTPError_BoundsErrorBody(t *testing.T) {
+	huge := strings.Repeat("A", 1<<20) // 1 MiB
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(huge))
+	}))
+	defer server.Close()
+
+	_, err := DoHTTPRequest(context.Background(), server.URL)
+	require.Error(t, err)
+	assert.Less(t, len(err.Error()), 1<<20, "error-body must be bounded, not echo the full 1MiB response")
+}
+
+// TestRetryHTTP_RetryAfterAboveMaxDelayClamps proves a Retry-After hint larger than
+// maxDelay is clamped to maxDelay (honored, not discarded back to the smaller jittered
+// backoff).
+func TestRetryHTTP_RetryAfterAboveMaxDelayClamps(t *testing.T) {
+	var attempts int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&attempts, 1)
+		if n == 1 {
+			w.Header().Set("Retry-After", "999") // far above maxDelay
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer server.Close()
+
+	// initialDelay tiny so jittered backoff would be ~ms; maxDelay 200ms. A clamped
+	// Retry-After should pin the wait at ~200ms, well above the jitter and far below 999s.
+	cfg := retryConfig{maxAttempts: 4, initialDelay: time.Millisecond, maxDelay: 200 * time.Millisecond}
+	start := time.Now()
+	body, err := doHTTPRequestBodyReaderWithRetry(context.Background(), server.URL, cfg, nil)
+	elapsed := time.Since(start)
+	require.NoError(t, err)
+	defer body.Close()
+	assert.GreaterOrEqual(t, elapsed, 150*time.Millisecond, "clamped Retry-After should wait ~maxDelay, not the tiny jittered backoff")
+	assert.Less(t, elapsed, 3*time.Second, "must not wait the full 999s Retry-After")
+}
+
 func TestParseRetryAfter(t *testing.T) {
 	cases := []struct {
 		in   string

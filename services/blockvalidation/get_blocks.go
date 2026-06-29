@@ -636,7 +636,9 @@ func (u *Server) fetchAndStoreSubtreeData(ctx context.Context, block *model.Bloc
 	ctx = context.WithoutCancel(ctx)
 
 	subtreeDataReader, err := u.fetchSubtreeDataFromPeer(ctx, subtreeHash, peerID, baseURL,
-		func(context.Context) error { return u.awaitPeerFetchSlot(pacingCtx, baseURL) })
+		// Intentionally ignore the per-attempt ctx (it is the detached WithoutCancel one);
+		// pace on the cancellable pacingCtx captured above so shutdown still aborts the wait.
+		func(_ context.Context) error { return u.awaitPeerFetchSlot(pacingCtx, baseURL) })
 	if err != nil {
 		return errors.NewProcessingError("[catchup:fetchAndStoreSubtreeData] Failed to fetch subtreeData for %s", subtreeHash.String(), err)
 	}
