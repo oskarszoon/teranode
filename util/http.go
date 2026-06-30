@@ -548,7 +548,7 @@ func jitterDelay(d time.Duration) time.Duration {
 	return half + time.Duration(rand.Int64N(int64(half)+1))
 }
 
-// retryHTTP runs attempt with exponential backoff + full jitter, retrying only
+// retryHTTP runs attempt with exponential backoff + equal jitter (see jitterDelay), retrying only
 // while attempt returns an error of the retryable transient class
 // (errors.Is(err, errors.ErrServiceUnavailable) — which buildHTTPError assigns
 // to both HTTP 503 and HTTP 429). Any other error is returned immediately.
@@ -625,7 +625,7 @@ func retryHTTP[T any](ctx context.Context, cfg retryConfig, attempt func(context
 //     (HTTP 503 and 429).
 //   - Other errors (404, 500, network errors) are returned immediately — they are not
 //     transient admission rejections.
-//   - Backoff is exponential starting at 250ms, doubling, capped at 5s, with full jitter.
+//   - Backoff is exponential starting at 250ms, doubling, capped at 5s, with equal jitter ([d/2,d]).
 //     Up to 6 attempts.
 //   - Honors the server's Retry-After header when present (clamped to maxDelay).
 //   - ctx cancellation aborts the retry loop and returns the parent ctx error.
