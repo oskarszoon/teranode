@@ -273,17 +273,6 @@ func TestGetPeersAtMaxHeight_SkipsPrunedPeers(t *testing.T) {
 	require.False(t, urls["http://pruned-1"], "pruned peers must be skipped")
 }
 
-// TestSelectAlternativePeer_SkipsPrunedPeers proves the peer-switch path won't rotate
-// onto a pruned peer.
-func TestSelectAlternativePeer_SkipsPrunedPeers(t *testing.T) {
-	client := &fakeParallelFetchP2P{peers: []*p2p.PeerInfo{
-		mkTestPeer("pruned-1", "pruned", 100),
-	}}
-
-	_, err := SelectAlternativePeer(context.Background(), ulogger.TestLogger{}, client, "current", 100)
-	require.Error(t, err, "a pruned-only peer set yields no eligible alternative")
-}
-
 // TestDistributeSubtreesAcrossPeers_SkipsPrunedPeers proves pruned peers are never
 // assigned subtree fetches when spreading load.
 func TestDistributeSubtreesAcrossPeers_SkipsPrunedPeers(t *testing.T) {

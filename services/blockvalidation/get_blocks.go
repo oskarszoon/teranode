@@ -19,9 +19,15 @@ import (
 	"github.com/bsv-blockchain/teranode/stores/blob/options"
 	"github.com/bsv-blockchain/teranode/util"
 	"github.com/bsv-blockchain/teranode/util/tracing"
+	lru "github.com/hashicorp/golang-lru/v2"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/time/rate"
 )
+
+// peerFetchLimiterCacheSize bounds the number of distinct per-peer (data-hub URL) rate
+// limiters retained. Far above any realistic catchup peer set, so it only caps pathological
+// growth from a peer churning its advertised DataHubURL on a long-running node.
+const peerFetchLimiterCacheSize = 1024
 
 // peerFetchLimiter returns the per-peer client-side rate limiter for baseURL,
 // lazily creating it from settings. Returns nil when per-peer pacing is disabled
@@ -38,15 +44,18 @@ func (u *Server) peerFetchLimiter(baseURL string) *rate.Limiter {
 	defer u.peerFetchLimitersMu.Unlock()
 
 	if u.peerFetchLimiters == nil {
-		u.peerFetchLimiters = make(map[string]*rate.Limiter)
+		// lru.New only errors on size <= 0, which the constant guards against.
+		c, _ := lru.New[string, *rate.Limiter](peerFetchLimiterCacheSize)
+		u.peerFetchLimiters = c
 	}
 
-	lim, ok := u.peerFetchLimiters[baseURL]
-	if !ok {
-		// rate == burst: allow a short burst up to the rate, then pace to it.
-		lim = rate.NewLimiter(rate.Limit(r), r)
-		u.peerFetchLimiters[baseURL] = lim
+	if lim, ok := u.peerFetchLimiters.Get(baseURL); ok {
+		return lim
 	}
+
+	// rate == burst: allow a short burst up to the rate, then pace to it.
+	lim := rate.NewLimiter(rate.Limit(r), r)
+	u.peerFetchLimiters.Add(baseURL, lim)
 
 	return lim
 }
@@ -437,6 +446,12 @@ func (u *Server) fetchSubtreeDataForBlock(gCtx context.Context, block *model.Blo
 	var peersMu sync.Mutex
 	contributingPeers := make(map[string]struct{})
 
+	// parentCtx is the catchup context BEFORE the errgroup derivation below: it is cancelled
+	// by node shutdown / catchup cancel but NOT by a sibling subtree failing in this batch.
+	// fetchAndStoreSubtreeData derives its detached download context from this, so an
+	// in-flight subtree_data download survives sibling failures yet still aborts on shutdown.
+	parentCtx := ctx
+
 	// Create error group for concurrent subtree fetching
 	g, ctx := errgroup.WithContext(ctx)
 	// Limit concurrency to avoid overwhelming the peer
@@ -477,7 +492,7 @@ func (u *Server) fetchSubtreeDataForBlock(gCtx context.Context, block *model.Blo
 		capturedBaseURL := fetchBaseURL
 
 		g.Go(func() error {
-			servingPeerID, err := u.fetchAndStoreSubtreeAndSubtreeData(ctx, block, &subtreeHashCopy, capturedPeerID, capturedBaseURL)
+			servingPeerID, err := u.fetchAndStoreSubtreeAndSubtreeData(ctx, parentCtx, block, &subtreeHashCopy, capturedPeerID, capturedBaseURL)
 			if err != nil {
 				return err
 			}
@@ -594,8 +609,12 @@ func (u *Server) fetchAndStoreSubtree(ctx context.Context, block *model.Block, s
 	return subtree, nil
 }
 
-// fetchAndStoreSubtreeData fetches and stores only the subtreeData
-func (u *Server) fetchAndStoreSubtreeData(ctx context.Context, block *model.Block, subtreeHash *chainhash.Hash,
+// fetchAndStoreSubtreeData fetches and stores only the subtreeData. shutdownCtx is the
+// catchup parent context (NOT the per-subtree errgroup child): the download+store is
+// derived from it so a sibling subtree failing in the same batch can't abort this in-flight
+// download (which would discard the peer's paid on-demand work), while node shutdown /
+// catchup cancel still tears it down promptly.
+func (u *Server) fetchAndStoreSubtreeData(ctx context.Context, shutdownCtx context.Context, block *model.Block, subtreeHash *chainhash.Hash,
 	subtree *subtreepkg.Subtree, peerID, baseURL string) error {
 	ctx, _, deferFn := tracing.Tracer("blockvalidation").Start(ctx, "fetchAndStoreSubtreeData",
 		tracing.WithParentStat(u.stats),
@@ -616,29 +635,23 @@ func (u *Server) fetchAndStoreSubtreeData(ctx context.Context, block *model.Bloc
 		return nil
 	}
 
-	// Detach from sibling cancellation: this function is called from a per-subtree
-	// goroutine inside fetchSubtreeDataForBlock's errgroup. Using gCtx for the HTTP
-	// fetch + parse + store means a single sibling failure cancels every in-flight
-	// subtree_data download in the batch — and each cancellation closes the upstream
-	// connection, causing the peer to abort its on-demand creation (storer.Abort) and
-	// throw away Aerospike work that was already paid for. Detaching here lets each
-	// fetch run to completion (or hit its own http_streaming_timeout) so the peer can
-	// finish writing its subtreeData file. The existence check above still respects
-	// the original ctx, so a pre-cancelled call still exits early.
-	//
-	// See companion fix in services/subtreevalidation/check_block_subtrees.go.
-	//
-	// Capture the cancellable context for per-attempt rate-limit pacing before detaching:
-	// the detach below intentionally protects only the in-flight download+store, while the
-	// token wait must stay cancellable (e.g. on shutdown). The pacing hook therefore waits
-	// on pacingCtx, while the fetch itself runs on the detached ctx.
-	pacingCtx := ctx
-	ctx = context.WithoutCancel(ctx)
+	// Derive the download+store context from shutdownCtx (the catchup parent), NOT from the
+	// per-subtree errgroup ctx. A sibling subtree failing in this batch cancels the errgroup
+	// ctx; running the HTTP fetch + parse + store on that would close the upstream connection
+	// and make the peer abort its on-demand creation (storer.Abort), discarding Aerospike work
+	// already paid for. Deriving from shutdownCtx avoids sibling cancellation while STILL
+	// honoring node shutdown / catchup cancel (the previous context.WithoutCancel detached
+	// from everything, so a stuck stream blocked graceful shutdown until http_streaming_timeout).
+	// The existence check above still uses the original (errgroup) ctx, so a pre-cancelled call
+	// exits early. See companion fix in services/subtreevalidation/check_block_subtrees.go.
+	var dlCancel context.CancelFunc
+	ctx, dlCancel = context.WithCancel(shutdownCtx)
+	defer dlCancel()
 
+	// The per-attempt rate-limit pacing hook uses the attempt ctx (this dlCtx), which is
+	// cancellable on shutdown — so both the pacing wait and the download abort promptly.
 	subtreeDataReader, err := u.fetchSubtreeDataFromPeer(ctx, subtreeHash, peerID, baseURL,
-		// Intentionally ignore the per-attempt ctx (it is the detached WithoutCancel one);
-		// pace on the cancellable pacingCtx captured above so shutdown still aborts the wait.
-		func(_ context.Context) error { return u.awaitPeerFetchSlot(pacingCtx, baseURL) })
+		func(c context.Context) error { return u.awaitPeerFetchSlot(c, baseURL) })
 	if err != nil {
 		return errors.NewProcessingError("[catchup:fetchAndStoreSubtreeData] Failed to fetch subtreeData for %s", subtreeHash.String(), err)
 	}
@@ -694,7 +707,7 @@ func (u *Server) fetchAndStoreSubtreeData(ctx context.Context, block *model.Bloc
 // and stores them in the subtreeStore. If the primary peer fails, it will try alternative peers
 // at max height before giving up.
 // Returns the peer ID that actually served the data and any error.
-func (u *Server) fetchAndStoreSubtreeAndSubtreeData(ctx context.Context, block *model.Block, subtreeHash *chainhash.Hash,
+func (u *Server) fetchAndStoreSubtreeAndSubtreeData(ctx context.Context, shutdownCtx context.Context, block *model.Block, subtreeHash *chainhash.Hash,
 	peerID, baseURL string) (string, error) {
 	ctx, _, deferFn := tracing.Tracer("blockvalidation").Start(ctx, "fetchAndStoreSubtreeAndSubtreeData",
 		tracing.WithParentStat(u.stats),
@@ -706,7 +719,7 @@ func (u *Server) fetchAndStoreSubtreeAndSubtreeData(ctx context.Context, block *
 	subtree, err := u.fetchAndStoreSubtree(ctx, block, subtreeHash, peerID, baseURL)
 	if err == nil {
 		// Primary peer succeeded for subtree, now try subtreeData
-		if err = u.fetchAndStoreSubtreeData(ctx, block, subtreeHash, subtree, peerID, baseURL); err == nil {
+		if err = u.fetchAndStoreSubtreeData(ctx, shutdownCtx, block, subtreeHash, subtree, peerID, baseURL); err == nil {
 			return peerID, nil // Success
 		}
 		// Check if error is local (not peer-related) - don't retry with other peers
@@ -754,7 +767,7 @@ func (u *Server) fetchAndStoreSubtreeAndSubtreeData(ctx context.Context, block *
 				}
 
 				// Subtree succeeded, try subtreeData
-				if err = u.fetchAndStoreSubtreeData(ctx, block, subtreeHash, subtree, altPeerID, altBaseURL); err != nil {
+				if err = u.fetchAndStoreSubtreeData(ctx, shutdownCtx, block, subtreeHash, subtree, altPeerID, altBaseURL); err != nil {
 					u.logger.Debugf("[catchup:fetchAndStoreSubtreeAndSubtreeData] Alternative peer %s failed for subtreeData %s: %v", altPeerID, subtreeHash.String(), err)
 					lastErr = err
 					// Don't continue trying other peers if it's a local error

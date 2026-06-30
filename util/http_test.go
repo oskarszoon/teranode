@@ -17,7 +17,6 @@ import (
 
 	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/libp2p/go-libp2p/core/crypto"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -32,7 +31,7 @@ func TestMain(m *testing.M) {
 func TestDoHTTPRequestGET(t *testing.T) {
 	// Create a test server that returns JSON
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, http.MethodGet, r.Method)
+		require.Equal(t, http.MethodGet, r.Method)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, err := w.Write([]byte(`{"message": "success"}`))
@@ -44,19 +43,19 @@ func TestDoHTTPRequestGET(t *testing.T) {
 	response, err := DoHTTPRequest(ctx, server.URL)
 
 	require.NoError(t, err)
-	assert.Equal(t, `{"message": "success"}`, string(response))
+	require.Equal(t, `{"message": "success"}`, string(response))
 }
 
 func TestDoHTTPRequestPOST(t *testing.T) {
 	requestBody := []byte(`{"data": "test"}`)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, http.MethodPost, r.Method)
-		assert.Equal(t, "application/octet-stream", r.Header.Get("Content-Type"))
+		require.Equal(t, http.MethodPost, r.Method)
+		require.Equal(t, "application/octet-stream", r.Header.Get("Content-Type"))
 
 		body, err := io.ReadAll(r.Body)
 		require.NoError(t, err)
-		assert.Equal(t, requestBody, body)
+		require.Equal(t, requestBody, body)
 
 		w.WriteHeader(http.StatusCreated)
 		_, err = w.Write([]byte(`{"created": true}`))
@@ -68,7 +67,7 @@ func TestDoHTTPRequestPOST(t *testing.T) {
 	response, err := DoHTTPRequest(ctx, server.URL, requestBody)
 
 	require.NoError(t, err)
-	assert.Equal(t, `{"created": true}`, string(response))
+	require.Equal(t, `{"created": true}`, string(response))
 }
 
 func TestDoHTTPRequestWithTimeout(t *testing.T) {
@@ -86,8 +85,8 @@ func TestDoHTTPRequestWithTimeout(t *testing.T) {
 	defer cancel()
 
 	_, err := DoHTTPRequest(ctx, server.URL)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "context deadline exceeded")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "context deadline exceeded")
 }
 
 func TestDoHTTPRequestDefaultTimeoutInMilliseconds(t *testing.T) {
@@ -111,11 +110,11 @@ func TestDoHTTPRequestDefaultTimeoutInMilliseconds(t *testing.T) {
 
 	// Should succeed because server responds in 500ms and default timeout is 1000ms
 	require.NoError(t, err)
-	assert.Equal(t, "response after 500ms", string(response))
+	require.Equal(t, "response after 500ms", string(response))
 
 	// Verify the request completed in a reasonable time (under 2 seconds)
 	// If timeout was 1000 seconds, this test would pass but take forever
-	assert.Less(t, duration, 2*time.Second, "Request should complete quickly with millisecond timeout")
+	require.Less(t, duration, 2*time.Second, "Request should complete quickly with millisecond timeout")
 }
 
 func TestDoHTTPRequestWithExistingDeadline(t *testing.T) {
@@ -132,7 +131,7 @@ func TestDoHTTPRequestWithExistingDeadline(t *testing.T) {
 
 	response, err := DoHTTPRequest(ctx, server.URL)
 	require.NoError(t, err)
-	assert.Equal(t, "response", string(response))
+	require.Equal(t, "response", string(response))
 }
 
 func TestDoHTTPRequestNotFound(t *testing.T) {
@@ -147,8 +146,8 @@ func TestDoHTTPRequestNotFound(t *testing.T) {
 	_, err := DoHTTPRequest(ctx, server.URL)
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "404")
-	assert.NotContains(t, err.Error(), "not found", "peer-controlled body must not be echoed into the classified error")
+	require.Contains(t, err.Error(), "404")
+	require.NotContains(t, err.Error(), "not found", "peer-controlled body must not be echoed into the classified error")
 }
 
 func TestDoHTTPRequestServerError(t *testing.T) {
@@ -163,8 +162,8 @@ func TestDoHTTPRequestServerError(t *testing.T) {
 	_, err := DoHTTPRequest(ctx, server.URL)
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "500")
-	assert.NotContains(t, err.Error(), "internal server error", "peer-controlled body must not be echoed into the classified error")
+	require.Contains(t, err.Error(), "500")
+	require.NotContains(t, err.Error(), "internal server error", "peer-controlled body must not be echoed into the classified error")
 }
 
 func TestDoHTTPRequestServerErrorNoBody(t *testing.T) {
@@ -178,9 +177,9 @@ func TestDoHTTPRequestServerErrorNoBody(t *testing.T) {
 	_, err := DoHTTPRequest(ctx, server.URL)
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "400")
+	require.Contains(t, err.Error(), "400")
 	// An empty body adds no "(N body bytes...)" suffix and never echoes body content.
-	assert.NotContains(t, err.Error(), "with body")
+	require.NotContains(t, err.Error(), "with body")
 }
 
 func TestDoHTTPRequestHTMLResponse(t *testing.T) {
@@ -196,8 +195,8 @@ func TestDoHTTPRequestHTMLResponse(t *testing.T) {
 	_, err := DoHTTPRequest(ctx, server.URL)
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "returned HTML")
-	assert.Contains(t, err.Error(), "assume bad URL")
+	require.Contains(t, err.Error(), "returned HTML")
+	require.Contains(t, err.Error(), "assume bad URL")
 }
 
 func TestDoHTTPRequestInvalidURL(t *testing.T) {
@@ -206,7 +205,7 @@ func TestDoHTTPRequestInvalidURL(t *testing.T) {
 
 	require.Error(t, err)
 	// Non-http URL passes SSRF validation but fails at HTTP client level
-	assert.Contains(t, err.Error(), "failed to do http request")
+	require.Contains(t, err.Error(), "failed to do http request")
 }
 
 func TestDoHTTPRequestConnectionError(t *testing.T) {
@@ -215,13 +214,13 @@ func TestDoHTTPRequestConnectionError(t *testing.T) {
 	_, err := DoHTTPRequest(ctx, "http://localhost:99999")
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to do http request")
+	require.Contains(t, err.Error(), "failed to do http request")
 }
 
 func TestDoHTTPRequestBodyReaderGET(t *testing.T) {
 	responseData := `{"message": "success"}`
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, http.MethodGet, r.Method)
+		require.Equal(t, http.MethodGet, r.Method)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, err := w.Write([]byte(responseData))
@@ -238,19 +237,19 @@ func TestDoHTTPRequestBodyReaderGET(t *testing.T) {
 
 	body, err := io.ReadAll(reader)
 	require.NoError(t, err)
-	assert.Equal(t, responseData, string(body))
+	require.Equal(t, responseData, string(body))
 }
 
 func TestDoHTTPRequestBodyReaderPOST(t *testing.T) {
 	requestBody := []byte(`{"data": "test"}`)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, http.MethodPost, r.Method)
-		assert.Equal(t, "application/octet-stream", r.Header.Get("Content-Type"))
+		require.Equal(t, http.MethodPost, r.Method)
+		require.Equal(t, "application/octet-stream", r.Header.Get("Content-Type"))
 
 		body, err := io.ReadAll(r.Body)
 		require.NoError(t, err)
-		assert.Equal(t, requestBody, body)
+		require.Equal(t, requestBody, body)
 
 		w.WriteHeader(http.StatusOK)
 		_, err = w.Write([]byte(`{"processed": true}`))
@@ -267,17 +266,17 @@ func TestDoHTTPRequestBodyReaderPOST(t *testing.T) {
 
 	body, err := io.ReadAll(reader)
 	require.NoError(t, err)
-	assert.Equal(t, `{"processed": true}`, string(body))
+	require.Equal(t, `{"processed": true}`, string(body))
 }
 
 func TestDoHTTPRequestBodyReaderError(t *testing.T) {
 	ctx := context.Background()
 	reader, err := DoHTTPRequestBodyReader(ctx, "invalid-url")
 
-	assert.Nil(t, reader)
+	require.Nil(t, reader)
 	require.Error(t, err)
 	// Non-http URL passes SSRF validation but fails at HTTP client level
-	assert.Contains(t, err.Error(), "failed to do http request")
+	require.Contains(t, err.Error(), "failed to do http request")
 }
 
 func TestDoHTTPRequestBodyReaderServerError(t *testing.T) {
@@ -291,9 +290,9 @@ func TestDoHTTPRequestBodyReaderServerError(t *testing.T) {
 	ctx := context.Background()
 	reader, err := DoHTTPRequestBodyReader(ctx, server.URL)
 
-	assert.Nil(t, reader)
+	require.Nil(t, reader)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "500")
+	require.Contains(t, err.Error(), "500")
 }
 
 func TestDoHTTPRequestBodyReaderNoTimeoutOnSlowStream(t *testing.T) {
@@ -319,7 +318,7 @@ func TestDoHTTPRequestBodyReaderNoTimeoutOnSlowStream(t *testing.T) {
 
 	body, err := io.ReadAll(reader)
 	require.NoError(t, err)
-	assert.Equal(t, responseData, body)
+	require.Equal(t, responseData, body)
 }
 
 func TestDoHTTPRequestBodyReaderWithShortTimeout(t *testing.T) {
@@ -397,17 +396,17 @@ func TestDoHTTPRequestBodyReaderRespectsExistingDeadline(t *testing.T) {
 	// Should fail with timeout
 	require.Error(t, err, "Should timeout with custom deadline")
 	// Should have timed out quickly (within 1 second), not after 5 minutes
-	assert.Less(t, elapsed, 2*time.Second, "Should respect short custom deadline, not wait for streaming timeout")
+	require.Less(t, elapsed, 2*time.Second, "Should respect short custom deadline, not wait for streaming timeout")
 }
 
 func TestDoHTTPRequestEmptyRequestBody(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Empty slice still triggers POST because len(requestBody) > 0
-		assert.Equal(t, http.MethodPost, r.Method)
-		assert.Equal(t, "application/octet-stream", r.Header.Get("Content-Type"))
+		require.Equal(t, http.MethodPost, r.Method)
+		require.Equal(t, "application/octet-stream", r.Header.Get("Content-Type"))
 		body, err := io.ReadAll(r.Body)
 		require.NoError(t, err)
-		assert.Equal(t, []byte{}, body)
+		require.Equal(t, []byte{}, body)
 
 		w.WriteHeader(http.StatusOK)
 		_, err = w.Write([]byte("ok"))
@@ -419,12 +418,12 @@ func TestDoHTTPRequestEmptyRequestBody(t *testing.T) {
 	// Pass empty byte slice - becomes POST because len > 0
 	response, err := DoHTTPRequest(ctx, server.URL, []byte{})
 	require.NoError(t, err)
-	assert.Equal(t, "ok", string(response))
+	require.Equal(t, "ok", string(response))
 }
 
 func TestDoHTTPRequestNilRequestBody(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, http.MethodGet, r.Method)
+		require.Equal(t, http.MethodGet, r.Method)
 		w.WriteHeader(http.StatusOK)
 		_, err := w.Write([]byte("ok"))
 		require.NoError(t, err)
@@ -435,18 +434,18 @@ func TestDoHTTPRequestNilRequestBody(t *testing.T) {
 	// Pass nil byte slice - should still be GET
 	response, err := DoHTTPRequest(ctx, server.URL, nil)
 	require.NoError(t, err)
-	assert.Equal(t, "ok", string(response))
+	require.Equal(t, "ok", string(response))
 }
 
 func TestDoHTTPRequestMultipleRequestBodies(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, http.MethodPost, r.Method)
-		assert.Equal(t, "application/octet-stream", r.Header.Get("Content-Type"))
+		require.Equal(t, http.MethodPost, r.Method)
+		require.Equal(t, "application/octet-stream", r.Header.Get("Content-Type"))
 
 		body, err := io.ReadAll(r.Body)
 		require.NoError(t, err)
 		// Should use the first non-nil body
-		assert.Equal(t, "first", string(body))
+		require.Equal(t, "first", string(body))
 
 		w.WriteHeader(http.StatusOK)
 		_, err = w.Write([]byte("ok"))
@@ -458,7 +457,7 @@ func TestDoHTTPRequestMultipleRequestBodies(t *testing.T) {
 	// Pass multiple request bodies - should use first one
 	response, err := DoHTTPRequest(ctx, server.URL, []byte("first"), []byte("second"))
 	require.NoError(t, err)
-	assert.Equal(t, "ok", string(response))
+	require.Equal(t, "ok", string(response))
 }
 
 func TestDoHTTPRequestServerErrorWithNilBody(t *testing.T) {
@@ -472,9 +471,9 @@ func TestDoHTTPRequestServerErrorWithNilBody(t *testing.T) {
 	_, err := DoHTTPRequest(ctx, server.URL)
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "500")
+	require.Contains(t, err.Error(), "500")
 	// Should not contain "with body" since body is effectively nil
-	assert.NotContains(t, err.Error(), "with body")
+	require.NotContains(t, err.Error(), "with body")
 }
 
 func TestDoHTTPRequestLargeResponse(t *testing.T) {
@@ -491,7 +490,7 @@ func TestDoHTTPRequestLargeResponse(t *testing.T) {
 	ctx := context.Background()
 	response, err := DoHTTPRequest(ctx, server.URL)
 	require.NoError(t, err)
-	assert.Equal(t, largeData, string(response))
+	require.Equal(t, largeData, string(response))
 }
 
 func TestDoHTTPRequestJSONResponse(t *testing.T) {
@@ -517,15 +516,15 @@ func TestDoHTTPRequestJSONResponse(t *testing.T) {
 	var parsed map[string]interface{}
 	err = json.Unmarshal(response, &parsed)
 	require.NoError(t, err)
-	assert.Equal(t, float64(123), parsed["id"]) // JSON numbers become float64
-	assert.Equal(t, "test", parsed["name"])
-	assert.Equal(t, true, parsed["active"])
+	require.Equal(t, float64(123), parsed["id"]) // JSON numbers become float64
+	require.Equal(t, "test", parsed["name"])
+	require.Equal(t, true, parsed["active"])
 }
 
 func TestDoHTTPRequestBounded_HappyPath(t *testing.T) {
 	responseData := []byte(`{"message": "success"}`)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, http.MethodGet, r.Method)
+		require.Equal(t, http.MethodGet, r.Method)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, err := w.Write(responseData)
@@ -537,19 +536,19 @@ func TestDoHTTPRequestBounded_HappyPath(t *testing.T) {
 	response, err := DoHTTPRequestBounded(ctx, server.URL, 1024)
 
 	require.NoError(t, err)
-	assert.Equal(t, responseData, response)
+	require.Equal(t, responseData, response)
 }
 
 func TestDoHTTPRequestBounded_POST(t *testing.T) {
 	requestBody := []byte(`{"data": "test"}`)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, http.MethodPost, r.Method)
-		assert.Equal(t, "application/octet-stream", r.Header.Get("Content-Type"))
+		require.Equal(t, http.MethodPost, r.Method)
+		require.Equal(t, "application/octet-stream", r.Header.Get("Content-Type"))
 
 		body, err := io.ReadAll(r.Body)
 		require.NoError(t, err)
-		assert.Equal(t, requestBody, body)
+		require.Equal(t, requestBody, body)
 
 		w.WriteHeader(http.StatusOK)
 		_, err = w.Write([]byte(`{"processed": true}`))
@@ -561,7 +560,7 @@ func TestDoHTTPRequestBounded_POST(t *testing.T) {
 	response, err := DoHTTPRequestBounded(ctx, server.URL, 1024, requestBody)
 
 	require.NoError(t, err)
-	assert.Equal(t, `{"processed": true}`, string(response))
+	require.Equal(t, `{"processed": true}`, string(response))
 }
 
 func TestDoHTTPRequestBounded_BodyEqualToLimit(t *testing.T) {
@@ -580,8 +579,8 @@ func TestDoHTTPRequestBounded_BodyEqualToLimit(t *testing.T) {
 	response, err := DoHTTPRequestBounded(ctx, server.URL, int64(limit))
 
 	require.NoError(t, err)
-	assert.Equal(t, responseData, response)
-	assert.Len(t, response, limit)
+	require.Equal(t, responseData, response)
+	require.Len(t, response, limit)
 }
 
 func TestDoHTTPRequestBounded_BodyExceedsLimit(t *testing.T) {
@@ -600,9 +599,9 @@ func TestDoHTTPRequestBounded_BodyExceedsLimit(t *testing.T) {
 	response, err := DoHTTPRequestBounded(ctx, server.URL, int64(limit))
 
 	require.Error(t, err)
-	assert.Nil(t, response)
-	assert.True(t, errors.Is(err, errors.ErrExternal), "expected ErrExternal, got %v", err)
-	assert.Contains(t, err.Error(), "exceeds")
+	require.Nil(t, response)
+	require.True(t, errors.Is(err, errors.ErrExternal), "expected ErrExternal, got %v", err)
+	require.Contains(t, err.Error(), "exceeds")
 }
 
 func TestDoHTTPRequestBounded_BodyOneByteOverLimit(t *testing.T) {
@@ -621,8 +620,8 @@ func TestDoHTTPRequestBounded_BodyOneByteOverLimit(t *testing.T) {
 	response, err := DoHTTPRequestBounded(ctx, server.URL, int64(limit))
 
 	require.Error(t, err)
-	assert.Nil(t, response)
-	assert.True(t, errors.Is(err, errors.ErrExternal))
+	require.Nil(t, response)
+	require.True(t, errors.Is(err, errors.ErrExternal))
 }
 
 func TestDoHTTPRequestBounded_NotFound(t *testing.T) {
@@ -637,7 +636,7 @@ func TestDoHTTPRequestBounded_NotFound(t *testing.T) {
 	_, err := DoHTTPRequestBounded(ctx, server.URL, 1024)
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "404")
+	require.Contains(t, err.Error(), "404")
 }
 
 func TestDoHTTPRequestBounded_Timeout(t *testing.T) {
@@ -730,7 +729,7 @@ func TestDoHTTPRequest_ReadBodyError(t *testing.T) {
 
 	// This might pass or fail depending on timing, but exercises the read error path
 	if err != nil {
-		assert.Contains(t, err.Error(), "failed to read body")
+		require.Contains(t, err.Error(), "failed to read body")
 	}
 }
 
@@ -749,14 +748,14 @@ func TestDoHTTPRequest_ErrorResponseBodyReadError(t *testing.T) {
 	_, err := DoHTTPRequest(ctx, server.URL)
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "500")
-	assert.NotContains(t, err.Error(), "server error", "peer-controlled body must not be echoed into the classified error")
+	require.Contains(t, err.Error(), "500")
+	require.NotContains(t, err.Error(), "server error", "peer-controlled body must not be echoed into the classified error")
 }
 
 func TestDoHTTPRequest_NilFirstRequestBody(t *testing.T) {
 	// Test with first element nil but slice not empty
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, http.MethodGet, r.Method) // Should be GET because first body is nil
+		require.Equal(t, http.MethodGet, r.Method) // Should be GET because first body is nil
 		w.WriteHeader(http.StatusOK)
 		_, err := w.Write([]byte("ok"))
 		require.NoError(t, err)
@@ -767,7 +766,7 @@ func TestDoHTTPRequest_NilFirstRequestBody(t *testing.T) {
 	// Pass nil as first element - should be GET
 	response, err := DoHTTPRequest(ctx, server.URL, nil)
 	require.NoError(t, err)
-	assert.Equal(t, "ok", string(response))
+	require.Equal(t, "ok", string(response))
 }
 
 func TestDoHTTPRequest_ErrorResponseNilBody(t *testing.T) {
@@ -782,9 +781,9 @@ func TestDoHTTPRequest_ErrorResponseNilBody(t *testing.T) {
 	_, err := DoHTTPRequest(ctx, server.URL)
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "400")
+	require.Contains(t, err.Error(), "400")
 	// An empty body adds no "(N body bytes...)" suffix and never echoes body content.
-	assert.NotContains(t, err.Error(), "with body")
+	require.NotContains(t, err.Error(), "with body")
 }
 
 func TestDoHTTPRequest_CreateRequestError(t *testing.T) {
@@ -795,7 +794,7 @@ func TestDoHTTPRequest_CreateRequestError(t *testing.T) {
 	_, err := DoHTTPRequest(ctx, "ht\ttp://invalid-url-with-control-char")
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid URL")
+	require.Contains(t, err.Error(), "invalid URL")
 }
 
 func TestValidateURL(t *testing.T) {
@@ -877,7 +876,7 @@ func TestValidateURL(t *testing.T) {
 			err := ValidateURL(tt.url)
 			if tt.wantErr {
 				require.Error(t, err)
-				assert.Contains(t, err.Error(), tt.errMsg)
+				require.Contains(t, err.Error(), tt.errMsg)
 			} else {
 				require.NoError(t, err)
 			}
@@ -922,7 +921,7 @@ func TestValidateURL_RejectsUserinfo(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			err := ValidateURL(tt.url)
 			require.Error(t, err)
-			assert.Contains(t, err.Error(), "userinfo")
+			require.Contains(t, err.Error(), "userinfo")
 		})
 	}
 }
@@ -943,7 +942,7 @@ func TestIsBlockedDialIP(t *testing.T) {
 		t.Run("blocked_"+ipStr, func(t *testing.T) {
 			ip := net.ParseIP(ipStr)
 			require.NotNil(t, ip)
-			assert.True(t, isBlockedDialIP(ip), "expected %s to be blocked", ipStr)
+			require.True(t, isBlockedDialIP(ip), "expected %s to be blocked", ipStr)
 		})
 	}
 
@@ -966,7 +965,7 @@ func TestIsBlockedDialIP(t *testing.T) {
 		t.Run("allowed_"+ipStr, func(t *testing.T) {
 			ip := net.ParseIP(ipStr)
 			require.NotNil(t, ip)
-			assert.False(t, isBlockedDialIP(ip), "expected %s to be allowed", ipStr)
+			require.False(t, isBlockedDialIP(ip), "expected %s to be allowed", ipStr)
 		})
 	}
 }
@@ -979,7 +978,7 @@ func TestSSRFDialContext_RejectsPrivateHostname(t *testing.T) {
 	ctx := context.Background()
 	_, err := ssrfDialContext(ctx, "tcp", "localhost:80")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "blocked IP")
+	require.Contains(t, err.Error(), "blocked IP")
 }
 
 func TestSSRFDialContext_DisabledAllowsPrivate(t *testing.T) {
@@ -993,7 +992,7 @@ func TestSSRFDialContext_DisabledAllowsPrivate(t *testing.T) {
 	_, err := ssrfDialContext(ctx, "tcp", "127.0.0.1:1")
 	// Any error here is a real network error (connection refused), NOT our SSRF guard.
 	if err != nil {
-		assert.NotContains(t, err.Error(), "blocked IP")
+		require.NotContains(t, err.Error(), "blocked IP")
 	}
 }
 
@@ -1016,7 +1015,7 @@ func TestSSRFDialContext_RejectsDNSRebinding(t *testing.T) {
 
 	_, err := ssrfDialContext(context.Background(), "tcp", "evil.example.com:80")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "blocked IP")
+	require.Contains(t, err.Error(), "blocked IP")
 }
 
 // TestSSRFDialContext_RejectsMixedPublicBlocked ensures a resolver answer mixing a public
@@ -1034,7 +1033,7 @@ func TestSSRFDialContext_RejectsMixedPublicBlocked(t *testing.T) {
 
 	_, err := ssrfDialContext(context.Background(), "tcp", "evil.example.com:80")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "blocked IP")
+	require.Contains(t, err.Error(), "blocked IP")
 }
 
 func TestHTTPClient_RejectsRedirectToLinkLocal(t *testing.T) {
@@ -1044,7 +1043,7 @@ func TestHTTPClient_RejectsRedirectToLinkLocal(t *testing.T) {
 	req := &http.Request{URL: func() *url.URL { u, _ := url.Parse(linkLocalURL); return u }()}
 	err := httpClient.CheckRedirect(req, []*http.Request{{}})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "SSRF redirect check")
+	require.Contains(t, err.Error(), "SSRF redirect check")
 }
 
 func TestHTTPClient_RedirectLimitEnforced(t *testing.T) {
@@ -1053,7 +1052,7 @@ func TestHTTPClient_RedirectLimitEnforced(t *testing.T) {
 	via := make([]*http.Request, 10)
 	err := httpClient.CheckRedirect(req, via)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "10 redirects")
+	require.Contains(t, err.Error(), "10 redirects")
 }
 
 // testRetryConfig is a fast retry config for tests: short delays, low attempt count.
@@ -1078,8 +1077,8 @@ func TestDoHTTPRequestBodyReaderWithRetry_SuccessOnFirstTry(t *testing.T) {
 
 	got, err := io.ReadAll(body)
 	require.NoError(t, err)
-	assert.Equal(t, "body", string(got))
-	assert.Equal(t, int32(1), atomic.LoadInt32(&attempts), "should not retry on success")
+	require.Equal(t, "body", string(got))
+	require.Equal(t, int32(1), atomic.LoadInt32(&attempts), "should not retry on success")
 }
 
 func TestDoHTTPRequestBodyReaderWithRetry_RetriesOn503ThenSucceeds(t *testing.T) {
@@ -1104,8 +1103,8 @@ func TestDoHTTPRequestBodyReaderWithRetry_RetriesOn503ThenSucceeds(t *testing.T)
 
 	got, err := io.ReadAll(body)
 	require.NoError(t, err)
-	assert.Equal(t, "ok-after-retry", string(got), "should return body from successful retry, not earlier 503 body")
-	assert.Equal(t, int32(3), atomic.LoadInt32(&attempts), "exactly two retries before success")
+	require.Equal(t, "ok-after-retry", string(got), "should return body from successful retry, not earlier 503 body")
+	require.Equal(t, int32(3), atomic.LoadInt32(&attempts), "exactly two retries before success")
 }
 
 func TestDoHTTPRequestBodyReaderWithRetry_ExhaustsAttemptsOnPersistent503(t *testing.T) {
@@ -1118,10 +1117,10 @@ func TestDoHTTPRequestBodyReaderWithRetry_ExhaustsAttemptsOnPersistent503(t *tes
 
 	body, err := doHTTPRequestBodyReaderWithRetry(context.Background(), server.URL, testRetryConfig, nil)
 	require.Error(t, err)
-	assert.Nil(t, body)
-	assert.True(t, errors.Is(err, errors.ErrServiceUnavailable),
+	require.Nil(t, body)
+	require.True(t, errors.Is(err, errors.ErrServiceUnavailable),
 		"final error must be ErrServiceUnavailable so callers can branch on it; got %T: %v", err, err)
-	assert.Equal(t, int32(testRetryConfig.maxAttempts), atomic.LoadInt32(&attempts),
+	require.Equal(t, int32(testRetryConfig.maxAttempts), atomic.LoadInt32(&attempts),
 		"should have exactly maxAttempts attempts")
 }
 
@@ -1149,9 +1148,9 @@ func TestDoHTTPRequestBodyReaderWithRetry_HonorsRetryAfter(t *testing.T) {
 
 	require.NoError(t, err)
 	defer body.Close()
-	assert.GreaterOrEqual(t, elapsed, time.Duration(retryAfterSeconds)*time.Second-100*time.Millisecond,
+	require.GreaterOrEqual(t, elapsed, time.Duration(retryAfterSeconds)*time.Second-100*time.Millisecond,
 		"server's Retry-After=1 must be honored over the much smaller initialDelay")
-	assert.Less(t, elapsed, 3*time.Second, "should not wait significantly longer than Retry-After")
+	require.Less(t, elapsed, 3*time.Second, "should not wait significantly longer than Retry-After")
 }
 
 func TestDoHTTPRequestBodyReaderWithRetry_NoRetryOnNon503(t *testing.T) {
@@ -1175,7 +1174,7 @@ func TestDoHTTPRequestBodyReaderWithRetry_NoRetryOnNon503(t *testing.T) {
 
 			_, err := doHTTPRequestBodyReaderWithRetry(context.Background(), server.URL, testRetryConfig, nil)
 			require.Error(t, err)
-			assert.Equal(t, int32(1), atomic.LoadInt32(&attempts),
+			require.Equal(t, int32(1), atomic.LoadInt32(&attempts),
 				"non-503 status %d must fail immediately, not retry", tc.code)
 		})
 	}
@@ -1203,11 +1202,11 @@ func TestDoHTTPRequestBodyReaderWithRetry_ContextCancelAbortsRetries(t *testing.
 	elapsed := time.Since(start)
 
 	require.Error(t, err)
-	assert.Less(t, elapsed, 500*time.Millisecond,
+	require.Less(t, elapsed, 500*time.Millisecond,
 		"ctx cancel should short-circuit the retry loop well before exhausting attempts")
 	// At least one attempt happened; we don't assert exactly because timing is racy.
-	assert.GreaterOrEqual(t, atomic.LoadInt32(&attempts), int32(1))
-	assert.LessOrEqual(t, atomic.LoadInt32(&attempts), int32(2),
+	require.GreaterOrEqual(t, atomic.LoadInt32(&attempts), int32(1))
+	require.LessOrEqual(t, atomic.LoadInt32(&attempts), int32(2),
 		"should not fire all 6 attempts if cancelled at 50ms with 200ms+ backoffs")
 }
 
@@ -1234,8 +1233,8 @@ func TestDoHTTPRequestBodyReaderWithRetry_RetriesOn429ThenSucceeds(t *testing.T)
 
 	got, err := io.ReadAll(body)
 	require.NoError(t, err)
-	assert.Equal(t, "ok-after-429", string(got))
-	assert.Equal(t, int32(3), atomic.LoadInt32(&attempts), "429 must be retried, not failed immediately")
+	require.Equal(t, "ok-after-429", string(got))
+	require.Equal(t, int32(3), atomic.LoadInt32(&attempts), "429 must be retried, not failed immediately")
 }
 
 func TestDoHTTPRequestBodyReaderWithRetry_ExhaustsAttemptsOnPersistent429(t *testing.T) {
@@ -1248,10 +1247,10 @@ func TestDoHTTPRequestBodyReaderWithRetry_ExhaustsAttemptsOnPersistent429(t *tes
 
 	body, err := doHTTPRequestBodyReaderWithRetry(context.Background(), server.URL, testRetryConfig, nil)
 	require.Error(t, err)
-	assert.Nil(t, body)
-	assert.True(t, errors.Is(err, errors.ErrServiceUnavailable),
+	require.Nil(t, body)
+	require.True(t, errors.Is(err, errors.ErrServiceUnavailable),
 		"persistent 429 must surface as ErrServiceUnavailable (retryable class); got %T: %v", err, err)
-	assert.Equal(t, int32(testRetryConfig.maxAttempts), atomic.LoadInt32(&attempts))
+	require.Equal(t, int32(testRetryConfig.maxAttempts), atomic.LoadInt32(&attempts))
 }
 
 // TestBuildHTTPError_429MapsToServiceUnavailable proves a single (non-retrying)
@@ -1266,9 +1265,9 @@ func TestBuildHTTPError_429MapsToServiceUnavailable(t *testing.T) {
 
 	_, err := DoHTTPRequest(context.Background(), server.URL)
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, errors.ErrServiceUnavailable),
+	require.True(t, errors.Is(err, errors.ErrServiceUnavailable),
 		"429 must map to ErrServiceUnavailable; got %T: %v", err, err)
-	assert.Contains(t, err.Error(), "429")
+	require.Contains(t, err.Error(), "429")
 }
 
 func TestDoHTTPRequestWithRetry_RetriesOn429ThenSucceeds(t *testing.T) {
@@ -1286,8 +1285,8 @@ func TestDoHTTPRequestWithRetry_RetriesOn429ThenSucceeds(t *testing.T) {
 
 	got, err := doHTTPRequestWithRetry(context.Background(), server.URL, testRetryConfig, nil)
 	require.NoError(t, err)
-	assert.Equal(t, "batch-ok", string(got))
-	assert.Equal(t, int32(2), atomic.LoadInt32(&attempts))
+	require.Equal(t, "batch-ok", string(got))
+	require.Equal(t, int32(2), atomic.LoadInt32(&attempts))
 }
 
 func TestDoHTTPRequestWithRetry_NoRetryOn404(t *testing.T) {
@@ -1300,7 +1299,7 @@ func TestDoHTTPRequestWithRetry_NoRetryOn404(t *testing.T) {
 
 	_, err := doHTTPRequestWithRetry(context.Background(), server.URL, testRetryConfig, nil)
 	require.Error(t, err)
-	assert.Equal(t, int32(1), atomic.LoadInt32(&attempts), "404 must not be retried (peer lacks data)")
+	require.Equal(t, int32(1), atomic.LoadInt32(&attempts), "404 must not be retried (peer lacks data)")
 }
 
 func TestDoHTTPRequestBoundedWithRetry_RetriesOn429ThenSucceeds(t *testing.T) {
@@ -1318,8 +1317,8 @@ func TestDoHTTPRequestBoundedWithRetry_RetriesOn429ThenSucceeds(t *testing.T) {
 
 	got, err := doHTTPRequestBoundedWithRetry(context.Background(), server.URL, 1024, testRetryConfig, nil)
 	require.NoError(t, err)
-	assert.Equal(t, "subtree-bytes", string(got))
-	assert.Equal(t, int32(2), atomic.LoadInt32(&attempts))
+	require.Equal(t, "subtree-bytes", string(got))
+	require.Equal(t, int32(2), atomic.LoadInt32(&attempts))
 }
 
 func TestDoHTTPRequestBoundedWithRetry_EnforcesCap(t *testing.T) {
@@ -1331,7 +1330,7 @@ func TestDoHTTPRequestBoundedWithRetry_EnforcesCap(t *testing.T) {
 
 	_, err := doHTTPRequestBoundedWithRetry(context.Background(), server.URL, 4, testRetryConfig, nil)
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, errors.ErrExternal), "over-cap body must return ErrExternal; got %v", err)
+	require.True(t, errors.Is(err, errors.ErrExternal), "over-cap body must return ErrExternal; got %v", err)
 }
 
 // TestReadBodyWithRetry_MidStreamStallIsPeerFault proves a peer that stalls mid-body
@@ -1361,7 +1360,7 @@ func TestReadBodyWithRetry_MidStreamStallIsPeerFault(t *testing.T) {
 	// No parent deadline → the transport timeout (httpRequestTimeout) governs the read.
 	_, err := DoHTTPRequestWithRetry(context.Background(), server.URL, nil)
 	require.Error(t, err)
-	assert.False(t, errors.IsLocalError(err),
+	require.False(t, errors.IsLocalError(err),
 		"a peer stalling mid-body must be a peer fault (non-local), not absolved as local; got %T: %v", err, err)
 }
 
@@ -1389,7 +1388,7 @@ func TestReadBodyWithRetry_ShutdownCancelIsLocal(t *testing.T) {
 
 	_, err := DoHTTPRequestWithRetry(ctx, server.URL, nil)
 	require.Error(t, err)
-	assert.True(t, errors.IsLocalError(err),
+	require.True(t, errors.IsLocalError(err),
 		"a shutdown cancel mid-read must be local (not a peer fault); got %T: %v", err, err)
 }
 
@@ -1411,7 +1410,7 @@ func TestReadBodyWithRetry_PreResponseStallIsPeerFault(t *testing.T) {
 
 	_, err := DoHTTPRequestWithRetry(context.Background(), server.URL, nil)
 	require.Error(t, err)
-	assert.False(t, errors.IsLocalError(err),
+	require.False(t, errors.IsLocalError(err),
 		"a peer stalling before headers must be a peer fault (non-local); got %T: %v", err, err)
 }
 
@@ -1450,20 +1449,20 @@ func TestWithRetryHelpers_SignRequests(t *testing.T) {
 		gotSig.Store(false)
 		_, err := DoHTTPRequestWithRetry(context.Background(), server.URL, nil)
 		require.NoError(t, err)
-		assert.True(t, gotSig.Load(), "DoHTTPRequestWithRetry must sign the request")
+		require.True(t, gotSig.Load(), "DoHTTPRequestWithRetry must sign the request")
 	})
 	t.Run("DoHTTPRequestBoundedWithRetry", func(t *testing.T) {
 		gotSig.Store(false)
 		_, err := DoHTTPRequestBoundedWithRetry(context.Background(), server.URL, 1024, nil)
 		require.NoError(t, err)
-		assert.True(t, gotSig.Load(), "DoHTTPRequestBoundedWithRetry must sign the request")
+		require.True(t, gotSig.Load(), "DoHTTPRequestBoundedWithRetry must sign the request")
 	})
 	t.Run("DoHTTPRequestBodyReaderWithRetry", func(t *testing.T) {
 		gotSig.Store(false)
 		body, err := DoHTTPRequestBodyReaderWithRetry(context.Background(), server.URL)
 		require.NoError(t, err)
 		_ = body.Close()
-		assert.True(t, gotSig.Load(), "DoHTTPRequestBodyReaderWithRetry must sign the request")
+		require.True(t, gotSig.Load(), "DoHTTPRequestBodyReaderWithRetry must sign the request")
 	})
 }
 
@@ -1483,9 +1482,9 @@ func TestRetryHTTP_DeadlineAfterPeerFaultIsPeerError(t *testing.T) {
 	}
 	_, err := retryHTTP(ctx, cfg, attempt)
 	require.Error(t, err)
-	assert.False(t, errors.IsLocalError(err),
+	require.False(t, errors.IsLocalError(err),
 		"deadline after a peer fault must be a peer fault (non-local); got %T: %v", err, err)
-	assert.True(t, errors.IsNetworkError(err),
+	require.True(t, errors.IsNetworkError(err),
 		"should classify as a network timeout (peer fault) by code; got %T: %v", err, err)
 }
 
@@ -1502,8 +1501,8 @@ func TestRetryHTTP_CancelStaysLocal(t *testing.T) {
 	}
 	_, err := retryHTTP(ctx, cfg, attempt)
 	require.Error(t, err)
-	assert.True(t, errors.IsLocalError(err), "an explicit cancel must stay local; got %T: %v", err, err)
-	assert.True(t, errors.Is(err, context.Canceled), "should be the canceled sentinel; got %T: %v", err, err)
+	require.True(t, errors.IsLocalError(err), "an explicit cancel must stay local; got %T: %v", err, err)
+	require.True(t, errors.Is(err, context.Canceled), "should be the canceled sentinel; got %T: %v", err, err)
 }
 
 // TestBuildHTTPError_DoesNotEchoOrTrustPeerBody proves a non-OK response body is neither
@@ -1522,9 +1521,9 @@ func TestBuildHTTPError_DoesNotEchoOrTrustPeerBody(t *testing.T) {
 
 	_, err := DoHTTPRequest(context.Background(), server.URL)
 	require.Error(t, err)
-	assert.Less(t, len(err.Error()), maxErrorBodyBytes, "error must not echo the peer body")
-	assert.NotContains(t, err.Error(), "context deadline exceeded", "peer body must not reach the classified message")
-	assert.False(t, errors.IsLocalError(err),
+	require.Less(t, len(err.Error()), maxErrorBodyBytes, "error must not echo the peer body")
+	require.NotContains(t, err.Error(), "context deadline exceeded", "peer body must not reach the classified message")
+	require.False(t, errors.IsLocalError(err),
 		"a peer's HTTP error must never classify as local, even if its body contains context-sentinel text; got %v", err)
 }
 
@@ -1553,8 +1552,33 @@ func TestRetryHTTP_RetryAfterAboveMaxDelayClamps(t *testing.T) {
 	elapsed := time.Since(start)
 	require.NoError(t, err)
 	defer body.Close()
-	assert.GreaterOrEqual(t, elapsed, 150*time.Millisecond, "clamped Retry-After should wait ~maxDelay, not the tiny jittered backoff")
-	assert.Less(t, elapsed, 3*time.Second, "must not wait the full 999s Retry-After")
+	require.GreaterOrEqual(t, elapsed, 150*time.Millisecond, "clamped Retry-After should wait ~maxDelay, not the tiny jittered backoff")
+	require.Less(t, elapsed, 3*time.Second, "must not wait the full 999s Retry-After")
+}
+
+// TestDoHTTPRequestWithRetry_BeforeAttemptFiresEveryAttempt guards the anti-re-burst
+// wiring: the per-peer rate-limit hook must run before EVERY attempt (including retries),
+// not just the first. A future refactor hoisting the hook out of the per-attempt closure
+// would silently revert it and this test would catch it.
+func TestDoHTTPRequestWithRetry_BeforeAttemptFiresEveryAttempt(t *testing.T) {
+	var attempts, hookCalls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&attempts, 1) < 3 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer server.Close()
+
+	hook := func(context.Context) error { atomic.AddInt32(&hookCalls, 1); return nil }
+	got, err := doHTTPRequestWithRetry(context.Background(), server.URL, testRetryConfig, hook)
+	require.NoError(t, err)
+	require.Equal(t, "ok", string(got))
+	require.Equal(t, int32(3), atomic.LoadInt32(&attempts))
+	require.Equal(t, atomic.LoadInt32(&attempts), atomic.LoadInt32(&hookCalls),
+		"the rate-limit hook must fire on every attempt incl. retries")
 }
 
 func TestParseRetryAfter(t *testing.T) {
@@ -1577,7 +1601,7 @@ func TestParseRetryAfter(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.in, func(t *testing.T) {
-			assert.Equal(t, c.want, parseRetryAfter(c.in))
+			require.Equal(t, c.want, parseRetryAfter(c.in))
 		})
 	}
 }

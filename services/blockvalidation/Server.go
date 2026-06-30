@@ -44,6 +44,7 @@ import (
 	"github.com/bsv-blockchain/teranode/util/kafka"
 	kafkamessage "github.com/bsv-blockchain/teranode/util/kafka/kafka_message"
 	"github.com/bsv-blockchain/teranode/util/tracing"
+	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/jellydator/ttlcache/v3"
 	"github.com/ordishs/gocore"
 	"github.com/prometheus/client_golang/prometheus"
@@ -219,7 +220,9 @@ type Server struct {
 	// limiter and wedge IBD (see issue #1174). Lazily populated by peerFetchLimiter;
 	// guarded by peerFetchLimitersMu. The catchup peer set is small, so the map is
 	// not actively evicted.
-	peerFetchLimiters   map[string]*rate.Limiter
+	// Bounded (LRU) so a peer churning its advertised DataHubURL across catchup cycles
+	// can't grow this map without limit on a long-running node.
+	peerFetchLimiters   *lru.Cache[string, *rate.Limiter]
 	peerFetchLimitersMu sync.Mutex
 
 	// catchupStatsMu protects concurrent access to lastCatchupTime and lastCatchupResult.
@@ -1740,6 +1743,19 @@ func (u *Server) processCatchupChItem(ctx context.Context, c processBlockCatchup
 		// FSM rejected the transition — not a peer issue
 		if errors.Is(err, errors.ErrStateError) {
 			u.logger.Warnf("[catchup] FSM rejected catchup for block %s (node not in RUNNING state), clearing markers", c.block.Hash().String())
+			u.processBlockNotify.Delete(*c.block.Hash())
+			u.catchupAlternatives.Delete(*c.block.Hash())
+			return
+		}
+
+		// A local STORAGE fault (disk full / blob backend down) is also not a peer issue,
+		// but unlike a transient service error it must be surfaced LOUDLY: left at Warnf in
+		// the silent-retry bucket below, a persistent storage fault that outlasts the
+		// per-block cooldown lets the node silently fall behind while appearing healthy.
+		// Same attempt-cap / no-peer-blame handling, but logged at error level.
+		if errors.Is(err, errors.ErrStorageError) {
+			attempts := u.recordCatchupAttemptUnlessProgress(c.block.Hash())
+			u.logger.Errorf("[catchup] Local STORAGE error during catchup for block %s (attempt %d/%d) — node may fall behind until storage recovers: %v", c.block.Hash().String(), attempts, u.settings.BlockValidation.CatchupMaxAttemptsPerBlock, err)
 			u.processBlockNotify.Delete(*c.block.Hash())
 			u.catchupAlternatives.Delete(*c.block.Hash())
 			return

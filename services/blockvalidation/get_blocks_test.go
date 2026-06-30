@@ -1609,7 +1609,7 @@ func TestSubtreeFunctions(t *testing.T) {
 		testBlock := &model.Block{
 			Height: 100,
 		}
-		_, err = suite.Server.fetchAndStoreSubtreeAndSubtreeData(suite.Ctx, testBlock, subtreeHash, "12D3KooWL1NF6fdTJ9cucEuwvuX8V8KtpJZZnUE4umdLBuK15eUZ", "http://test-peer")
+		_, err = suite.Server.fetchAndStoreSubtreeAndSubtreeData(suite.Ctx, suite.Ctx, testBlock, subtreeHash, "12D3KooWL1NF6fdTJ9cucEuwvuX8V8KtpJZZnUE4umdLBuK15eUZ", "http://test-peer")
 		assert.NoError(t, err)
 
 		// Verify both were stored in subtreeStore
@@ -1661,7 +1661,7 @@ func TestSubtreeFunctions(t *testing.T) {
 			Height: 100,
 		}
 
-		_, err := suite.Server.fetchAndStoreSubtreeAndSubtreeData(suite.Ctx, testBlock, subtreeHash, "12D3KooWL1NF6fdTJ9cucEuwvuX8V8KtpJZZnUE4umdLBuK15eUZ", "http://test-peer")
+		_, err := suite.Server.fetchAndStoreSubtreeAndSubtreeData(suite.Ctx, suite.Ctx, testBlock, subtreeHash, "12D3KooWL1NF6fdTJ9cucEuwvuX8V8KtpJZZnUE4umdLBuK15eUZ", "http://test-peer")
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "failed to fetch subtree from")
 	})
@@ -1700,7 +1700,7 @@ func TestSubtreeFunctions(t *testing.T) {
 		testBlock := &model.Block{
 			Height: 100,
 		}
-		_, err := suite.Server.fetchAndStoreSubtreeAndSubtreeData(suite.Ctx, testBlock, subtreeHash, "12D3KooWL1NF6fdTJ9cucEuwvuX8V8KtpJZZnUE4umdLBuK15eUZ", "http://test-peer")
+		_, err := suite.Server.fetchAndStoreSubtreeAndSubtreeData(suite.Ctx, suite.Ctx, testBlock, subtreeHash, "12D3KooWL1NF6fdTJ9cucEuwvuX8V8KtpJZZnUE4umdLBuK15eUZ", "http://test-peer")
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "failed to fetch subtree data from")
 	})
@@ -2249,7 +2249,7 @@ func TestFetchAndStoreSubtreeData(t *testing.T) {
 		testBlock := &model.Block{
 			Height: 100,
 		}
-		_, err := server.fetchAndStoreSubtreeAndSubtreeData(ctx, testBlock, subtreeHash, "12D3KooWL1NF6fdTJ9cucEuwvuX8V8KtpJZZnUE4umdLBuK15eUZ", baseURL)
+		_, err := server.fetchAndStoreSubtreeAndSubtreeData(ctx, ctx, testBlock, subtreeHash, "12D3KooWL1NF6fdTJ9cucEuwvuX8V8KtpJZZnUE4umdLBuK15eUZ", baseURL)
 		assert.NoError(t, err)
 	})
 
@@ -2282,7 +2282,7 @@ func TestFetchAndStoreSubtreeData(t *testing.T) {
 		testBlock := &model.Block{
 			Height: 100,
 		}
-		_, err := server.fetchAndStoreSubtreeAndSubtreeData(ctx, testBlock, subtreeHash, "12D3KooWL1NF6fdTJ9cucEuwvuX8V8KtpJZZnUE4umdLBuK15eUZ", baseURL)
+		_, err := server.fetchAndStoreSubtreeAndSubtreeData(ctx, ctx, testBlock, subtreeHash, "12D3KooWL1NF6fdTJ9cucEuwvuX8V8KtpJZZnUE4umdLBuK15eUZ", baseURL)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "failed to fetch subtree")
 	})
@@ -2324,7 +2324,7 @@ func TestFetchAndStoreSubtreeData(t *testing.T) {
 		testBlock := &model.Block{
 			Height: 100,
 		}
-		_, err := server.fetchAndStoreSubtreeAndSubtreeData(ctx, testBlock, subtreeHash, "12D3KooWL1NF6fdTJ9cucEuwvuX8V8KtpJZZnUE4umdLBuK15eUZ", baseURL)
+		_, err := server.fetchAndStoreSubtreeAndSubtreeData(ctx, ctx, testBlock, subtreeHash, "12D3KooWL1NF6fdTJ9cucEuwvuX8V8KtpJZZnUE4umdLBuK15eUZ", baseURL)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "failed to fetch subtree data from")
 	})
@@ -2378,7 +2378,7 @@ func TestFetchAndStoreSubtreeData(t *testing.T) {
 		testBlock := &model.Block{
 			Height: 100,
 		}
-		_, err := server.fetchAndStoreSubtreeAndSubtreeData(ctx, testBlock, subtreeHash, "12D3KooWL1NF6fdTJ9cucEuwvuX8V8KtpJZZnUE4umdLBuK15eUZ", baseURL)
+		_, err := server.fetchAndStoreSubtreeAndSubtreeData(ctx, ctx, testBlock, subtreeHash, "12D3KooWL1NF6fdTJ9cucEuwvuX8V8KtpJZZnUE4umdLBuK15eUZ", baseURL)
 		assert.Error(t, err)
 	})
 
@@ -2429,7 +2429,7 @@ func TestFetchAndStoreSubtreeData(t *testing.T) {
 		testBlock := &model.Block{
 			Height: 100,
 		}
-		_, err := server.fetchAndStoreSubtreeAndSubtreeData(cancelCtx, testBlock, subtreeHash, "12D3KooWL1NF6fdTJ9cucEuwvuX8V8KtpJZZnUE4umdLBuK15eUZ", baseURL)
+		_, err := server.fetchAndStoreSubtreeAndSubtreeData(cancelCtx, cancelCtx, testBlock, subtreeHash, "12D3KooWL1NF6fdTJ9cucEuwvuX8V8KtpJZZnUE4umdLBuK15eUZ", baseURL)
 		assert.Error(t, err)
 		// Check for either context canceled or the wrapped error containing context cancellation
 		assert.True(t,
@@ -3392,7 +3392,7 @@ func TestFetchAndStoreSubtreeDataEdgeCases(t *testing.T) {
 		}
 
 		// This should skip fetching since data already exists
-		err = suite.Server.fetchAndStoreSubtreeData(suite.Ctx, testBlock, &subtreeHash, subtree, "12D3KooWL1NF6fdTJ9cucEuwvuX8V8KtpJZZnUE4umdLBuK15eUZ", "http://test-peer")
+		err = suite.Server.fetchAndStoreSubtreeData(suite.Ctx, suite.Ctx, testBlock, &subtreeHash, subtree, "12D3KooWL1NF6fdTJ9cucEuwvuX8V8KtpJZZnUE4umdLBuK15eUZ", "http://test-peer")
 		assert.NoError(t, err)
 	})
 }

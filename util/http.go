@@ -177,26 +177,49 @@ func DoHTTPRequest(ctx context.Context, url string, requestBody ...[]byte) ([]by
 		}
 	}()
 
-	// Read body with context deadline support
-	// Create a channel to handle the read operation
-	done := make(chan struct{})
-	var blockBytes []byte
-	var readErr error
+	return readBodyWithCtx(ctx, url, bodyReaderCloser, -1)
+}
 
+// readBodyWithCtx reads r fully while honoring ctx during the read (a slow/stalled peer
+// can't block past the request deadline), with ONE shared cancel-vs-deadline
+// classification so every caller agrees: a context deadline (peer too slow) → a non-local
+// network timeout (the peer is at fault); a cancel (e.g. shutdown) → a local context error
+// (we are at fault, don't blame the peer). Any other read error → a generic service error.
+// maxBytes < 0 means unbounded; otherwise the body is capped and ErrExternal is returned if
+// the peer streams more than the cap.
+func readBodyWithCtx(ctx context.Context, url string, r io.Reader, maxBytes int64) ([]byte, error) {
+	if maxBytes >= 0 {
+		r = io.LimitReader(r, maxBytes+1)
+	}
+
+	done := make(chan struct{})
+	var b []byte
+	var readErr error
 	go func() {
-		blockBytes, readErr = io.ReadAll(bodyReaderCloser)
+		b, readErr = io.ReadAll(r)
 		close(done)
 	}()
 
-	// Wait for either read completion or context timeout
 	select {
 	case <-ctx.Done():
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return nil, errors.NewContextCanceledError("http request [%s] canceled while reading body", url, context.Canceled)
+		}
 		return nil, errors.NewNetworkTimeoutError("http request [%s] timed out while reading body", url)
 	case <-done:
 		if readErr != nil {
+			if errors.Is(readErr, context.DeadlineExceeded) {
+				return nil, errors.NewNetworkTimeoutError("http request [%s] timed out while reading body", url)
+			}
+			if errors.Is(readErr, context.Canceled) {
+				return nil, errors.NewContextCanceledError("http request [%s] canceled while reading body", url, context.Canceled)
+			}
 			return nil, errors.NewServiceError("http request [%s] failed to read body", url, readErr)
 		}
-		return blockBytes, nil
+		if maxBytes >= 0 && int64(len(b)) > maxBytes {
+			return nil, errors.NewExternalError("http request [%s] response body exceeds %d bytes", url, maxBytes)
+		}
+		return b, nil
 	}
 }
 
@@ -222,31 +245,7 @@ func DoHTTPRequestBounded(ctx context.Context, url string, maxBytes int64, reque
 		}
 	}()
 
-	bounded := io.LimitReader(bodyReaderCloser, maxBytes+1)
-
-	done := make(chan struct{})
-	var blockBytes []byte
-	var readErr error
-
-	go func() {
-		blockBytes, readErr = io.ReadAll(bounded)
-		close(done)
-	}()
-
-	select {
-	case <-ctx.Done():
-		return nil, errors.NewNetworkTimeoutError("http request [%s] timed out while reading body", url)
-	case <-done:
-		if readErr != nil {
-			return nil, errors.NewServiceError("http request [%s] failed to read body", url, readErr)
-		}
-
-		if int64(len(blockBytes)) > maxBytes {
-			return nil, errors.NewExternalError("http request [%s] response body exceeds %d bytes", url, maxBytes)
-		}
-
-		return blockBytes, nil
-	}
+	return readBodyWithCtx(ctx, url, bodyReaderCloser, maxBytes)
 }
 
 // readCloserWithCancel wraps an io.ReadCloser and calls a cancel function when closed.
@@ -534,8 +533,10 @@ var defaultRetryConfig = retryConfig{
 	maxDelay:     5 * time.Second,
 }
 
-// jitterDelay returns a randomised duration in [d/2, d] (full jitter on the
-// upper half of the computed backoff). De-synchronising the backoff matters
+// jitterDelay returns a randomised duration in [d/2, d] — i.e. "equal jitter"
+// (half fixed, half random), not "full jitter" ([0, d]). The d/2 floor is
+// deliberate: it avoids waking too early and re-bursting into the per-peer rate
+// limiter. De-synchronising the backoff matters
 // during p2p catchup: many heavy fetches hit the same per-peer rate limiter at
 // once, so without jitter every retry wakes on the same tick and re-bursts into
 // the limiter. Guarded so rand.Int64N never receives 0.
@@ -710,50 +711,9 @@ func readBodyWithRetryAfter(ctx context.Context, url string, maxBytes int64, req
 	}
 	defer func() { _ = reader.Close() }()
 
-	var r io.Reader = reader
-	if maxBytes >= 0 {
-		r = io.LimitReader(reader, maxBytes+1)
-	}
-
-	done := make(chan struct{})
-	var b []byte
-	var readErr error
-	go func() {
-		b, readErr = io.ReadAll(r)
-		close(done)
-	}()
-
-	select {
-	case <-ctx.Done():
-		// The parent context ended while reading. A cancel is a local condition
-		// (e.g. node shutdown) — keep it local so a peer isn't blamed for our own
-		// teardown. A deadline means the overall fetch budget was exceeded (the peer
-		// was too slow) — attribute that to the peer via a network timeout.
-		if errors.Is(ctx.Err(), context.Canceled) {
-			return nil, 0, errors.NewContextCanceledError("http request [%s] canceled while reading body", url, context.Canceled)
-		}
-		return nil, 0, errors.NewNetworkTimeoutError("http request [%s] timed out while reading body", url)
-	case <-done:
-		if readErr != nil {
-			// The per-request transport timeout (httpRequestTimeout) fires on the
-			// derived request context, which this select does not observe — it surfaces
-			// here as a context-deadline read error. A peer stalling mid-stream is the
-			// peer's fault, so classify it as a (non-local) network timeout rather than a
-			// generic ServiceError whose wrapped context string would be misread as local.
-			// errors.Is is checked on the raw readErr, before any teranode wrapping.
-			if errors.Is(readErr, context.DeadlineExceeded) {
-				return nil, 0, errors.NewNetworkTimeoutError("http request [%s] timed out while reading body", url)
-			}
-			if errors.Is(readErr, context.Canceled) {
-				return nil, 0, errors.NewContextCanceledError("http request [%s] canceled while reading body", url, context.Canceled)
-			}
-			return nil, 0, errors.NewServiceError("http request [%s] failed to read body", url, readErr)
-		}
-		if maxBytes >= 0 && int64(len(b)) > maxBytes {
-			return nil, 0, errors.NewExternalError("http request [%s] response body exceeds %d bytes", url, maxBytes)
-		}
-		return b, 0, nil
-	}
+	// Shared body read + cancel-vs-deadline classification (see readBodyWithCtx).
+	b, err := readBodyWithCtx(ctx, url, reader, maxBytes)
+	return b, 0, err
 }
 
 // doHTTPRequestForStreamingWithRetryAfter is doHTTPRequestForStreaming + extracts
