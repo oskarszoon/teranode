@@ -20,6 +20,7 @@ import (
 	"github.com/bsv-blockchain/teranode/util"
 	"github.com/bsv-blockchain/teranode/util/tracing"
 	lru "github.com/hashicorp/golang-lru/v2"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/time/rate"
 )
@@ -644,9 +645,16 @@ func (u *Server) fetchAndStoreSubtreeData(ctx context.Context, shutdownCtx conte
 	// from everything, so a stuck stream blocked graceful shutdown until http_streaming_timeout).
 	// The existence check above still uses the original (errgroup) ctx, so a pre-cancelled call
 	// exits early. See companion fix in services/subtreevalidation/check_block_subtrees.go.
+	//
+	// context.WithCancel(shutdownCtx) carries shutdownCtx's values (the catchup-level trace
+	// span), so re-attach this function's span afterwards — otherwise the fetch/store child
+	// spans reparent to the catchup root instead of nesting under fetchAndStoreSubtreeData.
+	// Observability-only; the cancellation behaviour is unchanged.
+	spanCtx := ctx
 	var dlCancel context.CancelFunc
 	ctx, dlCancel = context.WithCancel(shutdownCtx)
 	defer dlCancel()
+	ctx = trace.ContextWithSpan(ctx, trace.SpanFromContext(spanCtx))
 
 	// The per-attempt rate-limit pacing hook uses the attempt ctx (this dlCtx), which is
 	// cancellable on shutdown — so both the pacing wait and the download abort promptly.
