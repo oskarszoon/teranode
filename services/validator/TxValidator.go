@@ -152,10 +152,13 @@ func (tv *TxValidator) ValidateTransaction(tx *bt.Tx, blockHeight uint32, utxoHe
 		// The normal path leans on BDK to reject MEMPOOL_HEIGHT in consensus mode
 		// (bdk/core/txvalidator.cpp:779), but skipping script validation bypasses
 		// BDK entirely. Without this guard the unconfirmedParentHeight sentinel
-		// would propagate to BIP68 (height conversion produces -1 from 0xFFFFFFFF
-		// in sequenceLocks; MTP lookup in Validator.readMTPsLocked clamps to
-		// blockMTP) and the tx would be silently accepted. Mirror BDK's
-		// UnconfirmedInputInBlock rejection here.
+		// would propagate to BIP68. With the int64 height arithmetic in
+		// sequenceLocks the sentinel now evaluates to 4294967295 (not the old
+		// int32 wrap to -1), so an unguarded sentinel would FAIL the height check
+		// rather than be silently accepted; we still reject explicitly here to
+		// mirror BDK's UnconfirmedInputInBlock with the correct error instead of a
+		// generic BIP68 height failure (the MTP lookup in
+		// Validator.readMTPsLocked clamps to blockMTP).
 		if validationOptions.SkipPolicyChecks {
 			for _, h := range utxoHeights {
 				if h == unconfirmedParentHeight {
