@@ -718,10 +718,16 @@ func (s *Service) PruneWithPartitions(ctx context.Context, blockHeight uint32, b
 	//   - CheckAndRemove (cuckoo Delete) is destructive — one consumer per parent. For high
 	//     fan-out parents spanning sessions, only the first child to look gets the skip;
 	//     subsequent children fall back to the round-trip. Perf nit, not a correctness bug.
-	//   - The skip suppresses the deletedChildren bin update. That bin is only consulted by
-	//     the defensive-mode safety check (always off when prunedSet is non-nil), so a
-	//     missed update — including the ~3% cuckoo false-positive rate — has no
-	//     behavioural consequence.
+	//   - The skip suppresses the deletedChildren bin update. Consumers of that bin: the
+	//     defensive-mode safety check (always off when prunedSet is non-nil) AND the
+	//     counter-conflicting fail-closed guards (GetCounterConflictingTxHashes / the
+	//     ProcessConflicting repair path), which treat a marked ghost spender as a
+	//     deliberate deletion and refuse to tolerate it. A missed update — including the
+	//     ~3% cuckoo false-positive rate — therefore degrades a guard from fail-closed to
+	//     tolerate for that ghost; acceptable because a pruner-deleted record is by
+	//     construction ≥retention-deep mined-stable and the guards' safety argument
+	//     (documented at the walk's spender-existence check) covers exactly that corner.
+	//     The marker is best-effort by design, never load-bearing for consensus.
 	//
 	// Memory is bounded by settings.Pruner.UTXOPrunedSetMaxEntries — interpreted as a
 	// TOTAL entry budget across both generations of all shards, so memory ≈ maxEntries
@@ -1520,8 +1526,11 @@ func (s *Service) flushCleanupBatches(ctx context.Context, parentUpdates map[str
 	// parent's deletedChildren bin and assumes the update has landed
 	// before the child record is gone.
 	//
-	// When defensive mode is off (the dev-scale-1 default), order
-	// doesn't matter because the deletedChildren bin is never read.
+	// When defensive mode is off (the dev-scale-1 default), the pruner
+	// itself never reads the deletedChildren bin, so ordering within one
+	// batch does not matter for pruning. (The bin IS read elsewhere — the
+	// counter-conflicting fail-closed guards consume it best-effort — but
+	// they tolerate a missing marker, so combined ordering stays safe.)
 	if s.defensiveEnabled {
 		if len(parentUpdates) > 0 {
 			if err := s.executeBatchParentUpdates(ctx, parentUpdates); err != nil {

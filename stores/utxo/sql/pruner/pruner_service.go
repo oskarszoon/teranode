@@ -128,59 +128,108 @@ func (s *Service) Prune(ctx context.Context, blockHeight uint32, blockHashStr st
 
 // deleteTombstoned removes transactions that have passed their expiration time.
 // Only deletes parent transactions if their last spending child is mined and stable.
+//
+// Before the DELETE — in the same database transaction — it records a
+// deleted_children marker row (parent_hash, child_hash) on each deleted tx's input
+// parents, mirroring the aerospike deletedChildren bin. The counter-conflicting
+// fail-closed guards consume these markers to discriminate a deliberately reaped
+// spender from a tolerable ghost. Markers whose parent is itself deleted in the same
+// pass are removed again (a missing parent already fails the walk closed), which also
+// bounds the table's growth to (surviving parent, reaped child) pairs. Best-effort
+// corner: on postgres READ COMMITTED a row that starts qualifying between the marker
+// INSERT and the DELETE inside this transaction is deleted unmarked — the residual
+// window the counter-conflicting tolerance comments document.
 func (s *Service) deleteTombstoned(ctx context.Context, blockHeight uint32) (int64, error) {
 	// Use configured safety window from settings
 	safetyWindow := s.safetyWindow
 
 	// Defensive child verification is conditional on the UTXODefensiveEnabled setting
 	// When disabled, parents are deleted without verifying children are stable
-	var deleteQuery string
-	var result interface{ RowsAffected() (int64, error) }
-	var err error
+	var (
+		deletableIDs string
+		args         []interface{}
+	)
 
 	if !s.defensiveEnabled {
 		// Defensive mode disabled - delete all transactions past their expiration
-		deleteQuery = `
-			DELETE FROM transactions
-			WHERE delete_at_height IS NOT NULL
-			  AND delete_at_height <= $1
+		deletableIDs = `
+			SELECT t.id
+			FROM transactions t
+			WHERE t.delete_at_height IS NOT NULL
+			  AND t.delete_at_height <= $1
 		`
-		result, err = s.db.ExecContext(ctx, deleteQuery, blockHeight)
+		args = []interface{}{blockHeight}
 	} else {
 		// Defensive mode enabled - verify ALL spending children are stable before deletion
 		// This prevents orphaning any child transaction
-		deleteQuery = `
-			DELETE FROM transactions
-			WHERE id IN (
-				SELECT t.id
-				FROM transactions t
-				WHERE t.delete_at_height IS NOT NULL
-				  AND t.delete_at_height <= $1
-				  AND NOT EXISTS (
-				    -- Find ANY unstable child - if found, parent cannot be deleted
-				    -- This ensures ALL children must be stable before parent deletion
-				    SELECT 1
-				    FROM outputs o
-				    WHERE o.transaction_id = t.id
-				      AND o.spending_data IS NOT NULL
-				      AND (
-				        -- Extract child TX hash from spending_data (first 32 bytes)
-				        -- Check if this child is NOT stable
-				        NOT EXISTS (
-				          SELECT 1
-				          FROM transactions child
-				          INNER JOIN block_ids child_blocks ON child.id = child_blocks.transaction_id
-				          WHERE child.hash = substr(o.spending_data, 1, 32)
-				            AND child.unmined_since IS NULL  -- Child must be mined
-				            AND child_blocks.block_height <= ($1 - $2)  -- Child must be stable
-				        )
-				      )
-				  )
-			)
+		deletableIDs = `
+			SELECT t.id
+			FROM transactions t
+			WHERE t.delete_at_height IS NOT NULL
+			  AND t.delete_at_height <= $1
+			  AND NOT EXISTS (
+			    -- Find ANY unstable child - if found, parent cannot be deleted
+			    -- This ensures ALL children must be stable before parent deletion
+			    SELECT 1
+			    FROM outputs o
+			    WHERE o.transaction_id = t.id
+			      AND o.spending_data IS NOT NULL
+			      AND (
+			        -- Extract child TX hash from spending_data (first 32 bytes)
+			        -- Check if this child is NOT stable
+			        NOT EXISTS (
+			          SELECT 1
+			          FROM transactions child
+			          INNER JOIN block_ids child_blocks ON child.id = child_blocks.transaction_id
+			          WHERE child.hash = substr(o.spending_data, 1, 32)
+			            AND child.unmined_since IS NULL  -- Child must be mined
+			            AND child_blocks.block_height <= ($1 - $2)  -- Child must be stable
+			        )
+			      )
+			  )
 		`
-		result, err = s.db.ExecContext(ctx, deleteQuery, blockHeight, safetyWindow)
+		args = []interface{}{blockHeight, safetyWindow}
 	}
 
+	txn, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, errors.NewStorageError("failed to begin prune transaction", err)
+	}
+
+	defer func() {
+		_ = txn.Rollback() // no-op after Commit
+	}()
+
+	// 1: mark each deleted tx on its input parents.
+	insertMarkersQuery := `
+		INSERT INTO deleted_children (parent_hash, child_hash)
+		SELECT DISTINCT i.previous_transaction_hash, tx.hash
+		FROM transactions tx
+		INNER JOIN inputs i ON i.transaction_id = tx.id
+		WHERE tx.id IN (` + deletableIDs + `)
+		ON CONFLICT (parent_hash, child_hash) DO NOTHING
+	`
+	if _, err = txn.ExecContext(ctx, insertMarkersQuery, args...); err != nil {
+		return 0, errors.NewStorageError("failed to insert deleted_children markers", err)
+	}
+
+	// 2: drop markers whose parent is deleted in this pass (including ones just
+	// inserted) — the walk already fails closed on a missing parent, and this keeps
+	// the marker table from growing past the surviving parents.
+	cleanupMarkersQuery := `
+		DELETE FROM deleted_children
+		WHERE parent_hash IN (
+			SELECT tx.hash FROM transactions tx WHERE tx.id IN (` + deletableIDs + `)
+		)
+	`
+	if _, err = txn.ExecContext(ctx, cleanupMarkersQuery, args...); err != nil {
+		return 0, errors.NewStorageError("failed to clean up deleted_children markers", err)
+	}
+
+	// 3: the delete itself.
+	deleteQuery := `DELETE FROM transactions WHERE id IN (` + deletableIDs + `)`
+
+	result, err := txn.ExecContext(ctx, deleteQuery, args...)
 	if err != nil {
 		return 0, errors.NewStorageError("failed to delete transactions", err)
 	}
@@ -188,6 +237,10 @@ func (s *Service) deleteTombstoned(ctx context.Context, blockHeight uint32) (int
 	count, err := result.RowsAffected()
 	if err != nil {
 		return 0, errors.NewStorageError("failed to get rows affected", err)
+	}
+
+	if err = txn.Commit(); err != nil {
+		return 0, errors.NewStorageError("failed to commit prune transaction", err)
 	}
 
 	return count, nil

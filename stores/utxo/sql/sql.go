@@ -1419,8 +1419,8 @@ func (s *Store) get(ctx context.Context, hash *chainhash.Hash, bins []fields.Fie
 
 	// Use batcher for the common validator path (BlockIDs, BlockHeights, Tx, Inputs, Outputs).
 	// Fall back to unbatched for fields that BatchDecorate doesn't support
-	// (ConflictingChildren, Utxos) to avoid missing data.
-	if s.getBatcher != nil && !contains(bins, fields.ConflictingChildren) && !contains(bins, fields.Utxos) {
+	// (ConflictingChildren, Utxos, DeletedChildren) to avoid missing data.
+	if s.getBatcher != nil && !contains(bins, fields.ConflictingChildren) && !contains(bins, fields.Utxos) && !contains(bins, fields.DeletedChildren) {
 		return s.getBatched(ctx, hash, bins)
 	}
 
@@ -1668,6 +1668,38 @@ func (s *Store) getUnbatched(ctx context.Context, hash *chainhash.Hash, bins []f
 			}
 
 			data.ConflictingChildren = append(data.ConflictingChildren, chainhash.Hash(spendingDataBytes))
+		}
+	}
+
+	if contains(bins, fields.DeletedChildren) {
+		// Pruner-deleted spender markers for this tx as a parent — the SQL mirror of
+		// the aerospike deletedChildren bin, consumed by the counter-conflicting
+		// fail-closed guards.
+		q := `SELECT child_hash FROM deleted_children WHERE parent_hash = $1`
+
+		rows, err := s.db.QueryContext(ctx, q, hash[:])
+		if err != nil {
+			return nil, err
+		}
+
+		defer rows.Close()
+
+		for rows.Next() {
+			var childHashBytes []byte
+
+			if err = rows.Scan(&childHashBytes); err != nil {
+				return nil, err
+			}
+
+			if data.DeletedChildren == nil {
+				data.DeletedChildren = make(map[chainhash.Hash]struct{})
+			}
+
+			data.DeletedChildren[chainhash.Hash(childHashBytes)] = struct{}{}
+		}
+
+		if err = rows.Err(); err != nil {
+			return nil, err
 		}
 	}
 
@@ -4937,6 +4969,24 @@ func createPostgresSchemaImpl(db DBExecutor) error {
 		return errors.NewStorageError("could not create conflict_intents table - [%+v]", err)
 	}
 
+	// deleted_children mirrors the aerospike deletedChildren bin: one row per
+	// (surviving parent, pruner-deleted child). Written by the pruner in the same
+	// transaction as the child's DELETE; consumed by the counter-conflicting
+	// fail-closed guards (GetCounterConflictingTxHashes and the ProcessConflicting
+	// repair path) to discriminate a deliberately reaped spender from a tolerable
+	// ghost. Keyed by hash, not transactions(id) — the child row is gone by
+	// definition. Rows are removed when the parent itself is reaped.
+	if _, err := db.Exec(`
+      CREATE TABLE IF NOT EXISTS deleted_children (
+         parent_hash BYTEA NOT NULL
+        ,child_hash  BYTEA NOT NULL
+        ,PRIMARY KEY (parent_hash, child_hash)
+	  );
+	`); err != nil {
+		_ = db.Close()
+		return errors.NewStorageError("could not create deleted_children table - [%+v]", err)
+	}
+
 	return nil
 }
 
@@ -5248,6 +5298,20 @@ func createSqliteSchema(db *usql.DB) error {
 	`); err != nil {
 		_ = db.Close()
 		return errors.NewStorageError("could not create conflict_intents table - [%+v]", err)
+	}
+
+	// deleted_children — pruner-deleted spender markers consumed by the
+	// counter-conflicting fail-closed guards. See the postgres schema for the
+	// rationale; SQLite mirror with BLOB columns.
+	if _, err := db.Exec(`
+      CREATE TABLE IF NOT EXISTS deleted_children (
+         parent_hash BLOB NOT NULL
+        ,child_hash  BLOB NOT NULL
+        ,PRIMARY KEY (parent_hash, child_hash)
+	  );
+	`); err != nil {
+		_ = db.Close()
+		return errors.NewStorageError("could not create deleted_children table - [%+v]", err)
 	}
 
 	return nil

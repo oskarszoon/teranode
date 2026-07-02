@@ -24,6 +24,9 @@ import (
 	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/stores/utxo"
 	"github.com/bsv-blockchain/teranode/stores/utxo/fields"
+	sqlpruner "github.com/bsv-blockchain/teranode/stores/utxo/sql/pruner"
+	"github.com/bsv-blockchain/teranode/ulogger"
+	"github.com/bsv-blockchain/teranode/util/test"
 	"github.com/stretchr/testify/require"
 )
 
@@ -210,6 +213,12 @@ func TestProcessConflicting_SelfHealsDanglingLoserSlot(t *testing.T) {
 	winnerMeta, err := store.Get(ctx, winner.TxIDChainHash(), fields.Conflicting)
 	require.NoError(t, err)
 	require.False(t, winnerMeta.Conflicting, "promoted winner must be unmarked")
+
+	// And the parent must be spendable again — step 2 locked it, step 5 must have
+	// unlocked it. A leak here would leave the repaired parent stuck Locked.
+	parentMeta, err = store.Get(ctx, parent.TxIDChainHash(), fields.Locked)
+	require.NoError(t, err)
+	require.False(t, parentMeta.Locked, "self-heal must leave the parent unlocked")
 }
 
 // TestGetCounterConflictingTxHashes_FailsClosedOnMissingParent verifies that a
@@ -239,4 +248,121 @@ func TestGetCounterConflictingTxHashes_FailsClosedOnMissingParent(t *testing.T) 
 	require.Error(t, err, "a missing parent record must fail closed, not be silently tolerated")
 	require.True(t, errors.Is(err, errors.ErrTxNotFound) || errors.Is(err, errors.ErrNotFound),
 		"the missing-parent failure must propagate the underlying not-found error, not be swallowed")
+}
+
+// newDanglingTestPruner builds the SQL pruner service against the test store's own
+// database handle so pruner-driven deletions hit the same schema the walk reads.
+func newDanglingTestPruner(ctx context.Context, t *testing.T, store *Store) *sqlpruner.Service {
+	t.Helper()
+
+	tSettings := test.CreateBaseTestSettings(t)
+	tSettings.Pruner.UTXODefensiveEnabled = false // pin the plain-delete branch; the marker logic is branch-independent
+
+	svc, err := sqlpruner.NewService(tSettings, sqlpruner.Options{
+		Logger: ulogger.TestLogger{},
+		DB:     store.db,
+		Ctx:    ctx,
+	})
+	require.NoError(t, err)
+
+	return svc
+}
+
+// TestSQLPruner_DeletedChildLeavesMarker_WalkFailsClosed verifies the SQL mirror of the
+// aerospike deletedChildren bin: when the PRUNER (not an ad-hoc Delete) reaps a spender
+// whose parent survives, it must leave a deleted_children marker row, the store must
+// surface it via fields.DeletedChildren, and the counter walk must fail closed on the
+// marked ghost instead of tolerating it. This closes the (retention, retention*2] band
+// on postgres/sqlite where a mined-spent counter is pruned while still inside the
+// mined-on-chain comparison window.
+func TestSQLPruner_DeletedChildLeavesMarker_WalkFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	store, _ := setup(ctx, t)
+
+	parent := danglingParentTx(0x76)
+	_, err := store.Create(ctx, parent, 100)
+	require.NoError(t, err)
+
+	// counter is the recorded spender of parent[0]; the pruner will reap it.
+	counter := danglingSpendTx(t, parent, 80000)
+	_, err = store.Create(ctx, counter, 100)
+	require.NoError(t, err)
+
+	_, err = store.Spend(ctx, counter, 101)
+	require.NoError(t, err)
+
+	// queryTx is the conflicting tx that ALSO spends parent[0].
+	queryTx := danglingSpendTx(t, parent, 90000)
+	_, err = store.Create(ctx, queryTx, 100, utxo.WithConflicting(true))
+	require.NoError(t, err)
+
+	// Tombstone the counter and run the pruner.
+	_, err = store.db.ExecContext(ctx, `UPDATE transactions SET delete_at_height = $1 WHERE hash = $2`, 150, counter.TxIDChainHash()[:])
+	require.NoError(t, err)
+
+	pruned, err := newDanglingTestPruner(ctx, t, store).Prune(ctx, 150, "test")
+	require.NoError(t, err)
+	require.EqualValues(t, 1, pruned, "the tombstoned counter must be reaped")
+
+	// The counter's record is gone...
+	_, err = store.Get(ctx, counter.TxIDChainHash(), fields.Conflicting)
+	require.Error(t, err)
+	require.True(t, errors.Is(err, errors.ErrTxNotFound))
+
+	// ...but the surviving parent carries the marker.
+	parentMeta, err := store.Get(ctx, parent.TxIDChainHash(), fields.DeletedChildren)
+	require.NoError(t, err)
+	require.Contains(t, parentMeta.DeletedChildren, *counter.TxIDChainHash(),
+		"the pruner must leave a deleted_children marker on the surviving parent")
+
+	// The walk must fail closed on the marked ghost, not tolerate it.
+	_, err = utxo.GetCounterConflictingTxHashes(ctx, store, *queryTx.TxIDChainHash())
+	require.Error(t, err, "a pruner-marked ghost must fail the walk closed")
+	require.Contains(t, err.Error(), "deleted by the pruner")
+}
+
+// TestSQLPruner_MarkerRemovedWhenParentPruned verifies marker growth stays bounded:
+// once the parent itself is reaped, its deleted_children rows go with it (a missing
+// parent already fails the walk closed, so the markers carry no information).
+func TestSQLPruner_MarkerRemovedWhenParentPruned(t *testing.T) {
+	ctx := context.Background()
+	store, _ := setup(ctx, t)
+
+	parent := danglingParentTx(0x77)
+	_, err := store.Create(ctx, parent, 100)
+	require.NoError(t, err)
+
+	child := danglingSpendTx(t, parent, 80000)
+	_, err = store.Create(ctx, child, 100)
+	require.NoError(t, err)
+
+	_, err = store.Spend(ctx, child, 101)
+	require.NoError(t, err)
+
+	prunerSvc := newDanglingTestPruner(ctx, t, store)
+
+	// Pass 1: reap the child → marker row on the parent.
+	_, err = store.db.ExecContext(ctx, `UPDATE transactions SET delete_at_height = $1 WHERE hash = $2`, 150, child.TxIDChainHash()[:])
+	require.NoError(t, err)
+
+	pruned, err := prunerSvc.Prune(ctx, 150, "test")
+	require.NoError(t, err)
+	require.EqualValues(t, 1, pruned)
+
+	var markerCount int
+	require.NoError(t, store.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM deleted_children WHERE parent_hash = $1`, parent.TxIDChainHash()[:]).Scan(&markerCount))
+	require.Equal(t, 1, markerCount, "pass 1 must have left a marker on the surviving parent")
+
+	// Pass 2: reap the parent → its marker rows must be removed in the same pass.
+	_, err = store.db.ExecContext(ctx, `UPDATE transactions SET delete_at_height = $1 WHERE hash = $2`, 200, parent.TxIDChainHash()[:])
+	require.NoError(t, err)
+
+	pruned, err = prunerSvc.Prune(ctx, 200, "test")
+	require.NoError(t, err)
+	require.EqualValues(t, 1, pruned)
+
+	require.NoError(t, store.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM deleted_children WHERE parent_hash = $1`, parent.TxIDChainHash()[:]).Scan(&markerCount))
+	require.Equal(t, 0, markerCount, "reaping the parent must remove its deleted_children rows")
 }

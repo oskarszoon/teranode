@@ -4,10 +4,9 @@ package sql
 //   - stores/utxo/setconflicting_cascade_bug_test.go (mock-based, proves the cascade)
 //   - stores/utxo/aerospike/setconflicting_cascade_test.go (Aerospike TestContainer)
 //
-// SQLite cannot be tested here: SetConflicting (sql.go:3537) opens a write
-// transaction via s.db.Begin(), then calls s.Get/s.GetSpend (lines 3548, 3595)
-// on the store's connection pool — not on the open transaction. In SQLite
-// serialized mode with a single-connection test pool, this deadlocks.
-//
-// This is also a potential production-latency concern for the SQL store under
-// high concurrency, not just a test limitation.
+// SQLite-backed coverage is possible since the Phase-1 read hoist in SetConflicting
+// (sql.go ~4280): all s.Get/s.GetSpend reads now run on the pool BEFORE s.db.Begin()
+// opens the write transaction, so the historical shared-cache deadlock (reads
+// interleaved inside an open write txn on a single-connection pool) is gone.
+// TestProcessConflicting_SelfHealsDanglingLoserSlot in
+// counter_conflicting_dangling_test.go exercises SetConflicting end-to-end on SQLite.

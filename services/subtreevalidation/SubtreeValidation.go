@@ -489,6 +489,14 @@ func (u *Server) checkCounterConflictingOnCurrentChain(ctx context.Context, txHa
 				// The counter no longer exists on our chain (pruned/reorged/deleted). That is
 				// not grounds to reject: skip it, leaving counterConflictingTxMetas[idx] nil for
 				// the mined-check loop below to nil-guard.
+				//
+				// Intentional defense-in-depth, not the enforcement point: the walk
+				// (GetCounterConflictingTxHashes) already excluded ghosts and fail-closed on
+				// pruner-marked (deletedChildren) ones, so this branch is reachable only via
+				// a TOCTOU delete between the walk above and this GetMeta. The counter set
+				// here contains only records the walk just saw alive; a marker check cannot
+				// be repeated here because the marker lives on the PARENT record this loop
+				// does not re-read — the walk is the marker-enforcing point.
 				if errors.Is(err, errors.ErrTxNotFound) || errors.Is(err, errors.ErrNotFound) {
 					if u.logger != nil {
 						u.logger.Warnf("[checkCounterConflictingOnCurrentChain][%s] counter conflicting tx %s not found, skipping (dangling reference)", txHash.String(), counterConflictingTxHash.String())
@@ -514,16 +522,8 @@ func (u *Server) checkCounterConflictingOnCurrentChain(ctx context.Context, txHa
 	for _, counterConflictingTxHash := range counterConflictingTxHashes {
 		childTransactionHashes, err := utxo.GetConflictingChildren(ctx, u.utxoStore, counterConflictingTxHash)
 		if err != nil {
-			// A dangling counter has no reachable children to inspect for frozen sentinels —
-			// tolerate the missing record and move to the next counter.
-			if errors.Is(err, errors.ErrTxNotFound) || errors.Is(err, errors.ErrNotFound) {
-				if u.logger != nil {
-					u.logger.Warnf("[checkCounterConflictingOnCurrentChain][%s] counter conflicting tx %s not found while fetching children, skipping (dangling reference)", txHash.String(), counterConflictingTxHash.String())
-				}
-
-				continue
-			}
-
+			// GetConflictingChildren swallows NOT_FOUND internally (missing root or child
+			// records are evicted from the BFS), so any error here is a real failure.
 			return errors.NewProcessingError("[checkCounterConflictingOnCurrentChain][%s] failed to get child transactions", txHash.String(), err)
 		}
 
