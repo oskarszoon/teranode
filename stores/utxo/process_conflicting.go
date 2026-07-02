@@ -26,16 +26,21 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// prometheusUtxoCounterConflictingDanglingRefs counts every dangling reference the
-// counter-conflicting walk tolerates: a parent UTXO still records a spender whose own
-// record has been removed (pruned/reorged/deleted). These free functions have no logger,
-// so a counter is the observability surface — each tolerated ghost bumps it once.
-var prometheusUtxoCounterConflictingDanglingRefs = promauto.NewCounter(
+// prometheusUtxoCounterConflictingDanglingRefs counts every dangling reference tolerated
+// while resolving conflicts: a parent UTXO still records a spender whose own record has
+// been removed (pruned/reorged/deleted). These free functions have no logger, so a counter
+// is the observability surface — each tolerated ghost bumps it once. The "site" label
+// distinguishes where the ghost was tolerated: "walk" (GetCounterConflictingTxHashes),
+// "bfs" (GetConflictingChildren) and "repair" (the ProcessConflicting dangling-slot check).
+var prometheusUtxoCounterConflictingDanglingRefs = promauto.NewCounterVec(
 	prometheus.CounterOpts{
 		Namespace: "teranode",
 		Subsystem: "utxo",
 		Name:      "counter_conflicting_dangling_refs",
-		Help:      "Number of dangling spender references tolerated during the counter-conflicting walk",
+		Help:      "Number of dangling spender references tolerated while resolving conflicts (site: walk, bfs, repair)",
+	},
+	[]string{
+		"site", // where the ghost was tolerated: walk, bfs, repair
 	},
 )
 
@@ -946,7 +951,7 @@ func collectDanglingWinnerInputSpends(ctx context.Context, s Store, winningTxs [
 			if !seen {
 				var err error
 
-				parentMeta, err = s.Get(ctx, &parentHash, fields.Utxos)
+				parentMeta, err = s.Get(ctx, &parentHash, fields.Utxos, fields.DeletedChildren)
 				if err != nil {
 					// A missing parent record means there is no slot to repair for this
 					// input; the fail-closed guard for missing parents already ran inside
@@ -977,6 +982,15 @@ func collectDanglingWinnerInputSpends(ctx context.Context, s Store, winningTxs [
 				continue
 			}
 
+			// Frozen-sentinel guard: a frozen output records subtree.FrozenBytesTxHash (a
+			// coinbase placeholder can also appear in a spend slot). Neither has a store
+			// record, so the existence Get below would see NOT_FOUND and misclassify the
+			// slot as a tolerable ghost — queuing an Unspend that would unfreeze the output
+			// on aerospike. Fail closed instead.
+			if spender.Equal(subtree.FrozenBytesTxHash) || spender.Equal(subtree.CoinbasePlaceholderHashValue) {
+				return nil, errors.NewProcessingError("[ProcessConflicting][%s] winner input parent %s output is spent by frozen sentinel", txID.String(), parentHash.String())
+			}
+
 			if _, marked := markedSet[spender]; marked {
 				continue
 			}
@@ -991,7 +1005,14 @@ func collectDanglingWinnerInputSpends(ctx context.Context, s Store, winningTxs [
 				continue
 			}
 
-			prometheusUtxoCounterConflictingDanglingRefs.Inc()
+			// Ghost spender: its record is gone. If the pruner recorded this child in the
+			// parent's deletedChildren set, the deletion was deliberate (e.g. a mined tx
+			// reaped after retention) — we must NOT clear the slot. Fail closed.
+			if _, deleted := parentMeta.DeletedChildren[spender]; deleted {
+				return nil, errors.NewProcessingError("[ProcessConflicting][%s] recorded spender %s was deleted by the pruner (deletedChildren); cannot resolve conflict", txID.String(), spender.String())
+			}
+
+			prometheusUtxoCounterConflictingDanglingRefs.WithLabelValues("repair").Inc()
 
 			utxoHash, err := util.UTXOHashFromInput(input)
 			if err != nil {
@@ -1154,9 +1175,10 @@ func GetConflictingChildren(ctx context.Context, s Store, hash chainhash.Hash) (
 				if err != nil {
 					// A parent may still record a spender whose own record has been removed
 					// (pruned/reorged/deleted). Tolerate the dangling ref: leave results[i] nil
-					// (the accumulation loop already nil-skips) and continue the BFS.
+					// so the accumulation loop evicts and counts it (covering both the
+					// isNotFound-error and the (nil, nil) missing-record variants uniformly),
+					// then continue the BFS.
 					if isNotFound(err) {
-						prometheusUtxoCounterConflictingDanglingRefs.Inc()
 						return nil
 					}
 
@@ -1177,7 +1199,10 @@ func GetConflictingChildren(ctx context.Context, s Store, hash chainhash.Hash) (
 				// Tolerated dangling ref (or a backend that surfaces a missing record as
 				// (nil, nil)): the hash has no record, so it must not appear in the result
 				// set either — callers feed the result into SetConflicting/GetMeta, which
-				// fail on missing records.
+				// fail on missing records. Count both variants here (the goroutine no longer
+				// increments), exactly once per evicted node.
+				prometheusUtxoCounterConflictingDanglingRefs.WithLabelValues("bfs").Inc()
+
 				delete(visited, currentLevel[i])
 
 				continue
@@ -1218,6 +1243,15 @@ func GetConflictingChildren(ctx context.Context, s Store, hash chainhash.Hash) (
 	return conflictingChildren, nil
 }
 
+// parentSpendInfo carries, per parent tx, the recorded spender of each output slot plus
+// the parent's deletedChildren set (aerospike only; nil elsewhere). The deletedChildren
+// set lets GetCounterConflictingTxHashes discriminate a ghost spender the pruner deleted
+// deliberately (marker present → fail closed) from one to tolerate (marker absent).
+type parentSpendInfo struct {
+	spendingTxIDs   []*chainhash.Hash
+	deletedChildren map[chainhash.Hash]struct{}
+}
+
 func GetCounterConflictingTxHashes(ctx context.Context, s Store, txHash chainhash.Hash) ([]chainhash.Hash, error) {
 	ctx, _, deferFn := tracing.Tracer("utxo").Start(ctx, "GetCounterConflictingTxHashes")
 
@@ -1229,7 +1263,7 @@ func GetCounterConflictingTxHashes(ctx context.Context, s Store, txHash chainhas
 		// counter-conflicting set to compute for a tx that no longer exists — tolerate it
 		// and return an empty set rather than failing the caller with TX_NOT_FOUND.
 		if isNotFound(err) {
-			prometheusUtxoCounterConflictingDanglingRefs.Inc()
+			prometheusUtxoCounterConflictingDanglingRefs.WithLabelValues("walk").Inc()
 			return make([]chainhash.Hash, 0), nil
 		}
 
@@ -1239,18 +1273,21 @@ func GetCounterConflictingTxHashes(ctx context.Context, s Store, txHash chainhas
 	counterConflictingMap := make(map[chainhash.Hash]struct{})
 	counterConflictingMap[txHash] = struct{}{}
 
-	// get the unique parent txs
-	parentTxs := make(map[chainhash.Hash][]*chainhash.Hash)
+	// get the unique parent txs. Each parent carries its recorded spenders AND its
+	// deletedChildren set (aerospike only), so a ghost spender can be discriminated:
+	// a marker means the pruner deleted that spender deliberately (fail closed) vs. an
+	// unmarked ghost we tolerate.
+	parentTxs := make(map[chainhash.Hash]parentSpendInfo)
 
 	for _, input := range txMeta.Tx.Inputs {
 		// get the parent tx
-		parentTxs[*input.PreviousTxIDChainHash()] = nil
+		parentTxs[*input.PreviousTxIDChainHash()] = parentSpendInfo{}
 	}
 
 	for parentTx := range parentTxs {
 		parentTxHash := &parentTx
 
-		parentTxMeta, err := s.Get(ctx, parentTxHash, fields.Utxos)
+		parentTxMeta, err := s.Get(ctx, parentTxHash, fields.Utxos, fields.DeletedChildren)
 		if err != nil {
 			// Do NOT tolerate a missing PARENT record the way a missing spender/child record
 			// is tolerated. When only a spender's record is gone, the surviving parent's
@@ -1272,12 +1309,17 @@ func GetCounterConflictingTxHashes(ctx context.Context, s Store, txHash chainhas
 			spendingTxIDs[idx] = spendingData.TxID
 		}
 
-		parentTxs[*parentTxHash] = spendingTxIDs
+		parentTxs[*parentTxHash] = parentSpendInfo{
+			spendingTxIDs:   spendingTxIDs,
+			deletedChildren: parentTxMeta.DeletedChildren,
+		}
 	}
 
 	for _, input := range txMeta.Tx.Inputs {
-		parenTxIDS, ok := parentTxs[*input.PreviousTxIDChainHash()]
+		parentInfo, ok := parentTxs[*input.PreviousTxIDChainHash()]
 		if ok {
+			parenTxIDS := parentInfo.spendingTxIDs
+
 			// check the length of the spending txs, if it's less than the index, then the input is not spent
 			if len(parenTxIDS) <= int(input.PreviousTxOutIndex) {
 				// throw an error
@@ -1286,6 +1328,15 @@ func GetCounterConflictingTxHashes(ctx context.Context, s Store, txHash chainhas
 
 			spendingTxID := parenTxIDS[input.PreviousTxOutIndex]
 			if spendingTxID != nil {
+				// Frozen-sentinel guard: a frozen output records subtree.FrozenBytesTxHash (a
+				// coinbase placeholder can also appear in a spend slot). Neither has a store
+				// record, so the existence Get below would see NOT_FOUND and misclassify the
+				// slot as a tolerable ghost. Fail closed, mirroring the "tx has frozen child"
+				// rejection below.
+				if spendingTxID.Equal(subtree.FrozenBytesTxHash) || spendingTxID.Equal(subtree.CoinbasePlaceholderHashValue) {
+					return nil, errors.NewProcessingError("[GetCounterConflictingTxHashes][%s] parent output is spent by frozen sentinel", txHash.String())
+				}
+
 				// The recorded spender may itself have been removed while the parent still
 				// records its spend (dangling ref). A ghost must be excluded from the counter
 				// set entirely: callers feed this set into SetConflicting (ProcessConflicting
@@ -1295,7 +1346,14 @@ func GetCounterConflictingTxHashes(ctx context.Context, s Store, txHash chainhas
 				spenderMeta, err := s.Get(ctx, spendingTxID, fields.Conflicting)
 				if err != nil {
 					if isNotFound(err) {
-						prometheusUtxoCounterConflictingDanglingRefs.Inc()
+						// A ghost the pruner recorded in deletedChildren was deleted
+						// deliberately (e.g. a mined tx reaped after retention) — fail closed
+						// rather than tolerate it.
+						if _, deleted := parentInfo.deletedChildren[*spendingTxID]; deleted {
+							return nil, errors.NewProcessingError("[GetCounterConflictingTxHashes][%s] recorded spender %s was deleted by the pruner (deletedChildren); cannot resolve conflict", txHash.String(), spendingTxID.String())
+						}
+
+						prometheusUtxoCounterConflictingDanglingRefs.WithLabelValues("walk").Inc()
 
 						continue
 					}
@@ -1305,7 +1363,11 @@ func GetCounterConflictingTxHashes(ctx context.Context, s Store, txHash chainhas
 
 				if spenderMeta == nil {
 					// some backends surface a missing record as (nil, nil)
-					prometheusUtxoCounterConflictingDanglingRefs.Inc()
+					if _, deleted := parentInfo.deletedChildren[*spendingTxID]; deleted {
+						return nil, errors.NewProcessingError("[GetCounterConflictingTxHashes][%s] recorded spender %s was deleted by the pruner (deletedChildren); cannot resolve conflict", txHash.String(), spendingTxID.String())
+					}
+
+					prometheusUtxoCounterConflictingDanglingRefs.WithLabelValues("walk").Inc()
 
 					continue
 				}
@@ -1318,7 +1380,7 @@ func GetCounterConflictingTxHashes(ctx context.Context, s Store, txHash chainhas
 					// propagates NOT_FOUND for a spender deleted between the existence check
 					// above and this call.
 					if isNotFound(err) {
-						prometheusUtxoCounterConflictingDanglingRefs.Inc()
+						prometheusUtxoCounterConflictingDanglingRefs.WithLabelValues("walk").Inc()
 						delete(counterConflictingMap, *spendingTxID)
 
 						continue

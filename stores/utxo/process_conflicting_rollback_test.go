@@ -66,9 +66,11 @@ func TestProcessConflictingRollback_Step3Failure(t *testing.T) {
 	mockStore.On("SetLocked", mock.Anything, []chainhash.Hash{losingTxHash}, false).
 		Return(nil).Once()
 
-	// The dangling-slot check reads winner parents via Get; treat any lookup not
-	// primed above as "no record" so the check is a no-op for this fixture.
-	mockStore.On("Get", mock.Anything, mock.Anything, mock.Anything).Return(nil, errors.NewTxNotFoundError("not found")).Maybe()
+	// The dangling-slot check reads the winner's parent via Get; prime that exact parent
+	// (createTestTransaction's input spends createTestHash("prev-tx")) as "no record" so the
+	// check is a no-op. .Maybe() because some tests error out before the helper runs.
+	prevTxHash := createTestHash("prev-tx")
+	mockStore.On("Get", mock.Anything, &prevTxHash, mock.Anything).Return(nil, errors.NewTxNotFoundError("not found")).Maybe()
 
 	result, _, err := ProcessConflicting(ctx, mockStore, 1, chainhash.Hash{}, conflictingTxHashes, map[chainhash.Hash]struct{}{})
 
@@ -126,9 +128,11 @@ func TestProcessConflictingRollback_RollbackAlsoFails(t *testing.T) {
 	mockStore.On("SetLocked", mock.Anything, []chainhash.Hash{losingTxHash}, false).
 		Return(nil).Once()
 
-	// The dangling-slot check reads winner parents via Get; treat any lookup not
-	// primed above as "no record" so the check is a no-op for this fixture.
-	mockStore.On("Get", mock.Anything, mock.Anything, mock.Anything).Return(nil, errors.NewTxNotFoundError("not found")).Maybe()
+	// The dangling-slot check reads the winner's parent via Get; prime that exact parent
+	// (createTestTransaction's input spends createTestHash("prev-tx")) as "no record" so the
+	// check is a no-op. .Maybe() because some tests error out before the helper runs.
+	prevTxHash := createTestHash("prev-tx")
+	mockStore.On("Get", mock.Anything, &prevTxHash, mock.Anything).Return(nil, errors.NewTxNotFoundError("not found")).Maybe()
 
 	result, _, err := ProcessConflicting(ctx, mockStore, 1, chainhash.Hash{}, conflictingTxHashes, map[chainhash.Hash]struct{}{})
 
@@ -180,9 +184,11 @@ func TestProcessConflictingRollback_Step5RetrySucceeds(t *testing.T) {
 	mockStore.On("SetLocked", mock.Anything, []chainhash.Hash{losingTxHash}, false).
 		Return(nil).Once()
 
-	// The dangling-slot check reads winner parents via Get; treat any lookup not
-	// primed above as "no record" so the check is a no-op for this fixture.
-	mockStore.On("Get", mock.Anything, mock.Anything, mock.Anything).Return(nil, errors.NewTxNotFoundError("not found")).Maybe()
+	// The dangling-slot check reads the winner's parent via Get; prime that exact parent
+	// (createTestTransaction's input spends createTestHash("prev-tx")) as "no record" so the
+	// check is a no-op. .Maybe() because some tests error out before the helper runs.
+	prevTxHash := createTestHash("prev-tx")
+	mockStore.On("Get", mock.Anything, &prevTxHash, mock.Anything).Return(nil, errors.NewTxNotFoundError("not found")).Maybe()
 
 	result, _, err := ProcessConflicting(ctx, mockStore, 1, chainhash.Hash{}, conflictingTxHashes, map[chainhash.Hash]struct{}{})
 
@@ -230,9 +236,11 @@ func TestProcessConflictingRollback_Step5RetryExhausted(t *testing.T) {
 	mockStore.On("SetLocked", mock.Anything, []chainhash.Hash{losingTxHash}, false).
 		Return(errors.NewProcessingError("persistent lock failure")).Times(3)
 
-	// The dangling-slot check reads winner parents via Get; treat any lookup not
-	// primed above as "no record" so the check is a no-op for this fixture.
-	mockStore.On("Get", mock.Anything, mock.Anything, mock.Anything).Return(nil, errors.NewTxNotFoundError("not found")).Maybe()
+	// The dangling-slot check reads the winner's parent via Get; prime that exact parent
+	// (createTestTransaction's input spends createTestHash("prev-tx")) as "no record" so the
+	// check is a no-op. .Maybe() because some tests error out before the helper runs.
+	prevTxHash := createTestHash("prev-tx")
+	mockStore.On("Get", mock.Anything, &prevTxHash, mock.Anything).Return(nil, errors.NewTxNotFoundError("not found")).Maybe()
 
 	result, _, err := ProcessConflicting(ctx, mockStore, 1, chainhash.Hash{}, conflictingTxHashes, map[chainhash.Hash]struct{}{})
 
@@ -300,9 +308,11 @@ func TestProcessConflictingRollback_PartialStep3Spend(t *testing.T) {
 	mockStore.On("SetLocked", mock.Anything, []chainhash.Hash{losingTxHash}, false).
 		Return(nil).Once()
 
-	// The dangling-slot check reads winner parents via Get; treat any lookup not
-	// primed above as "no record" so the check is a no-op for this fixture.
-	mockStore.On("Get", mock.Anything, mock.Anything, mock.Anything).Return(nil, errors.NewTxNotFoundError("not found")).Maybe()
+	// The dangling-slot check reads the winner's parent via Get; prime that exact parent
+	// (createTestTransaction's input spends createTestHash("prev-tx")) as "no record" so the
+	// check is a no-op. .Maybe() because some tests error out before the helper runs.
+	prevTxHash := createTestHash("prev-tx")
+	mockStore.On("Get", mock.Anything, &prevTxHash, mock.Anything).Return(nil, errors.NewTxNotFoundError("not found")).Maybe()
 
 	result, _, err := ProcessConflicting(ctx, mockStore, 1, chainhash.Hash{}, conflictingTxHashes, map[chainhash.Hash]struct{}{})
 
@@ -383,9 +393,11 @@ func TestProcessConflictingRollback_CascadeDescendants(t *testing.T) {
 		return seen[losingTxHash] && seen[descendantHash]
 	}), false).Return(nil).Once()
 
-	// The dangling-slot check reads winner parents via Get; treat any lookup not
-	// primed above as "no record" so the check is a no-op for this fixture.
-	mockStore.On("Get", mock.Anything, mock.Anything, mock.Anything).Return(nil, errors.NewTxNotFoundError("not found")).Maybe()
+	// The dangling-slot check reads the winner's parent via Get; prime that exact parent
+	// (createTestTransaction's input spends createTestHash("prev-tx")) as "no record" so the
+	// check is a no-op. .Maybe() because some tests error out before the helper runs.
+	prevTxHash := createTestHash("prev-tx")
+	mockStore.On("Get", mock.Anything, &prevTxHash, mock.Anything).Return(nil, errors.NewTxNotFoundError("not found")).Maybe()
 
 	result, _, err := ProcessConflicting(ctx, mockStore, 1, chainhash.Hash{}, conflictingTxHashes, map[chainhash.Hash]struct{}{})
 

@@ -58,9 +58,11 @@ func TestProcessConflicting_Success(t *testing.T) {
 	mockStore.On("SetLocked", mock.Anything, []chainhash.Hash{losingTxHash}, false).Return(nil)
 
 	// Execute test
-	// The dangling-slot check reads winner parents via Get; treat any lookup not
-	// primed above as "no record" so the check is a no-op for this fixture.
-	mockStore.On("Get", mock.Anything, mock.Anything, mock.Anything).Return(nil, errors.NewTxNotFoundError("not found")).Maybe()
+	// The dangling-slot check reads the winner's parent via Get; prime that exact parent
+	// (createTestTransaction's input spends createTestHash("prev-tx")) as "no record" so the
+	// check is a no-op. .Maybe() because some tests error out before the helper runs.
+	prevTxHash := createTestHash("prev-tx")
+	mockStore.On("Get", mock.Anything, &prevTxHash, mock.Anything).Return(nil, errors.NewTxNotFoundError("not found")).Maybe()
 
 	result, _, err := ProcessConflicting(ctx, mockStore, 1, chainhash.Hash{}, conflictingTxHashes, map[chainhash.Hash]struct{}{})
 
@@ -78,11 +80,8 @@ func TestProcessConflicting_FrozenTxError(t *testing.T) {
 	// Use coinbase placeholder hash (frozen tx)
 	conflictingTxHashes := []chainhash.Hash{subtree.CoinbasePlaceholderHashValue}
 
-	// Execute test
-	// The dangling-slot check reads winner parents via Get; treat any lookup not
-	// primed above as "no record" so the check is a no-op for this fixture.
-	mockStore.On("Get", mock.Anything, mock.Anything, mock.Anything).Return(nil, errors.NewTxNotFoundError("not found")).Maybe()
-
+	// Execute test — the winner is the frozen placeholder, so ProcessConflicting returns
+	// before the dangling-slot check ever reads a parent; no Get expectation is needed.
 	result, _, err := ProcessConflicting(ctx, mockStore, 1, chainhash.Hash{}, conflictingTxHashes, map[chainhash.Hash]struct{}{})
 
 	// Assertions
@@ -106,9 +105,11 @@ func TestProcessConflicting_TxNotConflictingError(t *testing.T) {
 	}, nil)
 
 	// Execute test
-	// The dangling-slot check reads winner parents via Get; treat any lookup not
-	// primed above as "no record" so the check is a no-op for this fixture.
-	mockStore.On("Get", mock.Anything, mock.Anything, mock.Anything).Return(nil, errors.NewTxNotFoundError("not found")).Maybe()
+	// The dangling-slot check reads the winner's parent via Get; prime that exact parent
+	// (createTestTransaction's input spends createTestHash("prev-tx")) as "no record" so the
+	// check is a no-op. .Maybe() because some tests error out before the helper runs.
+	prevTxHash := createTestHash("prev-tx")
+	mockStore.On("Get", mock.Anything, &prevTxHash, mock.Anything).Return(nil, errors.NewTxNotFoundError("not found")).Maybe()
 
 	result, _, err := ProcessConflicting(ctx, mockStore, 1, chainhash.Hash{}, conflictingTxHashes, map[chainhash.Hash]struct{}{})
 
@@ -130,9 +131,11 @@ func TestProcessConflicting_GetTxError(t *testing.T) {
 	mockStore.On("Get", mock.Anything, &conflictingTxHash, mock.Anything).Return(nil, errors.NewProcessingError("database error"))
 
 	// Execute test
-	// The dangling-slot check reads winner parents via Get; treat any lookup not
-	// primed above as "no record" so the check is a no-op for this fixture.
-	mockStore.On("Get", mock.Anything, mock.Anything, mock.Anything).Return(nil, errors.NewTxNotFoundError("not found")).Maybe()
+	// The dangling-slot check reads the winner's parent via Get; prime that exact parent
+	// (createTestTransaction's input spends createTestHash("prev-tx")) as "no record" so the
+	// check is a no-op. .Maybe() because some tests error out before the helper runs.
+	prevTxHash := createTestHash("prev-tx")
+	mockStore.On("Get", mock.Anything, &prevTxHash, mock.Anything).Return(nil, errors.NewTxNotFoundError("not found")).Maybe()
 
 	result, _, err := ProcessConflicting(ctx, mockStore, 1, chainhash.Hash{}, conflictingTxHashes, map[chainhash.Hash]struct{}{})
 
@@ -161,9 +164,11 @@ func TestProcessConflicting_GetCounterConflictingError(t *testing.T) {
 		Return([]chainhash.Hash{}, errors.NewProcessingError("counter conflicting error"))
 
 	// Execute test
-	// The dangling-slot check reads winner parents via Get; treat any lookup not
-	// primed above as "no record" so the check is a no-op for this fixture.
-	mockStore.On("Get", mock.Anything, mock.Anything, mock.Anything).Return(nil, errors.NewTxNotFoundError("not found")).Maybe()
+	// The dangling-slot check reads the winner's parent via Get; prime that exact parent
+	// (createTestTransaction's input spends createTestHash("prev-tx")) as "no record" so the
+	// check is a no-op. .Maybe() because some tests error out before the helper runs.
+	prevTxHash := createTestHash("prev-tx")
+	mockStore.On("Get", mock.Anything, &prevTxHash, mock.Anything).Return(nil, errors.NewTxNotFoundError("not found")).Maybe()
 
 	result, _, err := ProcessConflicting(ctx, mockStore, 1, chainhash.Hash{}, conflictingTxHashes, map[chainhash.Hash]struct{}{})
 
@@ -204,9 +209,11 @@ func TestProcessConflicting_UnspendError(t *testing.T) {
 		Return([]*Spend{}, []chainhash.Hash{}, nil)
 
 	// Execute test
-	// The dangling-slot check reads winner parents via Get; treat any lookup not
-	// primed above as "no record" so the check is a no-op for this fixture.
-	mockStore.On("Get", mock.Anything, mock.Anything, mock.Anything).Return(nil, errors.NewTxNotFoundError("not found")).Maybe()
+	// The dangling-slot check reads the winner's parent via Get; prime that exact parent
+	// (createTestTransaction's input spends createTestHash("prev-tx")) as "no record" so the
+	// check is a no-op. .Maybe() because some tests error out before the helper runs.
+	prevTxHash := createTestHash("prev-tx")
+	mockStore.On("Get", mock.Anything, &prevTxHash, mock.Anything).Return(nil, errors.NewTxNotFoundError("not found")).Maybe()
 
 	result, _, err := ProcessConflicting(ctx, mockStore, 1, chainhash.Hash{}, conflictingTxHashes, map[chainhash.Hash]struct{}{})
 
@@ -265,9 +272,11 @@ func TestProcessConflicting_SpendError(t *testing.T) {
 	mockStore.On("SetLocked", mock.Anything, []chainhash.Hash{losingTxHash}, false).Return(nil)
 
 	// Execute test
-	// The dangling-slot check reads winner parents via Get; treat any lookup not
-	// primed above as "no record" so the check is a no-op for this fixture.
-	mockStore.On("Get", mock.Anything, mock.Anything, mock.Anything).Return(nil, errors.NewTxNotFoundError("not found")).Maybe()
+	// The dangling-slot check reads the winner's parent via Get; prime that exact parent
+	// (createTestTransaction's input spends createTestHash("prev-tx")) as "no record" so the
+	// check is a no-op. .Maybe() because some tests error out before the helper runs.
+	prevTxHash := createTestHash("prev-tx")
+	mockStore.On("Get", mock.Anything, &prevTxHash, mock.Anything).Return(nil, errors.NewTxNotFoundError("not found")).Maybe()
 
 	result, _, err := ProcessConflicting(ctx, mockStore, 1, chainhash.Hash{}, conflictingTxHashes, map[chainhash.Hash]struct{}{})
 

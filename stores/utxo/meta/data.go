@@ -95,6 +95,14 @@ type Data struct {
 
 	// SpendingDatas is the transaction ID of the transaction that spent the given tx output idx
 	SpendingDatas []*spendpkg.SpendingData `json:"spendingDatas"`
+
+	// DeletedChildren, when populated (fields.DeletedChildren, aerospike only), is the
+	// set of child tx hashes the pruner deleted at their delete-at-height. Written by
+	// the pruner's addDeletedChildren lua UDF on the parent record; best-effort (the
+	// pruner may suppress the update when it believes the parent is already pruned).
+	// Transient read-side data: not part of the binary serialization in
+	// Bytes()/NewMetaDataFromBytes.
+	DeletedChildren map[chainhash.Hash]struct{} `json:"deletedChildren,omitempty"`
 }
 
 // NewMetaDataFromBytes creates a new Data object from a byte slice.

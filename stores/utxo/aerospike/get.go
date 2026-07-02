@@ -876,6 +876,9 @@ NEXT_BATCH_RECORD:
 
 				items[idx].Data.ConflictingChildren = res
 
+			case fields.DeletedChildren:
+				items[idx].Data.DeletedChildren = processDeletedChildren(bins)
+
 			case fields.UnminedSince:
 				unminedSince, ok := bins[key.String()].(int)
 				if ok {
@@ -1179,6 +1182,44 @@ func processConflictingChildren(bins aerospike.BinMap) (conflictingChildren []ch
 	}
 
 	return conflictingChildren, nil
+}
+
+// processDeletedChildren extracts the deletedChildren set from Aerospike bins. The pruner's
+// addDeletedChildren lua UDF stores this as a map keyed by the child tx hash in display hex
+// (chainhash.String()) with a bool value. This discriminator tells the counter-conflicting
+// walk that a now-missing spender was deleted deliberately by the pruner (rather than being
+// a tolerable ghost).
+//
+// Best-effort by design: an unparseable key is skipped rather than failing the whole Get, so
+// a malformed entry never blocks conflict resolution. Returns nil when the bin is absent or
+// yields no usable entries.
+func processDeletedChildren(bins aerospike.BinMap) map[chainhash.Hash]struct{} {
+	deletedChildrenIfc, ok := bins[fields.DeletedChildren.String()].(map[interface{}]interface{})
+	if !ok {
+		return nil
+	}
+
+	deletedChildren := make(map[chainhash.Hash]struct{}, len(deletedChildrenIfc))
+
+	for key := range deletedChildrenIfc {
+		keyStr, ok := key.(string)
+		if !ok {
+			continue
+		}
+
+		childHash, err := chainhash.NewHashFromStr(keyStr)
+		if err != nil {
+			continue
+		}
+
+		deletedChildren[*childHash] = struct{}{}
+	}
+
+	if len(deletedChildren) == 0 {
+		return nil
+	}
+
+	return deletedChildren
 }
 
 // getAllExtraUTXOs retrieves all UTXOs from child records recursively
