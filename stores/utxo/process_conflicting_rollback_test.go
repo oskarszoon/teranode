@@ -66,6 +66,10 @@ func TestProcessConflictingRollback_Step3Failure(t *testing.T) {
 	mockStore.On("SetLocked", mock.Anything, []chainhash.Hash{losingTxHash}, false).
 		Return(nil).Once()
 
+	// The dangling-slot check reads winner parents via Get; treat any lookup not
+	// primed above as "no record" so the check is a no-op for this fixture.
+	mockStore.On("Get", mock.Anything, mock.Anything, mock.Anything).Return(nil, errors.NewTxNotFoundError("not found")).Maybe()
+
 	result, _, err := ProcessConflicting(ctx, mockStore, 1, chainhash.Hash{}, conflictingTxHashes, map[chainhash.Hash]struct{}{})
 
 	require.Nil(t, result)
@@ -122,6 +126,10 @@ func TestProcessConflictingRollback_RollbackAlsoFails(t *testing.T) {
 	mockStore.On("SetLocked", mock.Anything, []chainhash.Hash{losingTxHash}, false).
 		Return(nil).Once()
 
+	// The dangling-slot check reads winner parents via Get; treat any lookup not
+	// primed above as "no record" so the check is a no-op for this fixture.
+	mockStore.On("Get", mock.Anything, mock.Anything, mock.Anything).Return(nil, errors.NewTxNotFoundError("not found")).Maybe()
+
 	result, _, err := ProcessConflicting(ctx, mockStore, 1, chainhash.Hash{}, conflictingTxHashes, map[chainhash.Hash]struct{}{})
 
 	require.Nil(t, result)
@@ -172,6 +180,10 @@ func TestProcessConflictingRollback_Step5RetrySucceeds(t *testing.T) {
 	mockStore.On("SetLocked", mock.Anything, []chainhash.Hash{losingTxHash}, false).
 		Return(nil).Once()
 
+	// The dangling-slot check reads winner parents via Get; treat any lookup not
+	// primed above as "no record" so the check is a no-op for this fixture.
+	mockStore.On("Get", mock.Anything, mock.Anything, mock.Anything).Return(nil, errors.NewTxNotFoundError("not found")).Maybe()
+
 	result, _, err := ProcessConflicting(ctx, mockStore, 1, chainhash.Hash{}, conflictingTxHashes, map[chainhash.Hash]struct{}{})
 
 	require.NoError(t, err)
@@ -217,6 +229,10 @@ func TestProcessConflictingRollback_Step5RetryExhausted(t *testing.T) {
 	// step 5 fails on every attempt — 3 attempts total
 	mockStore.On("SetLocked", mock.Anything, []chainhash.Hash{losingTxHash}, false).
 		Return(errors.NewProcessingError("persistent lock failure")).Times(3)
+
+	// The dangling-slot check reads winner parents via Get; treat any lookup not
+	// primed above as "no record" so the check is a no-op for this fixture.
+	mockStore.On("Get", mock.Anything, mock.Anything, mock.Anything).Return(nil, errors.NewTxNotFoundError("not found")).Maybe()
 
 	result, _, err := ProcessConflicting(ctx, mockStore, 1, chainhash.Hash{}, conflictingTxHashes, map[chainhash.Hash]struct{}{})
 
@@ -283,6 +299,10 @@ func TestProcessConflictingRollback_PartialStep3Spend(t *testing.T) {
 	// 3d. SetLocked(parents, false) — undoes step 2's lock
 	mockStore.On("SetLocked", mock.Anything, []chainhash.Hash{losingTxHash}, false).
 		Return(nil).Once()
+
+	// The dangling-slot check reads winner parents via Get; treat any lookup not
+	// primed above as "no record" so the check is a no-op for this fixture.
+	mockStore.On("Get", mock.Anything, mock.Anything, mock.Anything).Return(nil, errors.NewTxNotFoundError("not found")).Maybe()
 
 	result, _, err := ProcessConflicting(ctx, mockStore, 1, chainhash.Hash{}, conflictingTxHashes, map[chainhash.Hash]struct{}{})
 
@@ -362,6 +382,10 @@ func TestProcessConflictingRollback_CascadeDescendants(t *testing.T) {
 		seen := map[chainhash.Hash]bool{hs[0]: true, hs[1]: true}
 		return seen[losingTxHash] && seen[descendantHash]
 	}), false).Return(nil).Once()
+
+	// The dangling-slot check reads winner parents via Get; treat any lookup not
+	// primed above as "no record" so the check is a no-op for this fixture.
+	mockStore.On("Get", mock.Anything, mock.Anything, mock.Anything).Return(nil, errors.NewTxNotFoundError("not found")).Maybe()
 
 	result, _, err := ProcessConflicting(ctx, mockStore, 1, chainhash.Hash{}, conflictingTxHashes, map[chainhash.Hash]struct{}{})
 

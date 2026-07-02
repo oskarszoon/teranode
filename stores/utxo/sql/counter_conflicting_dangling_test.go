@@ -1,0 +1,242 @@
+package sql
+
+// Dangling-reference tolerance tests for the counter-conflicting traversal.
+//
+// A "dangling reference" is a parent UTXO whose SpendingDatas still points at a
+// spender transaction whose own record has been removed from the store (pruned,
+// reorged, or otherwise deleted) while the parent survived. GetConflictingChildren
+// (BFS) and GetCounterConflictingTxHashes must tolerate this: a spender that no
+// longer exists is not a reason to fail the whole counter-conflicting check with a
+// TX_NOT_FOUND error.
+//
+// These are integration tests against the SQLite-backed store so the dangling ref
+// is real (the parent row genuinely references a deleted child), not a mock of the
+// error. On current (pre-fix) code they FAIL: the deleted spender's Get surfaces
+// NewTxNotFoundError, which the traversal propagates.
+
+import (
+	"context"
+	"testing"
+
+	"github.com/bsv-blockchain/go-bt/v2"
+	"github.com/bsv-blockchain/go-bt/v2/bscript"
+	"github.com/bsv-blockchain/go-bt/v2/chainhash"
+	"github.com/bsv-blockchain/teranode/errors"
+	"github.com/bsv-blockchain/teranode/stores/utxo"
+	"github.com/bsv-blockchain/teranode/stores/utxo/fields"
+	"github.com/stretchr/testify/require"
+)
+
+// danglingUnlockingScript is a minimal unlocking script so the fixture tx is
+// storable (SQL store has NOT NULL on unlocking_script).
+var danglingUnlockingScript = bscript.NewFromBytes([]byte{0x00, 0x48, 0x30, 0x45})
+
+// danglingParentTx builds a standalone parent tx with one spendable output. The
+// seed makes the txid unique so multiple fixtures can share one store.
+func danglingParentTx(seed byte) *bt.Tx {
+	parent := bt.NewTx()
+	in := &bt.Input{
+		PreviousTxOutIndex: 0,
+		PreviousTxSatoshis: 200000,
+		PreviousTxScript:   bscript.NewFromBytes([]byte{0x51}),
+		SequenceNumber:     0xFFFFFFFF,
+		UnlockingScript:    danglingUnlockingScript,
+	}
+	_ = in.PreviousTxIDAdd(&chainhash.Hash{seed, seed, seed, 0xCC})
+	parent.Inputs = []*bt.Input{in}
+	parent.Outputs = []*bt.Output{{Satoshis: 100000, LockingScript: bscript.NewFromBytes([]byte{0x52})}}
+
+	return parent
+}
+
+// danglingSpendTx builds a tx spending parent[0]; outSats makes its txid unique.
+func danglingSpendTx(t *testing.T, parent *bt.Tx, outSats uint64) *bt.Tx {
+	t.Helper()
+	tx := bt.NewTx()
+	require.NoError(t, tx.From(parent.TxIDChainHash().String(), 0, parent.Outputs[0].LockingScript.String(), parent.Outputs[0].Satoshis))
+	tx.Inputs[0].UnlockingScript = danglingUnlockingScript
+	tx.Outputs = []*bt.Output{{Satoshis: outSats, LockingScript: bscript.NewFromBytes([]byte{0x52})}}
+
+	return tx
+}
+
+// TestGetConflictingChildren_ToleratesDanglingSpendingRef verifies the BFS in
+// GetConflictingChildren does not error when a parent's SpendingDatas points at a
+// deleted spender. Pre-fix: BFS fetches the deleted child and returns TX_NOT_FOUND.
+func TestGetConflictingChildren_ToleratesDanglingSpendingRef(t *testing.T) {
+	ctx := context.Background()
+	store, _ := setup(ctx, t)
+
+	parent := danglingParentTx(0x71)
+	_, err := store.Create(ctx, parent, 100)
+	require.NoError(t, err)
+
+	child := danglingSpendTx(t, parent, 90000)
+	_, err = store.Create(ctx, child, 100)
+	require.NoError(t, err)
+
+	// Record the spend so parent.SpendingDatas[0] -> child.
+	_, err = store.Spend(ctx, child, 101)
+	require.NoError(t, err)
+
+	// Delete the child's own record, leaving parent's SpendingDatas dangling.
+	require.NoError(t, store.Delete(ctx, child.TxIDChainHash()))
+
+	res, err := utxo.GetConflictingChildren(ctx, store, *parent.TxIDChainHash())
+	require.NoError(t, err, "BFS must tolerate a parent that references a deleted spender, not fail with TX_NOT_FOUND")
+	require.NotNil(t, res)
+}
+
+// TestGetCounterConflictingTxHashes_ToleratesDanglingCounter verifies the counter
+// walk does not error when the counter spender itself has been deleted while the
+// parent still records it as the spender. Pre-fix: GetConflictingChildren(counter)
+// fetches the deleted counter and returns TX_NOT_FOUND.
+func TestGetCounterConflictingTxHashes_ToleratesDanglingCounter(t *testing.T) {
+	ctx := context.Background()
+	store, _ := setup(ctx, t)
+
+	parent := danglingParentTx(0x72)
+	_, err := store.Create(ctx, parent, 100)
+	require.NoError(t, err)
+
+	// counter is the recorded spender of parent[0].
+	counter := danglingSpendTx(t, parent, 80000)
+	_, err = store.Create(ctx, counter, 100)
+	require.NoError(t, err)
+
+	_, err = store.Spend(ctx, counter, 101)
+	require.NoError(t, err)
+
+	// queryTx is the conflicting tx that ALSO spends parent[0]; it is the tx whose
+	// counter-conflicting set we walk. Not spent (it is the loser), just stored.
+	queryTx := danglingSpendTx(t, parent, 90000)
+	_, err = store.Create(ctx, queryTx, 100, utxo.WithConflicting(true))
+	require.NoError(t, err)
+
+	// Delete the counter's record → parent.SpendingDatas[0] is now dangling.
+	require.NoError(t, store.Delete(ctx, counter.TxIDChainHash()))
+
+	res, err := utxo.GetCounterConflictingTxHashes(ctx, store, *queryTx.TxIDChainHash())
+	require.NoError(t, err, "counter walk must tolerate a deleted counter, not fail with TX_NOT_FOUND")
+	require.Contains(t, res, *queryTx.TxIDChainHash(), "result must include the queried tx")
+	require.NotContains(t, res, *counter.TxIDChainHash(),
+		"a ghost counter must be EXCLUDED from the set: callers feed it into SetConflicting/GetMeta, which fail on missing records")
+}
+
+// TestGetCounterConflictingTxHashes_ToleratesDanglingChildOfCounter verifies the
+// walk survives when the counter exists but ITS spending child has been deleted —
+// exercises the BFS one level deeper than the counter itself. Pre-fix: the internal
+// GetConflictingChildren(counter) fetches the deleted grandchild → TX_NOT_FOUND.
+func TestGetCounterConflictingTxHashes_ToleratesDanglingChildOfCounter(t *testing.T) {
+	ctx := context.Background()
+	store, _ := setup(ctx, t)
+
+	parent := danglingParentTx(0x73)
+	_, err := store.Create(ctx, parent, 100)
+	require.NoError(t, err)
+
+	// counter spends parent[0] and survives.
+	counter := danglingSpendTx(t, parent, 80000)
+	_, err = store.Create(ctx, counter, 100)
+	require.NoError(t, err)
+
+	_, err = store.Spend(ctx, counter, 101)
+	require.NoError(t, err)
+
+	// grandchild spends counter[0]; recorded then deleted → counter.SpendingDatas
+	// dangles.
+	grandchild := danglingSpendTx(t, counter, 70000)
+	_, err = store.Create(ctx, grandchild, 100)
+	require.NoError(t, err)
+
+	_, err = store.Spend(ctx, grandchild, 102)
+	require.NoError(t, err)
+
+	require.NoError(t, store.Delete(ctx, grandchild.TxIDChainHash()))
+
+	// queryTx is the conflicting loser also spending parent[0].
+	queryTx := danglingSpendTx(t, parent, 90000)
+	_, err = store.Create(ctx, queryTx, 100, utxo.WithConflicting(true))
+	require.NoError(t, err)
+
+	res, err := utxo.GetCounterConflictingTxHashes(ctx, store, *queryTx.TxIDChainHash())
+	require.NoError(t, err, "counter walk must tolerate a deleted grandchild of the counter, not fail with TX_NOT_FOUND")
+	require.Contains(t, res, *counter.TxIDChainHash(), "the surviving counter must still be reported")
+	require.NotContains(t, res, *grandchild.TxIDChainHash(),
+		"a ghost grandchild must be EXCLUDED from the set: callers feed it into SetConflicting/GetMeta, which fail on missing records")
+}
+
+// TestProcessConflicting_SelfHealsDanglingLoserSlot is the end-to-end self-heal proof
+// for issue #1213: a parent output is still held by a ghost loser (record deleted,
+// spend slot intact) while the network mined the rival. ProcessConflicting must
+// (a) exclude the ghost from the losing set, (b) clear the ghost's stale slot,
+// (c) spend the winner into the slot, and (d) unmark the winner — repairing the store
+// on the forward path with no manual intervention.
+func TestProcessConflicting_SelfHealsDanglingLoserSlot(t *testing.T) {
+	ctx := context.Background()
+	store, _ := setup(ctx, t)
+
+	parent := danglingParentTx(0x75)
+	_, err := store.Create(ctx, parent, 100)
+	require.NoError(t, err)
+
+	// ghost is the recorded spender of parent[0]; its record is then deleted.
+	ghost := danglingSpendTx(t, parent, 80000)
+	_, err = store.Create(ctx, ghost, 100)
+	require.NoError(t, err)
+
+	_, err = store.Spend(ctx, ghost, 101)
+	require.NoError(t, err)
+
+	require.NoError(t, store.Delete(ctx, ghost.TxIDChainHash()))
+
+	// winner is the rival the network mined; stored flagged conflicting (the state the
+	// validator leaves it in when its spend loses to the recorded spender).
+	winner := danglingSpendTx(t, parent, 90000)
+	_, err = store.Create(ctx, winner, 100, utxo.WithConflicting(true))
+	require.NoError(t, err)
+
+	_, _, err = utxo.ProcessConflicting(ctx, store, 102, chainhash.Hash{}, []chainhash.Hash{*winner.TxIDChainHash()}, map[chainhash.Hash]struct{}{})
+	require.NoError(t, err, "promotion must tolerate a ghost loser, not wedge on its missing record")
+
+	// The stale slot must now belong to the winner.
+	parentMeta, err := store.Get(ctx, parent.TxIDChainHash(), fields.Utxos)
+	require.NoError(t, err)
+	require.NotNil(t, parentMeta.SpendingDatas[0], "parent slot must be spent after promotion")
+	require.True(t, parentMeta.SpendingDatas[0].TxID.Equal(*winner.TxIDChainHash()),
+		"parent slot must be overwritten from the ghost to the winner")
+
+	// And the winner must no longer be conflicting.
+	winnerMeta, err := store.Get(ctx, winner.TxIDChainHash(), fields.Conflicting)
+	require.NoError(t, err)
+	require.False(t, winnerMeta.Conflicting, "promoted winner must be unmarked")
+}
+
+// TestGetCounterConflictingTxHashes_FailsClosedOnMissingParent verifies that a
+// missing PARENT record is NOT tolerated the way a missing spender/child record is.
+// A missing spender is safe to tolerate because the surviving parent's SpendingDatas
+// still identifies the current spender; a missing parent erases the whole spend graph
+// for that input, so we can no longer tell whether a counter mined on our chain (and
+// later pruned by retention) spends it. The walk must fail closed, not silently drop
+// the input — otherwise the counter-conflicting guard becomes fail-open.
+func TestGetCounterConflictingTxHashes_FailsClosedOnMissingParent(t *testing.T) {
+	ctx := context.Background()
+	store, _ := setup(ctx, t)
+
+	parent := danglingParentTx(0x74)
+	_, err := store.Create(ctx, parent, 100)
+	require.NoError(t, err)
+
+	// queryTx is the conflicting tx spending parent[0].
+	queryTx := danglingSpendTx(t, parent, 90000)
+	_, err = store.Create(ctx, queryTx, 100, utxo.WithConflicting(true))
+	require.NoError(t, err)
+
+	// Delete the PARENT record → the spend graph for queryTx's input is gone.
+	require.NoError(t, store.Delete(ctx, parent.TxIDChainHash()))
+
+	_, err = utxo.GetCounterConflictingTxHashes(ctx, store, *queryTx.TxIDChainHash())
+	require.Error(t, err, "a missing parent record must fail closed, not be silently tolerated")
+	require.True(t, errors.Is(err, errors.ErrTxNotFound) || errors.Is(err, errors.ErrNotFound),
+		"the missing-parent failure must propagate the underlying not-found error, not be swallowed")
+}

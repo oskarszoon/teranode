@@ -21,8 +21,31 @@ import (
 	spendpkg "github.com/bsv-blockchain/teranode/stores/utxo/spend"
 	"github.com/bsv-blockchain/teranode/util"
 	"github.com/bsv-blockchain/teranode/util/tracing"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"golang.org/x/sync/errgroup"
 )
+
+// prometheusUtxoCounterConflictingDanglingRefs counts every dangling reference the
+// counter-conflicting walk tolerates: a parent UTXO still records a spender whose own
+// record has been removed (pruned/reorged/deleted). These free functions have no logger,
+// so a counter is the observability surface — each tolerated ghost bumps it once.
+var prometheusUtxoCounterConflictingDanglingRefs = promauto.NewCounter(
+	prometheus.CounterOpts{
+		Namespace: "teranode",
+		Subsystem: "utxo",
+		Name:      "counter_conflicting_dangling_refs",
+		Help:      "Number of dangling spender references tolerated during the counter-conflicting walk",
+	},
+)
+
+// isNotFound reports whether err is a NotFound-family error the counter-conflicting
+// walk should tolerate rather than propagate. SQL raises ErrNotFound for missing
+// output rows; Aerospike raises ErrTxNotFound for missing records. Mirrors the pairing
+// in cmd/rewindblockchain/rewindblockchain/tx_delete.go.
+func isNotFound(err error) bool {
+	return errors.Is(err, errors.ErrTxNotFound) || errors.Is(err, errors.ErrNotFound)
+}
 
 // step5RetryDelays controls the bounded back-off when SetLocked(false) fails at the very
 // last step of ProcessConflicting. The slice length is the number of attempts; the value
@@ -230,6 +253,24 @@ func ProcessConflicting(ctx context.Context, s Store, blockHeight uint32, blockH
 
 	allMarkedConflicting = allMarkedHashes
 	step1Committed = true
+
+	// A ghost loser — a spender whose record was removed while the parent still records
+	// its spend — is excluded from the losing set by GetCounterConflicting, so step 1
+	// produced no unspend entry for its slot. Left alone, that stale slot would make the
+	// winner's spend in step 3 fail as a double-spend. Detect each winner input whose
+	// recorded spender no longer exists and queue an explicit unspend so step 2 clears it.
+	markedSet := make(map[chainhash.Hash]struct{}, len(allMarkedHashes))
+	for _, h := range allMarkedHashes {
+		markedSet[h] = struct{}{}
+	}
+
+	danglingSpends, dErr := collectDanglingWinnerInputSpends(ctx, s, winningTxs, conflictingTxHashes, markedSet)
+	if dErr != nil {
+		err = dErr
+		return nil, nil, err
+	}
+
+	affectedParentSpends = append(affectedParentSpends, danglingSpends...)
 
 	// - 2: un-spend txa, marking the input txs as not spendable (txp & txq)
 	if err = s.Unspend(ctx, affectedParentSpends, true); err != nil {
@@ -872,6 +913,105 @@ func setLockedWithRetry(ctx context.Context, s Store, hashes []chainhash.Hash, v
 //     order is BFS order (input level first, then each descendant level) — callers
 //     can rely on this for deterministic logs, traces, and eviction ordering.
 //   - An error if any issues occur during the process.
+//
+// collectDanglingWinnerInputSpends finds winner inputs whose parent output still records
+// a spender that (a) is not the winner itself, (b) is not in the marked-conflicting set
+// (whose slots step 2 already clears via the SetConflicting spends), and (c) no longer
+// has a record in the store. It returns Spend entries carrying the stored (ghost)
+// spending data so Unspend can clear those dangling slots. A live spender outside the
+// marked set is deliberately left alone: step 3 then fails closed rather than silently
+// stealing a live tx's spend. winningTxHashes pairs with winningTxs by index.
+func collectDanglingWinnerInputSpends(ctx context.Context, s Store, winningTxs []*bt.Tx, winningTxHashes []chainhash.Hash, markedSet map[chainhash.Hash]struct{}) ([]*Spend, error) {
+	var danglingSpends []*Spend
+
+	for txIdx, tx := range winningTxs {
+		if tx == nil || txIdx >= len(winningTxHashes) {
+			continue
+		}
+
+		txID := winningTxHashes[txIdx]
+
+		// read each unique parent's spend state once per winner
+		parentMetas := make(map[chainhash.Hash]*meta.Data, len(tx.Inputs))
+
+		for _, input := range tx.Inputs {
+			prevTxIDHash := input.PreviousTxIDChainHash()
+			if prevTxIDHash == nil {
+				continue
+			}
+
+			parentHash := *prevTxIDHash
+
+			parentMeta, seen := parentMetas[parentHash]
+			if !seen {
+				var err error
+
+				parentMeta, err = s.Get(ctx, &parentHash, fields.Utxos)
+				if err != nil {
+					// A missing parent record means there is no slot to repair for this
+					// input; the fail-closed guard for missing parents already ran inside
+					// GetCounterConflicting before step 1.
+					if isNotFound(err) {
+						parentMetas[parentHash] = nil
+
+						continue
+					}
+
+					return nil, errors.NewProcessingError("[ProcessConflicting][%s] error getting parent %s for dangling-slot check", txID.String(), parentHash.String(), err)
+				}
+
+				parentMetas[parentHash] = parentMeta
+			}
+
+			if parentMeta == nil || int(input.PreviousTxOutIndex) >= len(parentMeta.SpendingDatas) {
+				continue
+			}
+
+			spendingData := parentMeta.SpendingDatas[input.PreviousTxOutIndex]
+			if spendingData == nil || spendingData.TxID == nil {
+				continue
+			}
+
+			spender := *spendingData.TxID
+			if spender.Equal(txID) {
+				continue
+			}
+
+			if _, marked := markedSet[spender]; marked {
+				continue
+			}
+
+			spenderMeta, err := s.Get(ctx, &spender, fields.Conflicting)
+			if err != nil && !isNotFound(err) {
+				return nil, errors.NewProcessingError("[ProcessConflicting][%s] error getting spender %s for dangling-slot check", txID.String(), spender.String(), err)
+			}
+
+			if err == nil && spenderMeta != nil {
+				// live spender outside the marked set: leave the slot alone
+				continue
+			}
+
+			prometheusUtxoCounterConflictingDanglingRefs.Inc()
+
+			utxoHash, err := util.UTXOHashFromInput(input)
+			if err != nil {
+				return nil, errors.NewProcessingError("[ProcessConflicting][%s] error hashing input %d for dangling-slot check", txID.String(), input.PreviousTxOutIndex, err)
+			}
+
+			parentHashCopy := parentHash
+
+			danglingSpends = append(danglingSpends, &Spend{
+				TxID:         &parentHashCopy,
+				Vout:         input.PreviousTxOutIndex,
+				UTXOHash:     utxoHash,
+				SpendingData: spendingData,
+			})
+		}
+	}
+
+	return danglingSpends, nil
+}
+
 func MarkConflictingRecursively(ctx context.Context, s Store, hashes []chainhash.Hash) ([]*Spend, []chainhash.Hash, error) {
 	ctx, _, deferFn := tracing.Tracer("utxo").Start(ctx, "MarkConflictingRecursively")
 
@@ -1012,6 +1152,14 @@ func GetConflictingChildren(ctx context.Context, s Store, hash chainhash.Hash) (
 			g.Go(func() error {
 				txMeta, err := s.Get(gCtx, &current, fields.Utxos, fields.ConflictingChildren)
 				if err != nil {
+					// A parent may still record a spender whose own record has been removed
+					// (pruned/reorged/deleted). Tolerate the dangling ref: leave results[i] nil
+					// (the accumulation loop already nil-skips) and continue the BFS.
+					if isNotFound(err) {
+						prometheusUtxoCounterConflictingDanglingRefs.Inc()
+						return nil
+					}
+
 					return err
 				}
 				results[i] = txMeta
@@ -1024,8 +1172,14 @@ func GetConflictingChildren(ctx context.Context, s Store, hash chainhash.Hash) (
 		}
 
 		var nextLevel []chainhash.Hash
-		for _, txMeta := range results {
+		for i, txMeta := range results {
 			if txMeta == nil {
+				// Tolerated dangling ref (or a backend that surfaces a missing record as
+				// (nil, nil)): the hash has no record, so it must not appear in the result
+				// set either — callers feed the result into SetConflicting/GetMeta, which
+				// fail on missing records.
+				delete(visited, currentLevel[i])
+
 				continue
 			}
 
@@ -1071,6 +1225,14 @@ func GetCounterConflictingTxHashes(ctx context.Context, s Store, txHash chainhas
 
 	txMeta, err := s.Get(ctx, &txHash, fields.Tx)
 	if err != nil {
+		// The queried tx itself may have been removed since it was flagged. There is no
+		// counter-conflicting set to compute for a tx that no longer exists — tolerate it
+		// and return an empty set rather than failing the caller with TX_NOT_FOUND.
+		if isNotFound(err) {
+			prometheusUtxoCounterConflictingDanglingRefs.Inc()
+			return make([]chainhash.Hash, 0), nil
+		}
+
 		return nil, err
 	}
 
@@ -1090,6 +1252,13 @@ func GetCounterConflictingTxHashes(ctx context.Context, s Store, txHash chainhas
 
 		parentTxMeta, err := s.Get(ctx, parentTxHash, fields.Utxos)
 		if err != nil {
+			// Do NOT tolerate a missing PARENT record the way a missing spender/child record
+			// is tolerated. When only a spender's record is gone, the surviving parent's
+			// SpendingDatas still tells us who currently spends the output. When the parent
+			// record itself is gone, the entire spend graph for this input is lost: we can no
+			// longer tell whether a counter — including one that was mined on our chain and
+			// later pruned by retention — spends it. Silently dropping the input would turn
+			// this guard fail-open, so propagate the error and fail closed instead.
 			return nil, err
 		}
 
@@ -1117,10 +1286,44 @@ func GetCounterConflictingTxHashes(ctx context.Context, s Store, txHash chainhas
 
 			spendingTxID := parenTxIDS[input.PreviousTxOutIndex]
 			if spendingTxID != nil {
+				// The recorded spender may itself have been removed while the parent still
+				// records its spend (dangling ref). A ghost must be excluded from the counter
+				// set entirely: callers feed this set into SetConflicting (ProcessConflicting
+				// step 1) and GetMeta, both of which fail on a missing record. The default
+				// GetConflictingChildren tolerates a missing root and returns an empty set, so
+				// existence must be checked explicitly here.
+				spenderMeta, err := s.Get(ctx, spendingTxID, fields.Conflicting)
+				if err != nil {
+					if isNotFound(err) {
+						prometheusUtxoCounterConflictingDanglingRefs.Inc()
+
+						continue
+					}
+
+					return nil, err
+				}
+
+				if spenderMeta == nil {
+					// some backends surface a missing record as (nil, nil)
+					prometheusUtxoCounterConflictingDanglingRefs.Inc()
+
+					continue
+				}
+
 				counterConflictingMap[*spendingTxID] = struct{}{}
 
 				childHashes, err := s.GetConflictingChildren(ctx, *spendingTxID)
 				if err != nil {
+					// Fallback for Store implementations whose GetConflictingChildren still
+					// propagates NOT_FOUND for a spender deleted between the existence check
+					// above and this call.
+					if isNotFound(err) {
+						prometheusUtxoCounterConflictingDanglingRefs.Inc()
+						delete(counterConflictingMap, *spendingTxID)
+
+						continue
+					}
+
 					return nil, err
 				}
 

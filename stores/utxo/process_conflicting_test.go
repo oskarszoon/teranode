@@ -58,6 +58,10 @@ func TestProcessConflicting_Success(t *testing.T) {
 	mockStore.On("SetLocked", mock.Anything, []chainhash.Hash{losingTxHash}, false).Return(nil)
 
 	// Execute test
+	// The dangling-slot check reads winner parents via Get; treat any lookup not
+	// primed above as "no record" so the check is a no-op for this fixture.
+	mockStore.On("Get", mock.Anything, mock.Anything, mock.Anything).Return(nil, errors.NewTxNotFoundError("not found")).Maybe()
+
 	result, _, err := ProcessConflicting(ctx, mockStore, 1, chainhash.Hash{}, conflictingTxHashes, map[chainhash.Hash]struct{}{})
 
 	// Assertions
@@ -75,6 +79,10 @@ func TestProcessConflicting_FrozenTxError(t *testing.T) {
 	conflictingTxHashes := []chainhash.Hash{subtree.CoinbasePlaceholderHashValue}
 
 	// Execute test
+	// The dangling-slot check reads winner parents via Get; treat any lookup not
+	// primed above as "no record" so the check is a no-op for this fixture.
+	mockStore.On("Get", mock.Anything, mock.Anything, mock.Anything).Return(nil, errors.NewTxNotFoundError("not found")).Maybe()
+
 	result, _, err := ProcessConflicting(ctx, mockStore, 1, chainhash.Hash{}, conflictingTxHashes, map[chainhash.Hash]struct{}{})
 
 	// Assertions
@@ -98,6 +106,10 @@ func TestProcessConflicting_TxNotConflictingError(t *testing.T) {
 	}, nil)
 
 	// Execute test
+	// The dangling-slot check reads winner parents via Get; treat any lookup not
+	// primed above as "no record" so the check is a no-op for this fixture.
+	mockStore.On("Get", mock.Anything, mock.Anything, mock.Anything).Return(nil, errors.NewTxNotFoundError("not found")).Maybe()
+
 	result, _, err := ProcessConflicting(ctx, mockStore, 1, chainhash.Hash{}, conflictingTxHashes, map[chainhash.Hash]struct{}{})
 
 	// Assertions
@@ -118,6 +130,10 @@ func TestProcessConflicting_GetTxError(t *testing.T) {
 	mockStore.On("Get", mock.Anything, &conflictingTxHash, mock.Anything).Return(nil, errors.NewProcessingError("database error"))
 
 	// Execute test
+	// The dangling-slot check reads winner parents via Get; treat any lookup not
+	// primed above as "no record" so the check is a no-op for this fixture.
+	mockStore.On("Get", mock.Anything, mock.Anything, mock.Anything).Return(nil, errors.NewTxNotFoundError("not found")).Maybe()
+
 	result, _, err := ProcessConflicting(ctx, mockStore, 1, chainhash.Hash{}, conflictingTxHashes, map[chainhash.Hash]struct{}{})
 
 	// Assertions
@@ -145,6 +161,10 @@ func TestProcessConflicting_GetCounterConflictingError(t *testing.T) {
 		Return([]chainhash.Hash{}, errors.NewProcessingError("counter conflicting error"))
 
 	// Execute test
+	// The dangling-slot check reads winner parents via Get; treat any lookup not
+	// primed above as "no record" so the check is a no-op for this fixture.
+	mockStore.On("Get", mock.Anything, mock.Anything, mock.Anything).Return(nil, errors.NewTxNotFoundError("not found")).Maybe()
+
 	result, _, err := ProcessConflicting(ctx, mockStore, 1, chainhash.Hash{}, conflictingTxHashes, map[chainhash.Hash]struct{}{})
 
 	// Assertions
@@ -184,6 +204,10 @@ func TestProcessConflicting_UnspendError(t *testing.T) {
 		Return([]*Spend{}, []chainhash.Hash{}, nil)
 
 	// Execute test
+	// The dangling-slot check reads winner parents via Get; treat any lookup not
+	// primed above as "no record" so the check is a no-op for this fixture.
+	mockStore.On("Get", mock.Anything, mock.Anything, mock.Anything).Return(nil, errors.NewTxNotFoundError("not found")).Maybe()
+
 	result, _, err := ProcessConflicting(ctx, mockStore, 1, chainhash.Hash{}, conflictingTxHashes, map[chainhash.Hash]struct{}{})
 
 	// Assertions
@@ -241,6 +265,10 @@ func TestProcessConflicting_SpendError(t *testing.T) {
 	mockStore.On("SetLocked", mock.Anything, []chainhash.Hash{losingTxHash}, false).Return(nil)
 
 	// Execute test
+	// The dangling-slot check reads winner parents via Get; treat any lookup not
+	// primed above as "no record" so the check is a no-op for this fixture.
+	mockStore.On("Get", mock.Anything, mock.Anything, mock.Anything).Return(nil, errors.NewTxNotFoundError("not found")).Maybe()
+
 	result, _, err := ProcessConflicting(ctx, mockStore, 1, chainhash.Hash{}, conflictingTxHashes, map[chainhash.Hash]struct{}{})
 
 	// Assertions
@@ -671,6 +699,10 @@ func TestGetCounterConflictingTxHashes_Success(t *testing.T) {
 			SpendingDatas: []*spend.SpendingData{spendingData},
 		}, nil)
 
+	// The walk existence-checks the recorded spender before descending
+	mockStore.On("Get", mock.Anything, &conflictingTxHash, mock.Anything).
+		Return(&meta.Data{}, nil)
+
 	// Mock GetConflictingChildren call
 	mockStore.On("GetConflictingChildren", mock.Anything, conflictingTxHash).
 		Return([]chainhash.Hash{childTxHash}, nil)
@@ -788,6 +820,10 @@ func TestGetCounterConflictingTxHashes_FrozenChildError(t *testing.T) {
 			SpendingDatas: []*spend.SpendingData{spendingData},
 		}, nil)
 
+	// The walk existence-checks the recorded spender before descending
+	mockStore.On("Get", mock.Anything, &conflictingTxHash, mock.Anything).
+		Return(&meta.Data{}, nil)
+
 	// Mock GetConflictingChildren call returning frozen child
 	mockStore.On("GetConflictingChildren", mock.Anything, conflictingTxHash).
 		Return([]chainhash.Hash{subtree.FrozenBytesTxHash}, nil)
@@ -823,6 +859,10 @@ func TestGetCounterConflictingTxHashes_GetConflictingChildrenError(t *testing.T)
 		Return(&meta.Data{
 			SpendingDatas: []*spend.SpendingData{spendingData},
 		}, nil)
+
+	// The walk existence-checks the recorded spender before descending
+	mockStore.On("Get", mock.Anything, &conflictingTxHash, mock.Anything).
+		Return(&meta.Data{}, nil)
 
 	// Mock GetConflictingChildren call returning error
 	mockStore.On("GetConflictingChildren", mock.Anything, conflictingTxHash).

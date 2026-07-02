@@ -486,6 +486,17 @@ func (u *Server) checkCounterConflictingOnCurrentChain(ctx context.Context, txHa
 
 			counterConflictingTxMeta := &meta.Data{}
 			if err := u.utxoStore.GetMeta(gCtx, &counterConflictingTxHash, counterConflictingTxMeta); err != nil {
+				// The counter no longer exists on our chain (pruned/reorged/deleted). That is
+				// not grounds to reject: skip it, leaving counterConflictingTxMetas[idx] nil for
+				// the mined-check loop below to nil-guard.
+				if errors.Is(err, errors.ErrTxNotFound) || errors.Is(err, errors.ErrNotFound) {
+					if u.logger != nil {
+						u.logger.Warnf("[checkCounterConflictingOnCurrentChain][%s] counter conflicting tx %s not found, skipping (dangling reference)", txHash.String(), counterConflictingTxHash.String())
+					}
+
+					return nil
+				}
+
 				return errors.NewProcessingError("[checkCounterConflictingOnCurrentChain][%s] failed to get counter conflicting tx meta", txHash.String(), err)
 			}
 
@@ -503,6 +514,16 @@ func (u *Server) checkCounterConflictingOnCurrentChain(ctx context.Context, txHa
 	for _, counterConflictingTxHash := range counterConflictingTxHashes {
 		childTransactionHashes, err := utxo.GetConflictingChildren(ctx, u.utxoStore, counterConflictingTxHash)
 		if err != nil {
+			// A dangling counter has no reachable children to inspect for frozen sentinels —
+			// tolerate the missing record and move to the next counter.
+			if errors.Is(err, errors.ErrTxNotFound) || errors.Is(err, errors.ErrNotFound) {
+				if u.logger != nil {
+					u.logger.Warnf("[checkCounterConflictingOnCurrentChain][%s] counter conflicting tx %s not found while fetching children, skipping (dangling reference)", txHash.String(), counterConflictingTxHash.String())
+				}
+
+				continue
+			}
+
 			return errors.NewProcessingError("[checkCounterConflictingOnCurrentChain][%s] failed to get child transactions", txHash.String(), err)
 		}
 
@@ -515,6 +536,11 @@ func (u *Server) checkCounterConflictingOnCurrentChain(ctx context.Context, txHa
 
 	// check whether the counter-conflicting transactions have already been mined on our chain
 	for _, counterConflictingTxMeta := range counterConflictingTxMetas {
+		// nil entries mark counters that were tolerated as dangling above.
+		if counterConflictingTxMeta == nil {
+			continue
+		}
+
 		for _, blockID := range counterConflictingTxMeta.BlockIDs {
 			if blockIds[blockID] {
 				return errors.NewTxInvalidError("[checkCounterConflictingOnCurrentChain][%s] transaction is already mined on our chain", txHash.String())

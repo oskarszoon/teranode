@@ -4254,30 +4254,23 @@ func (s *Store) SetConflicting(ctx context.Context, txHashes []chainhash.Hash, s
 		utxoHash      *chainhash.Hash
 	)
 
-	// Create a database transaction
-	txn, err := s.db.Begin()
-	if err != nil {
-		return nil, nil, err
-	}
+	// Phase 1 — read everything BEFORE opening the write transaction. The previous
+	// shape interleaved s.Get/s.GetSpend (on s.db, a different connection) with writes
+	// inside the open txn; on SQLite shared-cache the reader then blocks on the txn's
+	// write lock and the call deadlocks until the context dies. Reading up front sees
+	// exactly the same pre-transaction state the interleaved reads saw (the txn's
+	// uncommitted writes were never visible on the other connection) and keeps the
+	// write transaction all-or-nothing.
+	txMetas := make([]*meta.Data, len(txHashes))
 
-	defer func() {
-		_ = txn.Rollback()
-	}()
-
-	for _, conflictingTxHash := range txHashes {
+	for idx, conflictingTxHash := range txHashes {
 		// get the extended tx
 		txMeta, err := s.Get(ctx, &conflictingTxHash)
 		if err != nil {
 			return nil, nil, err
 		}
 
-		if err = txn.QueryRowContext(ctx, qUpdate, conflictingTxHash[:], setValue, deleteAtHeight).Scan(&transactionID); err != nil {
-			return nil, nil, errors.NewStorageError("failed to set conflicting flag for %s", conflictingTxHash, err)
-		}
-
-		if err = s.updateParentConflictingChildren(ctx, transactionID, txMeta.Tx, txn); err != nil {
-			return nil, nil, err
-		}
+		txMetas[idx] = txMeta
 
 		for i, input := range txMeta.Tx.Inputs {
 			utxoHash, err = util.UTXOHashFromInput(input)
@@ -4321,6 +4314,26 @@ func (s *Store) SetConflicting(ctx context.Context, txHashes []chainhash.Hash, s
 			if spendResponse.Status == int(utxo.Status_SPENT) && spendResponse.SpendingData != nil && spendResponse.SpendingData.TxID != nil {
 				spendingTxHashes = append(spendingTxHashes, *spendResponse.SpendingData.TxID)
 			}
+		}
+	}
+
+	// Phase 2 — apply all writes in a single transaction.
+	txn, err := s.db.Begin()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	defer func() {
+		_ = txn.Rollback()
+	}()
+
+	for idx, conflictingTxHash := range txHashes {
+		if err = txn.QueryRowContext(ctx, qUpdate, conflictingTxHash[:], setValue, deleteAtHeight).Scan(&transactionID); err != nil {
+			return nil, nil, errors.NewStorageError("failed to set conflicting flag for %s", conflictingTxHash, err)
+		}
+
+		if err = s.updateParentConflictingChildren(ctx, transactionID, txMetas[idx].Tx, txn); err != nil {
+			return nil, nil, err
 		}
 	}
 
