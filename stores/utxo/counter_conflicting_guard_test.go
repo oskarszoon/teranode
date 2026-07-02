@@ -320,3 +320,49 @@ func TestProcessConflicting_LiveThirdPartySpenderSlot_UntouchedSpendFailsClosed(
 	mockStore.AssertCalled(t, "Get", mock.Anything, &liveHash, mock.Anything)
 	mockStore.AssertExpectations(t)
 }
+
+// Regression guard (frozen sentinel filtered before SetConflicting): the frozen sentinel
+// (subtree.FrozenBytesTxHash == subtree.CoinbasePlaceholderHashValue, the all-0xFF marker)
+// can reach MarkConflictingRecursively both in the input hashes (the counter walk keeps it
+// in the counter set) and as a returned spending child (a frozen parent slot surfaces it).
+// It is a marker, not a transaction: it must never be handed to SetConflicting, which would
+// nil-deref on aerospike and NOT_FOUND-error on SQL. The precise per-batch matchers below
+// (each rejecting any batch that contains the sentinel) prove the filter runs on BOTH the
+// initial batch and the descendant batch.
+func TestMarkConflictingRecursively_FiltersFrozenSentinel(t *testing.T) {
+	ctx := context.Background()
+	mockStore := &MockUtxostore{}
+
+	realTx := createTestHash("mcr-real-tx")
+	childTx := createTestHash("mcr-child-tx")
+	sentinel := subtree.FrozenBytesTxHash
+
+	// First batch: the input [realTx, sentinel] with the sentinel filtered → exactly
+	// [realTx]. The returned spending-child set deliberately includes the sentinel, as a
+	// frozen slot would surface it.
+	firstBatch := mock.MatchedBy(func(hashes []chainhash.Hash) bool {
+		return len(hashes) == 1 && hashes[0].Equal(realTx)
+	})
+	mockStore.On("SetConflicting", mock.Anything, firstBatch, true).
+		Return([]*Spend{}, []chainhash.Hash{childTx, sentinel}, nil).Once()
+
+	// Second batch: the descendant set [childTx, sentinel] with the sentinel filtered →
+	// exactly [childTx]. No more children.
+	secondBatch := mock.MatchedBy(func(hashes []chainhash.Hash) bool {
+		return len(hashes) == 1 && hashes[0].Equal(childTx)
+	})
+	mockStore.On("SetConflicting", mock.Anything, secondBatch, true).
+		Return([]*Spend{}, []chainhash.Hash{}, nil).Once()
+
+	_, marked, err := MarkConflictingRecursively(ctx, mockStore, []chainhash.Hash{realTx, sentinel})
+
+	require.NoError(t, err)
+	require.Contains(t, marked, realTx)
+	require.Contains(t, marked, childTx)
+	require.NotContains(t, marked, sentinel,
+		"the sentinel is a marker, never itself marked conflicting")
+	// A SetConflicting call carrying the sentinel would fail the per-batch matchers and
+	// surface as an unexpected-call panic; AssertExpectations confirms only the two
+	// sentinel-free batches ran.
+	mockStore.AssertExpectations(t)
+}

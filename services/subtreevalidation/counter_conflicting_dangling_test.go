@@ -17,11 +17,16 @@ import (
 	"net/url"
 	"testing"
 
+	"github.com/bsv-blockchain/go-bt/v2"
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
+	subtreepkg "github.com/bsv-blockchain/go-subtree"
 	"github.com/bsv-blockchain/teranode/stores/utxo"
+	"github.com/bsv-blockchain/teranode/stores/utxo/meta"
+	"github.com/bsv-blockchain/teranode/stores/utxo/spend"
 	"github.com/bsv-blockchain/teranode/stores/utxo/sql"
 	"github.com/bsv-blockchain/teranode/ulogger"
 	"github.com/bsv-blockchain/teranode/util/test"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -119,4 +124,51 @@ func TestCheckCounterConflictingOnCurrentChain_RejectsMinedCounterGuard(t *testi
 	// Counter now mined on our chain → the conflicting tx must be rejected.
 	err = s.checkCounterConflictingOnCurrentChain(ctx, *tx1.TxIDChainHash(), map[uint32]bool{122: true})
 	require.Error(t, err, "a counter mined on our chain must still reject the conflicting tx")
+}
+
+// TestCheckCounterConflictingOnCurrentChain_FrozenSentinelCounterRejected drives the
+// counter-conflicting walk (via a mocked store) to keep the frozen sentinel
+// (subtreepkg.CoinbasePlaceholderHashValue, the all-0xFF marker) in the counter set — the
+// walk does this on purpose for a frozen parent slot. checkCounterConflictingOnCurrentChain
+// must then reject the conflicting tx through its placeholder guard ("counter conflicting tx
+// is frozen"), never treating the sentinel as an ordinary counter. Previously this path was
+// covered only by the sequential integration test testFrozenTxInConflictResolutionPath; this
+// is the unit-level guard.
+func TestCheckCounterConflictingOnCurrentChain_FrozenSentinelCounterRejected(t *testing.T) {
+	InitPrometheusMetrics()
+
+	ctx := context.Background()
+	mockStore := &utxo.MockUtxostore{}
+
+	s := &Server{utxoStore: mockStore}
+
+	txHash := chainhash.HashH([]byte("frozen-counter-tx"))
+	parentHash := chainhash.HashH([]byte("frozen-counter-parent"))
+
+	// The conflicting tx spends parentHash[0].
+	conflictingTx := bt.NewTx()
+	in := &bt.Input{PreviousTxOutIndex: 0}
+	_ = in.PreviousTxIDAdd(&parentHash)
+	conflictingTx.Inputs = append(conflictingTx.Inputs, in)
+	conflictingTx.Outputs = append(conflictingTx.Outputs, &bt.Output{Satoshis: 1000})
+
+	// Walk step 1: fetch the conflicting tx body.
+	mockStore.On("Get", mock.Anything, &txHash, mock.Anything).
+		Return(&meta.Data{Tx: conflictingTx}, nil)
+
+	// Walk step 2: the parent output is spent by the frozen sentinel, so the walk keeps the
+	// sentinel in the counter set (no existence Get on it).
+	frozenHash := subtreepkg.FrozenBytesTxHash
+	mockStore.On("Get", mock.Anything, &parentHash, mock.Anything).
+		Return(&meta.Data{SpendingDatas: []*spend.SpendingData{{TxID: &frozenHash}}}, nil)
+
+	// The non-sentinel counter (the tx itself) is looked up via GetMeta; return it alive so
+	// only the sentinel drives the rejection.
+	mockStore.On("GetMeta", mock.Anything, &txHash, mock.Anything).Return(&meta.Data{})
+
+	err := s.checkCounterConflictingOnCurrentChain(ctx, txHash, map[uint32]bool{})
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "counter conflicting tx is frozen",
+		"a frozen sentinel in the counter set must reject via the placeholder guard")
 }

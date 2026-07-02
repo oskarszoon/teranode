@@ -21,6 +21,7 @@ import (
 	"github.com/bsv-blockchain/go-bt/v2"
 	"github.com/bsv-blockchain/go-bt/v2/bscript"
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
+	"github.com/bsv-blockchain/go-subtree"
 	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/stores/utxo"
 	"github.com/bsv-blockchain/teranode/stores/utxo/fields"
@@ -365,4 +366,40 @@ func TestSQLPruner_MarkerRemovedWhenParentPruned(t *testing.T) {
 	require.NoError(t, store.db.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM deleted_children WHERE parent_hash = $1`, parent.TxIDChainHash()[:]).Scan(&markerCount))
 	require.Equal(t, 0, markerCount, "reaping the parent must remove its deleted_children rows")
+}
+
+// TestSetConflicting_SkipsFrozenSentinel verifies SQL SetConflicting handles the frozen
+// sentinel (subtree.CoinbasePlaceholderHashValue, the all-0xFF marker) symmetrically with
+// aerospike: it is skipped, not treated as a real tx. The counter-conflicting walk can now
+// keep the sentinel in the losing set, so SetConflicting must tolerate it in the batch
+// without erroring, mark the accompanying real tx, and never create a row for the sentinel.
+// Pre-fix this call fails: s.Get(sentinel) returns TX_NOT_FOUND and aborts the whole batch.
+func TestSetConflicting_SkipsFrozenSentinel(t *testing.T) {
+	ctx := context.Background()
+	store, _ := setup(ctx, t)
+
+	parent := danglingParentTx(0x7F)
+	_, err := store.Create(ctx, parent, 100)
+	require.NoError(t, err)
+
+	// A real, storable tx that WILL be marked conflicting.
+	realTx := danglingSpendTx(t, parent, 90000)
+	_, err = store.Create(ctx, realTx, 100)
+	require.NoError(t, err)
+
+	sentinel := subtree.CoinbasePlaceholderHashValue
+
+	// SetConflicting over [sentinel, realTx]: the sentinel is skipped, not errored.
+	_, _, err = store.SetConflicting(ctx, []chainhash.Hash{sentinel, *realTx.TxIDChainHash()}, true)
+	require.NoError(t, err, "the frozen sentinel must be skipped, not abort the whole SetConflicting batch")
+
+	// The real tx is now flagged conflicting.
+	realMeta, err := store.Get(ctx, realTx.TxIDChainHash(), fields.Conflicting)
+	require.NoError(t, err)
+	require.True(t, realMeta.Conflicting, "the real tx in the batch must still be marked conflicting")
+
+	// The sentinel was never turned into a row.
+	_, err = store.Get(ctx, &sentinel, fields.Conflicting)
+	require.Error(t, err, "no row must be created for the sentinel — it is a marker, not a tx")
+	require.True(t, errors.Is(err, errors.ErrTxNotFound))
 }

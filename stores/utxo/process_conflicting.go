@@ -1045,11 +1045,25 @@ func MarkConflictingRecursively(ctx context.Context, s Store, hashes []chainhash
 	defer deferFn()
 
 	var allAffectedSpends []*Spend
-	toProcess := hashes
+
+	// The frozen sentinel (subtree.FrozenBytesTxHash == subtree.CoinbasePlaceholderHashValue,
+	// the all-0xFF hash) can reach here two ways: the counter-conflicting walk keeps it in the
+	// counter set on purpose, and a frozen parent slot can name it as a spending child in the
+	// batches SetConflicting returns below. It is a marker, not a transaction: it has no store
+	// record, marking it conflicting is meaningless, and feeding it to SetConflicting would
+	// nil-deref on aerospike (the fetch loop skips the placeholder, leaving a nil tx the
+	// processing loop derefs) and NOT_FOUND-error on SQL. Filter it out of BOTH the initial
+	// batch and every descendant batch so it never reaches SetConflicting.
+	toProcess := make([]chainhash.Hash, 0, len(hashes))
+	for _, h := range hashes {
+		if !h.Equal(subtree.FrozenBytesTxHash) {
+			toProcess = append(toProcess, h)
+		}
+	}
 
 	visited := make(map[chainhash.Hash]struct{}, len(hashes))
 	markedOrder := make([]chainhash.Hash, 0, len(hashes))
-	for _, h := range hashes {
+	for _, h := range toProcess {
 		if _, ok := visited[h]; !ok {
 			visited[h] = struct{}{}
 			markedOrder = append(markedOrder, h)
@@ -1064,9 +1078,14 @@ func MarkConflictingRecursively(ctx context.Context, s Store, hashes []chainhash
 
 		allAffectedSpends = append(allAffectedSpends, affectedParentSpends...)
 
-		// filter out already-visited hashes to prevent infinite loops
+		// filter out already-visited hashes to prevent infinite loops, and the frozen
+		// sentinel a frozen slot can surface as a spending child (see the note above).
 		nextBatch := spendingChildTxs[:0]
 		for _, child := range spendingChildTxs {
+			if child.Equal(subtree.FrozenBytesTxHash) {
+				continue
+			}
+
 			if _, ok := visited[child]; !ok {
 				visited[child] = struct{}{}
 				markedOrder = append(markedOrder, child)
@@ -1364,11 +1383,14 @@ func GetCounterConflictingTxHashes(ctx context.Context, s Store, txHash chainhas
 				// (== subtree.CoinbasePlaceholderHashValue — both are the all-0xFF hash)
 				// in its spend slot. It has no store record, so the existence Get below
 				// would misclassify it as a ghost; skip that Get and the child BFS, but
-				// keep the sentinel IN the counter set. The consumers stay fail-safe on
-				// it: checkCounterConflictingOnCurrentChain rejects a placeholder counter
-				// as frozen (SubtreeValidation.go), and SetConflicting skips the
-				// placeholder so ProcessConflicting still resolves the conflict
-				// (aerospike conflicting.go).
+				// keep the sentinel IN the counter set. Consumers stay fail-safe on it:
+				// checkCounterConflictingOnCurrentChain rejects a placeholder counter as
+				// frozen (SubtreeValidation.go). If the sentinel reaches the losing set,
+				// MarkConflictingRecursively filters it out BEFORE SetConflicting is ever
+				// called (it is a marker, not a tx), so ProcessConflicting still resolves
+				// the conflict; both SetConflicting backends also skip the placeholder
+				// defensively (aerospike nil-skips it in the processing loop, SQL skips it
+				// before its Get) so neither panics nor errors on it.
 				if spendingTxID.Equal(subtree.FrozenBytesTxHash) {
 					counterConflictingMap[*spendingTxID] = struct{}{}
 

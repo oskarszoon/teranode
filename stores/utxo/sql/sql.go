@@ -1691,6 +1691,13 @@ func (s *Store) getUnbatched(ctx context.Context, hash *chainhash.Hash, bins []f
 				return nil, err
 			}
 
+			if len(childHashBytes) != chainhash.HashSize {
+				// Best-effort marker read: a short/corrupt row would panic the
+				// slice-to-array cast below. Skip it rather than crash — a missing marker
+				// degrades to the tolerated-ghost path, which is fail-safe.
+				continue
+			}
+
 			if data.DeletedChildren == nil {
 				data.DeletedChildren = make(map[chainhash.Hash]struct{})
 			}
@@ -4296,6 +4303,16 @@ func (s *Store) SetConflicting(ctx context.Context, txHashes []chainhash.Hash, s
 	txMetas := make([]*meta.Data, len(txHashes))
 
 	for idx, conflictingTxHash := range txHashes {
+		if conflictingTxHash.Equal(subtree.CoinbasePlaceholderHashValue) {
+			// Skip the coinbase placeholder / frozen sentinel (the all-0xFF marker hash):
+			// it is a marker, not a transaction, has no row, and s.Get would return
+			// NOT_FOUND. Symmetric with aerospike, which skips the same hash in its fetch
+			// loop. Leaves txMetas[idx] nil; the write phase below skips nil entries.
+			// Callers already filter the sentinel in MarkConflictingRecursively; this is
+			// defence in depth.
+			continue
+		}
+
 		// get the extended tx
 		txMeta, err := s.Get(ctx, &conflictingTxHash)
 		if err != nil {
@@ -4360,6 +4377,11 @@ func (s *Store) SetConflicting(ctx context.Context, txHashes []chainhash.Hash, s
 	}()
 
 	for idx, conflictingTxHash := range txHashes {
+		if txMetas[idx] == nil {
+			// Placeholder skipped in phase 1 (or any future skip) — no row to update.
+			continue
+		}
+
 		if err = txn.QueryRowContext(ctx, qUpdate, conflictingTxHash[:], setValue, deleteAtHeight).Scan(&transactionID); err != nil {
 			return nil, nil, errors.NewStorageError("failed to set conflicting flag for %s", conflictingTxHash, err)
 		}
