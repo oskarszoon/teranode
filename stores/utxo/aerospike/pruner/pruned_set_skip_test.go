@@ -175,14 +175,16 @@ func TestProcessRecordChunk_AccumulatesParentsEvenWhenInPrunedSet(t *testing.T) 
 		"insert-only set: parents retained, child added up front")
 }
 
-// TestProcessRecordChunk_MarkerKeyedOnMasterAndPageRecords verifies the keying
-// fix: the deletedChildren marker for a parent is written to BOTH readers'
-// records. The counter-conflicting walk reads it from the parent MASTER record
-// (vout 0); the spendMulti lua UDF reads it from the PAGE record that owns the
-// spent output. When the child spends an output whose vout is >= utxoBatchSize
-// the two records differ, so the marker must land on both — a master-only marker
-// is invisible to the spend path, and a page-only marker invisible to the walk.
-func TestProcessRecordChunk_MarkerKeyedOnMasterAndPageRecords(t *testing.T) {
+// TestProcessRecordChunk_MarkerPageKeyedOnly verifies the round-6 keying fix: the
+// deletedChildren marker is written PAGE-keyed only — on the record that owns the
+// spent output (CalculateKeySource(parent, vout)) — never dual-keyed onto the
+// parent master record. Page-keying bounds the marker map per page so a
+// high-fanout parent cannot concentrate one entry per distinct pruned child (across
+// all vouts) onto a single record and wedge the pruner past the write-block-size.
+// The spendMulti UDF reads its own page; the counter-conflicting walk reads a
+// page-aggregating Get (get.go mergePageDeletedChildren), so a page-only marker is
+// still visible to both readers.
+func TestProcessRecordChunk_MarkerPageKeyedOnly(t *testing.T) {
 	ctx := context.Background()
 	svc := newTestServiceForSkip(t) // utxoBatchSize = 128
 	captured := captureFlush(svc)
@@ -192,8 +194,8 @@ func TestProcessRecordChunk_MarkerKeyedOnMasterAndPageRecords(t *testing.T) {
 		parent[i] = 0xCC
 	}
 
-	// vout well beyond utxoBatchSize so naive keying (vout / batchSize = 1)
-	// would land the marker on pagination record num=1.
+	// vout well beyond utxoBatchSize so CalculateKeySource(parent, 200) lands the
+	// marker on pagination record num=1, distinct from the master record (vout 0).
 	const vout = uint32(200)
 	require.Greater(t, vout, uint32(svc.utxoBatchSize), "test premise: vout must exceed batch size")
 
@@ -213,15 +215,53 @@ func TestProcessRecordChunk_MarkerKeyedOnMasterAndPageRecords(t *testing.T) {
 	require.NotEqual(t, masterKeySrc, pageKeySrc,
 		"test premise: vout must map to a distinct page record")
 
-	require.Len(t, *captured, 2, "marker must accumulate on both the master and the page record")
-
-	masterUpdate, okMaster := (*captured)[masterKeySrc]
-	require.True(t, okMaster, "marker must be keyed on the parent MASTER record (vout 0) for the counter-conflicting walk")
-	require.Len(t, masterUpdate.childHashes, 1, "master record carries the single child marker")
+	require.Len(t, *captured, 1, "marker must accumulate on exactly one record (page-keyed only)")
 
 	pageUpdate, okPage := (*captured)[pageKeySrc]
-	require.True(t, okPage, "marker must ALSO be keyed on the PAGE record owning the spent vout for the spendMulti guard")
+	require.True(t, okPage, "marker must be keyed on the PAGE record owning the spent vout")
 	require.Len(t, pageUpdate.childHashes, 1, "page record carries the single child marker")
+
+	_, okMaster := (*captured)[masterKeySrc]
+	require.False(t, okMaster,
+		"marker must NOT be dual-keyed onto the master record — that concentration is the prune-wedge this fix removes")
+}
+
+// TestProcessRecordChunk_MarkerOnMasterForLowVout verifies that for a spent output
+// at vout < utxoBatchSize the page record IS the master record (page 0), so the
+// single page-keyed marker lands on the master keySource. This is the common
+// ≤128-output-parent case and is byte-identical to the pre-PR behaviour.
+func TestProcessRecordChunk_MarkerOnMasterForLowVout(t *testing.T) {
+	ctx := context.Background()
+	svc := newTestServiceForSkip(t) // utxoBatchSize = 128
+	captured := captureFlush(svc)
+
+	var parent chainhash.Hash
+	for i := range parent {
+		parent[i] = 0xDD
+	}
+
+	const vout = uint32(5) // < utxoBatchSize: page 0 == master record
+	require.Less(t, vout, uint32(svc.utxoBatchSize), "test premise: vout must be within the first page")
+
+	chunk := []*aerospike.Result{
+		makeChildResultWithInputs(t, svc, 0x44, [][]byte{makeInputBytes(t, parent, vout)}),
+	}
+
+	processed, skipped, err := svc.processRecordChunk(ctx, 1000, chunk, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, processed)
+	require.Equal(t, 0, skipped)
+
+	masterKeySrc := string(uaerospike.CalculateKeySource(&parent, 0, svc.utxoBatchSize))
+	pageKeySrc := string(uaerospike.CalculateKeySource(&parent, vout, svc.utxoBatchSize))
+	require.Equal(t, masterKeySrc, pageKeySrc,
+		"test premise: a vout within the first page must key on the master record")
+
+	require.Len(t, *captured, 1, "single marker record for a low-vout spend")
+
+	masterUpdate, okMaster := (*captured)[masterKeySrc]
+	require.True(t, okMaster, "the page-keyed marker for a low vout lands on the master record (page 0)")
+	require.Len(t, masterUpdate.childHashes, 1, "master record carries the single child marker")
 }
 
 // TestProcessRecordChunk_EmptyPrunedSetIsNoOp verifies that an empty

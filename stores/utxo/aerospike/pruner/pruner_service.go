@@ -1,7 +1,6 @@
 package pruner
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -1130,29 +1129,25 @@ func (s *Service) processRecordChunk(ctx context.Context, blockHeight uint32, ch
 		for _, input := range inputs {
 			parentTxID := input.PreviousTxIDChainHash()
 
-			// The deletedChildren marker has TWO readers that key on DIFFERENT
-			// records, so it must be written to both:
-			//   - the counter-conflicting walk reads it from the parent MASTER
-			//     record (vout 0) via s.Get (get.go / process_conflicting.go);
-			//   - the spendMulti lua UDF reads it from the PAGE record that owns
-			//     the spent output — CalculateKeySource(parent, vout) — for the
-			//     same-spender re-spend INVALID_SPEND guard (teranode.lua).
-			// For vout < utxoBatchSize both resolve to the master record; for
-			// vout >= utxoBatchSize they differ, so a master-only marker is
-			// invisible to the spend path and a page-only marker is invisible to
-			// the walk. Write both (deduped when equal). addDeletedChildren is a
-			// silent no-op on a missing record, so a write to a page that does
-			// not exist is harmless.
-			masterKeySource := uaerospike.CalculateKeySource(parentTxID, 0, s.utxoBatchSize)
-			if err := s.accumulateDeletedChildMarker(masterKeySource, txHash, allParentUpdates); err != nil {
-				return 0, 0, err
-			}
-
+			// The deletedChildren marker is page-keyed on the record that owns the
+			// spent output — CalculateKeySource(parent, vout) — bounded to that
+			// page's outputs. This is the pre-PR write pattern. Two readers consume
+			// it:
+			//   - the spendMulti lua UDF reads its OWN page for the same-spender
+			//     re-spend INVALID_SPEND guard (teranode.lua);
+			//   - the counter-conflicting walk reads it via a page-aggregating Get
+			//     (get.go mergePageDeletedChildren) that unions the master record's
+			//     map with every page record's map, so it sees a marker on any page
+			//     regardless of which page owns the spent vout.
+			// Keeping the write page-bounded (not dual-keyed onto the master record)
+			// avoids concentrating one entry per distinct pruned child across all
+			// vouts onto a single record: a high-fanout parent that stays alive
+			// could otherwise grow the master map past the write-block-size and
+			// wedge the pruner. addDeletedChildren is a silent no-op on a missing
+			// record, so a write to a page that does not exist is harmless.
 			voutKeySource := uaerospike.CalculateKeySource(parentTxID, input.PreviousTxOutIndex, s.utxoBatchSize)
-			if !bytes.Equal(masterKeySource, voutKeySource) {
-				if err := s.accumulateDeletedChildMarker(voutKeySource, txHash, allParentUpdates); err != nil {
-					return 0, 0, err
-				}
+			if err := s.accumulateDeletedChildMarker(voutKeySource, txHash, allParentUpdates); err != nil {
+				return 0, 0, err
 			}
 		}
 

@@ -1032,10 +1032,13 @@ func collectDanglingWinnerInputSpends(ctx context.Context, s Store, winningTxs [
 			}
 
 			// Ghost spender: its record is gone. GetSpend does not carry the parent's
-			// deletedChildren marker, so fetch it here (rare path, single bin). A marked
-			// ghost was reaped deliberately by the pruner (e.g. a mined tx after retention)
-			// — fail closed rather than clear the slot. Safety bounds of tolerating an
-			// UNMARKED ghost are documented at the walk's spender-existence check in
+			// deletedChildren marker, so fetch it here (rare repair path). On aerospike
+			// this Get is page-aggregating: it unions the marker map from the master
+			// record and every page record, so a marker on any vout's page is seen
+			// (the pruner writes the marker page-keyed). A marked ghost was reaped
+			// deliberately by the pruner (e.g. a mined tx after retention) — fail closed
+			// rather than clear the slot. Safety bounds of tolerating an UNMARKED ghost
+			// are documented at the walk's spender-existence check in
 			// GetCounterConflictingTxHashes.
 			markerMeta, err := s.Get(ctx, &parentHash, fields.DeletedChildren)
 			if err != nil {
@@ -1316,10 +1319,10 @@ func GetConflictingChildren(ctx context.Context, s Store, hash chainhash.Hash) (
 }
 
 // parentSpendInfo carries, per parent tx, the recorded spender of each output slot plus
-// the parent's deletedChildren set (aerospike bin / SQL deleted_children table; both
-// best-effort). The deletedChildren set lets GetCounterConflictingTxHashes discriminate
-// a ghost spender the pruner deleted deliberately (marker present → fail closed) from
-// one to tolerate (marker absent).
+// the parent's deletedChildren set (aerospike bin / SQL deleted_children table; written
+// reliably as of this PR — see meta.Data.DeletedChildren). The deletedChildren set lets
+// GetCounterConflictingTxHashes discriminate a ghost spender the pruner deleted
+// deliberately (marker present → fail closed) from one to tolerate (marker absent).
 type parentSpendInfo struct {
 	spendingTxIDs   []*chainhash.Hash
 	deletedChildren map[chainhash.Hash]struct{}
@@ -1462,12 +1465,16 @@ func GetCounterConflictingTxHashes(ctx context.Context, s Store, txHash chainhas
 				// The marker is written reliably as of this PR — aerospike writes it
 				// unconditionally (the cuckoo consult that could skip it on a ~3% false
 				// positive was removed) and the SQL pruner freezes the deletable set in a
-				// temp table so no row is deleted unmarked under READ COMMITTED. Residual
-				// exposure is therefore historical only: aerospike markers written before
-				// this PR to a page record for vout ≥ utxoBatchSize (the walk reads master),
-				// and SQL stores upgraded mid-life whose deleted_children table starts empty.
-				// Both additionally require an attacker fork inside the 576-block window and
-				// are backstopped by the primary Spend double-spend defense.
+				// temp table so no row is deleted unmarked under READ COMMITTED. The aerospike
+				// marker is page-keyed (bounded per page record) and the parent Get above is
+				// page-aggregating (get.go mergePageDeletedChildren unions every page's map),
+				// so a marker for any vout — including vout ≥ utxoBatchSize — is seen here
+				// regardless of which page holds it. Residual exposure is therefore historical
+				// only: aerospike deletes done before this PR whose marker the cuckoo
+				// pre-filter suppressed, and SQL stores upgraded mid-life whose
+				// deleted_children table starts empty. Both additionally require an attacker
+				// fork inside the 576-block window and are backstopped by the primary Spend
+				// double-spend defense.
 				spenderMeta, err := s.Get(ctx, spendingTxID, fields.Conflicting)
 				if err != nil {
 					// A ghost (NOT_FOUND) is discriminated by the deletedChildren marker:
