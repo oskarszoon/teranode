@@ -98,13 +98,14 @@ type Data struct {
 
 	// DeletedChildren, when populated (fields.DeletedChildren), is the set of child tx
 	// hashes the pruner deleted at their delete-at-height. Written by the pruner on the
-	// parent: the addDeletedChildren lua UDF on aerospike (best-effort — the pruner may
-	// suppress the update when it believes the parent is already pruned, ~3% cuckoo
-	// false positives included), the deleted_children table on postgres/sqlite
-	// (best-effort — written in the same transaction as the delete, but a row that
-	// starts qualifying mid-transaction can be deleted unmarked under READ COMMITTED).
-	// Consumed by the counter-conflicting fail-closed guards. Transient read-side data:
-	// not part of the binary serialization in Bytes()/NewMetaDataFromBytes.
+	// parent, reliably as of the round that made it load-bearing: the addDeletedChildren
+	// lua UDF on aerospike (written unconditionally — the in-memory cuckoo consult that
+	// could skip it was removed) and the deleted_children table on postgres/sqlite
+	// (written in the same transaction as the delete, against a deletable set frozen in a
+	// temp table so no row is deleted unmarked under READ COMMITTED). Consumed by the
+	// counter-conflicting fail-closed guards; a missing marker is now historical only
+	// (see GetCounterConflictingTxHashes). Transient read-side data: not part of the
+	// binary serialization in Bytes()/NewMetaDataFromBytes.
 	//
 	// json:"-": a chainhash.Hash map key has no TextMarshaler, so encoding/json cannot
 	// marshal this map (it panics/errors on non-string, non-TextMarshaler map keys).

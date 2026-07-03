@@ -1459,11 +1459,15 @@ func GetCounterConflictingTxHashes(ctx context.Context, s Store, txHash chainhas
 				// (288, 576] band — pruned but still inside the comparison window — is
 				// covered by the pruner's deletedChildren marker on BOTH backends (aerospike
 				// bin + SQL deleted_children table): a marked ghost fails closed below.
-				// Residual exposure is only the marker-suppressed corners (aerospike ~3.1%
-				// cuckoo false positive; postgres READ COMMITTED drift between the marker
-				// insert and the delete inside the pruner's transaction), which additionally
-				// require an attacker fork inside the 576-block window and are backstopped
-				// by the primary Spend double-spend defense.
+				// The marker is written reliably as of this PR — aerospike writes it
+				// unconditionally (the cuckoo consult that could skip it on a ~3% false
+				// positive was removed) and the SQL pruner freezes the deletable set in a
+				// temp table so no row is deleted unmarked under READ COMMITTED. Residual
+				// exposure is therefore historical only: aerospike markers written before
+				// this PR to a page record for vout ≥ utxoBatchSize (the walk reads master),
+				// and SQL stores upgraded mid-life whose deleted_children table starts empty.
+				// Both additionally require an attacker fork inside the 576-block window and
+				// are backstopped by the primary Spend double-spend defense.
 				spenderMeta, err := s.Get(ctx, spendingTxID, fields.Conflicting)
 				if err != nil {
 					// A ghost (NOT_FOUND) is discriminated by the deletedChildren marker:
