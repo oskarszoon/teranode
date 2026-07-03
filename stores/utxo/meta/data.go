@@ -105,7 +105,11 @@ type Data struct {
 	// starts qualifying mid-transaction can be deleted unmarked under READ COMMITTED).
 	// Consumed by the counter-conflicting fail-closed guards. Transient read-side data:
 	// not part of the binary serialization in Bytes()/NewMetaDataFromBytes.
-	DeletedChildren map[chainhash.Hash]struct{} `json:"deletedChildren,omitempty"`
+	//
+	// json:"-": a chainhash.Hash map key has no TextMarshaler, so encoding/json cannot
+	// marshal this map (it panics/errors on non-string, non-TextMarshaler map keys).
+	// The field is populated by the backends per-read and never serialized as JSON.
+	DeletedChildren map[chainhash.Hash]struct{} `json:"-"`
 }
 
 // NewMetaDataFromBytes creates a new Data object from a byte slice.

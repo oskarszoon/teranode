@@ -989,6 +989,12 @@ func Is(err, target error) bool {
 	return checkGRPCContextError(origErr, err, target)
 }
 
+// IsNotFound reports whether err denotes a missing record on any UTXO-store
+// backend: aerospike surfaces ErrTxNotFound, the SQL stores ErrNotFound.
+func IsNotFound(err error) bool {
+	return Is(err, ErrNotFound) || Is(err, ErrTxNotFound)
+}
+
 // AsData attempts to assign the error data to the target if types are compatible.
 func AsData(err error, target interface{}) bool {
 	if isGRPCWrappedError(err) {

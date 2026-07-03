@@ -172,15 +172,127 @@ func TestGetCounterConflictingTxHashes_GhostWithoutMarkerTolerated(t *testing.T)
 	mockStore.AssertExpectations(t)
 }
 
-// Regression guard (freeze handling at the ProcessConflicting repair path): a winner
+// Walk (nil, nil) missing-spender branch, marked: some backends surface a deleted record
+// as (nil, nil) instead of a NOT_FOUND error. When the parent carries a deletedChildren
+// marker for that ghost the walk must fail closed, identically to the NOT_FOUND path —
+// the shared discriminateGhostSpender helper must treat both variants the same.
+func TestGetCounterConflictingTxHashes_NilSpenderWithMarkerFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	mockStore := &MockUtxostore{}
+
+	txHash := createTestHash("nilspender-marker-tx")
+	parentTxHash := createTestHash("nilspender-marker-parent")
+	ghostTxHash := createTestHash("nilspender-marker-ghost")
+
+	testTx := createTestTransactionWithInputs(parentTxHash, 0)
+
+	mockStore.On("Get", mock.Anything, &txHash, mock.Anything).
+		Return(&meta.Data{Tx: testTx}, nil)
+
+	// Parent records the ghost as spender AND carries a deletedChildren marker for it.
+	spendingData := &spend.SpendingData{TxID: &ghostTxHash}
+	mockStore.On("Get", mock.Anything, &parentTxHash, mock.Anything).
+		Return(&meta.Data{
+			SpendingDatas:   []*spend.SpendingData{spendingData},
+			DeletedChildren: map[chainhash.Hash]struct{}{ghostTxHash: {}},
+		}, nil)
+
+	// The ghost's own record surfaces as (nil, nil): no error, no data.
+	mockStore.On("Get", mock.Anything, &ghostTxHash, mock.Anything).
+		Return(nil, nil)
+
+	res, err := GetCounterConflictingTxHashes(ctx, mockStore, txHash)
+
+	require.Nil(t, res)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "deleted by the pruner")
+	mockStore.AssertExpectations(t)
+}
+
+// Walk (nil, nil) missing-spender branch, unmarked: the (nil, nil) variant of a ghost with
+// no deletedChildren marker must be tolerated — excluded from the counter set — exactly
+// like the NOT_FOUND variant.
+func TestGetCounterConflictingTxHashes_NilSpenderWithoutMarkerTolerated(t *testing.T) {
+	ctx := context.Background()
+	mockStore := &MockUtxostore{}
+
+	txHash := createTestHash("nilspender-nomarker-tx")
+	parentTxHash := createTestHash("nilspender-nomarker-parent")
+	ghostTxHash := createTestHash("nilspender-nomarker-ghost")
+
+	testTx := createTestTransactionWithInputs(parentTxHash, 0)
+
+	mockStore.On("Get", mock.Anything, &txHash, mock.Anything).
+		Return(&meta.Data{Tx: testTx}, nil)
+
+	// Parent records the ghost as spender but has NO deletedChildren marker for it.
+	spendingData := &spend.SpendingData{TxID: &ghostTxHash}
+	mockStore.On("Get", mock.Anything, &parentTxHash, mock.Anything).
+		Return(&meta.Data{SpendingDatas: []*spend.SpendingData{spendingData}}, nil)
+
+	// The ghost's own record surfaces as (nil, nil).
+	mockStore.On("Get", mock.Anything, &ghostTxHash, mock.Anything).
+		Return(nil, nil)
+
+	res, err := GetCounterConflictingTxHashes(ctx, mockStore, txHash)
+
+	require.NoError(t, err)
+	require.Contains(t, res, txHash)
+	require.NotContains(t, res, ghostTxHash)
+	require.Len(t, res, 1)
+	mockStore.AssertExpectations(t)
+}
+
+// Walk GetConflictingChildren NOT_FOUND fallback: a counter that exists at the existence
+// check but whose record is deleted before its child BFS runs surfaces NOT_FOUND from
+// GetConflictingChildren. The walk must evict the counter from the set (it was already
+// added) rather than propagate — callers feed the set into SetConflicting/GetMeta, which
+// fail on a missing record.
+func TestGetCounterConflictingTxHashes_GetConflictingChildrenNotFoundEvicts(t *testing.T) {
+	ctx := context.Background()
+	mockStore := &MockUtxostore{}
+
+	txHash := createTestHash("gcc-notfound-tx")
+	parentTxHash := createTestHash("gcc-notfound-parent")
+	counterTxHash := createTestHash("gcc-notfound-counter")
+
+	testTx := createTestTransactionWithInputs(parentTxHash, 0)
+
+	mockStore.On("Get", mock.Anything, &txHash, mock.Anything).
+		Return(&meta.Data{Tx: testTx}, nil)
+
+	spendingData := &spend.SpendingData{TxID: &counterTxHash}
+	mockStore.On("Get", mock.Anything, &parentTxHash, mock.Anything).
+		Return(&meta.Data{SpendingDatas: []*spend.SpendingData{spendingData}}, nil)
+
+	// The counter exists at the existence check...
+	mockStore.On("Get", mock.Anything, &counterTxHash, mock.Anything).
+		Return(&meta.Data{}, nil)
+
+	// ...but its record is gone by the time we walk its conflicting children.
+	mockStore.On("GetConflictingChildren", mock.Anything, counterTxHash).
+		Return([]chainhash.Hash{}, errors.NewTxNotFoundError("counter deleted mid-walk"))
+
+	res, err := GetCounterConflictingTxHashes(ctx, mockStore, txHash)
+
+	require.NoError(t, err, "a counter whose child walk returns NOT_FOUND must be evicted, not propagate")
+	require.Contains(t, res, txHash)
+	require.NotContains(t, res, counterTxHash,
+		"the evicted counter must not remain in the set — callers feed it into SetConflicting/GetMeta")
+	require.Len(t, res, 1)
+	mockStore.AssertExpectations(t)
+}
+
+// Regression guard (frozen sentinel at the ProcessConflicting pre-flight): a winner
 // input whose parent slot holds the frozen sentinel (subtree.FrozenBytesTxHash, ==
-// subtree.CoinbasePlaceholderHashValue — one comparison covers both spellings) is a
-// FROZEN slot, not a dangling one. The repair must skip it silently — never queue an
-// Unspend for it (clearing it would unfreeze the output on aerospike) and never
-// existence-check it (NOT_FOUND would misclassify it as a tolerable ghost). The
-// resolution itself proceeds; step 3's own frozen defenses fail the spend on a real
-// backend (mocked as success here — this test pins the repair-path behaviour only).
-func TestProcessConflicting_FrozenSentinelParentSlot_SkippedNoUnspend(t *testing.T) {
+// subtree.CoinbasePlaceholderHashValue — one comparison covers both spellings) makes step
+// 3 deterministically doomed (the aerospike lua refuses frozen slots; SQL frozen state
+// lives in a column Unspend never touches). collectDanglingWinnerInputSpends must fail
+// closed BEFORE step 2 ever runs: no Unspend queued (clearing the slot would unfreeze the
+// output; and a doomed resolution reaching step 2 could strand another input's cleared
+// ghost with no tx body for rollback to re-Spend). The error must not be a not-found the
+// tolerance path would swallow, and the sentinel must never be existence-checked.
+func TestProcessConflicting_FrozenSentinelParentSlot_FailsClosedBeforeUnspend(t *testing.T) {
 	ctx := context.Background()
 	mockStore := &MockUtxostore{}
 
@@ -193,33 +305,26 @@ func TestProcessConflicting_FrozenSentinelParentSlot_SkippedNoUnspend(t *testing
 	mockStore.On("Get", mock.Anything, &winnerHash, mock.Anything).
 		Return(&meta.Data{Tx: winnerTx, Conflicting: true}, nil)
 
-	// No losers — keep the cascade empty so the run reaches the dangling-slot check cleanly.
+	// No losers — keep the cascade empty so the run reaches the pre-flight check cleanly.
 	mockStore.On("GetCounterConflicting", mock.Anything, winnerHash).
 		Return([]chainhash.Hash{}, nil)
 
-	// The winner's parent output is spent by the frozen sentinel.
+	// The winner's parent output slot is held by the frozen sentinel: GetSpend reports it
+	// as the recorded spender (both backends set it explicitly for a frozen slot).
 	frozenHash := subtree.FrozenBytesTxHash
-	mockStore.On("Get", mock.Anything, &parentTxHash, mock.Anything).
-		Return(&meta.Data{SpendingDatas: []*spend.SpendingData{{TxID: &frozenHash}}}, nil)
-
-	// Step 2 unspends only the (empty) affected-parent set: the frozen slot must NOT
-	// have produced a repair entry. The MatchedBy pins that — a queued Unspend for the
-	// sentinel slot would not match and the mock would reject the call.
-	mockStore.On("Unspend", mock.Anything, mock.MatchedBy(func(spends []*Spend) bool {
-		return len(spends) == 0
-	}), mock.Anything).Return(nil)
-
-	// Steps 3-5 proceed normally on the mock.
-	mockStore.On("Spend", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
-		Return([]*Spend{}, nil)
-	mockStore.On("SetConflicting", mock.Anything, winnerHashes, false).
-		Return([]*Spend{}, []chainhash.Hash{}, nil)
-	mockStore.On("SetLocked", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	mockStore.On("GetSpend", mock.Anything, mock.MatchedBy(func(sp *Spend) bool {
+		return sp.TxID != nil && sp.TxID.Equal(parentTxHash)
+	})).Return(&SpendResponse{SpendingData: &spend.SpendingData{TxID: &frozenHash}}, nil)
 
 	result, _, err := ProcessConflicting(ctx, mockStore, 1, chainhash.Hash{}, winnerHashes, map[chainhash.Hash]struct{}{})
 
-	require.NoError(t, err, "a frozen slot is skipped by the repair, not an abort")
-	require.NotNil(t, result)
+	require.Nil(t, result)
+	require.Error(t, err, "a frozen winner-input slot must fail the resolution closed")
+	require.Contains(t, err.Error(), "is frozen")
+	require.False(t, errors.Is(err, errors.ErrTxNotFound),
+		"the frozen pre-flight rejection must be a distinct error, not a not-found the tolerance path swallows")
+	// Fail-closed means no mutation past step 1: Unspend must never run.
+	mockStore.AssertNotCalled(t, "Unspend", mock.Anything, mock.Anything, mock.Anything)
 	// The sentinel must never be existence-checked as a spender.
 	mockStore.AssertNotCalled(t, "Get", mock.Anything, &frozenHash, mock.Anything)
 	mockStore.AssertExpectations(t)
@@ -246,16 +351,19 @@ func TestProcessConflicting_DeletedChildrenMarker_FailsClosedNoUnspend(t *testin
 	mockStore.On("GetCounterConflicting", mock.Anything, winnerHash).
 		Return([]chainhash.Hash{}, nil)
 
-	// The winner's parent records the ghost as spender AND carries a deletedChildren marker.
-	mockStore.On("Get", mock.Anything, &parentTxHash, mock.Anything).
-		Return(&meta.Data{
-			SpendingDatas:   []*spend.SpendingData{{TxID: &ghostTxHash}},
-			DeletedChildren: map[chainhash.Hash]struct{}{ghostTxHash: {}},
-		}, nil)
+	// The winner's parent slot records the ghost as spender (targeted GetSpend read).
+	mockStore.On("GetSpend", mock.Anything, mock.MatchedBy(func(sp *Spend) bool {
+		return sp.TxID != nil && sp.TxID.Equal(parentTxHash)
+	})).Return(&SpendResponse{SpendingData: &spend.SpendingData{TxID: &ghostTxHash}}, nil)
 
 	// The ghost's own record is gone.
 	mockStore.On("Get", mock.Anything, &ghostTxHash, mock.Anything).
 		Return(nil, errors.NewTxNotFoundError("not found"))
+
+	// On the ghost path the pre-flight fetches the parent's deletedChildren marker (a
+	// single-bin Get). The pruner recorded the ghost there, so the deletion was deliberate.
+	mockStore.On("Get", mock.Anything, &parentTxHash, mock.Anything).
+		Return(&meta.Data{DeletedChildren: map[chainhash.Hash]struct{}{ghostTxHash: {}}}, nil)
 
 	result, _, err := ProcessConflicting(ctx, mockStore, 1, chainhash.Hash{}, winnerHashes, map[chainhash.Hash]struct{}{})
 
@@ -267,13 +375,14 @@ func TestProcessConflicting_DeletedChildrenMarker_FailsClosedNoUnspend(t *testin
 	mockStore.AssertExpectations(t)
 }
 
-// Regression guard (live third-party spender at the ProcessConflicting repair path): a
+// Regression guard (live third-party spender at the ProcessConflicting pre-flight): a
 // winner input whose parent slot records a LIVE spender outside the marked-conflicting
-// set must be left alone — no Unspend queued for the slot — so step 3's spend fails
-// closed as a natural double-spend instead of silently stealing the live tx's spend.
-// Pins the `err == nil && spenderMeta != nil → continue` branch in
-// collectDanglingWinnerInputSpends.
-func TestProcessConflicting_LiveThirdPartySpenderSlot_UntouchedSpendFailsClosed(t *testing.T) {
+// set makes step 3 a real double-spend against a live tx. collectDanglingWinnerInputSpends
+// must fail closed BEFORE step 2 — never clear the slot (which would steal the live tx's
+// spend) and never let step 2 commit (a doomed resolution could strand another input's
+// cleared ghost). The error must name the live spender. Pins the
+// `err == nil && spenderMeta != nil → fail closed` branch in collectDanglingWinnerInputSpends.
+func TestProcessConflicting_LiveThirdPartySpenderSlot_FailsClosedBeforeUnspend(t *testing.T) {
 	ctx := context.Background()
 	mockStore := &MockUtxostore{}
 
@@ -292,30 +401,24 @@ func TestProcessConflicting_LiveThirdPartySpenderSlot_UntouchedSpendFailsClosed(
 	mockStore.On("GetCounterConflicting", mock.Anything, winnerHash).
 		Return([]chainhash.Hash{}, nil)
 
-	// The winner's parent output is spent by the live third party.
-	mockStore.On("Get", mock.Anything, &parentTxHash, mock.Anything).
-		Return(&meta.Data{SpendingDatas: []*spend.SpendingData{{TxID: &liveHash}}}, nil)
+	// The winner's parent output slot is held by the live third party (targeted GetSpend).
+	mockStore.On("GetSpend", mock.Anything, mock.MatchedBy(func(sp *Spend) bool {
+		return sp.TxID != nil && sp.TxID.Equal(parentTxHash)
+	})).Return(&SpendResponse{SpendingData: &spend.SpendingData{TxID: &liveHash}}, nil)
 
-	// The spender's record EXISTS — the repair's existence check sees it live.
+	// The spender's record EXISTS — the pre-flight existence check sees it live.
 	mockStore.On("Get", mock.Anything, &liveHash, mock.Anything).
 		Return(&meta.Data{}, nil)
-
-	// Step 2 must unspend an EMPTY set: the live slot must not have produced a repair
-	// entry. An Unspend carrying the live spender's slot would not match and fail the
-	// mock.
-	mockStore.On("Unspend", mock.Anything, mock.MatchedBy(func(spends []*Spend) bool {
-		return len(spends) == 0
-	}), mock.Anything).Return(nil)
-
-	// Step 3 then fails closed: the slot is still held by the live spender.
-	mockStore.On("Spend", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
-		Return([]*Spend{}, errors.NewProcessingError("utxo already spent by live third-party spender"))
 
 	result, _, err := ProcessConflicting(ctx, mockStore, 1, chainhash.Hash{}, winnerHashes, map[chainhash.Hash]struct{}{})
 
 	require.Nil(t, result)
-	require.Error(t, err, "step 3 must surface the double-spend against the live spender")
-	require.Contains(t, err.Error(), "already spent")
+	require.Error(t, err, "a live third-party spender must fail the resolution closed before any mutation")
+	require.Contains(t, err.Error(), "spent by live non-conflicting tx")
+	require.Contains(t, err.Error(), liveHash.String(), "the error must name the live spender")
+	// Fail-closed before step 2: neither Unspend nor Spend may run.
+	mockStore.AssertNotCalled(t, "Unspend", mock.Anything, mock.Anything, mock.Anything)
+	mockStore.AssertNotCalled(t, "Spend", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
 	// The existence check on the live spender must have run.
 	mockStore.AssertCalled(t, "Get", mock.Anything, &liveHash, mock.Anything)
 	mockStore.AssertExpectations(t)
@@ -364,5 +467,92 @@ func TestMarkConflictingRecursively_FiltersFrozenSentinel(t *testing.T) {
 	// A SetConflicting call carrying the sentinel would fail the per-batch matchers and
 	// surface as an unexpected-call panic; AssertExpectations confirms only the two
 	// sentinel-free batches ran.
+	mockStore.AssertExpectations(t)
+}
+
+// Rollback transient-path: the pre-flight queues a genuine dangling ghost spend, step 2
+// commits it (clearing the stale slot), then step 3 fails with a TRANSIENT storage error
+// (not a double-spend). The deferred rollback must run — re-spend the cascade, then unlock
+// the parents — and when a rollback sub-step (here SetLocked) also fails, the returned
+// error must aggregate the original failure with the rollback failure under the MANUAL
+// INTERVENTION REQUIRED tag. Exercises the collect→step2→step3-fail→rollback interaction
+// that the new pre-flight introduces.
+func TestProcessConflicting_RollbackAfterDanglingUnspendThenTransientStep3(t *testing.T) {
+	ctx := context.Background()
+	mockStore := &MockUtxostore{}
+
+	winnerHash := createTestHash("transient-winner")
+	winnerHashes := []chainhash.Hash{winnerHash}
+	parentTxHash := createTestHash("transient-winner-parent")
+	ghostHash := createTestHash("transient-ghost-spender")
+	loserHash := createTestHash("transient-loser")
+	loserParentHash := createTestHash("transient-loser-parent")
+
+	// Extended input so the pre-flight's UTXOHashFromInput succeeds and the dangling spend
+	// is actually queued.
+	winnerTx := extendedInputTx(parentTxHash, 0)
+	loserTx := createTestTransaction()
+
+	mockStore.On("Get", mock.Anything, &winnerHash, mock.Anything).
+		Return(&meta.Data{Tx: winnerTx, Conflicting: true}, nil)
+
+	mockStore.On("GetCounterConflicting", mock.Anything, winnerHash).
+		Return([]chainhash.Hash{loserHash}, nil)
+
+	// step 1: mark the loser conflicting; its parent slot is the affected spend.
+	loserSpends := []*Spend{{TxID: &loserParentHash, Vout: 0}}
+	mockStore.On("SetConflicting", mock.Anything, []chainhash.Hash{loserHash}, true).
+		Return(loserSpends, []chainhash.Hash{}, nil)
+
+	// pre-flight: the winner's parent slot is held by a ghost whose record is gone and
+	// which carries NO deletedChildren marker → a benign dangling ref to be cleared.
+	mockStore.On("GetSpend", mock.Anything, mock.MatchedBy(func(sp *Spend) bool {
+		return sp.TxID != nil && sp.TxID.Equal(parentTxHash)
+	})).Return(&SpendResponse{SpendingData: &spend.SpendingData{TxID: &ghostHash}}, nil)
+	mockStore.On("Get", mock.Anything, &ghostHash, mock.Anything).
+		Return(nil, errors.NewTxNotFoundError("ghost gone"))
+	mockStore.On("Get", mock.Anything, &parentTxHash, mock.Anything).
+		Return(&meta.Data{}, nil)
+
+	// step 2: Unspend the combined set — the loser slot AND the queued dangling ghost slot.
+	unspendSawDangling := false
+	mockStore.On("Unspend", mock.Anything, mock.MatchedBy(func(spends []*Spend) bool {
+		for _, sp := range spends {
+			if sp != nil && sp.TxID != nil && sp.TxID.Equal(parentTxHash) {
+				unspendSawDangling = true
+			}
+		}
+		return len(spends) == 2
+	}), mock.Anything).Return(nil)
+
+	// step 3: winner spend fails transiently (a storage error, not a double-spend).
+	mockStore.On("Spend", mock.Anything, winnerTx, mock.Anything, mock.Anything).
+		Return([]*Spend{}, errors.NewStorageError("transient backend write failure"))
+
+	// rollback: re-fetch + re-spend the loser (undo step 2 for the cascade).
+	mockStore.On("Get", mock.Anything, &loserHash, mock.Anything).
+		Return(&meta.Data{Tx: loserTx}, nil)
+	mockStore.On("Spend", mock.Anything, loserTx, mock.Anything, mock.Anything).
+		Return([]*Spend{}, nil)
+	// rollback: clear the conflicting flag on the cascade (succeeds).
+	mockStore.On("SetConflicting", mock.Anything, []chainhash.Hash{loserHash}, false).
+		Return([]*Spend{}, []chainhash.Hash{}, nil)
+	// rollback: unlock the parents — this sub-step FAILS, forcing the aggregated error.
+	mockStore.On("SetLocked", mock.Anything, mock.MatchedBy(func(hs []chainhash.Hash) bool {
+		if len(hs) != 2 {
+			return false
+		}
+		seen := map[chainhash.Hash]bool{hs[0]: true, hs[1]: true}
+		return seen[loserParentHash] && seen[parentTxHash]
+	}), false).Return(errors.NewProcessingError("transient unlock failure"))
+
+	result, _, err := ProcessConflicting(ctx, mockStore, 1, chainhash.Hash{}, winnerHashes, map[chainhash.Hash]struct{}{})
+
+	require.Nil(t, result)
+	require.Error(t, err)
+	require.True(t, unspendSawDangling, "step 2 must have unspent the queued dangling ghost slot")
+	require.Contains(t, err.Error(), "MANUAL INTERVENTION REQUIRED")
+	require.Contains(t, err.Error(), "transient backend write failure", "the original step-3 failure must surface")
+	require.Contains(t, err.Error(), "SetLocked false", "the rollback sub-step failure must be aggregated in")
 	mockStore.AssertExpectations(t)
 }

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/bsv-blockchain/go-bt/v2"
+	"github.com/bsv-blockchain/go-bt/v2/bscript"
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	"github.com/bsv-blockchain/go-subtree"
 	"github.com/bsv-blockchain/teranode/errors"
@@ -58,11 +59,14 @@ func TestProcessConflicting_Success(t *testing.T) {
 	mockStore.On("SetLocked", mock.Anything, []chainhash.Hash{losingTxHash}, false).Return(nil)
 
 	// Execute test
-	// The dangling-slot check reads the winner's parent via Get; prime that exact parent
-	// (createTestTransaction's input spends createTestHash("prev-tx")) as "no record" so the
-	// check is a no-op. .Maybe() because some tests error out before the helper runs.
+	// The pre-flight dangling-slot check reads each winner input's parent slot via
+	// GetSpend; prime that parent (createTestTransaction's input spends
+	// createTestHash("prev-tx")) as NOT_FOUND so the check is a no-op. .Maybe() because
+	// some tests error out before the pre-flight runs.
 	prevTxHash := createTestHash("prev-tx")
-	mockStore.On("Get", mock.Anything, &prevTxHash, mock.Anything).Return(nil, errors.NewTxNotFoundError("not found")).Maybe()
+	mockStore.On("GetSpend", mock.Anything, mock.MatchedBy(func(sp *Spend) bool {
+		return sp.TxID != nil && sp.TxID.Equal(prevTxHash)
+	})).Return(&SpendResponse{Status: int(Status_NOT_FOUND)}, nil).Maybe()
 
 	result, _, err := ProcessConflicting(ctx, mockStore, 1, chainhash.Hash{}, conflictingTxHashes, map[chainhash.Hash]struct{}{})
 
@@ -105,11 +109,14 @@ func TestProcessConflicting_TxNotConflictingError(t *testing.T) {
 	}, nil)
 
 	// Execute test
-	// The dangling-slot check reads the winner's parent via Get; prime that exact parent
-	// (createTestTransaction's input spends createTestHash("prev-tx")) as "no record" so the
-	// check is a no-op. .Maybe() because some tests error out before the helper runs.
+	// The pre-flight dangling-slot check reads each winner input's parent slot via
+	// GetSpend; prime that parent (createTestTransaction's input spends
+	// createTestHash("prev-tx")) as NOT_FOUND so the check is a no-op. .Maybe() because
+	// some tests error out before the pre-flight runs.
 	prevTxHash := createTestHash("prev-tx")
-	mockStore.On("Get", mock.Anything, &prevTxHash, mock.Anything).Return(nil, errors.NewTxNotFoundError("not found")).Maybe()
+	mockStore.On("GetSpend", mock.Anything, mock.MatchedBy(func(sp *Spend) bool {
+		return sp.TxID != nil && sp.TxID.Equal(prevTxHash)
+	})).Return(&SpendResponse{Status: int(Status_NOT_FOUND)}, nil).Maybe()
 
 	result, _, err := ProcessConflicting(ctx, mockStore, 1, chainhash.Hash{}, conflictingTxHashes, map[chainhash.Hash]struct{}{})
 
@@ -131,11 +138,14 @@ func TestProcessConflicting_GetTxError(t *testing.T) {
 	mockStore.On("Get", mock.Anything, &conflictingTxHash, mock.Anything).Return(nil, errors.NewProcessingError("database error"))
 
 	// Execute test
-	// The dangling-slot check reads the winner's parent via Get; prime that exact parent
-	// (createTestTransaction's input spends createTestHash("prev-tx")) as "no record" so the
-	// check is a no-op. .Maybe() because some tests error out before the helper runs.
+	// The pre-flight dangling-slot check reads each winner input's parent slot via
+	// GetSpend; prime that parent (createTestTransaction's input spends
+	// createTestHash("prev-tx")) as NOT_FOUND so the check is a no-op. .Maybe() because
+	// some tests error out before the pre-flight runs.
 	prevTxHash := createTestHash("prev-tx")
-	mockStore.On("Get", mock.Anything, &prevTxHash, mock.Anything).Return(nil, errors.NewTxNotFoundError("not found")).Maybe()
+	mockStore.On("GetSpend", mock.Anything, mock.MatchedBy(func(sp *Spend) bool {
+		return sp.TxID != nil && sp.TxID.Equal(prevTxHash)
+	})).Return(&SpendResponse{Status: int(Status_NOT_FOUND)}, nil).Maybe()
 
 	result, _, err := ProcessConflicting(ctx, mockStore, 1, chainhash.Hash{}, conflictingTxHashes, map[chainhash.Hash]struct{}{})
 
@@ -164,11 +174,14 @@ func TestProcessConflicting_GetCounterConflictingError(t *testing.T) {
 		Return([]chainhash.Hash{}, errors.NewProcessingError("counter conflicting error"))
 
 	// Execute test
-	// The dangling-slot check reads the winner's parent via Get; prime that exact parent
-	// (createTestTransaction's input spends createTestHash("prev-tx")) as "no record" so the
-	// check is a no-op. .Maybe() because some tests error out before the helper runs.
+	// The pre-flight dangling-slot check reads each winner input's parent slot via
+	// GetSpend; prime that parent (createTestTransaction's input spends
+	// createTestHash("prev-tx")) as NOT_FOUND so the check is a no-op. .Maybe() because
+	// some tests error out before the pre-flight runs.
 	prevTxHash := createTestHash("prev-tx")
-	mockStore.On("Get", mock.Anything, &prevTxHash, mock.Anything).Return(nil, errors.NewTxNotFoundError("not found")).Maybe()
+	mockStore.On("GetSpend", mock.Anything, mock.MatchedBy(func(sp *Spend) bool {
+		return sp.TxID != nil && sp.TxID.Equal(prevTxHash)
+	})).Return(&SpendResponse{Status: int(Status_NOT_FOUND)}, nil).Maybe()
 
 	result, _, err := ProcessConflicting(ctx, mockStore, 1, chainhash.Hash{}, conflictingTxHashes, map[chainhash.Hash]struct{}{})
 
@@ -209,11 +222,14 @@ func TestProcessConflicting_UnspendError(t *testing.T) {
 		Return([]*Spend{}, []chainhash.Hash{}, nil)
 
 	// Execute test
-	// The dangling-slot check reads the winner's parent via Get; prime that exact parent
-	// (createTestTransaction's input spends createTestHash("prev-tx")) as "no record" so the
-	// check is a no-op. .Maybe() because some tests error out before the helper runs.
+	// The pre-flight dangling-slot check reads each winner input's parent slot via
+	// GetSpend; prime that parent (createTestTransaction's input spends
+	// createTestHash("prev-tx")) as NOT_FOUND so the check is a no-op. .Maybe() because
+	// some tests error out before the pre-flight runs.
 	prevTxHash := createTestHash("prev-tx")
-	mockStore.On("Get", mock.Anything, &prevTxHash, mock.Anything).Return(nil, errors.NewTxNotFoundError("not found")).Maybe()
+	mockStore.On("GetSpend", mock.Anything, mock.MatchedBy(func(sp *Spend) bool {
+		return sp.TxID != nil && sp.TxID.Equal(prevTxHash)
+	})).Return(&SpendResponse{Status: int(Status_NOT_FOUND)}, nil).Maybe()
 
 	result, _, err := ProcessConflicting(ctx, mockStore, 1, chainhash.Hash{}, conflictingTxHashes, map[chainhash.Hash]struct{}{})
 
@@ -272,11 +288,14 @@ func TestProcessConflicting_SpendError(t *testing.T) {
 	mockStore.On("SetLocked", mock.Anything, []chainhash.Hash{losingTxHash}, false).Return(nil)
 
 	// Execute test
-	// The dangling-slot check reads the winner's parent via Get; prime that exact parent
-	// (createTestTransaction's input spends createTestHash("prev-tx")) as "no record" so the
-	// check is a no-op. .Maybe() because some tests error out before the helper runs.
+	// The pre-flight dangling-slot check reads each winner input's parent slot via
+	// GetSpend; prime that parent (createTestTransaction's input spends
+	// createTestHash("prev-tx")) as NOT_FOUND so the check is a no-op. .Maybe() because
+	// some tests error out before the pre-flight runs.
 	prevTxHash := createTestHash("prev-tx")
-	mockStore.On("Get", mock.Anything, &prevTxHash, mock.Anything).Return(nil, errors.NewTxNotFoundError("not found")).Maybe()
+	mockStore.On("GetSpend", mock.Anything, mock.MatchedBy(func(sp *Spend) bool {
+		return sp.TxID != nil && sp.TxID.Equal(prevTxHash)
+	})).Return(&SpendResponse{Status: int(Status_NOT_FOUND)}, nil).Maybe()
 
 	result, _, err := ProcessConflicting(ctx, mockStore, 1, chainhash.Hash{}, conflictingTxHashes, map[chainhash.Hash]struct{}{})
 
@@ -958,6 +977,26 @@ func createTestTransactionWithInputs(parentTxHash chainhash.Hash, inputIndex uin
 		Satoshis: 1000,
 	}
 	tx.Outputs = append(tx.Outputs, output)
+
+	return tx
+}
+
+// extendedInputTx builds a tx whose single input carries PreviousTxScript /
+// PreviousTxSatoshis, so util.UTXOHashFromInput (which errors on a nil locking script)
+// succeeds. Needed by tests that must reach the pre-flight's dangling-slot append —
+// createTestTransactionWithInputs leaves the input un-extended on purpose.
+func extendedInputTx(parentTxHash chainhash.Hash, inputIndex uint32) *bt.Tx {
+	tx := bt.NewTx()
+
+	input := &bt.Input{
+		PreviousTxOutIndex: inputIndex,
+		PreviousTxSatoshis: 1000,
+		PreviousTxScript:   bscript.NewFromBytes([]byte{0x51}),
+	}
+	_ = input.PreviousTxIDAdd(&parentTxHash)
+	tx.Inputs = append(tx.Inputs, input)
+
+	tx.Outputs = append(tx.Outputs, &bt.Output{Satoshis: 900})
 
 	return tx
 }

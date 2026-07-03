@@ -273,11 +273,13 @@ func TestReplayPendingConflictIntents_StaleReverseHealed(t *testing.T) {
 	// Minimal ProcessConflicting flow with no losers (GetCounterConflicting → []).
 	mockStore.On("Get", mock.Anything, &demoted, mock.Anything).Return(&meta.Data{Tx: demotedTx, Conflicting: true}, nil)
 	mockStore.On("GetCounterConflicting", mock.Anything, demoted).Return([]chainhash.Hash{}, nil)
-	// The dangling-slot repair reads the demoted tx's input parent; not-found means
-	// there is no slot to repair, keeping this a pure routing test.
+	// The dangling-slot repair reads the demoted tx's input parent slot; not-found
+	// means there is no slot to repair, keeping this a pure routing test.
 	parentHash := chainhash.HashH([]byte("p"))
 	mockStore.On("Get", mock.Anything, &parentHash, mock.Anything).
-		Return(nil, errors.NewTxNotFoundError("not found"))
+		Return(nil, errors.NewTxNotFoundError("not found")).Maybe()
+	mockStore.On("GetSpend", mock.Anything, mock.Anything).
+		Return(&utxo.SpendResponse{Status: int(utxo.Status_NOT_FOUND)}, nil).Maybe()
 	mockStore.On("Unspend", mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	mockStore.On("Spend", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return([]*utxo.Spend{}, nil)
 	mockStore.On("SetConflicting", mock.Anything, mock.Anything, mock.Anything).Return([]*utxo.Spend{}, []chainhash.Hash{}, nil)

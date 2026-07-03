@@ -134,11 +134,13 @@ func (s *Service) Prune(ctx context.Context, blockHeight uint32, blockHashStr st
 // parents, mirroring the aerospike deletedChildren bin. The counter-conflicting
 // fail-closed guards consume these markers to discriminate a deliberately reaped
 // spender from a tolerable ghost. Markers whose parent is itself deleted in the same
-// pass are removed again (a missing parent already fails the walk closed), which also
-// bounds the table's growth to (surviving parent, reaped child) pairs. Best-effort
-// corner: on postgres READ COMMITTED a row that starts qualifying between the marker
-// INSERT and the DELETE inside this transaction is deleted unmarked — the residual
-// window the counter-conflicting tolerance comments document.
+// pass are removed again (a missing parent already fails the walk closed), and a marker
+// is never written for a parent whose record is already gone (an earlier pass reaped
+// it) — together bounding the table's growth to (surviving parent, reaped child) pairs.
+// The deletable set is materialized once into a temporary table that every statement
+// reads from, so the marker INSERT and the DELETE always operate on the exact same
+// rows: the old postgres READ COMMITTED window (a row that starts qualifying mid-
+// transaction, deleted unmarked, failing the walk open) is closed.
 func (s *Service) deleteTombstoned(ctx context.Context, blockHeight uint32) (int64, error) {
 	// Use configured safety window from settings
 	safetyWindow := s.safetyWindow
@@ -200,16 +202,45 @@ func (s *Service) deleteTombstoned(ctx context.Context, blockHeight uint32) (int
 		_ = txn.Rollback() // no-op after Commit
 	}()
 
-	// 1: mark each deleted tx on its input parents.
+	// Materialize the deletable set ONCE into a temporary table that all three
+	// statements below read from. Two whys:
+	//   1. Correctness: a single evaluation of the (possibly correlated) predicate kills
+	//      the READ COMMITTED drift. Re-running <deletableIDs> per statement let a row
+	//      become deletable between the marker INSERT and the DELETE (postgres READ
+	//      COMMITTED) — the DELETE would then reap it WITHOUT a marker, and the
+	//      counter-conflicting walk fails OPEN on that unmarked ghost. Binding every
+	//      statement to the same frozen id set makes "deleted" and "marked" agree.
+	//   2. Cost: the predicate — especially the defensive-mode NOT EXISTS correlated
+	//      subquery — evaluated 3x per pass; now it runs once.
+	// CREATE TEMPORARY TABLE ... AS SELECT is portable across sqlite and postgres. The
+	// table is dropped as the last statement before COMMIT: sqlite temp tables live for
+	// the connection, not the transaction, so a surviving one would leak back to the
+	// pool and make the next pass's CREATE collide. Error paths roll back the txn, which
+	// also discards the temp table.
+	createBatchQuery := `CREATE TEMPORARY TABLE prune_batch_ids AS ` + deletableIDs
+	if _, err = txn.ExecContext(ctx, createBatchQuery, args...); err != nil {
+		return 0, errors.NewStorageError("failed to materialize prune batch", err)
+	}
+
+	// 1: mark each deleted tx on its input parents. The INNER JOIN to transactions p
+	// (ChiR2) refuses to write a marker whose parent record is already gone — an earlier
+	// pass reaped it, and a missing parent already fails the walk closed, so the marker
+	// would carry no information and only leak. Same-pass parents still match (they die
+	// in statement 3 below) and are removed by the cleanup in statement 2, keeping the
+	// table to (surviving parent, reaped child) pairs.
 	insertMarkersQuery := `
 		INSERT INTO deleted_children (parent_hash, child_hash)
 		SELECT DISTINCT i.previous_transaction_hash, tx.hash
 		FROM transactions tx
 		INNER JOIN inputs i ON i.transaction_id = tx.id
-		WHERE tx.id IN (` + deletableIDs + `)
+		INNER JOIN transactions p ON p.hash = i.previous_transaction_hash
+		WHERE tx.id IN (SELECT id FROM prune_batch_ids)
 		ON CONFLICT (parent_hash, child_hash) DO NOTHING
 	`
-	if _, err = txn.ExecContext(ctx, insertMarkersQuery, args...); err != nil {
+	// A marker-INSERT failure aborts the whole pass deliberately: deleting a spender
+	// without recording its marker is the one outcome this table must never allow — it
+	// would leave the walk unable to tell a reaped spender from a tolerable ghost.
+	if _, err = txn.ExecContext(ctx, insertMarkersQuery); err != nil {
 		return 0, errors.NewStorageError("failed to insert deleted_children markers", err)
 	}
 
@@ -219,17 +250,17 @@ func (s *Service) deleteTombstoned(ctx context.Context, blockHeight uint32) (int
 	cleanupMarkersQuery := `
 		DELETE FROM deleted_children
 		WHERE parent_hash IN (
-			SELECT tx.hash FROM transactions tx WHERE tx.id IN (` + deletableIDs + `)
+			SELECT tx.hash FROM transactions tx WHERE tx.id IN (SELECT id FROM prune_batch_ids)
 		)
 	`
-	if _, err = txn.ExecContext(ctx, cleanupMarkersQuery, args...); err != nil {
+	if _, err = txn.ExecContext(ctx, cleanupMarkersQuery); err != nil {
 		return 0, errors.NewStorageError("failed to clean up deleted_children markers", err)
 	}
 
 	// 3: the delete itself.
-	deleteQuery := `DELETE FROM transactions WHERE id IN (` + deletableIDs + `)`
+	deleteQuery := `DELETE FROM transactions WHERE id IN (SELECT id FROM prune_batch_ids)`
 
-	result, err := txn.ExecContext(ctx, deleteQuery, args...)
+	result, err := txn.ExecContext(ctx, deleteQuery)
 	if err != nil {
 		return 0, errors.NewStorageError("failed to delete transactions", err)
 	}
@@ -237,6 +268,12 @@ func (s *Service) deleteTombstoned(ctx context.Context, blockHeight uint32) (int
 	count, err := result.RowsAffected()
 	if err != nil {
 		return 0, errors.NewStorageError("failed to get rows affected", err)
+	}
+
+	// Drop the temp table before COMMIT so it does not leak back to the pooled
+	// connection (see the createBatchQuery comment above).
+	if _, err = txn.ExecContext(ctx, `DROP TABLE prune_batch_ids`); err != nil {
+		return 0, errors.NewStorageError("failed to drop prune batch table", err)
 	}
 
 	if err = txn.Commit(); err != nil {

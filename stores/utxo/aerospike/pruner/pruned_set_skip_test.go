@@ -8,8 +8,10 @@ import (
 	"github.com/bsv-blockchain/aerospike-client-go/v8"
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	"github.com/bsv-blockchain/teranode/settings"
+	"github.com/bsv-blockchain/teranode/stores/blob/memory"
 	"github.com/bsv-blockchain/teranode/stores/utxo/fields"
 	"github.com/bsv-blockchain/teranode/ulogger"
+	"github.com/bsv-blockchain/teranode/util/uaerospike"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 )
@@ -26,9 +28,23 @@ func makeInputBytes(t *testing.T, parentTxID chainhash.Hash, prevIndex uint32) [
 }
 
 // makeChildResult constructs an aerospike.Result that processRecordChunk will
-// treat as a non-external, non-defensive, deletable record with the supplied
-// parent inputs. The child txid is also synthesised from the index seed.
+// treat as a non-external, non-defensive, deletable record spending each parent
+// at output index equal to its position in the slice. The child txid is
+// synthesised from the index seed.
 func makeChildResult(t *testing.T, s *Service, childSeed byte, parents []chainhash.Hash) *aerospike.Result {
+	t.Helper()
+
+	inputs := make([][]byte, 0, len(parents))
+	for i, p := range parents {
+		inputs = append(inputs, makeInputBytes(t, p, uint32(i)))
+	}
+
+	return makeChildResultWithInputs(t, s, childSeed, inputs)
+}
+
+// makeChildResultWithInputs is makeChildResult with explicit raw input bytes so
+// a test can control the previous-output index (vout) of each spend.
+func makeChildResultWithInputs(t *testing.T, s *Service, childSeed byte, rawInputs [][]byte) *aerospike.Result {
 	t.Helper()
 
 	var childTxID chainhash.Hash
@@ -36,9 +52,9 @@ func makeChildResult(t *testing.T, s *Service, childSeed byte, parents []chainha
 		childTxID[i] = childSeed
 	}
 
-	inputs := make([]interface{}, 0, len(parents))
-	for i, p := range parents {
-		inputs = append(inputs, makeInputBytes(t, p, uint32(i)))
+	inputs := make([]interface{}, 0, len(rawInputs))
+	for _, in := range rawInputs {
+		inputs = append(inputs, in)
 	}
 
 	key, err := aerospike.NewKey(s.namespace, s.set, childTxID[:])
@@ -59,15 +75,16 @@ func makeChildResult(t *testing.T, s *Service, childSeed byte, parents []chainha
 }
 
 // newTestServiceForSkip builds a Service configured for direct unit testing of
-// processRecordChunk's prunedSet skip path. Defensive mode is off and
-// SkipDeletions is on so the deletion path stays gated; the test only
-// exercises chunks where ALL inputs reference parents already in the set,
-// so flushCleanupBatches never attempts a real Aerospike call.
+// processRecordChunk's parent-accumulation path. Defensive mode is off and
+// SkipDeletions is on so the deletion path stays gated. flushCleanupBatchesFn
+// defaults to the real method (a no-op for empty parentUpdates); tests that
+// need to inspect the accumulated parent updates override it with a capturing
+// closure so no real Aerospike call is ever attempted.
 func newTestServiceForSkip(t *testing.T) *Service {
 	t.Helper()
 	ensurePrometheusMetrics()
 
-	return &Service{
+	svc := &Service{
 		logger: ulogger.NewVerboseTestLogger(t),
 		settings: &settings.Settings{
 			Pruner: settings.PrunerSettings{
@@ -88,25 +105,37 @@ func newTestServiceForSkip(t *testing.T) *Service {
 		fieldUnminedSince:    fields.UnminedSince.String(),
 		fieldBlockHeights:    fields.BlockHeights.String(),
 	}
+	svc.flushCleanupBatchesFn = svc.flushCleanupBatches
+	return svc
 }
 
-// TestProcessRecordChunk_SkipsParentsInPrunedSet verifies that when every
-// parent TXID referenced by a chunk is registered in the shared PrunedTxSet,
-// processRecordChunk:
-//   - omits all parent-update accumulation
-//   - increments utxo_pruner_parents_skipped_pruned_total once per input
-//   - reports the child record as processed (skipped count = 0)
-//
-// Because all parent updates are skipped, flushCleanupBatches receives an
-// empty parentUpdates map and never touches the Aerospike client — making
-// the test deterministic without a real cluster.
-func TestProcessRecordChunk_SkipsParentsInPrunedSet(t *testing.T) {
+// captureFlush swaps in a flushCleanupBatchesFn that records the accumulated
+// parent updates instead of hitting Aerospike, and returns a pointer the caller
+// reads after processRecordChunk returns.
+func captureFlush(svc *Service) *map[string]*parentUpdateInfo {
+	captured := new(map[string]*parentUpdateInfo)
+	svc.flushCleanupBatchesFn = func(_ context.Context, parentUpdates map[string]*parentUpdateInfo, _ []*aerospike.Key, _ []*externalFileInfo) error {
+		*captured = parentUpdates
+		return nil
+	}
+	return captured
+}
+
+// TestProcessRecordChunk_AccumulatesParentsEvenWhenInPrunedSet verifies the
+// marker-reliability fix: the cuckoo "skip parents already in the PrunedTxSet"
+// optimisation was removed, so processRecordChunk now:
+//   - accumulates a parent update for EVERY input, even when the parent TXID is
+//     already registered in the shared PrunedTxSet
+//   - never increments utxo_pruner_parents_skipped_pruned_total
+//   - leaves the set insert-only: parents are NOT removed (no CheckAndRemove);
+//     the chunk's own child TXID is still Added up front
+func TestProcessRecordChunk_AccumulatesParentsEvenWhenInPrunedSet(t *testing.T) {
 	ctx := context.Background()
 	svc := newTestServiceForSkip(t)
+	captured := captureFlush(svc)
 
-	// Two distinct parents to confirm the metric increments per input.
-	// PrunedTxSet.CheckAndRemove is destructive, but each parent appears
-	// only once in the chunk, so the destructive semantic is fine here.
+	// Two distinct parents, both pre-registered in the set. Under the old
+	// behaviour both would have been skipped; now both must accumulate.
 	var parentA chainhash.Hash
 	for i := range parentA {
 		parentA[i] = 0xAA
@@ -129,24 +158,77 @@ func TestProcessRecordChunk_SkipsParentsInPrunedSet(t *testing.T) {
 
 	processed, skipped, err := svc.processRecordChunk(ctx, 1000, chunk, prunedSet)
 	require.NoError(t, err)
-	require.Equal(t, 1, processed, "the record itself is still processed for deletion")
+	require.Equal(t, 1, processed)
 	require.Equal(t, 0, skipped, "no defensive skip when defensive mode is off")
 
 	after := testutil.ToFloat64(prometheusUtxoParentsSkippedPruned)
-	require.Equal(t, float64(2), after-before,
-		"each input whose parent is in the set must increment the skipped-pruned metric")
+	require.Equal(t, float64(0), after-before,
+		"the skipped-pruned metric must never increment: the cuckoo skip was removed")
 
-	// Both parents removed via CheckAndRemove (Len -= 2), and the chunk's
-	// own TXID was Added by the up-front loop at the start of
-	// processRecordChunk (Len += 1). Net: 1 entry (the child).
-	require.Equal(t, 1, prunedSet.Len(),
-		"parents removed, child TXID added by the up-front Add loop")
+	require.Len(t, *captured, 2,
+		"both parents must accumulate despite already being in the PrunedTxSet")
+
+	// Insert-only: the set is no longer consulted (no CheckAndRemove), so both
+	// parents stay, and the chunk's own child TXID (0x11) is Added up front.
+	// Net: 2 parents + 1 child = 3 distinct fingerprints.
+	require.Equal(t, 3, prunedSet.Len(),
+		"insert-only set: parents retained, child added up front")
+}
+
+// TestProcessRecordChunk_MarkerKeyedOnMasterAndPageRecords verifies the keying
+// fix: the deletedChildren marker for a parent is written to BOTH readers'
+// records. The counter-conflicting walk reads it from the parent MASTER record
+// (vout 0); the spendMulti lua UDF reads it from the PAGE record that owns the
+// spent output. When the child spends an output whose vout is >= utxoBatchSize
+// the two records differ, so the marker must land on both — a master-only marker
+// is invisible to the spend path, and a page-only marker invisible to the walk.
+func TestProcessRecordChunk_MarkerKeyedOnMasterAndPageRecords(t *testing.T) {
+	ctx := context.Background()
+	svc := newTestServiceForSkip(t) // utxoBatchSize = 128
+	captured := captureFlush(svc)
+
+	var parent chainhash.Hash
+	for i := range parent {
+		parent[i] = 0xCC
+	}
+
+	// vout well beyond utxoBatchSize so naive keying (vout / batchSize = 1)
+	// would land the marker on pagination record num=1.
+	const vout = uint32(200)
+	require.Greater(t, vout, uint32(svc.utxoBatchSize), "test premise: vout must exceed batch size")
+
+	chunk := []*aerospike.Result{
+		makeChildResultWithInputs(t, svc, 0x22, [][]byte{makeInputBytes(t, parent, vout)}),
+	}
+
+	// prunedSet nil keeps the test focused on keying; the up-front Add loop is
+	// guarded by a nil check.
+	processed, skipped, err := svc.processRecordChunk(ctx, 1000, chunk, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, processed)
+	require.Equal(t, 0, skipped)
+
+	masterKeySrc := string(uaerospike.CalculateKeySource(&parent, 0, svc.utxoBatchSize))
+	pageKeySrc := string(uaerospike.CalculateKeySource(&parent, vout, svc.utxoBatchSize))
+	require.NotEqual(t, masterKeySrc, pageKeySrc,
+		"test premise: vout must map to a distinct page record")
+
+	require.Len(t, *captured, 2, "marker must accumulate on both the master and the page record")
+
+	masterUpdate, okMaster := (*captured)[masterKeySrc]
+	require.True(t, okMaster, "marker must be keyed on the parent MASTER record (vout 0) for the counter-conflicting walk")
+	require.Len(t, masterUpdate.childHashes, 1, "master record carries the single child marker")
+
+	pageUpdate, okPage := (*captured)[pageKeySrc]
+	require.True(t, okPage, "marker must ALSO be keyed on the PAGE record owning the spent vout for the spendMulti guard")
+	require.Len(t, pageUpdate.childHashes, 1, "page record carries the single child marker")
 }
 
 // TestProcessRecordChunk_EmptyPrunedSetIsNoOp verifies that an empty
 // PrunedTxSet does not cause any skipped-pruned increments. The chunk is
 // crafted with zero inputs so no parent updates accumulate and the
-// flushCleanupBatches deletion path stays gated by SkipDeletions.
+// flushCleanupBatches deletion path stays gated by SkipDeletions — so the
+// default real flush is a no-op with no Aerospike call.
 func TestProcessRecordChunk_EmptyPrunedSetIsNoOp(t *testing.T) {
 	ctx := context.Background()
 	svc := newTestServiceForSkip(t)
@@ -185,4 +267,53 @@ func TestProcessRecordChunk_EmptyPrunedSetIsNoOp(t *testing.T) {
 
 	after := testutil.ToFloat64(prometheusUtxoParentsSkippedPruned)
 	require.Equal(t, float64(0), after-before)
+}
+
+// TestProcessRecordChunk_DefersExternalTxWithMissingBlob verifies the marker-invariant
+// fix: when a non-coinbase external tx's blob is gone its inputs cannot be recovered, so
+// the parent deletedChildren markers cannot be written. The record must therefore be
+// DEFERRED (not deleted) — deleting it marker-less would make it an UNMARKED ghost that
+// the counter-conflicting walk fails OPEN on. The record is counted as skipped and never
+// appended to the deletion batch, and the missing blob must not abort the whole chunk.
+func TestProcessRecordChunk_DefersExternalTxWithMissingBlob(t *testing.T) {
+	ctx := context.Background()
+	svc := newTestServiceForSkip(t)
+	svc.external = memory.New() // empty store: the tx's blob is absent
+
+	// Capture both parent updates and deletions from the flush seam.
+	var capturedUpdates map[string]*parentUpdateInfo
+	var capturedDeletions []*aerospike.Key
+	svc.flushCleanupBatchesFn = func(_ context.Context, parentUpdates map[string]*parentUpdateInfo, deletions []*aerospike.Key, _ []*externalFileInfo) error {
+		capturedUpdates = parentUpdates
+		capturedDeletions = deletions
+		return nil
+	}
+
+	var txID chainhash.Hash
+	for i := range txID {
+		txID[i] = 0x33
+	}
+
+	key, keyErr := aerospike.NewKey(svc.namespace, svc.set, txID[:])
+	require.NoError(t, keyErr)
+
+	chunk := []*aerospike.Result{
+		{
+			Record: &aerospike.Record{
+				Key: key,
+				Bins: aerospike.BinMap{
+					svc.fieldTxID:     txID.CloneBytes(),
+					svc.fieldExternal: true, // external: inputs live in the (missing) blob
+				},
+			},
+		},
+	}
+
+	processed, skipped, err := svc.processRecordChunk(ctx, 1000, chunk, nil)
+	require.NoError(t, err, "a missing external blob must not abort the chunk")
+	require.Equal(t, 0, processed, "the record with an unrecoverable blob must not be processed for deletion")
+	require.Equal(t, 1, skipped, "the record must be counted as skipped/deferred")
+
+	require.Empty(t, capturedDeletions, "a marker-less external record must NOT be appended to the deletion batch")
+	require.Empty(t, capturedUpdates, "no parent markers can be written without the tx's inputs")
 }

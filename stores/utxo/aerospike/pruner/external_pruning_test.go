@@ -339,7 +339,11 @@ func TestMultiRecordExternalTransactionPruning(t *testing.T) {
 	assert.False(t, exists, "External .outputs file should be deleted")
 }
 
-// TestExternalFileAlreadyDeleted tests graceful handling when external file is already gone
+// TestExternalFileAlreadyDeleted tests graceful handling when an external file is already
+// gone. The record's inputs are then unrecoverable, so the parent deletedChildren markers
+// cannot be written; deleting the record marker-less would make it an UNMARKED ghost that
+// the counter-conflicting walk fails OPEN on. The pruner therefore DEFERS the deletion:
+// the missing blob must not abort the run, and the record must survive for a later pass.
 func TestExternalFileAlreadyDeleted(t *testing.T) {
 	logger := ulogger.New("test")
 	ctx := context.Background()
@@ -406,17 +410,20 @@ func TestExternalFileAlreadyDeleted(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, exists)
 
-	// Trigger cleanup - should handle missing file gracefully
+	// Trigger cleanup - the missing file must be handled gracefully (no error), but the
+	// record deletion is DEFERRED because its inputs cannot be recovered.
 	pruneCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	recordsProcessed, err := service.Prune(pruneCtx, 7, "<test-hash>")
 	cancel()
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, recordsProcessed, int64(0))
 
-	// Verify the Aerospike record was still deleted
-	_, err = client.Get(nil, key)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "not found")
+	// Verify the Aerospike record was NOT deleted: it is deferred so it stays visible to
+	// the counter-conflicting walk as a live spender (marker-invariant fail-closed).
+	record, err := client.Get(nil, key)
+	require.NoError(t, err, "record with an unrecoverable blob must be deferred, not deleted")
+	assert.NotNil(t, record)
+	assert.True(t, record.Bins[fields.External.String()].(bool))
 }
 
 // TestMixedExternalAndNormalTransactions tests pruning of both types in one batch

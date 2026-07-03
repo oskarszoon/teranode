@@ -1,16 +1,17 @@
 package subtreevalidation
 
-// End-to-end dangling-reference tolerance + regression guards for
-// checkCounterConflictingOnCurrentChain, backed by the SQLite UTXO store.
+// Fail-closed behaviour + regression guards for
+// checkCounterConflictingOnCurrentChain, backed by the SQLite UTXO store and a mock
+// store for the TOCTOU race.
 //
-// Tolerance: a conflicting tx whose counter (the recorded spender of the same
-// parent output) has been deleted from the store must NOT fail the check with a
-// TX_NOT_FOUND error — the counter simply no longer exists on our chain, which is
-// not grounds to reject.
+// Fail closed: if a counter the walk saw alive is deleted before the mined-on-chain
+// re-read (GetMeta returns NOT_FOUND), the check must reject with an error naming the
+// counter rather than tolerate it — a tolerated NOT_FOUND could hide a counter that is
+// mined on our chain (TOCTOU fail-open on a consensus gate). A counter genuinely absent
+// at walk time is instead excluded earlier by the walk (GetCounterConflictingTxHashes).
 //
 // Guard: when the counter DOES still exist and has been mined on our chain, the
-// check must still reject the conflicting tx. The fix must tolerate genuinely
-// missing counters without swallowing real mined-on-chain rejections.
+// check must still reject the conflicting tx.
 
 import (
 	"context"
@@ -20,6 +21,7 @@ import (
 	"github.com/bsv-blockchain/go-bt/v2"
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	subtreepkg "github.com/bsv-blockchain/go-subtree"
+	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/stores/utxo"
 	"github.com/bsv-blockchain/teranode/stores/utxo/meta"
 	"github.com/bsv-blockchain/teranode/stores/utxo/spend"
@@ -45,41 +47,64 @@ func newDanglingUtxoStore(ctx context.Context, t *testing.T, name string) *sql.S
 	return utxoStore
 }
 
-// TestCheckCounterConflictingOnCurrentChain_ToleratesDanglingCounter builds a real
-// dangling reference (parent still records the counter as spender, but the counter
-// record is deleted) and asserts the check passes. Pre-fix this FAILS: the counter
-// walk fetches the deleted counter and returns TX_NOT_FOUND, which the check wraps.
-func TestCheckCounterConflictingOnCurrentChain_ToleratesDanglingCounter(t *testing.T) {
+// TestCheckCounterConflictingOnCurrentChain_FailsClosedOnDanglingCounter models the
+// TOCTOU race the fail-closed policy defends against: the counter-conflicting walk sees a
+// counter alive, but the counter is deleted (pruner DAH) before
+// checkCounterConflictingOnCurrentChain re-reads it via GetMeta. A tolerated NOT_FOUND at
+// that point could hide a counter that IS mined on our chain, so the check must fail closed
+// — return an error naming the missing counter — instead of accepting the block.
+//
+// This requires a mock store: with a consistent real store the walk and GetMeta observe the
+// same state, so a counter absent at GetMeta time is already excluded by the walk and never
+// re-read here. The walk-side exclusion of a genuinely deleted counter is covered by the
+// store-backed walk tests in stores/utxo.
+func TestCheckCounterConflictingOnCurrentChain_FailsClosedOnDanglingCounter(t *testing.T) {
 	InitPrometheusMetrics()
 
 	ctx := context.Background()
-	utxoStore := newDanglingUtxoStore(ctx, t, "dangling_tolerate")
+	mockStore := &utxo.MockUtxostore{}
 
-	s := &Server{utxoStore: utxoStore}
+	s := &Server{utxoStore: mockStore}
 
-	_, err := s.utxoStore.Create(ctx, parentTx1, 122)
-	require.NoError(t, err)
+	txHash := chainhash.HashH([]byte("dangling-counter-tx"))
+	parentHash := chainhash.HashH([]byte("dangling-counter-parent"))
+	counterHash := chainhash.HashH([]byte("dangling-counter-spender"))
 
-	// counter is a double-spend of the same parent output as tx1; it becomes the
-	// recorded spender of the parent output.
-	counter := tx1.Clone()
-	counter.Version = 2
+	// The conflicting tx spends parentHash[0].
+	conflictingTx := bt.NewTx()
+	in := &bt.Input{PreviousTxOutIndex: 0}
+	_ = in.PreviousTxIDAdd(&parentHash)
+	conflictingTx.Inputs = append(conflictingTx.Inputs, in)
+	conflictingTx.Outputs = append(conflictingTx.Outputs, &bt.Output{Satoshis: 1000})
 
-	_, err = s.utxoStore.Spend(ctx, counter, 122)
-	require.NoError(t, err)
+	// Walk step 1: fetch the conflicting tx body.
+	mockStore.On("Get", mock.Anything, &txHash, mock.Anything).
+		Return(&meta.Data{Tx: conflictingTx}, nil)
 
-	_, err = s.utxoStore.Create(ctx, counter, 122)
-	require.NoError(t, err)
+	// Walk step 2: the parent output is spent by counterHash, with no deletedChildren marker.
+	mockStore.On("Get", mock.Anything, &parentHash, mock.Anything).
+		Return(&meta.Data{SpendingDatas: []*spend.SpendingData{{TxID: &counterHash}}}, nil)
 
-	// tx1 is the conflicting loser also spending the parent output.
-	_, err = s.utxoStore.Create(ctx, tx1, 123, utxo.WithConflicting(true))
-	require.NoError(t, err)
+	// Walk step 3: the counter still exists at walk time, so the walk keeps it in the counter
+	// set (existence Get succeeds, no conflicting children).
+	mockStore.On("Get", mock.Anything, &counterHash, mock.Anything).
+		Return(&meta.Data{}, nil)
+	mockStore.On("GetConflictingChildren", mock.Anything, counterHash).
+		Return([]chainhash.Hash{}, nil)
 
-	// Delete the counter → the parent's spending data now dangles.
-	require.NoError(t, s.utxoStore.Delete(ctx, counter.TxIDChainHash()))
+	// The queried tx itself is always in the counter set; keep it alive so only the racing
+	// counter drives the outcome.
+	mockStore.On("GetMeta", mock.Anything, &txHash, mock.Anything).Return(&meta.Data{})
 
-	err = s.checkCounterConflictingOnCurrentChain(ctx, *tx1.TxIDChainHash(), map[uint32]bool{})
-	require.NoError(t, err, "a deleted counter must be tolerated, not rejected with TX_NOT_FOUND")
+	// But the counter is deleted before the mined-on-chain re-read: GetMeta returns NOT_FOUND.
+	mockStore.On("GetMeta", mock.Anything, &counterHash, mock.Anything).
+		Return(errors.NewTxNotFoundError("counter %s not found", counterHash.String()))
+
+	err := s.checkCounterConflictingOnCurrentChain(ctx, txHash, map[uint32]bool{})
+
+	require.Error(t, err, "a counter that vanishes between the walk and GetMeta must fail closed")
+	require.Contains(t, err.Error(), counterHash.String(),
+		"the fail-closed error must name the missing counter hash")
 }
 
 // TestCheckCounterConflictingOnCurrentChain_RejectsMinedCounterGuard is the

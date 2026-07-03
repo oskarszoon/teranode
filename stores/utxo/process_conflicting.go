@@ -44,14 +44,6 @@ var prometheusUtxoCounterConflictingDanglingRefs = promauto.NewCounterVec(
 	},
 )
 
-// isNotFound reports whether err is a NotFound-family error the counter-conflicting
-// walk should tolerate rather than propagate. SQL raises ErrNotFound for missing
-// output rows; Aerospike raises ErrTxNotFound for missing records. Mirrors the pairing
-// in cmd/rewindblockchain/rewindblockchain/tx_delete.go.
-func isNotFound(err error) bool {
-	return errors.Is(err, errors.ErrTxNotFound) || errors.Is(err, errors.ErrNotFound)
-}
-
 // step5RetryDelays controls the bounded back-off when SetLocked(false) fails at the very
 // last step of ProcessConflicting. The slice length is the number of attempts; the value
 // at index i is the delay BEFORE attempt i (so index 0 is always zero — the first attempt
@@ -803,6 +795,18 @@ func UnmarkConflictingRecursively(ctx context.Context, s Store, hashes []chainha
 // errors.Join so subsequent sub-steps still run. If the caller sees a non-nil return
 // the UTXO store may be in an inconsistent state — see ProcessConflicting deferred
 // block which tags this as MANUAL INTERVENTION REQUIRED.
+//
+// Cleared-ghost-slot note: collectDanglingWinnerInputSpends now fails closed BEFORE
+// step 2 for every winner-input slot whose step-3 spend is deterministically doomed
+// (frozen sentinel, live third-party spender, pruner-marked ghost). So the only way a
+// dangling ghost slot is cleared at step 2 is when step 3 can succeed — a slot the
+// winner is entitled to. Rollback cannot re-Spend a cleared ghost slot (the ghost has
+// no tx body to restore), but that only leaves a residual strand when step 2 or step 3
+// fails transiently AFTER a ghost slot was cleared. That window is transient: the empty
+// slot yields no dangling entry on the next attempt, so WAL replay converges (empty slot
+// → nothing to clear → the winner spends it). The previously-deterministic
+// unspent+unlocked exposure — where a doomed-anyway resolution stranded an OTHER input's
+// cleared ghost — is gone.
 func rollbackProcessConflicting(ctx context.Context, s Store, conflictingTxHashes,
 	allMarkedHashes, markedAsNotSpendable []chainhash.Hash,
 	step3SuccessfulSpends []*Spend, blockHeight uint32, step2Committed, step4Committed bool) error {
@@ -919,13 +923,41 @@ func setLockedWithRetry(ctx context.Context, s Store, hashes []chainhash.Hash, v
 //     can rely on this for deterministic logs, traces, and eviction ordering.
 //   - An error if any issues occur during the process.
 //
-// collectDanglingWinnerInputSpends finds winner inputs whose parent output still records
-// a spender that (a) is not the winner itself, (b) is not in the marked-conflicting set
-// (whose slots step 2 already clears via the SetConflicting spends), and (c) no longer
-// has a record in the store. It returns Spend entries carrying the stored (ghost)
-// spending data so Unspend can clear those dangling slots. A live spender outside the
-// marked set is deliberately left alone: step 3 then fails closed rather than silently
-// stealing a live tx's spend. winningTxHashes pairs with winningTxs by index.
+// collectDanglingWinnerInputSpends runs BEFORE step 2 (Unspend) and is a pre-flight
+// fail-closed gate. It inspects every winner-input slot and either queues an explicit
+// Unspend for a genuinely dangling ghost slot, or returns a hard error when step 3's
+// spend of that slot is deterministically doomed. It mutates nothing; only step 1 (fully
+// reversible via SetConflicting(false)) has committed when it runs, so a return here is a
+// clean abort.
+//
+// For each winner input it reads the recorded spender of the exact (parent, vout) slot
+// via GetSpend — a single targeted page-record read on aerospike, avoiding the
+// getAllExtraUTXOs fan-out that Get(fields.Utxos) triggers on high-fanout parents. Both
+// backends normalise a missing parent to Status NOT_FOUND (no slot to repair — the
+// missing-parent guard already ran inside GetCounterConflicting before step 1). The slot
+// is then classified:
+//
+//   - empty, spent by the winner itself, or spender already in the marked-conflicting set
+//     (step 1 queues its clear): nothing to do.
+//   - frozen sentinel (subtree.FrozenBytesTxHash == subtree.CoinbasePlaceholderHashValue,
+//     the all-0xFF hash): step 3 is doomed — the aerospike lua refuses frozen slots and
+//     SQL keeps frozen state in a column Unspend never touches. Fail closed.
+//   - live spender outside the marked set: step 3 is a real double-spend against a live
+//     tx. Fail closed rather than silently steal its spend.
+//   - ghost spender the pruner marked in the parent's deletedChildren set: deletion was
+//     deliberate (e.g. a mined tx reaped after retention). Fail closed.
+//   - unmarked ghost spender (record gone, no marker): a benign dangling ref — queue a
+//     Spend carrying the stored spending data so step 2 clears the stale slot.
+//
+// Why the doomed cases fail closed BEFORE step 2 rather than skipping the slot and
+// letting step 3 fail: step 3 IS doomed either way, but failing only at step 3 means
+// step 2 has already run — and if the winner has ANOTHER input holding an unmarked ghost,
+// step 2 clears that ghost's slot. Rollback cannot restore a cleared ghost slot (the
+// ghost has no tx body to re-Spend), so a doomed-anyway resolution would strand it
+// unspent+unlocked. Failing here, before any Unspend, closes that gap: danglingSpends is
+// only ever queued when step 3 can succeed, so a mid-run failure can only strand a cleared
+// ghost transiently and WAL replay converges (see rollbackProcessConflicting).
+// winningTxHashes pairs with winningTxs by index.
 func collectDanglingWinnerInputSpends(ctx context.Context, s Store, winningTxs []*bt.Tx, winningTxHashes []chainhash.Hash, markedSet map[chainhash.Hash]struct{}) ([]*Spend, error) {
 	var danglingSpends []*Spend
 
@@ -936,9 +968,6 @@ func collectDanglingWinnerInputSpends(ctx context.Context, s Store, winningTxs [
 
 		txID := winningTxHashes[txIdx]
 
-		// read each unique parent's spend state once per winner
-		parentMetas := make(map[chainhash.Hash]*meta.Data, len(tx.Inputs))
-
 		for _, input := range tx.Inputs {
 			prevTxIDHash := input.PreviousTxIDChainHash()
 			if prevTxIDHash == nil {
@@ -947,32 +976,25 @@ func collectDanglingWinnerInputSpends(ctx context.Context, s Store, winningTxs [
 
 			parentHash := *prevTxIDHash
 
-			parentMeta, seen := parentMetas[parentHash]
-			if !seen {
-				var err error
-
-				parentMeta, err = s.Get(ctx, &parentHash, fields.Utxos, fields.DeletedChildren)
-				if err != nil {
-					// A missing parent record means there is no slot to repair for this
-					// input; the fail-closed guard for missing parents already ran inside
-					// GetCounterConflicting before step 1.
-					if isNotFound(err) {
-						parentMetas[parentHash] = nil
-
-						continue
-					}
-
-					return nil, errors.NewProcessingError("[ProcessConflicting][%s] error getting parent %s for dangling-slot check", txID.String(), parentHash.String(), err)
+			// Targeted per-slot read (P2 read-storm fix): GetSpend returns the recorded
+			// spender for exactly (parent, vout) and normalises a missing parent to Status
+			// NOT_FOUND on both backends (aerospike ErrKeyNotFound, SQL sql.ErrNoRows). A
+			// missing parent means there is no slot to repair — the fail-closed guard for
+			// missing parents already ran inside GetCounterConflicting before step 1.
+			resp, err := s.GetSpend(ctx, &Spend{TxID: &parentHash, Vout: input.PreviousTxOutIndex})
+			if err != nil {
+				if errors.IsNotFound(err) {
+					continue
 				}
 
-				parentMetas[parentHash] = parentMeta
+				return nil, errors.NewProcessingError("[ProcessConflicting][%s] error getting parent %s:%d spend for dangling-slot check", txID.String(), parentHash.String(), input.PreviousTxOutIndex, err)
 			}
 
-			if parentMeta == nil || int(input.PreviousTxOutIndex) >= len(parentMeta.SpendingDatas) {
+			if resp == nil || resp.Status == int(Status_NOT_FOUND) {
 				continue
 			}
 
-			spendingData := parentMeta.SpendingDatas[input.PreviousTxOutIndex]
+			spendingData := resp.SpendingData
 			if spendingData == nil || spendingData.TxID == nil {
 				continue
 			}
@@ -982,17 +1004,14 @@ func collectDanglingWinnerInputSpends(ctx context.Context, s Store, winningTxs [
 				continue
 			}
 
-			// Frozen-sentinel guard: a frozen output records subtree.FrozenBytesTxHash
-			// (== subtree.CoinbasePlaceholderHashValue — both are the all-0xFF hash) in
-			// its spend slot. The slot is frozen, not dangling: skip it WITHOUT queuing
-			// an Unspend (clearing it would unfreeze the output on aerospike) and let
-			// step 3's own frozen defenses fail the winner's spend instead (the
-			// aerospike lua refuses frozen slots; SQL keeps frozen state in a column
-			// Unspend never touches). Pre-repair-path parity: no repair existed, so a
-			// silent skip is the no-op equivalent. Ghost-tolerance safety bounds: see
-			// the walk's spender-existence check in GetCounterConflictingTxHashes.
+			// Frozen sentinel on a winner input: GetSpend reports the slot's spender as
+			// subtree.FrozenBytesTxHash (== subtree.CoinbasePlaceholderHashValue — both are
+			// the all-0xFF hash). Step 3 is deterministically doomed (aerospike lua refuses
+			// frozen slots; SQL frozen state lives in a column Unspend never touches), so
+			// fail closed here rather than clear the slot (which would unfreeze the output)
+			// or let step 2 commit and strand another input's cleared ghost.
 			if spender.Equal(subtree.FrozenBytesTxHash) {
-				continue
+				return nil, errors.NewProcessingError("[ProcessConflicting][%s] winner input %s:%d is frozen; refusing to resolve conflict", txID.String(), parentHash.String(), input.PreviousTxOutIndex)
 			}
 
 			if _, marked := markedSet[spender]; marked {
@@ -1000,22 +1019,33 @@ func collectDanglingWinnerInputSpends(ctx context.Context, s Store, winningTxs [
 			}
 
 			spenderMeta, err := s.Get(ctx, &spender, fields.Conflicting)
-			if err != nil && !isNotFound(err) {
+			if err != nil && !errors.IsNotFound(err) {
 				return nil, errors.NewProcessingError("[ProcessConflicting][%s] error getting spender %s for dangling-slot check", txID.String(), spender.String(), err)
 			}
 
+			// Live spender outside the marked set: step 3 is a real double-spend against a
+			// live tx. Fail closed BEFORE step 2 — silently clearing the slot would steal
+			// the live tx's spend, and completing step 2 on a doomed resolution would
+			// strand another input's cleared ghost (see the frozen case above).
 			if err == nil && spenderMeta != nil {
-				// live spender outside the marked set: leave the slot alone
-				continue
+				return nil, errors.NewProcessingError("[ProcessConflicting][%s] winner input %s:%d is spent by live non-conflicting tx %s; refusing to resolve conflict", txID.String(), parentHash.String(), input.PreviousTxOutIndex, spender.String())
 			}
 
-			// Ghost spender: its record is gone. If the pruner recorded this child in the
-			// parent's deletedChildren set, the deletion was deliberate (e.g. a mined tx
-			// reaped after retention) — we must NOT clear the slot. Fail closed. Safety
-			// bounds of tolerating an UNMARKED ghost are documented at the walk's
-			// spender-existence check in GetCounterConflictingTxHashes.
-			if _, deleted := parentMeta.DeletedChildren[spender]; deleted {
-				return nil, errors.NewProcessingError("[ProcessConflicting][%s] recorded spender %s was deleted by the pruner (deletedChildren); cannot resolve conflict", txID.String(), spender.String())
+			// Ghost spender: its record is gone. GetSpend does not carry the parent's
+			// deletedChildren marker, so fetch it here (rare path, single bin). A marked
+			// ghost was reaped deliberately by the pruner (e.g. a mined tx after retention)
+			// — fail closed rather than clear the slot. Safety bounds of tolerating an
+			// UNMARKED ghost are documented at the walk's spender-existence check in
+			// GetCounterConflictingTxHashes.
+			markerMeta, err := s.Get(ctx, &parentHash, fields.DeletedChildren)
+			if err != nil {
+				return nil, errors.NewProcessingError("[ProcessConflicting][%s] error getting deletedChildren marker for parent %s for dangling-slot check", txID.String(), parentHash.String(), err)
+			}
+
+			if markerMeta != nil {
+				if _, deleted := markerMeta.DeletedChildren[spender]; deleted {
+					return nil, errors.NewProcessingError("[ProcessConflicting][%s] recorded spender %s was deleted by the pruner (deletedChildren); cannot resolve conflict", txID.String(), spender.String())
+				}
 			}
 
 			prometheusUtxoCounterConflictingDanglingRefs.WithLabelValues("repair").Inc()
@@ -1203,7 +1233,7 @@ func GetConflictingChildren(ctx context.Context, s Store, hash chainhash.Hash) (
 					// so the accumulation loop evicts and counts it (covering both the
 					// isNotFound-error and the (nil, nil) missing-record variants uniformly),
 					// then continue the BFS.
-					if isNotFound(err) {
+					if errors.IsNotFound(err) {
 						return nil
 					}
 
@@ -1295,6 +1325,24 @@ type parentSpendInfo struct {
 	deletedChildren map[chainhash.Hash]struct{}
 }
 
+// discriminateGhostSpender applies the deletedChildren discriminator to a recorded
+// spender whose own record is gone — surfaced either as a NOT_FOUND error or as a
+// (nil, nil) missing record. A ghost the pruner recorded in the parent's deletedChildren
+// set was deleted deliberately (e.g. a mined tx reaped after retention): it returns a
+// non-nil error so the walk fails closed. An unmarked ghost is a benign dangling ref: it
+// bumps the tolerance counter once and returns nil so the caller tolerates it (excludes
+// it from the counter set). Shared by the NOT_FOUND-error and (nil, nil) paths so both
+// apply the identical rule.
+func discriminateGhostSpender(txHash chainhash.Hash, spender *chainhash.Hash, deletedChildren map[chainhash.Hash]struct{}) error {
+	if _, deleted := deletedChildren[*spender]; deleted {
+		return errors.NewProcessingError("[GetCounterConflictingTxHashes][%s] recorded spender %s was deleted by the pruner (deletedChildren); cannot resolve conflict", txHash.String(), spender.String())
+	}
+
+	prometheusUtxoCounterConflictingDanglingRefs.WithLabelValues("walk").Inc()
+
+	return nil
+}
+
 func GetCounterConflictingTxHashes(ctx context.Context, s Store, txHash chainhash.Hash) ([]chainhash.Hash, error) {
 	ctx, _, deferFn := tracing.Tracer("utxo").Start(ctx, "GetCounterConflictingTxHashes")
 
@@ -1305,7 +1353,7 @@ func GetCounterConflictingTxHashes(ctx context.Context, s Store, txHash chainhas
 		// The queried tx itself may have been removed since it was flagged. There is no
 		// counter-conflicting set to compute for a tx that no longer exists — tolerate it
 		// and return an empty set rather than failing the caller with TX_NOT_FOUND.
-		if isNotFound(err) {
+		if errors.IsNotFound(err) {
 			prometheusUtxoCounterConflictingDanglingRefs.WithLabelValues("walk").Inc()
 			return make([]chainhash.Hash, 0), nil
 		}
@@ -1418,15 +1466,12 @@ func GetCounterConflictingTxHashes(ctx context.Context, s Store, txHash chainhas
 				// by the primary Spend double-spend defense.
 				spenderMeta, err := s.Get(ctx, spendingTxID, fields.Conflicting)
 				if err != nil {
-					if isNotFound(err) {
-						// A ghost the pruner recorded in deletedChildren was deleted
-						// deliberately (e.g. a mined tx reaped after retention) — fail closed
-						// rather than tolerate it.
-						if _, deleted := parentInfo.deletedChildren[*spendingTxID]; deleted {
-							return nil, errors.NewProcessingError("[GetCounterConflictingTxHashes][%s] recorded spender %s was deleted by the pruner (deletedChildren); cannot resolve conflict", txHash.String(), spendingTxID.String())
+					// A ghost (NOT_FOUND) is discriminated by the deletedChildren marker:
+					// marked → fail closed, unmarked → tolerated (counter bumped).
+					if errors.IsNotFound(err) {
+						if ghostErr := discriminateGhostSpender(txHash, spendingTxID, parentInfo.deletedChildren); ghostErr != nil {
+							return nil, ghostErr
 						}
-
-						prometheusUtxoCounterConflictingDanglingRefs.WithLabelValues("walk").Inc()
 
 						continue
 					}
@@ -1435,12 +1480,11 @@ func GetCounterConflictingTxHashes(ctx context.Context, s Store, txHash chainhas
 				}
 
 				if spenderMeta == nil {
-					// some backends surface a missing record as (nil, nil)
-					if _, deleted := parentInfo.deletedChildren[*spendingTxID]; deleted {
-						return nil, errors.NewProcessingError("[GetCounterConflictingTxHashes][%s] recorded spender %s was deleted by the pruner (deletedChildren); cannot resolve conflict", txHash.String(), spendingTxID.String())
+					// Some backends surface a missing record as (nil, nil): same
+					// marker discriminator as the NOT_FOUND-error path above.
+					if ghostErr := discriminateGhostSpender(txHash, spendingTxID, parentInfo.deletedChildren); ghostErr != nil {
+						return nil, ghostErr
 					}
-
-					prometheusUtxoCounterConflictingDanglingRefs.WithLabelValues("walk").Inc()
 
 					continue
 				}
@@ -1452,7 +1496,7 @@ func GetCounterConflictingTxHashes(ctx context.Context, s Store, txHash chainhas
 					// Fallback for Store implementations whose GetConflictingChildren still
 					// propagates NOT_FOUND for a spender deleted between the existence check
 					// above and this call.
-					if isNotFound(err) {
+					if errors.IsNotFound(err) {
 						prometheusUtxoCounterConflictingDanglingRefs.WithLabelValues("walk").Inc()
 						delete(counterConflictingMap, *spendingTxID)
 

@@ -486,26 +486,12 @@ func (u *Server) checkCounterConflictingOnCurrentChain(ctx context.Context, txHa
 
 			counterConflictingTxMeta := &meta.Data{}
 			if err := u.utxoStore.GetMeta(gCtx, &counterConflictingTxHash, counterConflictingTxMeta); err != nil {
-				// The counter no longer exists on our chain (pruned/reorged/deleted). That is
-				// not grounds to reject: skip it, leaving counterConflictingTxMetas[idx] nil for
-				// the mined-check loop below to nil-guard.
-				//
-				// Intentional defense-in-depth, not the enforcement point: the walk
-				// (GetCounterConflictingTxHashes) already excluded ghosts and fail-closed on
-				// pruner-marked (deletedChildren) ones, so this branch is reachable only via
-				// a TOCTOU delete between the walk above and this GetMeta. The counter set
-				// here contains only records the walk just saw alive; a marker check cannot
-				// be repeated here because the marker lives on the PARENT record this loop
-				// does not re-read — the walk is the marker-enforcing point.
-				if errors.Is(err, errors.ErrTxNotFound) || errors.Is(err, errors.ErrNotFound) {
-					if u.logger != nil {
-						u.logger.Warnf("[checkCounterConflictingOnCurrentChain][%s] counter conflicting tx %s not found, skipping (dangling reference)", txHash.String(), counterConflictingTxHash.String())
-					}
-
-					return nil
-				}
-
-				return errors.NewProcessingError("[checkCounterConflictingOnCurrentChain][%s] failed to get counter conflicting tx meta", txHash.String(), err)
+				// Fail closed. The walk (GetCounterConflictingTxHashes) saw this counter alive
+				// moments ago; NOT_FOUND here can only be a delete racing this check (pruner DAH).
+				// Tolerating it would skip the mined-on-our-chain rejection for a counter that IS
+				// mined (TOCTOU fail-open on a consensus gate). On retry the walk re-runs and
+				// applies the marker discriminator: unmarked ghost → excluded, marked → fail closed.
+				return errors.NewProcessingError("[checkCounterConflictingOnCurrentChain][%s] failed to get counter conflicting tx meta for %s", txHash.String(), counterConflictingTxHash.String(), err)
 			}
 
 			counterConflictingTxMetas[idx] = counterConflictingTxMeta
@@ -536,7 +522,8 @@ func (u *Server) checkCounterConflictingOnCurrentChain(ctx context.Context, txHa
 
 	// check whether the counter-conflicting transactions have already been mined on our chain
 	for _, counterConflictingTxMeta := range counterConflictingTxMetas {
-		// nil entries mark counters that were tolerated as dangling above.
+		// Defensive nil-guard: GetMeta now fails closed above, so no slot is left nil on the
+		// success path; keep the guard so a future change cannot turn this into a nil deref.
 		if counterConflictingTxMeta == nil {
 			continue
 		}
