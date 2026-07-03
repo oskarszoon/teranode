@@ -61,6 +61,7 @@ var (
 	prometheusUtxoBatchQueryError             prometheus.Counter
 	prometheusUtxoRecordsDeleted              prometheus.Counter
 	prometheusUtxoRecordsDeletedSkipped       prometheus.Counter
+	prometheusUtxoRecordsDeferredNoMarker     prometheus.Counter
 	prometheusUtxoParentsUpdated              prometheus.Counter
 	prometheusUtxoParentsUpdatedSkipped       prometheus.Counter
 	prometheusUtxoExternalFilesDeleted        prometheus.Counter
@@ -221,6 +222,10 @@ func NewService(settings *settings.Settings, opts Options) (*Service, error) {
 		prometheusUtxoRecordsDeletedSkipped = promauto.NewCounter(prometheus.CounterOpts{
 			Name: "utxo_pruner_records_deleted_skipped_total",
 			Help: "Total number of UTXO records skipped during pruning (updated incrementally)",
+		})
+		prometheusUtxoRecordsDeferredNoMarker = promauto.NewCounter(prometheus.CounterOpts{
+			Name: "utxo_pruner_records_deferred_no_marker_total",
+			Help: "External-tx records whose deletion was deferred because the blob is gone and deletedChildren markers cannot be written (re-counted each pass the record is re-seen)",
 		})
 		prometheusUtxoParentsUpdated = promauto.NewCounter(prometheus.CounterOpts{
 			Name: "utxo_pruner_parents_updated_total",
@@ -1099,7 +1104,12 @@ func (s *Service) processRecordChunk(ctx context.Context, blockHeight uint32, ch
 			// counter-conflicting walk fails OPEN on. The record survives this pass and
 			// stays visible to the walk as a live spender.
 			if err == errExternalInputsUnrecoverable {
-				s.logger.Warnf("deferring prune of external tx %s at height %d: blob gone, inputs unrecoverable, cannot write deletedChildren markers", txHash.String(), blockHeight)
+				// A permanently-gone blob means this record is re-seen every pass, so log
+				// at Debug (not Warn) to avoid N lines/pass indefinitely; the dedicated
+				// counter is the monitorable signal. Record accumulation is bounded only by
+				// a future GC path past a finality horizon (tracked as follow-up).
+				s.logger.Debugf("deferring prune of external tx %s at height %d: blob gone, inputs unrecoverable, cannot write deletedChildren markers", txHash.String(), blockHeight)
+				prometheusUtxoRecordsDeferredNoMarker.Inc()
 				skippedCount++
 				continue
 			}
