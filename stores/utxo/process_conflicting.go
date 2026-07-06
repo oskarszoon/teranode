@@ -1035,11 +1035,12 @@ func collectDanglingWinnerInputSpends(ctx context.Context, s Store, winningTxs [
 			// deletedChildren marker, so fetch it here (rare repair path). On aerospike
 			// this Get is page-aggregating: it unions the marker map from the master
 			// record and every page record, so a marker on any vout's page is seen
-			// (the pruner writes the marker page-keyed). A marked ghost was reaped
-			// deliberately by the pruner (e.g. a mined tx after retention) — fail closed
-			// rather than clear the slot. Safety bounds of tolerating an UNMARKED ghost
-			// are documented at the walk's spender-existence check in
-			// GetCounterConflictingTxHashes.
+			// (the pruner writes the marker page-keyed). The pruner marks ONLY reaped
+			// children that were mined on our longest chain (F1 write-side invariant), so a
+			// marked ghost is a mined-then-pruned counter — fail closed rather than clear
+			// the slot. An UNMARKED ghost (including a conflicting/never-mined loser reaped
+			// without a marker) is cleared/tolerated; safety bounds are documented at the
+			// walk's spender-existence check in GetCounterConflictingTxHashes.
 			markerMeta, err := s.Get(ctx, &parentHash, fields.DeletedChildren)
 			if err != nil {
 				return nil, errors.NewProcessingError("[ProcessConflicting][%s] error getting deletedChildren marker for parent %s for dangling-slot check", txID.String(), parentHash.String(), err)
@@ -1047,9 +1048,10 @@ func collectDanglingWinnerInputSpends(ctx context.Context, s Store, winningTxs [
 
 			if markerMeta != nil {
 				if _, deleted := markerMeta.DeletedChildren[spender]; deleted {
-					// A marked ghost is a mined-then-pruned counter, so this tx double-spends a
-					// counter mined on our chain — genuinely INVALID (matches SubtreeValidation.go
-					// "already mined on our chain"), not a transient ProcessingError.
+					// A marked ghost is a mined-then-pruned counter (marker ⟹ mined-on-our-chain,
+					// enforced at the pruner write side), so this tx double-spends a counter mined
+					// on our chain — genuinely INVALID (matches SubtreeValidation.go "already mined
+					// on our chain"), not a transient ProcessingError.
 					return nil, errors.NewTxInvalidError("[ProcessConflicting][%s] recorded spender %s was deleted by the pruner (deletedChildren); cannot resolve conflict", txID.String(), spender.String())
 				}
 			}
@@ -1333,17 +1335,24 @@ type parentSpendInfo struct {
 
 // discriminateGhostSpender applies the deletedChildren discriminator to a recorded
 // spender whose own record is gone — surfaced either as a NOT_FOUND error or as a
-// (nil, nil) missing record. A ghost the pruner recorded in the parent's deletedChildren
-// set was deleted deliberately (e.g. a mined tx reaped after retention): it returns a
-// non-nil error so the walk fails closed. An unmarked ghost is a benign dangling ref: it
-// bumps the tolerance counter once and returns nil so the caller tolerates it (excludes
-// it from the counter set). Shared by the NOT_FOUND-error and (nil, nil) paths so both
-// apply the identical rule.
+// (nil, nil) missing record. The pruner records a deletedChildren marker ONLY for a
+// reaped child that was mined on our longest chain (F1 write-side invariant: both
+// backends gate the marker on mined — aerospike isReapedChildMined, SQL insertMarkersQuery
+// mined predicate), so a marked ghost is a mined-then-pruned counter: it returns a
+// TxInvalidError so the walk fails closed. An unmarked ghost is a benign dangling ref —
+// including a conflicting/never-mined loser the setConflicting DAH branch tombstoned and
+// the pruner reaped WITHOUT a marker — so it bumps the tolerance counter once and returns
+// nil, and the caller tolerates it (excludes it from the counter set). Tolerating a
+// never-mined ghost is correct: it was never on our chain, so the tx under validation is
+// not double-spending a chain-mined counter, and permanently rejecting the block would be
+// a consensus split against a block the honest network accepted. Shared by the
+// NOT_FOUND-error and (nil, nil) paths so both apply the identical rule.
 func discriminateGhostSpender(txHash chainhash.Hash, spender *chainhash.Hash, deletedChildren map[chainhash.Hash]struct{}) error {
 	if _, deleted := deletedChildren[*spender]; deleted {
-		// A marked ghost is a mined-then-pruned counter, so the tx under validation double-spends
-		// a counter mined on our chain — genuinely INVALID (matches SubtreeValidation.go "already
-		// mined on our chain"), not a transient ProcessingError.
+		// A marked ghost is a mined-then-pruned counter (marker ⟹ mined-on-our-chain,
+		// enforced at the pruner write side), so the tx under validation double-spends a
+		// counter mined on our chain — genuinely INVALID (matches SubtreeValidation.go
+		// "already mined on our chain"), not a transient ProcessingError.
 		return errors.NewTxInvalidError("[GetCounterConflictingTxHashes][%s] recorded spender %s was deleted by the pruner (deletedChildren); cannot resolve conflict", txHash.String(), spender.String())
 	}
 
@@ -1465,24 +1474,32 @@ func GetCounterConflictingTxHashes(ctx context.Context, s Store, txHash chainhas
 				// (checkCounterConflictingOnCurrentChain) compares counters against blockIds
 				// built from retention*2 (576 blocks, check_block_subtrees.go), NOT the
 				// retention horizon (288) at which a mined-spent counter is pruned. The
-				// (288, 576] band — pruned but still inside the comparison window — is
-				// covered by the pruner's deletedChildren marker on BOTH backends (aerospike
-				// bin + SQL deleted_children table): a marked ghost fails closed below.
-				// The marker is written reliably as of this PR — aerospike writes it
-				// unconditionally (the cuckoo consult that could skip it on a ~3% false
-				// positive was removed) and the SQL pruner freezes the deletable set in a
-				// temp table so no row is deleted unmarked under READ COMMITTED. The aerospike
-				// marker is page-keyed (bounded per page record) and the parent Get above is
+				// (288, 576] band — a MINED counter pruned but still inside the comparison
+				// window — is covered by the pruner's deletedChildren marker on BOTH backends
+				// (aerospike bin + SQL deleted_children table): a marked ghost fails closed
+				// below. The marker is written for MINED reaped children ONLY, gated on mined
+				// on both backends (F1 write-side invariant "marker present ⟹ mined-on-our-
+				// chain": aerospike isReapedChildMined, SQL insertMarkersQuery mined predicate),
+				// and reliably so for a mined child — aerospike writes it for every input's
+				// parent (the cuckoo consult that could skip it on a ~3% false positive was
+				// removed) and the SQL pruner freezes the deletable set in a temp table so no
+				// mined row is deleted unmarked under READ COMMITTED. The aerospike marker is
+				// page-keyed (bounded per page record) and the parent Get above is
 				// page-aggregating (get.go mergePageDeletedChildren unions every page's map),
 				// so a marker for any vout — including vout ≥ utxoBatchSize — is seen here
-				// regardless of which page holds it. Residual unmarked-ghost exposure is
-				// historical/transient only: aerospike deletes done before this PR whose
+				// regardless of which page holds it. A never-mined reaped ghost (a conflicting
+				// loser the setConflicting DAH branch tombstoned without a mined gate) is
+				// intentionally UNMARKED and tolerated here: it was never on our chain, so the
+				// tx under validation is not double-spending a chain-mined counter and the
+				// block the honest network accepted must not be rejected — that absence is
+				// correct, not an exposure. Residual unmarked-MINED-ghost exposure is
+				// historical/transient only: aerospike deletes done before the marker fix whose
 				// marker the cuckoo pre-filter suppressed, and SQL stores upgraded mid-life
 				// whose deleted_children table starts empty (transient — one retention*2
 				// window after upgrade, then fresh pruning has marked the live band). The
-				// aerospike blob-missing GC path does NOT contribute: it only reaps
-				// marker-less past DAH + 2*retention, which — since block validation caps fork
-				// depth at CoinbaseMaturity (< retention) — is outside every validatable
+				// aerospike blob-missing GC path does NOT contribute: it only reaps marker-less
+				// past DAH + retention + max(retention, CoinbaseMaturity), which — since block
+				// validation caps fork depth at CoinbaseMaturity — is outside every validatable
 				// block's comparison window, so a GC'd record can never be an in-window ghost.
 				// Any residual additionally requires an attacker fork inside the 576-block
 				// window AND is backstopped by the primary Spend double-spend defense: the

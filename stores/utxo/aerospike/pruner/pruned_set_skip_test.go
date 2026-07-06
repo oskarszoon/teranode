@@ -64,6 +64,12 @@ func makeChildResultWithInputs(t *testing.T, s *Service, childSeed byte, rawInpu
 		s.fieldTxID:     childTxID.CloneBytes(),
 		s.fieldInputs:   inputs,
 		s.fieldExternal: false,
+		// Mined-on-our-chain signal (F1): a non-empty blockHeights list with no
+		// unminedSince marks this reaped child as mined (isReapedChildMined), so
+		// processRecordChunk accumulates its parent markers. makeUnminedChildResult flips
+		// this to the never-mined state (unmined_since set, empty blockHeights) that must
+		// NOT accumulate a marker.
+		s.fieldBlockHeights: []interface{}{int(900)},
 	}
 
 	return &aerospike.Result{
@@ -72,6 +78,21 @@ func makeChildResultWithInputs(t *testing.T, s *Service, childSeed byte, rawInpu
 			Bins: bins,
 		},
 	}
+}
+
+// makeUnminedChildResult is makeChildResult for a reaped child that was NEVER mined on
+// our longest chain — the state the setConflicting DAH branch (teranode.lua ~990) leaves
+// a conflicting loser in: unmined_since stamped and an empty blockHeights list.
+// isReapedChildMined returns false for it, so processRecordChunk must NOT accumulate any
+// deletedChildren marker (F1: marker ⟹ mined-on-our-chain).
+func makeUnminedChildResult(t *testing.T, s *Service, childSeed byte, parents []chainhash.Hash) *aerospike.Result {
+	t.Helper()
+
+	res := makeChildResult(t, s, childSeed, parents)
+	res.Record.Bins[s.fieldUnminedSince] = int(500)
+	res.Record.Bins[s.fieldBlockHeights] = []interface{}{}
+
+	return res
 }
 
 // newTestServiceForSkip builds a Service configured for direct unit testing of
@@ -122,10 +143,12 @@ func captureFlush(svc *Service) *map[string]*parentUpdateInfo {
 }
 
 // TestProcessRecordChunk_AccumulatesEveryParentMarker verifies the
-// marker-reliability guarantee: processRecordChunk accumulates a deletedChildren
-// marker for EVERY input's parent unconditionally. The marker is a consensus
-// discriminator for the counter-conflicting fail-closed guards, so it must never
-// be suppressed by any pre-filter skip.
+// marker-reliability guarantee for a MINED reaped child: processRecordChunk accumulates a
+// deletedChildren marker for EVERY input's parent unconditionally. The marker is a
+// consensus discriminator for the counter-conflicting fail-closed guards, so for a mined
+// child it must never be suppressed by any pre-filter skip (the "never suppress for a
+// mined child" property). makeChildResult marks the child mined; the never-mined path is
+// covered by TestProcessRecordChunk_SkipsMarkerForNeverMinedChild.
 func TestProcessRecordChunk_AccumulatesEveryParentMarker(t *testing.T) {
 	ctx := context.Background()
 	svc := newTestServiceForSkip(t)
@@ -152,6 +175,42 @@ func TestProcessRecordChunk_AccumulatesEveryParentMarker(t *testing.T) {
 
 	require.Len(t, *captured, 2,
 		"a marker must accumulate for every input's parent unconditionally (no pre-filter skip)")
+}
+
+// TestProcessRecordChunk_SkipsMarkerForNeverMinedChild verifies the F1 write-side
+// invariant on aerospike: a reaped child that was never mined on our longest chain
+// (unmined_since stamped, empty blockHeights — the state setConflicting leaves a
+// conflicting loser in) must NOT accumulate a deletedChildren marker on any parent. The
+// marker is what the counter-conflicting discriminator reads as "mined on our chain";
+// marking a never-mined loser would make the discriminator permanently reject a block the
+// honest network accepted. The child is still reaped (processed), just left UNMARKED so
+// the walk tolerates its ghost. Contrast with the mined child in
+// TestProcessRecordChunk_AccumulatesEveryParentMarker.
+func TestProcessRecordChunk_SkipsMarkerForNeverMinedChild(t *testing.T) {
+	ctx := context.Background()
+	svc := newTestServiceForSkip(t)
+	captured := captureFlush(svc)
+
+	var parentA chainhash.Hash
+	for i := range parentA {
+		parentA[i] = 0xAA
+	}
+	var parentB chainhash.Hash
+	for i := range parentB {
+		parentB[i] = 0xBB
+	}
+
+	chunk := []*aerospike.Result{
+		makeUnminedChildResult(t, svc, 0x11, []chainhash.Hash{parentA, parentB}),
+	}
+
+	processed, skipped, err := svc.processRecordChunk(ctx, 1000, chunk)
+	require.NoError(t, err)
+	require.Equal(t, 1, processed, "the never-mined child is still reaped")
+	require.Equal(t, 0, skipped, "no defensive skip when defensive mode is off")
+
+	require.Empty(t, *captured,
+		"a never-mined reaped child must NOT accumulate any parent marker (F1: marker ⟹ mined-on-our-chain)")
 }
 
 // TestProcessRecordChunk_MarkerPageKeyedOnly verifies the round-6 keying fix: the

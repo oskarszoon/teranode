@@ -53,6 +53,22 @@ func danglingParentTx(seed byte) *bt.Tx {
 	return parent
 }
 
+// markTxMined flags a stored tx as mined on our longest chain — unmined_since NULL plus a
+// block_ids row — so the F1 pruner marker gate (mined-only) writes a deleted_children
+// marker when the tx is reaped. Without it a Create'd tx stays never-mined (Create leaves
+// unmined_since set and adds no block_ids row), and the pruner intentionally leaves such a
+// reaped child UNMARKED (marker ⟹ mined-on-our-chain). block_id 900001 is arbitrary; the
+// block_ids PK is (transaction_id, block_id) so distinct txs may share it.
+func markTxMined(ctx context.Context, t *testing.T, store *Store, tx *bt.Tx, blockHeight int64) {
+	t.Helper()
+	_, err := store.db.ExecContext(ctx, `UPDATE transactions SET unmined_since = NULL WHERE hash = $1`, tx.TxIDChainHash()[:])
+	require.NoError(t, err)
+	_, err = store.db.ExecContext(ctx,
+		`INSERT INTO block_ids (transaction_id, block_id, block_height, subtree_idx) SELECT id, 900001, $1, 0 FROM transactions WHERE hash = $2`,
+		blockHeight, tx.TxIDChainHash()[:])
+	require.NoError(t, err)
+}
+
 // danglingSpendTx builds a tx spending parent[0]; outSats makes its txid unique.
 func danglingSpendTx(t *testing.T, parent *bt.Tx, outSats uint64) *bt.Tx {
 	t.Helper()
@@ -284,13 +300,17 @@ func TestSQLPruner_DeletedChildLeavesMarker_WalkFailsClosed(t *testing.T) {
 	_, err := store.Create(ctx, parent, 100)
 	require.NoError(t, err)
 
-	// counter is the recorded spender of parent[0]; the pruner will reap it.
+	// counter is the recorded spender of parent[0]; the pruner will reap it. It is MINED on
+	// our chain (mined-then-pruned counter in the retention band), so the F1 gate writes its
+	// marker and the walk must fail closed.
 	counter := danglingSpendTx(t, parent, 80000)
 	_, err = store.Create(ctx, counter, 100)
 	require.NoError(t, err)
 
 	_, err = store.Spend(ctx, counter, 101)
 	require.NoError(t, err)
+
+	markTxMined(ctx, t, store, counter, 140)
 
 	// queryTx is the conflicting tx that ALSO spends parent[0].
 	queryTx := danglingSpendTx(t, parent, 90000)
@@ -324,6 +344,57 @@ func TestSQLPruner_DeletedChildLeavesMarker_WalkFailsClosed(t *testing.T) {
 		"a marked ghost is a mined-then-pruned counter → INVALID, not a transient ProcessingError")
 }
 
+// TestSQLPruner_NeverMinedGhostToleratedByWalk is the F1 regression guard and the
+// never-mined counterpart to TestSQLPruner_DeletedChildLeavesMarker_WalkFailsClosed: a
+// CONFLICTING/never-mined loser is given a delete_at_height (as SetConflicting stamps a
+// loser, with NO mined gate) and reaped by the pruner, but because it was never mined on
+// our chain the F1 marker gate leaves it UNMARKED. The counter walk must therefore
+// TOLERATE its ghost (exclude it, no error), NOT return TxInvalidError — permanently
+// rejecting a block the honest network accepted would be a consensus split.
+func TestSQLPruner_NeverMinedGhostToleratedByWalk(t *testing.T) {
+	ctx := context.Background()
+	store, _ := setup(ctx, t)
+
+	parent := danglingParentTx(0x78)
+	_, err := store.Create(ctx, parent, 100)
+	require.NoError(t, err)
+
+	// counter is the recorded spender of parent[0]; it stays NEVER-MINED (Create leaves
+	// unmined_since set and adds no block_ids row — no markTxMined call).
+	counter := danglingSpendTx(t, parent, 80000)
+	_, err = store.Create(ctx, counter, 100)
+	require.NoError(t, err)
+
+	_, err = store.Spend(ctx, counter, 101)
+	require.NoError(t, err)
+
+	// queryTx is the conflicting tx that ALSO spends parent[0] — the tx we walk.
+	queryTx := danglingSpendTx(t, parent, 90000)
+	_, err = store.Create(ctx, queryTx, 100, utxo.WithConflicting(true))
+	require.NoError(t, err)
+
+	// Tombstone the never-mined counter (as SetConflicting does for a loser) and reap it.
+	_, err = store.db.ExecContext(ctx, `UPDATE transactions SET delete_at_height = $1 WHERE hash = $2`, 150, counter.TxIDChainHash()[:])
+	require.NoError(t, err)
+
+	pruned, err := newDanglingTestPruner(ctx, t, store).Prune(ctx, 150, "test")
+	require.NoError(t, err)
+	require.EqualValues(t, 1, pruned, "the never-mined counter is still reaped")
+
+	// F1: the reaped never-mined counter leaves NO marker on the surviving parent.
+	var markerCount int
+	require.NoError(t, store.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM deleted_children WHERE parent_hash = $1`, parent.TxIDChainHash()[:]).Scan(&markerCount))
+	require.Equal(t, 0, markerCount,
+		"a never-mined reaped counter must NOT leave a deleted_children marker (marker ⟹ mined-on-our-chain)")
+
+	// ...so the walk TOLERATES the unmarked ghost instead of rejecting the block as INVALID.
+	res, err := utxo.GetCounterConflictingTxHashes(ctx, store, *queryTx.TxIDChainHash())
+	require.NoError(t, err,
+		"an unmarked never-mined ghost must be tolerated, not fail the walk with TxInvalidError")
+	require.NotContains(t, res, *counter.TxIDChainHash(), "the ghost counter is excluded from the set")
+}
+
 // TestSQLPruner_MarkerRemovedWhenParentPruned verifies marker growth stays bounded:
 // once the parent itself is reaped, its deleted_children rows go with it (a missing
 // parent already fails the walk closed, so the markers carry no information).
@@ -341,6 +412,9 @@ func TestSQLPruner_MarkerRemovedWhenParentPruned(t *testing.T) {
 
 	_, err = store.Spend(ctx, child, 101)
 	require.NoError(t, err)
+
+	// Mined-then-pruned child: the F1 gate writes its marker when reaped.
+	markTxMined(ctx, t, store, child, 140)
 
 	prunerSvc := newDanglingTestPruner(ctx, t, store)
 

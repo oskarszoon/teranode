@@ -133,6 +133,10 @@ func TestSQLPruner_DefensiveModeProtectsUnstableChildAndMarksDeletable(t *testin
 	_, err = store.Create(ctx, d, 100)
 	require.NoError(t, err)
 
+	// D is the reaped deletable parent that must leave a marker, so it must be MINED on our
+	// chain (F1 gate). Its own deletability is governed by DC's stability, not by this.
+	markTxMined(ctx, t, store, d, 140)
+
 	dc := danglingSpendTx(t, d, 80000) // spends D[0]
 	_, err = store.Create(ctx, dc, 100)
 	require.NoError(t, err)
@@ -253,6 +257,9 @@ func TestSQLPruner_BoundedBatchDrainsAndMarks(t *testing.T) {
 		child := danglingSpendTx(t, parent, uint64(90000+i))
 		_, err = store.Create(ctx, child, 100)
 		require.NoError(t, err)
+
+		// Each reaped child must leave a marker, so each is MINED on our chain (F1 gate).
+		markTxMined(ctx, t, store, child, 140)
 
 		children = append(children, child)
 	}

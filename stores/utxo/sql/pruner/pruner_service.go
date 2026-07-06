@@ -185,9 +185,11 @@ func (s *Service) Prune(ctx context.Context, blockHeight uint32, blockHashStr st
 //
 // Before the DELETE — in the same database transaction — it records a
 // deleted_children marker row (parent_hash, child_hash) on each deleted tx's input
-// parents, mirroring the aerospike deletedChildren bin. The counter-conflicting
-// fail-closed guards consume these markers to discriminate a deliberately reaped
-// spender from a tolerable ghost. Markers whose parent is itself deleted in the same
+// parents, mirroring the aerospike deletedChildren bin, but ONLY for a reaped child that
+// was mined on our longest chain (F1 — see the insertMarkersQuery mined predicate). The
+// counter-conflicting fail-closed guards consume these markers to discriminate a
+// deliberately reaped mined counter (fail closed) from a tolerable never-mined ghost
+// (tolerated). Markers whose parent is itself deleted in the same
 // pass are removed again (a missing parent already fails the walk closed), and a marker
 // is never written for a parent whose record is already gone (an earlier pass reaped
 // it) — together bounding the table's growth to (surviving parent, reaped child) pairs.
@@ -303,6 +305,19 @@ func (s *Service) deleteTombstoned(ctx context.Context, blockHeight uint32) (int
 	// would carry no information and only leak. Same-pass parents still match (they die
 	// in statement 3 below) and are removed by the cleanup in statement 2, keeping the
 	// table to (surviving parent, reaped child) pairs.
+	//
+	// F1: a marker is written ONLY for a reaped child that was MINED on our longest chain
+	// — tx.unmined_since IS NULL AND a block_ids row exists for tx. This is the SAME
+	// mined-on-chain definition the defensive child-stability predicate above uses
+	// (child.unmined_since IS NULL + INNER JOIN block_ids) and the aerospike gate
+	// (isReapedChildMined: unminedSince nil + blockHeights non-empty). It restores the
+	// invariant "marker present ⟹ mined-on-our-chain" the counter-conflicting discriminator
+	// depends on. SetConflicting (sql.go ~4254) stamps a conflicting/never-mined loser with a
+	// delete_at_height and NO mined gate, so such a loser is reaped too; leaving it UNMARKED
+	// lets the walk tolerate its ghost instead of permanently rejecting a block the honest
+	// network accepted. A mined-then-pruned counter in the (retention, retention*2] band
+	// still carries block_ids with unmined_since NULL, so it is still marked and still fails
+	// the walk closed.
 	insertMarkersQuery := `
 		INSERT INTO deleted_children (parent_hash, child_hash)
 		SELECT DISTINCT i.previous_transaction_hash, tx.hash
@@ -310,6 +325,8 @@ func (s *Service) deleteTombstoned(ctx context.Context, blockHeight uint32) (int
 		INNER JOIN inputs i ON i.transaction_id = tx.id
 		INNER JOIN transactions p ON p.hash = i.previous_transaction_hash
 		WHERE tx.id IN (SELECT id FROM prune_batch_ids)
+		  AND tx.unmined_since IS NULL
+		  AND EXISTS (SELECT 1 FROM block_ids b WHERE b.transaction_id = tx.id)
 		ON CONFLICT (parent_hash, child_hash) DO NOTHING
 	`
 	// A marker-INSERT failure aborts the whole pass deliberately: deleting a spender

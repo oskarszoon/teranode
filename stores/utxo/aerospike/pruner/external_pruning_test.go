@@ -518,6 +518,9 @@ func TestMixedExternalAndNormalTransactions(t *testing.T) {
 		fields.Inputs.String():         []interface{}{input.Bytes(true)},
 		fields.External.String():       false,
 		fields.DeleteAtHeight.String(): 15,
+		// Mined on our chain (F1 gate): a non-empty blockHeights list with no unminedSince
+		// makes this reaped child eligible for a deletedChildren marker on its parent.
+		fields.BlockHeights.String(): []interface{}{10},
 	})
 	require.NoError(t, err)
 

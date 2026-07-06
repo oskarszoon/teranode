@@ -97,14 +97,18 @@ func TestCheckCounterConflictingOnCurrentChain_FailsClosedOnDanglingCounter(t *t
 	mockStore.On("GetMeta", mock.Anything, &txHash, mock.Anything).Return(&meta.Data{})
 
 	// But the counter is deleted before the mined-on-chain re-read: GetMeta returns NOT_FOUND.
+	// The mock's message deliberately does NOT contain the counter hash, so the assertion
+	// below pins the CODE's own "...for %s" enrichment rather than echoing the mock's text.
 	mockStore.On("GetMeta", mock.Anything, &counterHash, mock.Anything).
-		Return(errors.NewTxNotFoundError("counter %s not found", counterHash.String()))
+		Return(errors.NewTxNotFoundError("record vanished"))
 
 	err := s.checkCounterConflictingOnCurrentChain(ctx, txHash, map[uint32]bool{})
 
 	require.Error(t, err, "a counter that vanishes between the walk and GetMeta must fail closed")
 	require.Contains(t, err.Error(), counterHash.String(),
-		"the fail-closed error must name the missing counter hash")
+		"the fail-closed error must name the missing counter hash (from the code's enrichment, not the mock message)")
+	require.False(t, errors.Is(err, errors.ErrTxInvalid),
+		"a racing-delete fail-close is a Processing error, not the marked-ghost TxInvalid path")
 }
 
 // TestCheckCounterConflictingOnCurrentChain_RejectsMinedCounterGuard is the

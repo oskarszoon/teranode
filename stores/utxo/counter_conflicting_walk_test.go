@@ -156,6 +156,6 @@ func TestGetCounterConflictingTxHashes_NilParentRecordFailsClosed(t *testing.T) 
 
 	require.Nil(t, res)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "not found")
+	require.True(t, errors.IsNotFound(err), "missing parent must fail closed with a not-found-classed error (matches the SQL sibling)")
 	mockStore.AssertExpectations(t)
 }

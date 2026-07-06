@@ -231,7 +231,7 @@ func NewService(settings *settings.Settings, opts Options) (*Service, error) {
 		})
 		prometheusUtxoRecordsDeferredGCed = promauto.NewCounter(prometheus.CounterOpts{
 			Name: "utxo_pruner_records_deferred_gced_total",
-			Help: "Deferred external-tx records deleted marker-less after passing the finality horizon (block height > delete-at-height + retention, i.e. mined + 2x retention), beyond the counter-conflicting walk window",
+			Help: "Deferred external-tx records deleted marker-less after passing the finality horizon (block height > delete-at-height + 2x retention, i.e. mined + 3x retention), beyond every validatable block's counter-conflicting walk window",
 		})
 		prometheusUtxoParentsUpdated = promauto.NewCounter(prometheus.CounterOpts{
 			Name: "utxo_pruner_parents_updated_total",
@@ -493,7 +493,12 @@ func (s *Service) partitionWorker(
 	// GC-horizon check in processRecordChunk reads it to decide whether a deferred
 	// blob-missing external tx is old enough to delete marker-less (see the deferral
 	// branch in processRecordChunk).
-	binNames := []string{s.fieldTxID, s.fieldExternal, s.fieldTotalExtraRecs, s.fieldInputs, s.fieldDeleteAtHeight}
+	// BlockHeights + UnminedSince are the mined-on-our-chain signal (F1): the
+	// deletedChildren marker is written ONLY for a reaped child that was mined on our
+	// longest chain (isReapedChildMined), so "marker present ⟹ mined-on-our-chain"
+	// holds for the counter-conflicting discriminator. They are fetched unconditionally
+	// (not gated on defensive mode) because the marker gate runs on every reaped record.
+	binNames := []string{s.fieldTxID, s.fieldExternal, s.fieldTotalExtraRecs, s.fieldInputs, s.fieldDeleteAtHeight, s.fieldBlockHeights, s.fieldUnminedSince}
 	if s.defensiveEnabled {
 		binNames = append(binNames, s.fieldUtxos, s.fieldDeletedChildren)
 	}
@@ -1019,14 +1024,28 @@ func (s *Service) processRecordChunk(ctx context.Context, blockHeight uint32, ch
 				// validatable block sits at pruner_tip - CoinbaseMaturity and its window
 				// reaches back a further retention*2. This record's counter is outside all of
 				// them once pruner_tip - CoinbaseMaturity - retention*2 > mined, i.e.
-				// blockHeight > DAH + CoinbaseMaturity + retention. CoinbaseMaturity < retention
-				// on every supported chain, so blockHeight > DAH + 2*retention is a safe,
-				// dependency-free bound (2*retention > CoinbaseMaturity + retention). Past it,
-				// the marker-less delete cannot be seen by any walk → not a fail-open source.
-				// Accumulation stays bounded (≤ 2 retention windows of blob-gone records).
-				// Below the horizon (or when DAH is absent or unreadable) we keep deferring.
-				if dah, ok := rec.Record.Bins[s.fieldDeleteAtHeight].(int); ok && dah > 0 && blockHeight > uint32(dah)+2*s.blockHeightRetention {
-					s.logger.Debugf("GC-pruning deferred external tx %s at height %d: past finality horizon (DAH %d + 2*retention %d), deleting marker-less", txHash.String(), blockHeight, dah, s.blockHeightRetention)
+				// blockHeight > DAH + CoinbaseMaturity + retention.
+				//
+				// F8: retention is operator-tunable, not a chain param, so the old
+				// DAH + 2*retention bound (which silently assumed retention >= CoinbaseMaturity)
+				// is too tight if a node is misconfigured with retention < CoinbaseMaturity — it
+				// could GC a record still inside a validatable fork's window. Compute the horizon
+				// as DAH + retention + max(retention, CoinbaseMaturity) so it is never narrower
+				// than DAH + CoinbaseMaturity + retention regardless of retention. CoinbaseMaturity
+				// is read from ChainCfgParams (nil-guarded: 0 for the bare test settings, which
+				// reduces the bound to DAH + 2*retention, matching the historical behaviour); on
+				// every supported chain retention >= CoinbaseMaturity so the production horizon is
+				// unchanged at DAH + 2*retention. Past it, the marker-less delete cannot be seen
+				// by any walk → not a fail-open source. Accumulation stays bounded (≤ 2 retention
+				// windows of blob-gone records). Below the horizon (or when DAH is absent or
+				// unreadable) we keep deferring.
+				var coinbaseMaturity uint32
+				if s.settings != nil && s.settings.ChainCfgParams != nil {
+					coinbaseMaturity = uint32(s.settings.ChainCfgParams.CoinbaseMaturity)
+				}
+				gcHorizon := s.blockHeightRetention + max(s.blockHeightRetention, coinbaseMaturity)
+				if dah, ok := rec.Record.Bins[s.fieldDeleteAtHeight].(int); ok && dah > 0 && blockHeight > uint32(dah)+gcHorizon {
+					s.logger.Debugf("GC-pruning deferred external tx %s at height %d: past finality horizon (DAH %d + retention %d + max(retention, coinbaseMaturity %d)), deleting marker-less", txHash.String(), blockHeight, dah, s.blockHeightRetention, coinbaseMaturity)
 					allDeletions = s.appendRecordDeletions(allDeletions, rec.Record, txHash)
 					prometheusUtxoRecordsDeferredGCed.Inc()
 					processedCount++
@@ -1046,36 +1065,50 @@ func (s *Service) processRecordChunk(ctx context.Context, blockHeight uint32, ch
 			return 0, 0, err
 		}
 
-		// Accumulate a deletedChildren marker for EVERY input's parent —
-		// unconditionally. The marker is a consensus discriminator for the
-		// counter-conflicting fail-closed guards, so it must never be suppressed:
-		// a pre-filter that skipped parents "already pruned this session" was
-		// removed for exactly that reason. Writing the marker to a parent that has
-		// itself already been pruned is harmless — the addDeletedChildren UDF is a
-		// silent no-op on a missing record — so the unconditional write costs
-		// nothing but keeps the marker reliable.
-		for _, input := range inputs {
-			parentTxID := input.PreviousTxIDChainHash()
+		// F1: accumulate a deletedChildren marker on this reaped child's input parents
+		// ONLY when the child was MINED on our longest chain (isReapedChildMined). The
+		// marker is the consensus discriminator the counter-conflicting fail-closed guards
+		// read; the discriminator treats a marked ghost as a counter mined on our chain and
+		// returns TxInvalidError. Restricting the write to mined children restores the
+		// invariant "marker present ⟹ mined-on-our-chain": the setConflicting DAH branch
+		// (teranode.lua ~990) tombstones a conflicting/never-mined loser with NO mined gate,
+		// so such a loser is reaped too — but it was never on our chain, so marking it would
+		// make the discriminator permanently reject a block the honest network accepted. A
+		// never-mined reaped child is therefore intentionally left UNMARKED so the walk
+		// tolerates its ghost. spendMulti's same-spender re-spend guard also stops firing for
+		// an unmarked never-mined reaped spender; that is acceptable (a DIFFERENT spender
+		// still fails ErrSpent, and an idempotent same-spender re-spend creates no new spend
+		// — see teranode.lua:388-405).
+		//
+		// For a MINED child the marker is still written to EVERY input's parent
+		// unconditionally (the "never suppress for a mined child" reliability property): a
+		// mined-then-pruned counter in the (retention, retention*2] band must fail the walk
+		// closed. Writing to a parent that has itself already been pruned is harmless — the
+		// addDeletedChildren UDF is a silent no-op on a missing record.
+		if s.isReapedChildMined(rec.Record.Bins) {
+			for _, input := range inputs {
+				parentTxID := input.PreviousTxIDChainHash()
 
-			// The deletedChildren marker is page-keyed on the record that owns the
-			// spent output — CalculateKeySource(parent, vout) — bounded to that
-			// page's outputs. This is the pre-PR write pattern. Two readers consume
-			// it:
-			//   - the spendMulti lua UDF reads its OWN page for the same-spender
-			//     re-spend INVALID_SPEND guard (teranode.lua);
-			//   - the counter-conflicting walk reads it via a page-aggregating Get
-			//     (get.go mergePageDeletedChildren) that unions the master record's
-			//     map with every page record's map, so it sees a marker on any page
-			//     regardless of which page owns the spent vout.
-			// Keeping the write page-bounded (not dual-keyed onto the master record)
-			// avoids concentrating one entry per distinct pruned child across all
-			// vouts onto a single record: a high-fanout parent that stays alive
-			// could otherwise grow the master map past the write-block-size and
-			// wedge the pruner. addDeletedChildren is a silent no-op on a missing
-			// record, so a write to a page that does not exist is harmless.
-			voutKeySource := uaerospike.CalculateKeySource(parentTxID, input.PreviousTxOutIndex, s.utxoBatchSize)
-			if err := s.accumulateDeletedChildMarker(voutKeySource, txHash, allParentUpdates); err != nil {
-				return 0, 0, err
+				// The deletedChildren marker is page-keyed on the record that owns the
+				// spent output — CalculateKeySource(parent, vout) — bounded to that
+				// page's outputs. This is the pre-PR write pattern. Two readers consume
+				// it:
+				//   - the spendMulti lua UDF reads its OWN page for the same-spender
+				//     re-spend INVALID_SPEND guard (teranode.lua);
+				//   - the counter-conflicting walk reads it via a page-aggregating Get
+				//     (get.go mergePageDeletedChildren) that unions the master record's
+				//     map with every page record's map, so it sees a marker on any page
+				//     regardless of which page owns the spent vout.
+				// Keeping the write page-bounded (not dual-keyed onto the master record)
+				// avoids concentrating one entry per distinct pruned child across all
+				// vouts onto a single record: a high-fanout parent that stays alive
+				// could otherwise grow the master map past the write-block-size and
+				// wedge the pruner. addDeletedChildren is a silent no-op on a missing
+				// record, so a write to a page that does not exist is harmless.
+				voutKeySource := uaerospike.CalculateKeySource(parentTxID, input.PreviousTxOutIndex, s.utxoBatchSize)
+				if err := s.accumulateDeletedChildMarker(voutKeySource, txHash, allParentUpdates); err != nil {
+					return 0, 0, err
+				}
 			}
 		}
 
@@ -1154,6 +1187,45 @@ func (s *Service) accumulateDeletedChildMarker(keySource []byte, childTxHash *ch
 	}
 
 	return nil
+}
+
+// isReapedChildMined reports whether a reaped record was mined on our LONGEST chain,
+// using the SAME definition as the non-conflicting delete-at-height gate
+// (teranode.lua setDeleteAtHeight: hasBlockIDs && isOnLongestChain, ~:1032) and the
+// pruner's own child-stability check (batchVerifyChildrenSafety): the record carries at
+// least one block height AND is not flagged unmined (unminedSince absent/nil).
+//
+// blockIDs and blockHeights are parallel lists the mine UDF maintains in lockstep (both
+// appended together, both removed together on unset-mined), so a non-empty blockHeights
+// is equivalent to the lua hasBlockIDs test. The unminedSince==nil clause is REQUIRED,
+// not redundant: a fork-mined tx keeps blockHeights non-empty but retains unminedSince
+// until its block reaches the longest chain (teranode.lua:635-644), so a positive
+// block-heights test ALONE would misclassify a fork-mined-but-not-on-our-chain
+// conflicting tx (which the conflicting DAH branch tombstones without a mined gate) as
+// mined and wrongly mark its ghost.
+//
+// F1 write-side invariant: the pruner writes a deletedChildren marker ONLY for a reaped
+// child that was mined on our chain, so "marker present ⟹ mined-on-our-chain" holds and
+// the counter-conflicting discriminator's TxInvalidError is sound. A conflicting/
+// never-mined reaped child is intentionally left UNMARKED so the walk tolerates its ghost.
+func (s *Service) isReapedChildMined(bins aerospike.BinMap) bool {
+	// Not on the longest chain if flagged unmined (isOnLongestChain == false).
+	if unminedSince, ok := bins[s.fieldUnminedSince]; ok && unminedSince != nil {
+		return false
+	}
+
+	// hasBlockIDs: at least one block height entry (blockHeights ↔ blockIDs are parallel).
+	blockHeightsRaw, ok := bins[s.fieldBlockHeights]
+	if !ok || blockHeightsRaw == nil {
+		return false
+	}
+
+	blockHeights, ok := blockHeightsRaw.([]interface{})
+	if !ok {
+		return false
+	}
+
+	return len(blockHeights) > 0
 }
 
 // batchVerifyChildrenSafety checks multiple child transactions at once to determine if their parents
