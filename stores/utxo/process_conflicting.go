@@ -1475,16 +1475,22 @@ func GetCounterConflictingTxHashes(ctx context.Context, s Store, txHash chainhas
 				// marker is page-keyed (bounded per page record) and the parent Get above is
 				// page-aggregating (get.go mergePageDeletedChildren unions every page's map),
 				// so a marker for any vout — including vout ≥ utxoBatchSize — is seen here
-				// regardless of which page holds it. Residual unmarked-ghost exposure is:
-				// (historical) aerospike deletes done before this PR whose marker the cuckoo
-				// pre-filter suppressed, and SQL stores upgraded mid-life whose
-				// deleted_children table starts empty; and (ongoing) a blob-missing external
-				// counter the aerospike pruner GC-deletes marker-less once past its finality
-				// horizon (pruner tip > DAH + retention), which under a deep reorg can still
-				// fall inside a fork block's 576-window. All require an attacker fork inside
-				// the 576-block window AND are backstopped by the primary Spend double-spend
-				// defense: the surviving parent still records the spender in its slot, so a
-				// double-spender is rejected as ErrSpent regardless of this tolerate path.
+				// regardless of which page holds it. Residual unmarked-ghost exposure is
+				// historical/transient only: aerospike deletes done before this PR whose
+				// marker the cuckoo pre-filter suppressed, and SQL stores upgraded mid-life
+				// whose deleted_children table starts empty (transient — one retention*2
+				// window after upgrade, then fresh pruning has marked the live band). The
+				// aerospike blob-missing GC path does NOT contribute: it only reaps
+				// marker-less past DAH + 2*retention, which — since block validation caps fork
+				// depth at CoinbaseMaturity (< retention) — is outside every validatable
+				// block's comparison window, so a GC'd record can never be an in-window ghost.
+				// Any residual additionally requires an attacker fork inside the 576-block
+				// window AND is backstopped by the primary Spend double-spend defense: the
+				// surviving parent still records the spender in its slot, so a double-spender
+				// is rejected as ErrSpent regardless of this tolerate path. (That backstop is
+				// the validation/store guard; note the ProcessConflicting winner/repair path
+				// clears an unmarked ghost slot rather than relying on ErrSpent — which is why
+				// the GC horizon is set wide enough that GC'd records never reach either path.)
 				spenderMeta, err := s.Get(ctx, spendingTxID, fields.Conflicting)
 				if err != nil {
 					// A ghost (NOT_FOUND) is discriminated by the deletedChildren marker:

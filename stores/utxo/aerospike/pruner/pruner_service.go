@@ -68,7 +68,6 @@ var (
 	prometheusUtxoExternalFilesDeletedSkipped prometheus.Counter
 	prometheusUtxoRetryAttempts               prometheus.Counter
 	prometheusUtxoTimeoutEvents               prometheus.Counter
-	prometheusUtxoParentsSkippedPruned        prometheus.Counter
 )
 
 // Options contains configuration options for the cleanup service
@@ -140,6 +139,17 @@ type Service struct {
 	// capture the accumulated parent updates / deletions without a live cluster.
 	// Defaults to s.flushCleanupBatches in NewService.
 	flushCleanupBatchesFn func(ctx context.Context, parentUpdates map[string]*parentUpdateInfo, deletions []*aerospike.Key, externalFiles []*externalFileInfo) error
+
+	// executeBatchParentUpdatesFn is a finer seam than flushCleanupBatchesFn: it
+	// intercepts only the parent-marker phase inside flushCleanupBatches, so a test can
+	// fault-inject a marker-write failure and observe that executeBatchDeletionsFn (below)
+	// is never reached, without bypassing flushCleanupBatches's own ordering logic.
+	// Defaults to s.executeBatchParentUpdates in NewService.
+	executeBatchParentUpdatesFn func(ctx context.Context, updates map[string]*parentUpdateInfo) error
+
+	// executeBatchDeletionsFn is the child-delete counterpart to executeBatchParentUpdatesFn.
+	// Defaults to s.executeBatchDeletions in NewService.
+	executeBatchDeletionsFn func(ctx context.Context, keys []*aerospike.Key) error
 
 	// Lua UDF module name
 	luaPackage string
@@ -247,10 +257,6 @@ func NewService(settings *settings.Settings, opts Options) (*Service, error) {
 			Name: "utxo_pruner_timeout_events_total",
 			Help: "Total number of timeout events requiring retry during pruning operations",
 		})
-		prometheusUtxoParentsSkippedPruned = promauto.NewCounter(prometheus.CounterOpts{
-			Name: "utxo_pruner_parents_skipped_pruned_total",
-			Help: "Number of parent updates skipped because parent was already pruned (in this or a prior session)",
-		})
 	})
 
 	// Use the configured query policy from settings (configured via aerospike_queryPolicy URL)
@@ -305,6 +311,8 @@ func NewService(settings *settings.Settings, opts Options) (*Service, error) {
 
 	service.partitionWorkerFn = service.partitionWorker
 	service.flushCleanupBatchesFn = service.flushCleanupBatches
+	service.executeBatchParentUpdatesFn = service.executeBatchParentUpdates
+	service.executeBatchDeletionsFn = service.executeBatchDeletions
 
 	return service, nil
 }
@@ -1000,26 +1008,25 @@ func (s *Service) processRecordChunk(ctx context.Context, blockHeight uint32, ch
 			// survives this pass and stays visible to the walk as a live spender.
 			if err == errExternalInputsUnrecoverable {
 				// GC-on-horizon: reap permanently-blob-gone externals marker-less once they
-				// are far enough past mining to bound accumulation. delete_at_height (DAH) =
-				// mined height + retention, so blockHeight > DAH + retention is more than
-				// retention*2 blocks past mining — past the top of the (retention,
-				// retention*2] walk window as measured from the PRUNER's height.
+				// are provably outside EVERY block the node will ever validate against, so a
+				// missing marker can no longer make the counter-conflicting walk fail open.
 				//
-				// This is an accumulation bound, not a clean safety proof. The counter-
-				// conflicting walk anchors its comparison window to the VALIDATED block's
-				// height, not the pruner's; during a fork/reorg a block can be validated up
-				// to the reorg horizon (retention blocks) below the pruner tip, so that
-				// block's window can still span this record. With the marker gone the walk
-				// then tolerates it as an UNMARKED ghost (secondary-guard fail-open in
-				// process_conflicting.go) — an ongoing source, not a historical-only one.
-				// That residual is backstopped by the primary Spend double-spend defense:
-				// the surviving parent still records the spend, so any real double-spender is
-				// rejected there regardless. Widening this to DAH + 2*retention would close
-				// the window, at the cost of one extra retention of retained blob-gone
-				// records. Below the horizon (or when DAH is absent or unreadable) we keep
-				// deferring.
-				if dah, ok := rec.Record.Bins[s.fieldDeleteAtHeight].(int); ok && dah > 0 && blockHeight > uint32(dah)+s.blockHeightRetention {
-					s.logger.Debugf("GC-pruning deferred external tx %s at height %d: past finality horizon (DAH %d + retention %d), deleting marker-less", txHash.String(), blockHeight, dah, s.blockHeightRetention)
+				// delete_at_height (DAH) = mined height + retention. The walk anchors its
+				// (retention, retention*2] comparison window to the VALIDATED block's height,
+				// and a fork block can be validated below the pruner tip — but only down to
+				// the reorg horizon, which block validation caps at CoinbaseMaturity
+				// (mainnet 100; catchup rejects any fork deeper than that). So the deepest
+				// validatable block sits at pruner_tip - CoinbaseMaturity and its window
+				// reaches back a further retention*2. This record's counter is outside all of
+				// them once pruner_tip - CoinbaseMaturity - retention*2 > mined, i.e.
+				// blockHeight > DAH + CoinbaseMaturity + retention. CoinbaseMaturity < retention
+				// on every supported chain, so blockHeight > DAH + 2*retention is a safe,
+				// dependency-free bound (2*retention > CoinbaseMaturity + retention). Past it,
+				// the marker-less delete cannot be seen by any walk → not a fail-open source.
+				// Accumulation stays bounded (≤ 2 retention windows of blob-gone records).
+				// Below the horizon (or when DAH is absent or unreadable) we keep deferring.
+				if dah, ok := rec.Record.Bins[s.fieldDeleteAtHeight].(int); ok && dah > 0 && blockHeight > uint32(dah)+2*s.blockHeightRetention {
+					s.logger.Debugf("GC-pruning deferred external tx %s at height %d: past finality horizon (DAH %d + 2*retention %d), deleting marker-less", txHash.String(), blockHeight, dah, s.blockHeightRetention)
 					allDeletions = s.appendRecordDeletions(allDeletions, rec.Record, txHash)
 					prometheusUtxoRecordsDeferredGCed.Inc()
 					processedCount++
@@ -1531,13 +1538,13 @@ func (s *Service) getTxInputsFromBins(ctx context.Context, blockHeight uint32, b
 // deletedChildren marker write has already succeeded.
 func (s *Service) flushCleanupBatches(ctx context.Context, parentUpdates map[string]*parentUpdateInfo, deletions []*aerospike.Key, externalFiles []*externalFileInfo) error {
 	if len(parentUpdates) > 0 {
-		if err := s.executeBatchParentUpdates(ctx, parentUpdates); err != nil {
+		if err := s.executeBatchParentUpdatesFn(ctx, parentUpdates); err != nil {
 			return err
 		}
 	}
 
 	if !s.settings.Pruner.SkipDeletions && len(deletions) > 0 {
-		if err := s.executeBatchDeletions(ctx, deletions); err != nil {
+		if err := s.executeBatchDeletionsFn(ctx, deletions); err != nil {
 			return err
 		}
 	}

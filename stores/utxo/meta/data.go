@@ -103,8 +103,11 @@ type Data struct {
 	// could skip it was removed) and the deleted_children table on postgres/sqlite
 	// (written in the same transaction as the delete, against a deletable set frozen in a
 	// temp table so no row is deleted unmarked under READ COMMITTED). Consumed by the
-	// counter-conflicting fail-closed guards; a missing marker is now historical only
-	// (see GetCounterConflictingTxHashes). Transient read-side data: not part of the
+	// counter-conflicting fail-closed guards; a missing marker is historical/transient
+	// only — pre-fix aerospike deletes and freshly-upgraded SQL stores whose table starts
+	// empty (the blob-missing GC path reaps marker-less only past DAH + 2*retention, which
+	// is outside every validatable block's window, so it is not a missing-marker source).
+	// See GetCounterConflictingTxHashes. Transient read-side data: not part of the
 	// binary serialization in Bytes()/NewMetaDataFromBytes.
 	//
 	// json:"-": a chainhash.Hash map key has no TextMarshaler, so encoding/json cannot

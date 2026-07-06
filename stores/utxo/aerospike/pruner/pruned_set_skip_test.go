@@ -123,8 +123,7 @@ func captureFlush(svc *Service) *map[string]*parentUpdateInfo {
 
 // TestProcessRecordChunk_AccumulatesEveryParentMarker verifies the
 // marker-reliability guarantee: processRecordChunk accumulates a deletedChildren
-// marker for EVERY input's parent unconditionally, and never increments
-// utxo_pruner_parents_skipped_pruned_total. The marker is a consensus
+// marker for EVERY input's parent unconditionally. The marker is a consensus
 // discriminator for the counter-conflicting fail-closed guards, so it must never
 // be suppressed by any pre-filter skip.
 func TestProcessRecordChunk_AccumulatesEveryParentMarker(t *testing.T) {
@@ -146,19 +145,13 @@ func TestProcessRecordChunk_AccumulatesEveryParentMarker(t *testing.T) {
 		makeChildResult(t, svc, 0x11, []chainhash.Hash{parentA, parentB}),
 	}
 
-	before := testutil.ToFloat64(prometheusUtxoParentsSkippedPruned)
-
 	processed, skipped, err := svc.processRecordChunk(ctx, 1000, chunk)
 	require.NoError(t, err)
 	require.Equal(t, 1, processed)
 	require.Equal(t, 0, skipped, "no defensive skip when defensive mode is off")
 
-	after := testutil.ToFloat64(prometheusUtxoParentsSkippedPruned)
-	require.Equal(t, float64(0), after-before,
-		"the skipped-pruned metric must never increment: the pre-filter skip was removed")
-
 	require.Len(t, *captured, 2,
-		"a marker must accumulate for every input's parent")
+		"a marker must accumulate for every input's parent unconditionally (no pre-filter skip)")
 }
 
 // TestProcessRecordChunk_MarkerPageKeyedOnly verifies the round-6 keying fix: the
@@ -279,15 +272,10 @@ func TestProcessRecordChunk_NoInputsIsNoOp(t *testing.T) {
 		},
 	}
 
-	before := testutil.ToFloat64(prometheusUtxoParentsSkippedPruned)
-
 	processed, skipped, err := svc.processRecordChunk(ctx, 1000, chunk)
 	require.NoError(t, err)
 	require.Equal(t, 1, processed)
 	require.Equal(t, 0, skipped)
-
-	after := testutil.ToFloat64(prometheusUtxoParentsSkippedPruned)
-	require.Equal(t, float64(0), after-before)
 }
 
 // TestProcessRecordChunk_DefersExternalTxWithMissingBlob verifies the marker-invariant
@@ -387,14 +375,14 @@ func TestProcessRecordChunk_DefersBlobMissingExternalTxBelowHorizon(t *testing.T
 		return nil
 	}
 
-	// DAH = 100, retention = 288 → horizon = 388. blockHeight 388 is NOT strictly
-	// greater than the horizon, so the record must stay deferred.
+	// DAH = 100, retention = 288 → horizon = DAH + 2*retention = 676. blockHeight 676 is
+	// NOT strictly greater than the horizon, so the record must stay deferred.
 	const dah = 100
 	chunk := []*aerospike.Result{makeMissingBlobExternalResult(t, svc, 0x55, dah)}
 
 	beforeGC := testutil.ToFloat64(prometheusUtxoRecordsDeferredGCed)
 
-	processed, skipped, err := svc.processRecordChunk(ctx, uint32(dah)+svc.blockHeightRetention, chunk)
+	processed, skipped, err := svc.processRecordChunk(ctx, uint32(dah)+2*svc.blockHeightRetention, chunk)
 	require.NoError(t, err)
 	require.Equal(t, 0, processed, "below the horizon the record must not be deleted")
 	require.Equal(t, 1, skipped, "below the horizon the record stays deferred/skipped")
@@ -407,8 +395,8 @@ func TestProcessRecordChunk_DefersBlobMissingExternalTxBelowHorizon(t *testing.T
 
 // TestProcessRecordChunk_GCsBlobMissingExternalTxPastHorizon verifies the GC-on-horizon
 // path: once a blob-missing external tx is past the finality horizon
-// (blockHeight > DAH + retention, i.e. mined + 2x retention), it is beyond the
-// counter-conflicting walk window and is deleted marker-less. The master record key is
+// (blockHeight > DAH + 2*retention, i.e. mined + 3x retention — outside every
+// validatable fork's counter-conflicting window), it is deleted marker-less. The master record key is
 // appended to the deletion batch, no parent marker is written, processedCount is bumped,
 // and the GC counter increments.
 func TestProcessRecordChunk_GCsBlobMissingExternalTxPastHorizon(t *testing.T) {
@@ -425,7 +413,7 @@ func TestProcessRecordChunk_GCsBlobMissingExternalTxPastHorizon(t *testing.T) {
 		return nil
 	}
 
-	// DAH = 100, retention = 288 → horizon = 388. blockHeight 389 is strictly past it.
+	// DAH = 100, retention = 288 → horizon = DAH + 2*retention = 676. blockHeight 677 is strictly past it.
 	const dah = 100
 	result := makeMissingBlobExternalResult(t, svc, 0x66, dah)
 	chunk := []*aerospike.Result{result}
@@ -433,7 +421,7 @@ func TestProcessRecordChunk_GCsBlobMissingExternalTxPastHorizon(t *testing.T) {
 	beforeGC := testutil.ToFloat64(prometheusUtxoRecordsDeferredGCed)
 	beforeNoMarker := testutil.ToFloat64(prometheusUtxoRecordsDeferredNoMarker)
 
-	processed, skipped, err := svc.processRecordChunk(ctx, uint32(dah)+svc.blockHeightRetention+1, chunk)
+	processed, skipped, err := svc.processRecordChunk(ctx, uint32(dah)+2*svc.blockHeightRetention+1, chunk)
 	require.NoError(t, err)
 	require.Equal(t, 1, processed, "past the horizon the record is reaped and counts as processed")
 	require.Equal(t, 0, skipped, "past the horizon the record is not deferred/skipped")

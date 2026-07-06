@@ -20,6 +20,8 @@ package sql
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -285,7 +287,9 @@ func TestSQLPruner_BoundedBatchDrainsAndMarks(t *testing.T) {
 	require.EqualValues(t, numChildren, pruned, "repeated bounded passes must drain the whole eligible set")
 
 	// Each pass deleted at most cap: a single unbounded pass would report 1 pass; cap 2
-	// over 5 rows forces exactly 3, proving the LIMIT bounded each txn.
+	// over 5 rows forces exactly 3, proving the LIMIT bounded each txn. Assert the pass
+	// COUNT (extracted numerically), not the full log prose, so a wording/pluralization
+	// change to the completion message does not break this test.
 	var completion string
 
 	for _, m := range infoMsgs {
@@ -294,7 +298,15 @@ func TestSQLPruner_BoundedBatchDrainsAndMarks(t *testing.T) {
 		}
 	}
 
-	require.Contains(t, completion, "over 3 pass(es)", "cap 2 over 5 eligible rows must take 3 bounded passes")
+	passCountRe := regexp.MustCompile(`over (\d+) pass`)
+	matches := passCountRe.FindStringSubmatch(completion)
+	require.Len(t, matches, 2, "completion message must report a pass count: %q", completion)
+
+	actualPasses, convErr := strconv.Atoi(matches[1])
+	require.NoError(t, convErr)
+
+	expectedPasses := (numChildren + batchCap - 1) / batchCap // ceil(numChildren / batchCap)
+	require.Equal(t, expectedPasses, actualPasses, "cap %d over %d eligible rows must take ceil(%d/%d)=%d bounded passes", batchCap, numChildren, numChildren, batchCap, expectedPasses)
 
 	// All tombstoned children were reaped.
 	for _, child := range children {
@@ -314,4 +326,115 @@ func TestSQLPruner_BoundedBatchDrainsAndMarks(t *testing.T) {
 	for _, child := range children {
 		require.Contains(t, pMeta.DeletedChildren, *child.TxIDChainHash(), "no reaped child may be deleted without its marker")
 	}
+}
+
+// TestSQLPruner_MarkerInsertFailureRollsBackDelete is the negative-path counterpart to
+// TestSQLPruner_DeletedChildLeavesMarker_WalkFailsClosed: it fault-injects a failure of
+// the deleted_children marker INSERT (by dropping the table deleteTombstoned writes
+// into) and verifies deleteTombstoned's single-atomic-txn guarantee end to end against a
+// real sqlite transaction — not just at the Go call-ordering level. If the marker INSERT
+// fails, Prune must surface the error AND the tombstoned child row must still exist:
+// the DELETE statement, which runs strictly after the marker INSERT inside the same txn
+// (see deleteTombstoned's ordering comment), must never be reached. A child deleted
+// without its marker is an unmarked ghost that fails the counter-conflicting walk OPEN.
+func TestSQLPruner_MarkerInsertFailureRollsBackDelete(t *testing.T) {
+	ctx := context.Background()
+	store, _ := setup(ctx, t)
+
+	// P survives; C spends P[0] and will be tombstoned.
+	parent := danglingParentTx(0x93)
+	_, err := store.Create(ctx, parent, 100)
+	require.NoError(t, err)
+
+	child := danglingSpendTx(t, parent, 90000)
+	_, err = store.Create(ctx, child, 100)
+	require.NoError(t, err)
+
+	_, err = store.Spend(ctx, child, 101)
+	require.NoError(t, err)
+
+	const pruneHeight = uint32(150)
+	_, err = store.db.ExecContext(ctx, `UPDATE transactions SET delete_at_height = $1 WHERE hash = $2`, pruneHeight, child.TxIDChainHash()[:])
+	require.NoError(t, err)
+
+	// Fault-inject: drop the table the marker INSERT targets, so it fails deterministically.
+	_, err = store.db.ExecContext(ctx, `DROP TABLE deleted_children`)
+	require.NoError(t, err)
+
+	prunerSvc := newDanglingTestPruner(ctx, t, store)
+
+	pruned, err := prunerSvc.Prune(ctx, pruneHeight, "test")
+	require.Error(t, err, "a marker-INSERT failure must abort the pass, not be swallowed")
+	require.Zero(t, pruned, "no rows may be counted as pruned when the marker write failed")
+
+	// The tombstoned child must STILL EXIST: the DELETE statement is never reached because
+	// the marker INSERT — which runs first in the same atomic txn — already failed.
+	_, err = store.Get(ctx, child.TxIDChainHash(), fields.TxID)
+	require.NoError(t, err, "the child must not be deleted when its parent-marker write failed")
+
+	// The surviving parent is untouched either way.
+	_, err = store.Get(ctx, parent.TxIDChainHash(), fields.TxID)
+	require.NoError(t, err, "the surviving parent must still exist")
+}
+
+// TestSQLPruner_MaxPrunePassesPerTriggerCapsSingleRun exercises the maxPrunePassesPerTrigger
+// cap (50, see pruner_service.go): with PruneBatchSize forced to 1 and more than 50 eligible
+// tombstoned rows, a single Prune call must stop after exactly 50 bounded passes — deleting
+// exactly 50 rows — leaving the remainder for the next trigger. Only the drain-completes
+// branch (n < pruneBatchSize) was covered before; this pins the iterations >= cap branch.
+func TestSQLPruner_MaxPrunePassesPerTriggerCapsSingleRun(t *testing.T) {
+	ctx := context.Background()
+	store, _ := setup(ctx, t)
+
+	const (
+		batchCap = 1
+		// maxPrunePassesPerTrigger (pruner_service.go) is 50 and unexported; numChildren must
+		// exceed it so the cap — not drain-completion — is what stops this Prune call.
+		maxPrunePassesPerTrigger = 50
+		numChildren              = maxPrunePassesPerTrigger + 5
+		pruneHeight              = uint32(150)
+	)
+
+	parent := danglingParentTx(0x94)
+	_, err := store.Create(ctx, parent, 100)
+	require.NoError(t, err)
+
+	children := make([]*bt.Tx, 0, numChildren)
+	for i := 0; i < numChildren; i++ {
+		child := danglingSpendTx(t, parent, uint64(90000+i))
+		_, err = store.Create(ctx, child, 100)
+		require.NoError(t, err)
+
+		children = append(children, child)
+	}
+
+	for _, child := range children {
+		_, err = store.db.ExecContext(ctx,
+			`UPDATE transactions SET delete_at_height = $1 WHERE hash = $2`, pruneHeight, child.TxIDChainHash()[:])
+		require.NoError(t, err)
+	}
+
+	tSettings := test.CreateBaseTestSettings(t)
+	tSettings.Pruner.UTXODefensiveEnabled = false
+
+	svc, err := sqlpruner.NewService(tSettings, sqlpruner.Options{
+		Logger:         ulogger.TestLogger{},
+		DB:             store.db,
+		Ctx:            ctx,
+		PruneBatchSize: batchCap,
+	})
+	require.NoError(t, err)
+
+	pruned, err := svc.Prune(ctx, pruneHeight, "test")
+	require.NoError(t, err)
+	require.EqualValues(t, maxPrunePassesPerTrigger, pruned,
+		"the per-trigger pass cap must stop this Prune call at exactly maxPrunePassesPerTrigger deletions")
+
+	// The remainder is left for the next trigger to pick up.
+	var remaining int
+	require.NoError(t, store.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM transactions WHERE delete_at_height IS NOT NULL AND delete_at_height <= $1`,
+		pruneHeight).Scan(&remaining))
+	require.Equal(t, numChildren-maxPrunePassesPerTrigger, remaining,
+		"rows beyond the per-trigger cap must remain eligible for the next Prune call")
 }
