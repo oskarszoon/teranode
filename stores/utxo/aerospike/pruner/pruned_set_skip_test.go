@@ -121,21 +121,18 @@ func captureFlush(svc *Service) *map[string]*parentUpdateInfo {
 	return captured
 }
 
-// TestProcessRecordChunk_AccumulatesParentsEvenWhenInPrunedSet verifies the
-// marker-reliability fix: the cuckoo "skip parents already in the PrunedTxSet"
-// optimisation was removed, so processRecordChunk now:
-//   - accumulates a parent update for EVERY input, even when the parent TXID is
-//     already registered in the shared PrunedTxSet
-//   - never increments utxo_pruner_parents_skipped_pruned_total
-//   - leaves the set insert-only: parents are NOT removed (no CheckAndRemove);
-//     the chunk's own child TXID is still Added up front
-func TestProcessRecordChunk_AccumulatesParentsEvenWhenInPrunedSet(t *testing.T) {
+// TestProcessRecordChunk_AccumulatesEveryParentMarker verifies the
+// marker-reliability guarantee: processRecordChunk accumulates a deletedChildren
+// marker for EVERY input's parent unconditionally, and never increments
+// utxo_pruner_parents_skipped_pruned_total. The marker is a consensus
+// discriminator for the counter-conflicting fail-closed guards, so it must never
+// be suppressed by any pre-filter skip.
+func TestProcessRecordChunk_AccumulatesEveryParentMarker(t *testing.T) {
 	ctx := context.Background()
 	svc := newTestServiceForSkip(t)
 	captured := captureFlush(svc)
 
-	// Two distinct parents, both pre-registered in the set. Under the old
-	// behaviour both would have been skipped; now both must accumulate.
+	// Two distinct parents; both must accumulate a marker.
 	var parentA chainhash.Hash
 	for i := range parentA {
 		parentA[i] = 0xAA
@@ -145,34 +142,23 @@ func TestProcessRecordChunk_AccumulatesParentsEvenWhenInPrunedSet(t *testing.T) 
 		parentB[i] = 0xBB
 	}
 
-	prunedSet := NewPrunedTxSet(4, 4096)
-	prunedSet.Add(parentA)
-	prunedSet.Add(parentB)
-	require.Equal(t, 2, prunedSet.Len())
-
 	chunk := []*aerospike.Result{
 		makeChildResult(t, svc, 0x11, []chainhash.Hash{parentA, parentB}),
 	}
 
 	before := testutil.ToFloat64(prometheusUtxoParentsSkippedPruned)
 
-	processed, skipped, err := svc.processRecordChunk(ctx, 1000, chunk, prunedSet)
+	processed, skipped, err := svc.processRecordChunk(ctx, 1000, chunk)
 	require.NoError(t, err)
 	require.Equal(t, 1, processed)
 	require.Equal(t, 0, skipped, "no defensive skip when defensive mode is off")
 
 	after := testutil.ToFloat64(prometheusUtxoParentsSkippedPruned)
 	require.Equal(t, float64(0), after-before,
-		"the skipped-pruned metric must never increment: the cuckoo skip was removed")
+		"the skipped-pruned metric must never increment: the pre-filter skip was removed")
 
 	require.Len(t, *captured, 2,
-		"both parents must accumulate despite already being in the PrunedTxSet")
-
-	// Insert-only: the set is no longer consulted (no CheckAndRemove), so both
-	// parents stay, and the chunk's own child TXID (0x11) is Added up front.
-	// Net: 2 parents + 1 child = 3 distinct fingerprints.
-	require.Equal(t, 3, prunedSet.Len(),
-		"insert-only set: parents retained, child added up front")
+		"a marker must accumulate for every input's parent")
 }
 
 // TestProcessRecordChunk_MarkerPageKeyedOnly verifies the round-6 keying fix: the
@@ -203,9 +189,7 @@ func TestProcessRecordChunk_MarkerPageKeyedOnly(t *testing.T) {
 		makeChildResultWithInputs(t, svc, 0x22, [][]byte{makeInputBytes(t, parent, vout)}),
 	}
 
-	// prunedSet nil keeps the test focused on keying; the up-front Add loop is
-	// guarded by a nil check.
-	processed, skipped, err := svc.processRecordChunk(ctx, 1000, chunk, nil)
+	processed, skipped, err := svc.processRecordChunk(ctx, 1000, chunk)
 	require.NoError(t, err)
 	require.Equal(t, 1, processed)
 	require.Equal(t, 0, skipped)
@@ -247,7 +231,7 @@ func TestProcessRecordChunk_MarkerOnMasterForLowVout(t *testing.T) {
 		makeChildResultWithInputs(t, svc, 0x44, [][]byte{makeInputBytes(t, parent, vout)}),
 	}
 
-	processed, skipped, err := svc.processRecordChunk(ctx, 1000, chunk, nil)
+	processed, skipped, err := svc.processRecordChunk(ctx, 1000, chunk)
 	require.NoError(t, err)
 	require.Equal(t, 1, processed)
 	require.Equal(t, 0, skipped)
@@ -264,12 +248,11 @@ func TestProcessRecordChunk_MarkerOnMasterForLowVout(t *testing.T) {
 	require.Len(t, masterUpdate.childHashes, 1, "master record carries the single child marker")
 }
 
-// TestProcessRecordChunk_EmptyPrunedSetIsNoOp verifies that an empty
-// PrunedTxSet does not cause any skipped-pruned increments. The chunk is
-// crafted with zero inputs so no parent updates accumulate and the
-// flushCleanupBatches deletion path stays gated by SkipDeletions — so the
-// default real flush is a no-op with no Aerospike call.
-func TestProcessRecordChunk_EmptyPrunedSetIsNoOp(t *testing.T) {
+// TestProcessRecordChunk_NoInputsIsNoOp verifies that a record with zero inputs
+// (e.g. coinbase) accumulates no parent updates and causes no skipped-pruned
+// increments. The flushCleanupBatches deletion path stays gated by SkipDeletions,
+// so the default real flush is a no-op with no Aerospike call.
+func TestProcessRecordChunk_NoInputsIsNoOp(t *testing.T) {
 	ctx := context.Background()
 	svc := newTestServiceForSkip(t)
 
@@ -296,11 +279,9 @@ func TestProcessRecordChunk_EmptyPrunedSetIsNoOp(t *testing.T) {
 		},
 	}
 
-	prunedSet := NewPrunedTxSet(4, 4096)
-
 	before := testutil.ToFloat64(prometheusUtxoParentsSkippedPruned)
 
-	processed, skipped, err := svc.processRecordChunk(ctx, 1000, chunk, prunedSet)
+	processed, skipped, err := svc.processRecordChunk(ctx, 1000, chunk)
 	require.NoError(t, err)
 	require.Equal(t, 1, processed)
 	require.Equal(t, 0, skipped)
@@ -311,10 +292,12 @@ func TestProcessRecordChunk_EmptyPrunedSetIsNoOp(t *testing.T) {
 
 // TestProcessRecordChunk_DefersExternalTxWithMissingBlob verifies the marker-invariant
 // fix: when a non-coinbase external tx's blob is gone its inputs cannot be recovered, so
-// the parent deletedChildren markers cannot be written. The record must therefore be
-// DEFERRED (not deleted) — deleting it marker-less would make it an UNMARKED ghost that
-// the counter-conflicting walk fails OPEN on. The record is counted as skipped and never
-// appended to the deletion batch, and the missing blob must not abort the whole chunk.
+// the parent deletedChildren markers cannot be written. Below the finality horizon the
+// record must therefore be DEFERRED (not deleted) — deleting it marker-less would make it
+// an UNMARKED ghost that the counter-conflicting walk fails OPEN on. The record is counted
+// as skipped and never appended to the deletion batch, and the missing blob must not abort
+// the whole chunk. This record carries no delete_at_height bin, so the GC-horizon check
+// cannot fire and the record stays deferred regardless of block height.
 func TestProcessRecordChunk_DefersExternalTxWithMissingBlob(t *testing.T) {
 	ctx := context.Background()
 	svc := newTestServiceForSkip(t)
@@ -349,11 +332,118 @@ func TestProcessRecordChunk_DefersExternalTxWithMissingBlob(t *testing.T) {
 		},
 	}
 
-	processed, skipped, err := svc.processRecordChunk(ctx, 1000, chunk, nil)
+	processed, skipped, err := svc.processRecordChunk(ctx, 1000, chunk)
 	require.NoError(t, err, "a missing external blob must not abort the chunk")
 	require.Equal(t, 0, processed, "the record with an unrecoverable blob must not be processed for deletion")
 	require.Equal(t, 1, skipped, "the record must be counted as skipped/deferred")
 
 	require.Empty(t, capturedDeletions, "a marker-less external record must NOT be appended to the deletion batch")
 	require.Empty(t, capturedUpdates, "no parent markers can be written without the tx's inputs")
+}
+
+// makeMissingBlobExternalResult builds an aerospike.Result for a non-coinbase external tx
+// whose blob is absent, tagged with delete_at_height = dah. processRecordChunk will hit
+// errExternalInputsUnrecoverable for it and then consult the DAH bin for the GC-horizon
+// decision.
+func makeMissingBlobExternalResult(t *testing.T, svc *Service, seed byte, dah int) *aerospike.Result {
+	t.Helper()
+
+	var txID chainhash.Hash
+	for i := range txID {
+		txID[i] = seed
+	}
+
+	key, keyErr := aerospike.NewKey(svc.namespace, svc.set, txID[:])
+	require.NoError(t, keyErr)
+
+	return &aerospike.Result{
+		Record: &aerospike.Record{
+			Key: key,
+			Bins: aerospike.BinMap{
+				svc.fieldTxID:           txID.CloneBytes(),
+				svc.fieldExternal:       true, // inputs live in the (missing) blob
+				svc.fieldDeleteAtHeight: dah,
+			},
+		},
+	}
+}
+
+// TestProcessRecordChunk_DefersBlobMissingExternalTxBelowHorizon verifies that a
+// blob-missing external tx whose delete_at_height is still within the finality horizon
+// (blockHeight <= DAH + retention) stays DEFERRED: it must not be deleted, no marker is
+// written, and it counts as skipped. The record is inside the counter-conflicting walk
+// window so a marker-less deletion would still be a fail-OPEN ghost.
+func TestProcessRecordChunk_DefersBlobMissingExternalTxBelowHorizon(t *testing.T) {
+	ctx := context.Background()
+	svc := newTestServiceForSkip(t)
+	svc.external = memory.New()
+	svc.blockHeightRetention = 288
+
+	var capturedUpdates map[string]*parentUpdateInfo
+	var capturedDeletions []*aerospike.Key
+	svc.flushCleanupBatchesFn = func(_ context.Context, parentUpdates map[string]*parentUpdateInfo, deletions []*aerospike.Key, _ []*externalFileInfo) error {
+		capturedUpdates = parentUpdates
+		capturedDeletions = deletions
+		return nil
+	}
+
+	// DAH = 100, retention = 288 → horizon = 388. blockHeight 388 is NOT strictly
+	// greater than the horizon, so the record must stay deferred.
+	const dah = 100
+	chunk := []*aerospike.Result{makeMissingBlobExternalResult(t, svc, 0x55, dah)}
+
+	beforeGC := testutil.ToFloat64(prometheusUtxoRecordsDeferredGCed)
+
+	processed, skipped, err := svc.processRecordChunk(ctx, uint32(dah)+svc.blockHeightRetention, chunk)
+	require.NoError(t, err)
+	require.Equal(t, 0, processed, "below the horizon the record must not be deleted")
+	require.Equal(t, 1, skipped, "below the horizon the record stays deferred/skipped")
+
+	require.Empty(t, capturedDeletions, "below-horizon deferral must not append to the deletion batch")
+	require.Empty(t, capturedUpdates, "no markers without recoverable inputs")
+	require.Equal(t, beforeGC, testutil.ToFloat64(prometheusUtxoRecordsDeferredGCed),
+		"the GC counter must not increment below the horizon")
+}
+
+// TestProcessRecordChunk_GCsBlobMissingExternalTxPastHorizon verifies the GC-on-horizon
+// path: once a blob-missing external tx is past the finality horizon
+// (blockHeight > DAH + retention, i.e. mined + 2x retention), it is beyond the
+// counter-conflicting walk window and is deleted marker-less. The master record key is
+// appended to the deletion batch, no parent marker is written, processedCount is bumped,
+// and the GC counter increments.
+func TestProcessRecordChunk_GCsBlobMissingExternalTxPastHorizon(t *testing.T) {
+	ctx := context.Background()
+	svc := newTestServiceForSkip(t)
+	svc.external = memory.New()
+	svc.blockHeightRetention = 288
+
+	var capturedUpdates map[string]*parentUpdateInfo
+	var capturedDeletions []*aerospike.Key
+	svc.flushCleanupBatchesFn = func(_ context.Context, parentUpdates map[string]*parentUpdateInfo, deletions []*aerospike.Key, _ []*externalFileInfo) error {
+		capturedUpdates = parentUpdates
+		capturedDeletions = deletions
+		return nil
+	}
+
+	// DAH = 100, retention = 288 → horizon = 388. blockHeight 389 is strictly past it.
+	const dah = 100
+	result := makeMissingBlobExternalResult(t, svc, 0x66, dah)
+	chunk := []*aerospike.Result{result}
+
+	beforeGC := testutil.ToFloat64(prometheusUtxoRecordsDeferredGCed)
+	beforeNoMarker := testutil.ToFloat64(prometheusUtxoRecordsDeferredNoMarker)
+
+	processed, skipped, err := svc.processRecordChunk(ctx, uint32(dah)+svc.blockHeightRetention+1, chunk)
+	require.NoError(t, err)
+	require.Equal(t, 1, processed, "past the horizon the record is reaped and counts as processed")
+	require.Equal(t, 0, skipped, "past the horizon the record is not deferred/skipped")
+
+	require.Len(t, capturedDeletions, 1, "the master record key must be appended to the deletion batch")
+	require.Equal(t, result.Record.Key, capturedDeletions[0], "the deletion must target the record's own key")
+	require.Empty(t, capturedUpdates, "GC delete-through is marker-less: no parent markers are written")
+
+	require.Equal(t, beforeGC+1, testutil.ToFloat64(prometheusUtxoRecordsDeferredGCed),
+		"the GC counter must increment past the horizon")
+	require.Equal(t, beforeNoMarker, testutil.ToFloat64(prometheusUtxoRecordsDeferredNoMarker),
+		"the deferral counter must not increment when the record is GC'd")
 }

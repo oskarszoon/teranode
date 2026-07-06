@@ -1692,10 +1692,13 @@ func (s *Store) getUnbatched(ctx context.Context, hash *chainhash.Hash, bins []f
 			}
 
 			if len(childHashBytes) != chainhash.HashSize {
-				// Best-effort marker read: a short/corrupt row would panic the
-				// slice-to-array cast below. Skip it rather than crash — a missing marker
-				// degrades to the tolerated-ghost path, which is fail-safe.
-				continue
+				// A short/corrupt marker row would panic the slice-to-array cast below.
+				// Fail the Get closed rather than skip it: silently dropping the marker
+				// degrades to the tolerated-ghost path, which fails the counter-conflicting
+				// walk OPEN on a reaped spender — the one outcome the marker table exists to
+				// prevent. A corrupt row means we can no longer trust this parent's marker
+				// set, so surface the corruption instead of masking it.
+				return nil, errors.NewStorageError("corrupt deleted_children row: child_hash len %d", len(childHashBytes))
 			}
 
 			if data.DeletedChildren == nil {

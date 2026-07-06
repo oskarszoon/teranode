@@ -16,10 +16,30 @@ import (
 // Ensure Store implements the Pruner Service interface
 var _ pruner.Service = (*Service)(nil)
 
+const (
+	// defaultPruneBatchSize bounds how many tombstoned transactions a single prune pass
+	// materializes, marks and deletes in one database transaction. The whole pass is one
+	// atomic txn — a double-JOIN marker INSERT, the marker cleanup, then the DELETE — so
+	// letting the deletable set grow unbounded lets a large first pass time out the marker
+	// INSERT, error the pass, and delete nothing: a permanent wedge that never drains.
+	// Capping the pass keeps each txn's work bounded while still draining large backlogs in
+	// a handful of passes. Tradeoff: smaller ⇒ more passes and round-trips per trigger;
+	// larger ⇒ heavier per-txn cost and a higher marker-INSERT timeout risk. No existing
+	// pruner setting fits (BlobDeletionBatchSize bounds blob deletes; UTXOChunkSize is the
+	// aerospike scan chunk), so this is a local const rather than a new setting.
+	defaultPruneBatchSize = 100_000
+
+	// maxPrunePassesPerTrigger caps how many bounded passes a single Prune trigger runs so
+	// one trigger cannot loop unbounded on a huge backlog; the remainder is drained by the
+	// next trigger. 50 × defaultPruneBatchSize = 5M deletions is the per-trigger ceiling.
+	maxPrunePassesPerTrigger = 50
+)
+
 // Service implements the utxo.CleanupService interface for SQL-based UTXO stores
 type Service struct {
 	safetyWindow     uint32 // Block height retention for child stability verification
 	defensiveEnabled bool   // Enable defensive checks before deleting UTXO transactions
+	pruneBatchSize   int    // Max tombstoned transactions deleted per pass (and per txn)
 	logger           ulogger.Logger
 	settings         *settings.Settings
 	db               *usql.DB
@@ -40,6 +60,11 @@ type Options struct {
 	// SafetyWindow is the number of blocks a child must be stable before parent deletion
 	// If not specified, defaults to global_blockHeightRetention (288 blocks)
 	SafetyWindow uint32
+
+	// PruneBatchSize caps the number of tombstoned transactions deleted per pass (and thus
+	// the work in a single database transaction). If <= 0, defaultPruneBatchSize is used.
+	// Primarily an injection point for tests; production leaves it at the default.
+	PruneBatchSize int
 }
 
 // NewService creates a new cleanup service for the SQL store
@@ -62,9 +87,15 @@ func NewService(tSettings *settings.Settings, opts Options) (*Service, error) {
 		safetyWindow = tSettings.GlobalBlockHeightRetention
 	}
 
+	pruneBatchSize := opts.PruneBatchSize
+	if pruneBatchSize <= 0 {
+		pruneBatchSize = defaultPruneBatchSize
+	}
+
 	service := &Service{
 		safetyWindow:     safetyWindow,
 		defensiveEnabled: tSettings.Pruner.UTXODefensiveEnabled,
+		pruneBatchSize:   pruneBatchSize,
 		logger:           opts.Logger,
 		settings:         tSettings,
 		db:               opts.DB,
@@ -99,11 +130,34 @@ func (s *Service) Prune(ctx context.Context, blockHeight uint32, blockHashStr st
 	s.logger.Infof("[pruner][%s:%d] phase 2: starting cleanup scan (delete_at_height <= %d)",
 		blockHashStr, blockHeight, blockHeight)
 
-	// Execute the cleanup
-	deletedCount, err := s.deleteTombstoned(ctx, blockHeight)
-	if err != nil {
-		s.logger.Errorf("[pruner][%s:%d] phase 2: cleanup failed: %v", blockHashStr, blockHeight, err)
-		return 0, err
+	// Drain the tombstoned set in bounded passes. Each deleteTombstoned call materializes,
+	// marks and deletes at most pruneBatchSize rows inside ONE atomic txn (see the batch-cap
+	// rationale on defaultPruneBatchSize): a single unbounded pass over a huge backlog can
+	// time out the double-JOIN marker INSERT, error the whole pass, and delete nothing — a
+	// permanent wedge. Looping keeps every pass's marker+delete atomic on its own frozen id
+	// set (never delete an unmarked spender) while still clearing large backlogs. A pass that
+	// does not fill its batch drained the eligible set; otherwise we loop, but never past
+	// maxPrunePassesPerTrigger so one trigger cannot run unbounded — the remainder is picked
+	// up by the next trigger.
+	var (
+		deletedCount int64
+		iterations   int
+	)
+
+	for {
+		iterations++
+
+		n, err := s.deleteTombstoned(ctx, blockHeight)
+		if err != nil {
+			s.logger.Errorf("[pruner][%s:%d] phase 2: cleanup failed on pass %d: %v", blockHashStr, blockHeight, iterations, err)
+			return deletedCount, err
+		}
+
+		deletedCount += n
+
+		if n < int64(s.pruneBatchSize) || iterations >= maxPrunePassesPerTrigger {
+			break
+		}
 	}
 
 	// Calculate throughput
@@ -120,8 +174,8 @@ func (s *Service) Prune(ctx context.Context, blockHeight uint32, blockHashStr st
 		tpsStr = fmt.Sprintf("%.2f records/sec", tps)
 	}
 
-	s.logger.Infof("[pruner][%s:%d] phase 2: completed cleanup in %v: deleted %s records (%s)",
-		blockHashStr, blockHeight, elapsed, util.FormatComma(deletedCount), tpsStr)
+	s.logger.Infof("[pruner][%s:%d] phase 2: completed cleanup in %v: deleted %s records over %d pass(es) (%s)",
+		blockHashStr, blockHeight, elapsed, util.FormatComma(deletedCount), iterations, tpsStr)
 
 	return deletedCount, nil
 }
@@ -152,6 +206,24 @@ func (s *Service) deleteTombstoned(ctx context.Context, blockHeight uint32) (int
 		args         []interface{}
 	)
 
+	// The LIMIT bounds each pass to pruneBatchSize rows so the atomic marker+delete txn
+	// below never grows unbounded (see defaultPruneBatchSize). Prune loops until a pass
+	// returns fewer than the cap, so the LIMIT drains the whole eligible set across passes.
+	// LIMIT lives on the inner SELECT (not the CREATE ... AS) because CREATE TEMPORARY TABLE
+	// AS SELECT ... LIMIT is portable across sqlite and postgres and both bind the LIMIT
+	// parameter inside the CTAS select. The non-defensive query needs no ORDER BY: each
+	// pass may take an arbitrary bounded subset of the eligible rows and their union over
+	// passes is the full set. The defensive query DOES order by (delete_at_height, id): its
+	// predicate makes a parent deletable only while its spending child still exists as a
+	// stable-mined row, so a child reaped in an earlier batch would strand the parent as
+	// permanently un-deletable (over-retention). A spending child is mined at or after its
+	// parent (DAH_child >= DAH_parent) and inserted after it (id_child > id_parent), so
+	// ascending (delete_at_height, id) order reaps the parent in the same or an earlier
+	// batch than the child — the parent is always evaluated while the child is still
+	// present. This is a strong mitigation, not an absolute guarantee: a reorg that inverts
+	// the DAH ordering can still split them across batches (the same over-retention already
+	// possible across separate triggers), but the outcome is only over-retention, never an
+	// unsafe delete.
 	if !s.defensiveEnabled {
 		// Defensive mode disabled - delete all transactions past their expiration
 		deletableIDs = `
@@ -159,8 +231,9 @@ func (s *Service) deleteTombstoned(ctx context.Context, blockHeight uint32) (int
 			FROM transactions t
 			WHERE t.delete_at_height IS NOT NULL
 			  AND t.delete_at_height <= $1
+			LIMIT $2
 		`
-		args = []interface{}{blockHeight}
+		args = []interface{}{blockHeight, s.pruneBatchSize}
 	} else {
 		// Defensive mode enabled - verify ALL spending children are stable before deletion
 		// This prevents orphaning any child transaction
@@ -189,8 +262,10 @@ func (s *Service) deleteTombstoned(ctx context.Context, blockHeight uint32) (int
 			        )
 			      )
 			  )
+			ORDER BY t.delete_at_height, t.id
+			LIMIT $3
 		`
-		args = []interface{}{blockHeight, safetyWindow}
+		args = []interface{}{blockHeight, safetyWindow, s.pruneBatchSize}
 	}
 
 	txn, err := s.db.BeginTx(ctx, nil)

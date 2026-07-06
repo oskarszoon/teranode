@@ -61,6 +61,7 @@ var (
 	prometheusUtxoRecordsDeleted              prometheus.Counter
 	prometheusUtxoRecordsDeletedSkipped       prometheus.Counter
 	prometheusUtxoRecordsDeferredNoMarker     prometheus.Counter
+	prometheusUtxoRecordsDeferredGCed         prometheus.Counter
 	prometheusUtxoParentsUpdated              prometheus.Counter
 	prometheusUtxoParentsUpdatedSkipped       prometheus.Counter
 	prometheusUtxoExternalFilesDeleted        prometheus.Counter
@@ -68,9 +69,6 @@ var (
 	prometheusUtxoRetryAttempts               prometheus.Counter
 	prometheusUtxoTimeoutEvents               prometheus.Counter
 	prometheusUtxoParentsSkippedPruned        prometheus.Counter
-	prometheusUtxoPrunedSetSize               prometheus.Gauge
-	prometheusUtxoPrunedSetSaturated          prometheus.Gauge
-	prometheusUtxoPrunedSetRotations          prometheus.Gauge
 )
 
 // Options contains configuration options for the cleanup service
@@ -136,12 +134,7 @@ type Service struct {
 	connectionPoolWarningThreshold float64 // Threshold for connection pool auto-adjustment (0.0-1.0)
 	utxoSetTTL                     bool    // Use TTL expiration instead of hard delete
 
-	// Persisted across prune sessions so that parents pruned in earlier blocks can still be
-	// recognised when their children reach the prune horizon a session or more later.
-	// Nil when defensiveEnabled is true.
-	prunedSet *PrunedTxSet
-
-	partitionWorkerFn func(ctx context.Context, blockHeight uint32, partitionStart int, partitionCount int, prunedSet *PrunedTxSet) (int64, int64, error)
+	partitionWorkerFn func(ctx context.Context, blockHeight uint32, partitionStart int, partitionCount int) (int64, int64, error)
 
 	// flushCleanupBatchesFn is a seam over flushCleanupBatches so unit tests can
 	// capture the accumulated parent updates / deletions without a live cluster.
@@ -226,6 +219,10 @@ func NewService(settings *settings.Settings, opts Options) (*Service, error) {
 			Name: "utxo_pruner_records_deferred_no_marker_total",
 			Help: "External-tx records whose deletion was deferred because the blob is gone and deletedChildren markers cannot be written (re-counted each pass the record is re-seen)",
 		})
+		prometheusUtxoRecordsDeferredGCed = promauto.NewCounter(prometheus.CounterOpts{
+			Name: "utxo_pruner_records_deferred_gced_total",
+			Help: "Deferred external-tx records deleted marker-less after passing the finality horizon (block height > delete-at-height + retention, i.e. mined + 2x retention), beyond the counter-conflicting walk window",
+		})
 		prometheusUtxoParentsUpdated = promauto.NewCounter(prometheus.CounterOpts{
 			Name: "utxo_pruner_parents_updated_total",
 			Help: "Total number of parent records updated during pruning (updated incrementally)",
@@ -253,23 +250,6 @@ func NewService(settings *settings.Settings, opts Options) (*Service, error) {
 		prometheusUtxoParentsSkippedPruned = promauto.NewCounter(prometheus.CounterOpts{
 			Name: "utxo_pruner_parents_skipped_pruned_total",
 			Help: "Number of parent updates skipped because parent was already pruned (in this or a prior session)",
-		})
-		prometheusUtxoPrunedSetSize = promauto.NewGauge(prometheus.GaugeOpts{
-			Name: "utxo_pruner_pruned_set_size",
-			Help: "Approximate number of TXIDs tracked in the in-memory PrunedTxSet across prune sessions",
-		})
-		prometheusUtxoPrunedSetSaturated = promauto.NewGauge(prometheus.GaugeOpts{
-			Name: "utxo_pruner_pruned_set_saturated",
-			Help: "1 if any PrunedTxSet Insert has failed since construction without rotation recovering it (extreme CAS contention without saturation, or insertion into a freshly-rotated generation also failing — both are error/backstop signals; should be 0 in normal operation. Use utxo_pruner_pruned_set_rotations for routine cap pressure.)",
-		})
-		// Tracked as a Gauge (not a Counter) because the value is sampled
-		// from PrunedTxSet.Rotations() at the end of each prune session
-		// rather than incremented per-event. The _total suffix is omitted
-		// to comply with the Prometheus convention that "_total" is
-		// reserved for Counter metrics.
-		prometheusUtxoPrunedSetRotations = promauto.NewGauge(prometheus.GaugeOpts{
-			Name: "utxo_pruner_pruned_set_rotations",
-			Help: "Cumulative number of generation rotations across all PrunedTxSet shards (each rotation drops the previous-gen entries; high rate suggests pruner_utxoPrunedSetMaxEntries is too small)",
 		})
 	})
 
@@ -321,14 +301,6 @@ func NewService(settings *settings.Settings, opts Options) (*Service, error) {
 		fieldTotalExtraRecs:            fields.TotalExtraRecs.String(),
 		fieldUnminedSince:              fields.UnminedSince.String(),
 		fieldBlockHeights:              fields.BlockHeights.String(),
-	}
-
-	// PrunedTxSet is persistent across prune sessions so children whose parents were pruned
-	// in earlier sessions can still skip the parent-update round-trip. Defensive mode is
-	// incompatible with the optimisation because records may be skipped after the reader
-	// registers them.
-	if !service.defensiveEnabled {
-		service.prunedSet = NewPrunedTxSet(256, settings.Pruner.UTXOPrunedSetMaxEntries)
 	}
 
 	service.partitionWorkerFn = service.partitionWorker
@@ -494,7 +466,6 @@ func (s *Service) partitionWorker(
 	blockHeight uint32,
 	partitionStart int,
 	partitionCount int,
-	prunedSet *PrunedTxSet,
 ) (processed int64, skipped int64, err error) {
 
 	// Each worker creates its own policy for complete independence (no shared state)
@@ -509,9 +480,12 @@ func (s *Service) partitionWorker(
 		return 0, 0, err
 	}
 
-	// Fetch bins based on defensive mode
-	// Note: DeleteAtHeight is only used in query filter (server-side), not in processing logic
-	binNames := []string{s.fieldTxID, s.fieldExternal, s.fieldTotalExtraRecs, s.fieldInputs}
+	// Fetch bins based on defensive mode.
+	// DeleteAtHeight is fetched (not just used server-side in the query filter): the
+	// GC-horizon check in processRecordChunk reads it to decide whether a deferred
+	// blob-missing external tx is old enough to delete marker-less (see the deferral
+	// branch in processRecordChunk).
+	binNames := []string{s.fieldTxID, s.fieldExternal, s.fieldTotalExtraRecs, s.fieldInputs, s.fieldDeleteAtHeight}
 	if s.defensiveEnabled {
 		binNames = append(binNames, s.fieldUtxos, s.fieldDeletedChildren)
 	}
@@ -529,8 +503,8 @@ func (s *Service) partitionWorker(
 	}
 	defer recordset.Close()
 
-	// Two-stage pipeline: reader registers TXIDs in shared set before processor handles them
-	// This eliminates cross-worker race conditions for parent-update skipping
+	// Two-stage pipeline: reader streams records from Aerospike and forwards them to
+	// the processor stage, decoupling network read-ahead from chunk processing.
 	// Derive read-ahead buffer size from chunkSize with a conservative cap so memory scales predictably.
 	readAheadBase := s.chunkSize
 	if readAheadBase <= 0 {
@@ -562,17 +536,6 @@ func (s *Service) partitionWorker(
 				}
 				rec = r
 			}
-
-			// NOTE: prunedSet.Add is deliberately NOT called here in the read
-			// hot path. It is called in batch at the top of processRecordChunk
-			// (per-chunk). The set is now INSERT-ONLY — the CheckAndRemove skip
-			// it used to feed was removed (see the PrunedTxSet note in
-			// PruneWithPartitions) — so batching Add per-chunk is retained purely
-			// for cache locality: calling Add per scanned record put a cuckoo
-			// bucket cache miss on every record, costing ~5% of total CPU under
-			// load (measured in a CPU profile on dev-scale-1). Doing the ~30 us
-			// batch of Adds once per 1024-record chunk lets the hardware
-			// prefetcher do its job and amortises the cost.
 
 			// Check for timeout/network errors
 			if rec.Err != nil {
@@ -606,7 +569,7 @@ func (s *Service) partitionWorker(
 
 	submitChunk := func(chunkToProcess []*aerospike.Result) {
 		chunkGroup.Go(func() error {
-			processed, skipped, err := s.processRecordChunk(ctx, blockHeight, chunkToProcess, prunedSet)
+			processed, skipped, err := s.processRecordChunk(ctx, blockHeight, chunkToProcess)
 			if err != nil {
 				return err
 			}
@@ -704,47 +667,14 @@ func (s *Service) PruneWithPartitions(ctx context.Context, blockHeight uint32, b
 		partitionStart += partitionCount
 	}
 
-	// PrunedTxSet is owned by the Service and reused across prune sessions within the
-	// life of this process. The set lives only in memory — it is rebuilt from scratch on
-	// pod restart and is not persisted to disk.
-	//
-	// INSERT-ONLY AS OF THE MARKER-RELIABILITY FIX: the set is still populated (Add runs
-	// up front in processRecordChunk) but is NO LONGER CONSULTED — the CheckAndRemove
-	// "skip the parent-update round-trip if the parent was already pruned" optimisation
-	// was removed. Its ~3% cuckoo false-positive rate hit LIVE parents and silently
-	// suppressed the deletedChildren marker, and that marker is a consensus discriminator
-	// (see below), so a false skip was corrupting a fail-closed guard. Parents are now
-	// ALWAYS accumulated. The Add machinery + gauges are retained pending full removal of
-	// the set in a follow-up; keeping them avoids churn in the metrics surface.
-	//
-	// Why the marker is now load-bearing (not best-effort): the deletedChildren bin on a
-	// parent is read by the counter-conflicting fail-closed guards
-	// (GetCounterConflictingTxHashes / the ProcessConflicting repair path). In the
-	// (288,576]-block band they treat a marked-then-missing spender as a deliberate pruner
-	// deletion and REFUSE to tolerate it. With the false-skip hole closed AND the marker
-	// keyed on the parent master record (see the accumulate loop and executeBatch* /
-	// flushCleanupBatches ordering), the marker is write-reliable: every pruned child's
-	// parent gets a durable marker before the child record is deleted. The old
-	// "best-effort by design, never load-bearing" framing no longer holds.
-	//
-	// Invariants:
-	//   - nil when defensiveEnabled: the defensive child-verify path reads a stale set
-	//     unsafely, so the set is not constructed in that mode.
-	//   - Add is idempotent at the call-site level (cuckoo Insert may re-insert a duplicate
-	//     fingerprint, but Count tracks all successful inserts so re-scanning a partition
-	//     after a timeout is functionally safe).
-	//
-	// Memory is bounded by settings.Pruner.UTXOPrunedSetMaxEntries — interpreted as a
-	// TOTAL entry budget across both generations of all shards, so memory ≈ maxEntries
-	// × ~1 byte (default 10M ≈ 10 MiB; 0 selects the built-in 2B default ≈ 2 GiB).
-	// When the current generation saturates it rotates into the `previous` slot and a
-	// fresh `current` is allocated, so the set never freezes — older entries simply
-	// fall out of `previous` on the next rotation. The
-	// utxo_pruner_pruned_set_rotations gauge surfaces rotation rate;
-	// utxo_pruner_pruned_set_saturated indicates the rare case where an Insert fails
-	// even in the freshly-rotated current generation (a backstop signal, not the
-	// normal at-capacity indicator).
-	prunedSet := s.prunedSet
+	// The deletedChildren marker on a pruned child's parent is load-bearing, not
+	// best-effort: the counter-conflicting fail-closed guards
+	// (GetCounterConflictingTxHashes / the ProcessConflicting repair path) read it and,
+	// in the (288,576]-block band, treat a marked-then-missing spender as a deliberate
+	// pruner deletion and REFUSE to tolerate it. Parents are therefore ALWAYS
+	// accumulated (see the accumulate loop in processRecordChunk), and the marker is
+	// written before the child record is deleted (executeBatch* / flushCleanupBatches
+	// ordering), so every pruned child's parent carries a durable marker.
 
 	// Cumulative counters persist across retry attempts
 	var cumulativeProcessed, cumulativeSkipped int64
@@ -766,7 +696,7 @@ func (s *Service) PruneWithPartitions(ctx context.Context, blockHeight uint32, b
 			wg.Add(1)
 			go func(r partitionRange) {
 				defer wg.Done()
-				processed, skipped, err := s.partitionWorkerFn(ctx, blockHeight, r.start, r.count, prunedSet)
+				processed, skipped, err := s.partitionWorkerFn(ctx, blockHeight, r.start, r.count)
 				results <- workerResult{
 					processed:      processed,
 					skipped:        skipped,
@@ -863,16 +793,6 @@ func (s *Service) PruneWithPartitions(ctx context.Context, blockHeight uint32, b
 
 		prometheusUtxoCleanupBatch.Observe(float64(elapsed.Microseconds()) / 1_000_000)
 
-		if prunedSet != nil {
-			prometheusUtxoPrunedSetSize.Set(float64(prunedSet.Len()))
-			prometheusUtxoPrunedSetRotations.Set(float64(prunedSet.Rotations()))
-			if prunedSet.Saturated() {
-				prometheusUtxoPrunedSetSaturated.Set(1)
-			} else {
-				prometheusUtxoPrunedSetSaturated.Set(0)
-			}
-		}
-
 		s.notifier.NotifyPruneComplete(blockHeight, cumulativeProcessed)
 
 		return cumulativeProcessed, nil
@@ -914,7 +834,7 @@ func (s *Service) Prune(ctx context.Context, blockHeight uint32, blockHashStr st
 
 // processRecordChunk processes a chunk of parent records with batched child verification
 // Returns: (processedCount, skippedCount, error)
-func (s *Service) processRecordChunk(ctx context.Context, blockHeight uint32, chunk []*aerospike.Result, prunedSet *PrunedTxSet) (int, int, error) {
+func (s *Service) processRecordChunk(ctx context.Context, blockHeight uint32, chunk []*aerospike.Result) (int, int, error) {
 	if len(chunk) == 0 {
 		return 0, 0, nil
 	}
@@ -1022,28 +942,6 @@ func (s *Service) processRecordChunk(ctx context.Context, blockHeight uint32, ch
 	processedCount := 0
 	skippedCount := 0
 
-	// Add this chunk's record TXIDs to prunedSet. The set is now insert-only
-	// (the CheckAndRemove skip that consumed it was removed — see the
-	// PrunedTxSet note in PruneWithPartitions), so this populates the retained
-	// Add machinery pending its full removal in a follow-up.
-	//
-	// Cost: ~30 us for a 1024-record chunk (lock-free atomic CAS, ~30 ns
-	// each). Negligible vs the ~10 ms flushCleanupBatches that follows.
-	if prunedSet != nil {
-		for _, rec := range chunk {
-			if rec.Err != nil || rec.Record == nil || rec.Record.Bins == nil {
-				continue
-			}
-			txIDBytes, ok := rec.Record.Bins[s.fieldTxID].([]byte)
-			if !ok || len(txIDBytes) != 32 {
-				continue
-			}
-			var h chainhash.Hash
-			copy(h[:], txIDBytes)
-			prunedSet.Add(h)
-		}
-	}
-
 	for _, rec := range chunk {
 		if rec.Err != nil {
 			if firstRecordError == nil {
@@ -1092,21 +990,46 @@ func (s *Service) processRecordChunk(ctx context.Context, blockHeight uint32, ch
 		}
 
 		// Safe to delete - get inputs for parent updates.
-		// Note: this record's TXID is already in prunedSet from the up-front
-		// Add loop at the top of processRecordChunk.
 		inputs, err := s.getTxInputsFromBins(ctx, blockHeight, rec.Record.Bins, txHash)
 		if err != nil {
 			// Identity compare: the sentinel is returned directly, never wrapped. An
 			// external tx whose blob is gone cannot have its inputs recovered, so we
-			// cannot write the parent deletedChildren markers. Defer its deletion —
-			// deleting it marker-less would make it an UNMARKED ghost the
-			// counter-conflicting walk fails OPEN on. The record survives this pass and
-			// stays visible to the walk as a live spender.
+			// cannot write the parent deletedChildren markers. Below the finality
+			// horizon we DEFER its deletion — deleting it marker-less would make it an
+			// UNMARKED ghost the counter-conflicting walk fails OPEN on. The record
+			// survives this pass and stays visible to the walk as a live spender.
 			if err == errExternalInputsUnrecoverable {
-				// A permanently-gone blob means this record is re-seen every pass, so log
-				// at Debug (not Warn) to avoid N lines/pass indefinitely; the dedicated
-				// counter is the monitorable signal. Record accumulation is bounded only by
-				// a future GC path past a finality horizon (tracked as follow-up).
+				// GC-on-horizon: reap permanently-blob-gone externals marker-less once they
+				// are far enough past mining to bound accumulation. delete_at_height (DAH) =
+				// mined height + retention, so blockHeight > DAH + retention is more than
+				// retention*2 blocks past mining — past the top of the (retention,
+				// retention*2] walk window as measured from the PRUNER's height.
+				//
+				// This is an accumulation bound, not a clean safety proof. The counter-
+				// conflicting walk anchors its comparison window to the VALIDATED block's
+				// height, not the pruner's; during a fork/reorg a block can be validated up
+				// to the reorg horizon (retention blocks) below the pruner tip, so that
+				// block's window can still span this record. With the marker gone the walk
+				// then tolerates it as an UNMARKED ghost (secondary-guard fail-open in
+				// process_conflicting.go) — an ongoing source, not a historical-only one.
+				// That residual is backstopped by the primary Spend double-spend defense:
+				// the surviving parent still records the spend, so any real double-spender is
+				// rejected there regardless. Widening this to DAH + 2*retention would close
+				// the window, at the cost of one extra retention of retained blob-gone
+				// records. Below the horizon (or when DAH is absent or unreadable) we keep
+				// deferring.
+				if dah, ok := rec.Record.Bins[s.fieldDeleteAtHeight].(int); ok && dah > 0 && blockHeight > uint32(dah)+s.blockHeightRetention {
+					s.logger.Debugf("GC-pruning deferred external tx %s at height %d: past finality horizon (DAH %d + retention %d), deleting marker-less", txHash.String(), blockHeight, dah, s.blockHeightRetention)
+					allDeletions = s.appendRecordDeletions(allDeletions, rec.Record, txHash)
+					prometheusUtxoRecordsDeferredGCed.Inc()
+					processedCount++
+					continue
+				}
+
+				// A permanently-gone blob means this record is re-seen every pass until it
+				// crosses the horizon, so log at Debug (not Warn) to avoid N lines/pass; the
+				// dedicated counter is the monitorable signal. Accumulation is now bounded to
+				// one retention window: records are GC'd above the horizon by the branch above.
 				s.logger.Debugf("deferring prune of external tx %s at height %d: blob gone, inputs unrecoverable, cannot write deletedChildren markers", txHash.String(), blockHeight)
 				prometheusUtxoRecordsDeferredNoMarker.Inc()
 				skippedCount++
@@ -1117,15 +1040,13 @@ func (s *Service) processRecordChunk(ctx context.Context, blockHeight uint32, ch
 		}
 
 		// Accumulate a deletedChildren marker for EVERY input's parent —
-		// unconditionally. The cuckoo pre-filter that used to skip parents
-		// "already pruned this session" was removed: its ~3% false-positive
-		// rate hit LIVE parents and silently suppressed the marker, which is a
-		// consensus discriminator for the counter-conflicting fail-closed
-		// guards. Writing the marker to a parent that has itself already been
-		// pruned is harmless — the addDeletedChildren UDF is a silent no-op on
-		// a missing record — so the unconditional write costs nothing but
-		// closes the suppression hole. See the PrunedTxSet note in
-		// PruneWithPartitions.
+		// unconditionally. The marker is a consensus discriminator for the
+		// counter-conflicting fail-closed guards, so it must never be suppressed:
+		// a pre-filter that skipped parents "already pruned this session" was
+		// removed for exactly that reason. Writing the marker to a parent that has
+		// itself already been pruned is harmless — the addDeletedChildren UDF is a
+		// silent no-op on a missing record — so the unconditional write costs
+		// nothing but keeps the marker reliable.
 		for _, input := range inputs {
 			parentTxID := input.PreviousTxIDChainHash()
 
@@ -1165,25 +1086,13 @@ func (s *Service) processRecordChunk(ctx context.Context, blockHeight uint32, ch
 		}
 
 		// Accumulate deletions (master + child records)
-		allDeletions = append(allDeletions, rec.Record.Key)
-
-		if totalExtraRecs, hasExtraRecs := rec.Record.Bins[s.fieldTotalExtraRecs].(int); hasExtraRecs && totalExtraRecs > 0 {
-			for i := 1; i <= totalExtraRecs; i++ {
-				childKeySource := uaerospike.CalculateKeySourceInternal(txHash, uint32(i))
-				childKey, err := aerospike.NewKey(s.namespace, s.set, childKeySource)
-				if err == nil {
-					allDeletions = append(allDeletions, childKey)
-				}
-			}
-		}
+		allDeletions = s.appendRecordDeletions(allDeletions, rec.Record, txHash)
 
 		processedCount++
 	}
 
 	// Flush all accumulated operations in one batch per chunk. Blocks on
-	// Aerospike network I/O. The chunk's record TXIDs were Added to
-	// prunedSet at the top of this function so concurrent chunks can see
-	// them during this wait.
+	// Aerospike network I/O.
 	if err := s.flushCleanupBatchesFn(ctx, allParentUpdates, allDeletions, allExternalFiles); err != nil {
 		return 0, 0, err
 	}
@@ -1194,6 +1103,26 @@ func (s *Service) processRecordChunk(ctx context.Context, blockHeight uint32, ch
 	}
 
 	return processedCount, skippedCount, nil
+}
+
+// appendRecordDeletions appends the deletion keys for a pruned record to deletions:
+// the master record key plus any pagination child record keys (num=1..totalExtraRecs).
+// Shared by the normal delete path and the GC-on-horizon marker-less delete path so both
+// reap the full record footprint identically.
+func (s *Service) appendRecordDeletions(deletions []*aerospike.Key, record *aerospike.Record, txHash *chainhash.Hash) []*aerospike.Key {
+	deletions = append(deletions, record.Key)
+
+	if totalExtraRecs, hasExtraRecs := record.Bins[s.fieldTotalExtraRecs].(int); hasExtraRecs && totalExtraRecs > 0 {
+		for i := 1; i <= totalExtraRecs; i++ {
+			childKeySource := uaerospike.CalculateKeySourceInternal(txHash, uint32(i))
+			childKey, err := aerospike.NewKey(s.namespace, s.set, childKeySource)
+			if err == nil {
+				deletions = append(deletions, childKey)
+			}
+		}
+	}
+
+	return deletions
 }
 
 // accumulateDeletedChildMarker records that childTxHash should be added to the

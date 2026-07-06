@@ -320,6 +320,8 @@ func TestSQLPruner_DeletedChildLeavesMarker_WalkFailsClosed(t *testing.T) {
 	_, err = utxo.GetCounterConflictingTxHashes(ctx, store, *queryTx.TxIDChainHash())
 	require.Error(t, err, "a pruner-marked ghost must fail the walk closed")
 	require.Contains(t, err.Error(), "deleted by the pruner")
+	require.True(t, errors.Is(err, errors.ErrTxInvalid),
+		"a marked ghost is a mined-then-pruned counter → INVALID, not a transient ProcessingError")
 }
 
 // TestSQLPruner_MarkerRemovedWhenParentPruned verifies marker growth stays bounded:

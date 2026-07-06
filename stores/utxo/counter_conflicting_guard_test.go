@@ -135,6 +135,8 @@ func TestGetCounterConflictingTxHashes_DeletedChildrenMarkerFailsClosed(t *testi
 	require.Nil(t, res)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "deleted by the pruner")
+	require.True(t, errors.Is(err, errors.ErrTxInvalid),
+		"a marked ghost is a mined-then-pruned counter → INVALID, not a transient ProcessingError")
 	mockStore.AssertExpectations(t)
 }
 
@@ -206,6 +208,8 @@ func TestGetCounterConflictingTxHashes_NilSpenderWithMarkerFailsClosed(t *testin
 	require.Nil(t, res)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "deleted by the pruner")
+	require.True(t, errors.Is(err, errors.ErrTxInvalid),
+		"a marked ghost is a mined-then-pruned counter → INVALID, not a transient ProcessingError")
 	mockStore.AssertExpectations(t)
 }
 
@@ -370,6 +374,8 @@ func TestProcessConflicting_DeletedChildrenMarker_FailsClosedNoUnspend(t *testin
 	require.Nil(t, result)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "deleted by the pruner")
+	require.True(t, errors.Is(err, errors.ErrTxInvalid),
+		"a marked ghost is a mined-then-pruned counter → INVALID, not a transient ProcessingError")
 	// The marked slot must never be unspent — the spender was reaped deliberately.
 	mockStore.AssertNotCalled(t, "Unspend", mock.Anything, mock.Anything, mock.Anything)
 	mockStore.AssertExpectations(t)

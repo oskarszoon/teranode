@@ -3,8 +3,10 @@ package aerospike
 // Unit coverage for processDeletedChildren — pure bins-map parsing, no Aerospike required.
 // The pruner's addDeletedChildren UDF stores deletedChildren as a map keyed by the child tx
 // hash in display hex (chainhash.String()) with a bool value; this discriminator tells the
-// counter-conflicting walk a now-missing spender was reaped deliberately. Parsing is
-// best-effort: an unparseable or wrong-typed key is skipped, never fatal.
+// counter-conflicting walk a now-missing spender was reaped deliberately. Parsing fails
+// CLOSED: a torn/corrupt marker (present-but-non-map bin, non-string entry, or key that is
+// not valid display hex) returns an error rather than being silently skipped, so the walk
+// can never drop a spender's marker and treat a deliberately-reaped child as a tolerable ghost.
 
 import (
 	"testing"
@@ -19,65 +21,86 @@ func deletedChildrenBin(entries map[interface{}]interface{}) aerospike.BinMap {
 	return aerospike.BinMap{fields.DeletedChildren.String(): entries}
 }
 
+// mustProcessDeletedChildren asserts processDeletedChildren parsed cleanly and returns the set.
+// Used by the union tests, whose inputs are always well-formed markers.
+func mustProcessDeletedChildren(t *testing.T, bins aerospike.BinMap) map[chainhash.Hash]struct{} {
+	t.Helper()
+
+	res, err := processDeletedChildren(bins)
+	require.NoError(t, err)
+
+	return res
+}
+
 func TestProcessDeletedChildren_ValidHexKeys(t *testing.T) {
 	h1 := chainhash.HashH([]byte("deleted-child-1"))
 	h2 := chainhash.HashH([]byte("deleted-child-2"))
 
-	res := processDeletedChildren(deletedChildrenBin(map[interface{}]interface{}{
+	res, err := processDeletedChildren(deletedChildrenBin(map[interface{}]interface{}{
 		h1.String(): true,
 		h2.String(): true,
 	}))
 
+	require.NoError(t, err)
 	require.Len(t, res, 2)
 	require.Contains(t, res, h1)
 	require.Contains(t, res, h2)
 }
 
-func TestProcessDeletedChildren_InvalidHexKeySkipped(t *testing.T) {
+func TestProcessDeletedChildren_InvalidHexKeyFailsClosed(t *testing.T) {
 	valid := chainhash.HashH([]byte("valid-child"))
 
-	res := processDeletedChildren(deletedChildrenBin(map[interface{}]interface{}{
+	// An unparseable hex key is a torn marker → fail closed, do not drop it silently.
+	res, err := processDeletedChildren(deletedChildrenBin(map[interface{}]interface{}{
 		valid.String():     true,
-		"not-a-valid-hash": true, // unparseable hex → skipped, not fatal
+		"not-a-valid-hash": true,
 	}))
 
-	require.Len(t, res, 1)
-	require.Contains(t, res, valid)
+	require.Error(t, err)
+	require.Nil(t, res)
 }
 
-func TestProcessDeletedChildren_NonStringKeySkipped(t *testing.T) {
+func TestProcessDeletedChildren_NonStringKeyFailsClosed(t *testing.T) {
 	valid := chainhash.HashH([]byte("valid-child-2"))
 
-	res := processDeletedChildren(deletedChildrenBin(map[interface{}]interface{}{
+	// A non-string entry is a torn marker → fail closed.
+	res, err := processDeletedChildren(deletedChildrenBin(map[interface{}]interface{}{
 		valid.String(): true,
-		42:             true, // non-string key → skipped
+		42:             true,
 	}))
 
-	require.Len(t, res, 1)
-	require.Contains(t, res, valid)
+	require.Error(t, err)
+	require.Nil(t, res)
 }
 
-func TestProcessDeletedChildren_WrongBinTypeReturnsNil(t *testing.T) {
-	// The bin exists but is not a map — the type assertion fails and the parse yields nil.
-	res := processDeletedChildren(aerospike.BinMap{fields.DeletedChildren.String(): "not-a-map"})
+func TestProcessDeletedChildren_WrongBinTypeFailsClosed(t *testing.T) {
+	// The bin is present but not a map — a corrupt marker → fail closed, not a silent nil.
+	res, err := processDeletedChildren(aerospike.BinMap{fields.DeletedChildren.String(): "not-a-map"})
+	require.Error(t, err)
+	require.Nil(t, res)
+}
+
+func TestProcessDeletedChildren_AllUnparseableFailsClosed(t *testing.T) {
+	// A map whose only entry is an unparseable key must fail closed rather than yield nil.
+	res, err := processDeletedChildren(deletedChildrenBin(map[interface{}]interface{}{
+		"bad-key": true,
+	}))
+
+	require.Error(t, err)
 	require.Nil(t, res)
 }
 
 func TestProcessDeletedChildren_AbsentBinReturnsNil(t *testing.T) {
-	res := processDeletedChildren(aerospike.BinMap{"someOtherBin": 1})
+	// Absent bin carries no markers and is tolerated → (nil, nil).
+	res, err := processDeletedChildren(aerospike.BinMap{"someOtherBin": 1})
+	require.NoError(t, err)
 	require.Nil(t, res)
 }
 
 func TestProcessDeletedChildren_EmptyMapReturnsNil(t *testing.T) {
-	res := processDeletedChildren(deletedChildrenBin(map[interface{}]interface{}{}))
-	require.Nil(t, res)
-}
-
-func TestProcessDeletedChildren_AllUnparseableReturnsNil(t *testing.T) {
-	// A map with only unusable entries yields no hashes → nil (never an empty non-nil map).
-	res := processDeletedChildren(deletedChildrenBin(map[interface{}]interface{}{
-		"bad-key": true,
-	}))
+	// An empty map yields no entries and is tolerated → (nil, nil).
+	res, err := processDeletedChildren(deletedChildrenBin(map[interface{}]interface{}{}))
+	require.NoError(t, err)
 	require.Nil(t, res)
 }
 
@@ -106,15 +129,15 @@ func TestUnionDeletedChildren_AggregatesMasterAndPages(t *testing.T) {
 
 	// The master record's own parsed set must NOT contain the page-vout children —
 	// that no-concentration property is the whole point of page-keyed writes.
-	masterOnly := processDeletedChildren(masterBins)
+	masterOnly := mustProcessDeletedChildren(t, masterBins)
 	require.Len(t, masterOnly, 2)
 	require.NotContains(t, masterOnly, page1)
 	require.NotContains(t, masterOnly, page2)
 
 	// The walk's page-aggregating read folds every page into the master-derived set.
-	union := processDeletedChildren(masterBins)
-	union = unionDeletedChildren(union, processDeletedChildren(page1Bins))
-	union = unionDeletedChildren(union, processDeletedChildren(page2Bins))
+	union := mustProcessDeletedChildren(t, masterBins)
+	union = unionDeletedChildren(union, mustProcessDeletedChildren(t, page1Bins))
+	union = unionDeletedChildren(union, mustProcessDeletedChildren(t, page2Bins))
 
 	require.Len(t, union, 4)
 	require.Contains(t, union, master1)
@@ -129,7 +152,7 @@ func TestUnionDeletedChildren_AggregatesMasterAndPages(t *testing.T) {
 func TestUnionDeletedChildren_NilMasterAllocatesFromPages(t *testing.T) {
 	page1 := chainhash.HashH([]byte("only-page-child"))
 
-	union := unionDeletedChildren(nil, processDeletedChildren(deletedChildrenBin(map[interface{}]interface{}{
+	union := unionDeletedChildren(nil, mustProcessDeletedChildren(t, deletedChildrenBin(map[interface{}]interface{}{
 		page1.String(): true,
 	})))
 
@@ -144,8 +167,8 @@ func TestUnionDeletedChildren_DedupAcrossRecords(t *testing.T) {
 	shared := chainhash.HashH([]byte("shared-child"))
 
 	union := unionDeletedChildren(
-		processDeletedChildren(deletedChildrenBin(map[interface{}]interface{}{shared.String(): true})),
-		processDeletedChildren(deletedChildrenBin(map[interface{}]interface{}{shared.String(): true})),
+		mustProcessDeletedChildren(t, deletedChildrenBin(map[interface{}]interface{}{shared.String(): true})),
+		mustProcessDeletedChildren(t, deletedChildrenBin(map[interface{}]interface{}{shared.String(): true})),
 	)
 
 	require.Len(t, union, 1)
@@ -153,16 +176,16 @@ func TestUnionDeletedChildren_DedupAcrossRecords(t *testing.T) {
 }
 
 // TestUnionDeletedChildren_EmptyPageIsNoOp verifies an empty/absent page bin
-// contributes nothing and does not allocate — a nil master stays nil (best-effort
-// read: missing page markers never fabricate an empty non-nil set).
+// contributes nothing and does not allocate — a nil master stays nil (a missing
+// page contributes no markers and never fabricates an empty non-nil set).
 func TestUnionDeletedChildren_EmptyPageIsNoOp(t *testing.T) {
 	require.Nil(t, unionDeletedChildren(nil, nil))
 
 	master := chainhash.HashH([]byte("master-child"))
-	into := processDeletedChildren(deletedChildrenBin(map[interface{}]interface{}{master.String(): true}))
+	into := mustProcessDeletedChildren(t, deletedChildrenBin(map[interface{}]interface{}{master.String(): true}))
 
 	// Absent page bin → processDeletedChildren yields nil → union is a no-op.
-	into = unionDeletedChildren(into, processDeletedChildren(aerospike.BinMap{"someOtherBin": 1}))
+	into = unionDeletedChildren(into, mustProcessDeletedChildren(t, aerospike.BinMap{"someOtherBin": 1}))
 	require.Len(t, into, 1)
 	require.Contains(t, into, master)
 }

@@ -935,7 +935,15 @@ NEXT_BATCH_RECORD:
 				// parent has totalExtraRecs == 0 and does zero extra reads. A real
 				// page-read error fails this record closed (mergePageDeletedChildren
 				// propagates it) so the walk never silently drops a page-only marker.
-				deletedChildren := processDeletedChildren(bins)
+				// A torn/corrupt master marker likewise fails this record closed
+				// (processDeletedChildren returns an error) rather than failing open.
+				deletedChildren, err := processDeletedChildren(bins)
+				if err != nil {
+					items[idx].Err = errors.NewStorageError("could not process deletedChildren", err)
+
+					continue NEXT_BATCH_RECORD // because a corrupt marker would fail the conflict walk open.
+				}
+
 				if totalExtraRecs, ok := bins[fields.TotalExtraRecs.String()].(int); ok && totalExtraRecs > 0 {
 					merged, err := s.mergePageDeletedChildren(ctx, &items[idx].Hash, totalExtraRecs, deletedChildren)
 					if err != nil {
@@ -1260,13 +1268,24 @@ func processConflictingChildren(bins aerospike.BinMap) (conflictingChildren []ch
 // walk that a now-missing spender was deleted deliberately by the pruner (rather than being
 // a tolerable ghost).
 //
-// Best-effort by design: an unparseable key is skipped rather than failing the whole Get, so
-// a malformed entry never blocks conflict resolution. Returns nil when the bin is absent or
-// yields no usable entries.
-func processDeletedChildren(bins aerospike.BinMap) map[chainhash.Hash]struct{} {
-	deletedChildrenIfc, ok := bins[fields.DeletedChildren.String()].(map[interface{}]interface{})
+// Fails CLOSED on a torn/corrupt marker: a present-but-non-map bin, a non-string entry, or a
+// key that is not valid display hex all return an error rather than being silently skipped.
+// Silently dropping a corrupt entry would fail the counter-conflicting walk OPEN — the walk
+// would treat a deliberately-reaped spender as a tolerable ghost — so a malformed marker must
+// fail the record's Get, consistent with mergePageDeletedChildren failing closed on a
+// page-read error. Only an absent bin or a map that yields no entries is tolerated: both
+// return (nil, nil).
+func processDeletedChildren(bins aerospike.BinMap) (map[chainhash.Hash]struct{}, error) {
+	raw, present := bins[fields.DeletedChildren.String()]
+	if !present || raw == nil {
+		// Absent bin carries no markers — a non-paginated/unpruned parent.
+		return nil, nil
+	}
+
+	deletedChildrenIfc, ok := raw.(map[interface{}]interface{})
 	if !ok {
-		return nil
+		// The bin exists but is not a map: a torn/corrupt marker. Fail closed.
+		return nil, errors.NewStorageError("deletedChildren bin has unexpected type %T", raw)
 	}
 
 	deletedChildren := make(map[chainhash.Hash]struct{}, len(deletedChildrenIfc))
@@ -1274,22 +1293,22 @@ func processDeletedChildren(bins aerospike.BinMap) map[chainhash.Hash]struct{} {
 	for key := range deletedChildrenIfc {
 		keyStr, ok := key.(string)
 		if !ok {
-			continue
+			return nil, errors.NewStorageError("deletedChildren has non-string key of type %T", key)
 		}
 
 		childHash, err := chainhash.NewHashFromStr(keyStr)
 		if err != nil {
-			continue
+			return nil, errors.NewStorageError("deletedChildren has unparseable key %q", keyStr, err)
 		}
 
 		deletedChildren[*childHash] = struct{}{}
 	}
 
 	if len(deletedChildren) == 0 {
-		return nil
+		return nil, nil
 	}
 
-	return deletedChildren
+	return deletedChildren, nil
 }
 
 // getAllExtraUTXOs retrieves all UTXOs from child records recursively
@@ -1395,7 +1414,16 @@ func (s *Store) mergePageDeletedChildren(ctx context.Context, txID *chainhash.Ha
 			return into, errors.NewStorageError("failed to get deletedChildren page record", err)
 		}
 
-		into = unionDeletedChildren(into, processDeletedChildren(pageRecord.Bins))
+		// Distinct name: the loop's `err` is the aerospike.Error from client.Get above,
+		// not a standard error, so it cannot be reused for this parse result.
+		pageDeletedChildren, parseErr := processDeletedChildren(pageRecord.Bins)
+		if parseErr != nil {
+			// A torn/corrupt page marker is propagated so the walk fails CLOSED,
+			// matching the NOT_FOUND-tolerated / other-error-propagated read above.
+			return into, errors.NewStorageError("failed to parse deletedChildren page record", parseErr)
+		}
+
+		into = unionDeletedChildren(into, pageDeletedChildren)
 	}
 
 	return into, nil

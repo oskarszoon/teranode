@@ -577,7 +577,7 @@ func NewSettings(alternativeContext ...string) *Settings {
 			SkipPreserveParents:            getBool("pruner_skipPreserveParents", false, alternativeContext...),                  // Skip Phase 1: preserve parents
 			SkipDeletions:                  getBool("pruner_skipDeletions", false, alternativeContext...),                        // Skip deletions for performance
 			MinBlockHeight:                 getUint32("pruner_min_block_height", 0, alternativeContext...),                       // Do not prune blocks at or below this height
-			UTXOPrunedSetMaxEntries:        getInt("pruner_utxoPrunedSetMaxEntries", 10_000_000, alternativeContext...),          // Soft cap on PrunedTxSet entries; 0 = use built-in 2B default (NOT unlimited)
+			UTXOPrunedSetMaxEntries:        getInt("pruner_utxoPrunedSetMaxEntries", 10_000_000, alternativeContext...),          // DEPRECATED/no-op: sized the removed PrunedTxSet; parsed only for config back-compat
 		},
 		SubtreeValidation: SubtreeValidationSettings{
 			QuorumAbsoluteTimeout:                     getDuration("subtree_quorum_absolute_timeout", 30*time.Second, alternativeContext...),

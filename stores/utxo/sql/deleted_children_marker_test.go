@@ -19,8 +19,11 @@ package sql
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 
+	"github.com/bsv-blockchain/go-bt/v2"
 	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/stores/utxo/fields"
 	sqlpruner "github.com/bsv-blockchain/teranode/stores/utxo/sql/pruner"
@@ -194,4 +197,121 @@ func TestSQLPruner_DefensiveModeProtectsUnstableChildAndMarksDeletable(t *testin
 	// The stable child DC survives (only D was tombstoned).
 	_, err = store.Get(ctx, dc.TxIDChainHash(), fields.Conflicting)
 	require.NoError(t, err, "the stable child DC must survive")
+}
+
+// TestGet_CorruptDeletedChildrenRow_FailsClosed verifies the DeletedChildren read fails
+// the whole Get when a marker row's child_hash is not chainhash.HashSize bytes. A short or
+// corrupt row must NOT be silently skipped: a dropped marker degrades to the tolerated-
+// ghost path, which fails the counter-conflicting walk OPEN on a reaped spender — the one
+// outcome the marker table exists to prevent. Corruption is surfaced, not masked.
+func TestGet_CorruptDeletedChildrenRow_FailsClosed(t *testing.T) {
+	ctx := context.Background()
+	store, _ := setup(ctx, t)
+
+	parent := danglingParentTx(0x9a)
+	_, err := store.Create(ctx, parent, 100)
+	require.NoError(t, err)
+
+	// Inject a corrupt marker: a child_hash shorter than the 32-byte chainhash size.
+	_, err = store.db.ExecContext(ctx,
+		`INSERT INTO deleted_children (parent_hash, child_hash) VALUES ($1, $2)`,
+		parent.TxIDChainHash()[:], []byte{0x01, 0x02, 0x03, 0x04})
+	require.NoError(t, err)
+
+	_, err = store.Get(ctx, parent.TxIDChainHash(), fields.DeletedChildren)
+	require.Error(t, err, "a short/corrupt deleted_children row must fail the Get, not be skipped")
+	require.Contains(t, err.Error(), "corrupt deleted_children row",
+		"the failure must name the corrupt marker so the fail-closed reason is visible")
+}
+
+// TestSQLPruner_BoundedBatchDrainsAndMarks exercises the batch cap on deleteTombstoned:
+// with an injected small cap, each pass deletes at most cap rows in its own atomic
+// marker+delete txn, and Prune loops until the eligible set is fully drained. It also
+// pins the two invariants the batching must not break: every reaped child still leaves a
+// marker on its surviving input parent, and nothing is deleted without its marker.
+func TestSQLPruner_BoundedBatchDrainsAndMarks(t *testing.T) {
+	ctx := context.Background()
+	store, _ := setup(ctx, t)
+
+	const (
+		batchCap    = 2
+		numChildren = 5 // 5 eligible / cap 2 ⇒ 3 bounded passes: 2 + 2 + 1
+		pruneHeight = uint32(150)
+	)
+
+	// P survives (never tombstoned); every reaped child spends P[0], so each reaped child
+	// must leave a (P, child) marker on P.
+	parent := danglingParentTx(0x88)
+	_, err := store.Create(ctx, parent, 100)
+	require.NoError(t, err)
+
+	children := make([]*bt.Tx, 0, numChildren)
+	for i := 0; i < numChildren; i++ {
+		// Distinct outSats ⇒ distinct txid so all children share P but are unique rows.
+		child := danglingSpendTx(t, parent, uint64(90000+i))
+		_, err = store.Create(ctx, child, 100)
+		require.NoError(t, err)
+
+		children = append(children, child)
+	}
+
+	// Tombstone every child at the prune height; P stays live.
+	for _, child := range children {
+		_, err = store.db.ExecContext(ctx,
+			`UPDATE transactions SET delete_at_height = $1 WHERE hash = $2`, pruneHeight, child.TxIDChainHash()[:])
+		require.NoError(t, err)
+	}
+
+	// Build the pruner with an injected small cap and a recording logger so the pass count
+	// is observable. Defensive disabled ⇒ plain-delete branch.
+	var infoMsgs []string
+
+	tSettings := test.CreateBaseTestSettings(t)
+	tSettings.Pruner.UTXODefensiveEnabled = false
+
+	svc, err := sqlpruner.NewService(tSettings, sqlpruner.Options{
+		Logger: &sqlpruner.MockLogger{
+			InfofFunc:  func(format string, args ...interface{}) { infoMsgs = append(infoMsgs, fmt.Sprintf(format, args...)) },
+			ErrorfFunc: func(format string, args ...interface{}) { infoMsgs = append(infoMsgs, fmt.Sprintf(format, args...)) },
+		},
+		DB:             store.db,
+		Ctx:            ctx,
+		PruneBatchSize: batchCap,
+	})
+	require.NoError(t, err)
+
+	pruned, err := svc.Prune(ctx, pruneHeight, "test")
+	require.NoError(t, err)
+	require.EqualValues(t, numChildren, pruned, "repeated bounded passes must drain the whole eligible set")
+
+	// Each pass deleted at most cap: a single unbounded pass would report 1 pass; cap 2
+	// over 5 rows forces exactly 3, proving the LIMIT bounded each txn.
+	var completion string
+
+	for _, m := range infoMsgs {
+		if strings.Contains(m, "completed cleanup") {
+			completion = m
+		}
+	}
+
+	require.Contains(t, completion, "over 3 pass(es)", "cap 2 over 5 eligible rows must take 3 bounded passes")
+
+	// All tombstoned children were reaped.
+	for _, child := range children {
+		_, err = store.Get(ctx, child.TxIDChainHash(), fields.Conflicting)
+		require.True(t, errors.IsNotFound(err), "every tombstoned child must be reaped")
+	}
+
+	// P survived and carries a marker for every reaped child — markers were written on
+	// every pass, and nothing was deleted without its marker.
+	_, err = store.Get(ctx, parent.TxIDChainHash(), fields.Conflicting)
+	require.NoError(t, err, "the surviving input parent must not be reaped")
+
+	pMeta, err := store.Get(ctx, parent.TxIDChainHash(), fields.DeletedChildren)
+	require.NoError(t, err)
+	require.Len(t, pMeta.DeletedChildren, numChildren, "every reaped child must leave a marker on the surviving parent")
+
+	for _, child := range children {
+		require.Contains(t, pMeta.DeletedChildren, *child.TxIDChainHash(), "no reaped child may be deleted without its marker")
+	}
 }
