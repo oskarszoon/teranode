@@ -2615,3 +2615,83 @@ func TestDeletedChildren(t *testing.T) {
 	deletedChildrenMap := parentResp.Bins[fields.DeletedChildren.String()].(map[interface{}]interface{})
 	assert.Len(t, deletedChildrenMap, 1)
 }
+
+// TestDeletedChildren_PageRecordAggregatedOnRead covers the page-aggregating read
+// (mergePageDeletedChildren): a marker for a child that spent a HIGH vout
+// (>= utxoBatchSize) lands on a PAGINATION record of the parent, not the master. The
+// counter-conflicting walk reads the marker set via store.Get(parent, fields.DeletedChildren),
+// which must union the master record's map with every page record's map. TestDeletedChildren
+// only spends vout 0 (master record), so this exercises the previously-untested page path —
+// the exact seam that would silently regress the discriminator on a high-fanout mainnet parent.
+func TestDeletedChildren_PageRecordAggregatedOnRead(t *testing.T) {
+	logger := ulogger.NewErrorTestLogger(t)
+	tSettings := test.CreateBaseTestSettings(t)
+
+	client, store, ctx, deferFn := initAerospike(t, tSettings, logger)
+	t.Cleanup(deferFn)
+
+	privKey, _ := bec.PrivateKeyFromBytes([]byte("ALWAYS_THE_SAME"))
+
+	coinbaseTx := transactions.Create(t,
+		transactions.WithCoinbaseData(100, "/Test miner/"),
+		transactions.WithP2PKHOutputs(1, 5_000_000_000, privKey.PubKey()),
+	)
+	_, err := store.Create(ctx, coinbaseTx, 0, utxo.WithMinedBlockInfo(utxo.MinedBlockInfo{BlockID: 1, BlockHeight: 1, OnLongestChain: true}))
+	require.NoError(t, err)
+
+	// Parent with enough outputs to paginate (default utxoBatchSize is 128, so >128
+	// outputs spill into page records). We spend a vout in the SECOND page so the marker
+	// cannot land on the master record.
+	parentTxOptions := []transactions.TxOption{transactions.WithInput(coinbaseTx, 0, privKey)}
+	for i := 0; i < 300; i++ {
+		parentTxOptions = append(parentTxOptions, transactions.WithP2PKHOutputs(1, 10_000_000, privKey.PubKey()))
+	}
+	parentTx := transactions.Create(t, parentTxOptions...)
+	_, err = store.Create(ctx, parentTx, 0, utxo.WithMinedBlockInfo(utxo.MinedBlockInfo{BlockID: 1, BlockHeight: 1, OnLongestChain: true}))
+	require.NoError(t, err)
+
+	const highVout = 200 // page floor(200/128) == 1, i.e. NOT the master record
+	require.GreaterOrEqual(t, highVout, int(store.GetUtxoBatchSize()), "vout must exceed utxoBatchSize to land on a page record")
+
+	childTx := transactions.Create(t,
+		transactions.WithInput(parentTx, highVout, privKey),
+		transactions.WithP2PKHOutputs(1, 100_000, privKey.PubKey()),
+	)
+	_, err = store.Spend(ctx, childTx, 1)
+	require.NoError(t, err)
+	_, err = store.Create(ctx, childTx, 0, utxo.WithMinedBlockInfo(utxo.MinedBlockInfo{BlockID: 1, BlockHeight: 1, OnLongestChain: true}))
+	require.NoError(t, err)
+
+	// Reap the child → the pruner writes the deletedChildren marker on the parent PAGE
+	// record that owns vout 200.
+	opts := pruner.Options{
+		Ctx:           ctx,
+		Logger:        logger,
+		Client:        client,
+		ExternalStore: memory.New(),
+		Namespace:     store.GetNamespace(),
+		Set:           store.GetName(),
+		IndexWaiter:   &mockIndexWaiter{},
+		LuaPackage:    teranode_aerospike.LuaPackage,
+	}
+	cleanupService, err := pruner.NewService(tSettings, opts)
+	require.NoError(t, err)
+	require.NoError(t, cleanupService.ProcessSingleRecord(childTx.TxIDChainHash(), childTx.Inputs))
+
+	// The marker is on the PAGE record, not the master: a raw master-record read must NOT
+	// see it (proves the page aggregation below is what surfaces it).
+	masterKey, err := aerospike.NewKey(store.GetNamespace(), store.GetName(), parentTx.TxIDChainHash().CloneBytes())
+	require.NoError(t, err)
+	masterResp, err := client.Get(nil, masterKey, fields.DeletedChildren.String())
+	require.NoError(t, err)
+	if raw, ok := masterResp.Bins[fields.DeletedChildren.String()].(map[interface{}]interface{}); ok {
+		require.NotContains(t, raw, childTx.TxIDChainHash().String(), "marker must be on the page record, not the master")
+	}
+
+	// The production read path (store.Get → mergePageDeletedChildren) must aggregate the
+	// page-record marker into the returned set.
+	md, err := store.Get(ctx, parentTx.TxIDChainHash(), fields.DeletedChildren)
+	require.NoError(t, err)
+	require.Contains(t, md.DeletedChildren, *childTx.TxIDChainHash(),
+		"page-record marker must be aggregated by mergePageDeletedChildren on the walk's read")
+}

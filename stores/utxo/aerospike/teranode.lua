@@ -1150,6 +1150,15 @@ end
 
 -- Adds child transaction hashes to the deletedChildren map on a parent record.
 -- If the record does not exist, returns TX_NOT_FOUND (no error raised).
+--
+-- CONSENSUS NOTE: this UDF is a dumb setter with NO mined-on-chain gate. The
+-- counter-conflicting discriminator treats a marker as "the reaped child was mined on
+-- our chain" (marker present => fail closed), so a marker MUST only be written for a
+-- mined child. That invariant lives entirely in Go (isReapedChildMined in
+-- pruner_service.go); the only caller (processRecordChunk) gates before calling here.
+-- Any future caller must apply the same gate — an ungated call would weaken the
+-- discriminator for a never-mined ghost (backstopped by the primary Spend/ErrSpent
+-- double-spend defense, but do not rely on that).
 -- Parameters:
 --   rec: record - The parent transaction record
 --   childHashes: list - List of child transaction hash strings to mark as deleted
