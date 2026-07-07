@@ -595,6 +595,17 @@ func (s *Store) addAbstractedBins(bins []fields.FieldName) []fields.FieldName {
 		}
 	}
 
+	// The deletedChildren marker is page-keyed by the pruner (bounded per page
+	// record), so a paginated (>utxoBatchSize-output) parent's markers are spread
+	// across its page records. TotalExtraRecs tells the read how many page records
+	// to aggregate. A caller may request fields.DeletedChildren WITHOUT fields.Utxos,
+	// so it must pull TotalExtraRecs in itself rather than rely on the Utxos branch.
+	if slices.Contains(newBins, fields.DeletedChildren) {
+		if !slices.Contains(newBins, fields.TotalExtraRecs) {
+			newBins = append(newBins, fields.TotalExtraRecs)
+		}
+	}
+
 	return newBins
 }
 
@@ -915,6 +926,36 @@ NEXT_BATCH_RECORD:
 
 				items[idx].Data.ConflictingChildren = res
 
+			case fields.DeletedChildren:
+				// The pruner keeps the marker page-keyed (bounded per page record),
+				// so a paginated parent's markers live across its page records. Union
+				// the master record's map with every page record's map so the
+				// counter-conflicting walk sees a marker on any vout. A non-paginated
+				// parent has totalExtraRecs == 0 and does zero extra reads. A real
+				// page-read error fails this record closed (mergePageDeletedChildren
+				// propagates it) so the walk never silently drops a page-only marker.
+				// A torn/corrupt master marker likewise fails this record closed
+				// (processDeletedChildren returns an error) rather than failing open.
+				deletedChildren, err := processDeletedChildren(bins)
+				if err != nil {
+					items[idx].Err = errors.NewStorageError("could not process deletedChildren", err)
+
+					continue NEXT_BATCH_RECORD // because a corrupt marker would fail the conflict walk open.
+				}
+
+				if totalExtraRecs, ok := bins[fields.TotalExtraRecs.String()].(int); ok && totalExtraRecs > 0 {
+					merged, err := s.mergePageDeletedChildren(ctx, &items[idx].Hash, totalExtraRecs, deletedChildren)
+					if err != nil {
+						items[idx].Err = errors.NewStorageError("could not merge paginated deletedChildren", err)
+
+						continue NEXT_BATCH_RECORD // because a page read failed and dropping it would fail the conflict walk open.
+					}
+
+					deletedChildren = merged
+				}
+
+				items[idx].Data.DeletedChildren = deletedChildren
+
 			case fields.UnminedSince:
 				unminedSince, ok := bins[key.String()].(int)
 				if ok {
@@ -1220,6 +1261,55 @@ func processConflictingChildren(bins aerospike.BinMap) (conflictingChildren []ch
 	return conflictingChildren, nil
 }
 
+// processDeletedChildren extracts the deletedChildren set from Aerospike bins. The pruner's
+// addDeletedChildren lua UDF stores this as a map keyed by the child tx hash in display hex
+// (chainhash.String()) with a bool value. This discriminator tells the counter-conflicting
+// walk that a now-missing spender was deleted deliberately by the pruner (rather than being
+// a tolerable ghost).
+//
+// Fails CLOSED on a torn/corrupt marker: a present-but-non-map bin, a non-string entry, or a
+// key that is not valid display hex all return an error rather than being silently skipped.
+// Silently dropping a corrupt entry would fail the counter-conflicting walk OPEN — the walk
+// would treat a deliberately-reaped spender as a tolerable ghost — so a malformed marker must
+// fail the record's Get, consistent with mergePageDeletedChildren failing closed on a
+// page-read error. Only an absent bin or a map that yields no entries is tolerated: both
+// return (nil, nil).
+func processDeletedChildren(bins aerospike.BinMap) (map[chainhash.Hash]struct{}, error) {
+	raw, present := bins[fields.DeletedChildren.String()]
+	if !present || raw == nil {
+		// Absent bin carries no markers — a non-paginated/unpruned parent.
+		return nil, nil
+	}
+
+	deletedChildrenIfc, ok := raw.(map[interface{}]interface{})
+	if !ok {
+		// The bin exists but is not a map: a torn/corrupt marker. Fail closed.
+		return nil, errors.NewStorageError("deletedChildren bin has unexpected type %T", raw)
+	}
+
+	deletedChildren := make(map[chainhash.Hash]struct{}, len(deletedChildrenIfc))
+
+	for key := range deletedChildrenIfc {
+		keyStr, ok := key.(string)
+		if !ok {
+			return nil, errors.NewStorageError("deletedChildren has non-string key of type %T", key)
+		}
+
+		childHash, err := chainhash.NewHashFromStr(keyStr)
+		if err != nil {
+			return nil, errors.NewStorageError("deletedChildren has unparseable key %q", keyStr, err)
+		}
+
+		deletedChildren[*childHash] = struct{}{}
+	}
+
+	if len(deletedChildren) == 0 {
+		return nil, nil
+	}
+
+	return deletedChildren, nil
+}
+
 // getAllExtraUTXOs retrieves all UTXOs from child records recursively
 func (s *Store) getAllExtraUTXOs(ctx context.Context, txID *chainhash.Hash, totalExtraRecs int, spendingDatas []*spendpkg.SpendingData) error {
 	if totalExtraRecs <= 0 {
@@ -1268,6 +1358,94 @@ func (s *Store) getAllExtraUTXOs(ctx context.Context, txID *chainhash.Hash, tota
 	}
 
 	return nil
+}
+
+// mergePageDeletedChildren unions the deletedChildren markers stored on each of a
+// paginated parent's page records into `into` (the set already parsed from the
+// master record) and returns the union. The pruner keeps the marker page-keyed
+// (bounded per page record) so a high-fanout parent cannot concentrate one entry
+// per pruned child onto a single record; the counter-conflicting walk needs the
+// full set, so this read aggregates every page's map. Marker keys are the
+// globally-unique child (spender) tx hash, so unioning across pages is correct
+// regardless of which page each entry lives on.
+//
+// A missing/empty page bin contributes nothing, but a real per-page read error
+// (anything other than a not-found record) is propagated so the counter-conflicting
+// walk fails CLOSED — matching the master read and the SQL deleted_children mirror —
+// rather than silently dropping a marker that lives only on the failed page. Only a
+// not-found page record is tolerated: a paginated parent's pages are written with the
+// master, so a genuinely absent page is anomalous but carries no markers. DeletedChildren
+// reads are conflict-walk/repair only (not a hot path), so the extra per-page Gets on
+// paginated parents are acceptable; a common ≤utxoBatchSize-output parent has
+// totalExtraRecs == 0 and does zero extra reads (the caller skips this helper).
+func (s *Store) mergePageDeletedChildren(ctx context.Context, txID *chainhash.Hash, totalExtraRecs int, into map[chainhash.Hash]struct{}) (map[chainhash.Hash]struct{}, error) {
+	if totalExtraRecs <= 0 {
+		return into, nil
+	}
+
+	policy := util.GetAerospikeReadPolicy(s.settings)
+
+	for recordNum := 1; recordNum <= totalExtraRecs; recordNum++ {
+		// Check context before each iteration (mirrors getAllExtraUTXOs).
+		select {
+		case <-ctx.Done():
+			return into, ctx.Err()
+		default: // Empty default to prevent blocking
+		}
+
+		keySource := uaerospike.CalculateKeySourceInternal(txID, uint32(recordNum)) // nolint: gosec
+
+		pageKey, err := aerospike.NewKey(s.namespace, s.setName, keySource)
+		if err != nil {
+			return into, errors.NewProcessingError("failed to create key for deletedChildren page record", err)
+		}
+
+		pageRecord, err := s.client.Get(policy, pageKey, fields.DeletedChildren.String())
+		if err != nil {
+			// A genuinely absent page carries no markers, so tolerate NOT_FOUND. Any
+			// other read error (transient network/timeout after readMaxRetries) could be
+			// hiding a marker that lives only on this page; propagate it so the
+			// counter-conflicting walk fails CLOSED instead of silently dropping it.
+			if errors.Is(err, aerospike.ErrKeyNotFound) {
+				continue
+			}
+
+			return into, errors.NewStorageError("failed to get deletedChildren page record", err)
+		}
+
+		// Distinct name: the loop's `err` is the aerospike.Error from client.Get above,
+		// not a standard error, so it cannot be reused for this parse result.
+		pageDeletedChildren, parseErr := processDeletedChildren(pageRecord.Bins)
+		if parseErr != nil {
+			// A torn/corrupt page marker is propagated so the walk fails CLOSED,
+			// matching the NOT_FOUND-tolerated / other-error-propagated read above.
+			return into, errors.NewStorageError("failed to parse deletedChildren page record", parseErr)
+		}
+
+		into = unionDeletedChildren(into, pageDeletedChildren)
+	}
+
+	return into, nil
+}
+
+// unionDeletedChildren merges `page` into `into`, allocating `into` if it is nil
+// and `page` is non-empty, and returns the result. Split out from
+// mergePageDeletedChildren so the page-aggregation union is unit-testable on
+// synthetic bins without an Aerospike client.
+func unionDeletedChildren(into, page map[chainhash.Hash]struct{}) map[chainhash.Hash]struct{} {
+	if len(page) == 0 {
+		return into
+	}
+
+	if into == nil {
+		into = make(map[chainhash.Hash]struct{}, len(page))
+	}
+
+	for h := range page {
+		into[h] = struct{}{}
+	}
+
+	return into
 }
 
 // PreviousOutputsDecorate fetches output data for transaction inputs.

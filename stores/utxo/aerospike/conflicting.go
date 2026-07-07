@@ -74,6 +74,16 @@ func (s *Store) SetConflicting(ctx context.Context, txHashes []chainhash.Hash, s
 	spendingTxHashes := make([]chainhash.Hash, 0, len(txHashes))
 
 	for _, tx := range txs {
+		if tx == nil {
+			// The fetch loop above skips the coinbase placeholder / frozen sentinel
+			// (subtree.CoinbasePlaceholderHashValue, the all-0xFF marker hash), leaving a
+			// nil slot. It is a marker, not a transaction: skip it here too rather than
+			// nil-deref in updateParentConflictingChildren / tx.Inputs below. Symmetric
+			// with SQL, which skips the same hash before its Get. Callers already filter
+			// the sentinel in MarkConflictingRecursively; this is defence in depth.
+			continue
+		}
+
 		// first make sure the parents have been updated that this transaction is conflicting
 		// if this fails, the transaction will not be marked as conflicting and the function will return an error
 		if err := s.updateParentConflictingChildren(tx); err != nil {

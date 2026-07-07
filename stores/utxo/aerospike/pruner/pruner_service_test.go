@@ -357,10 +357,13 @@ func TestDeleteAtHeight(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create record 1 with deleteAtHeight = 0 (not to be deleted)
+	// blockHeights makes it mined on our chain (F1 gate) so it marks its parent when reaped;
+	// aerospike Put is a per-bin upsert, so this survives the later deleteAtHeight-only Put.
 	err = client.Put(writePolicy, key1, aerospike.BinMap{
 		fields.TxID.String():           txID1.CloneBytes(),
 		fields.Inputs.String():         []interface{}{input1.Bytes(true)},
 		fields.DeleteAtHeight.String(): 0,
+		fields.BlockHeights.String():   []interface{}{1},
 	})
 	require.NoError(t, err)
 

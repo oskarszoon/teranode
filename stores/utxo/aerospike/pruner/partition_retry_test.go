@@ -33,6 +33,12 @@ func ensurePrometheusMetrics() {
 		prometheusUtxoRecordsDeletedSkipped = prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "test_utxo_pruner_records_deleted_skipped_total",
 		})
+		prometheusUtxoRecordsDeferredNoMarker = prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "test_utxo_pruner_records_deferred_no_marker_total",
+		})
+		prometheusUtxoRecordsDeferredGCed = prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "test_utxo_pruner_records_deferred_gced_total",
+		})
 		prometheusUtxoParentsUpdated = prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "test_utxo_pruner_parents_updated_total",
 		})
@@ -50,18 +56,6 @@ func ensurePrometheusMetrics() {
 		})
 		prometheusUtxoTimeoutEvents = prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "test_utxo_pruner_timeout_events_total",
-		})
-		prometheusUtxoParentsSkippedPruned = prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "test_utxo_pruner_parents_skipped_pruned_total",
-		})
-		prometheusUtxoPrunedSetSize = prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "test_utxo_pruner_pruned_set_size",
-		})
-		prometheusUtxoPrunedSetSaturated = prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "test_utxo_pruner_pruned_set_saturated",
-		})
-		prometheusUtxoPrunedSetRotations = prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "test_utxo_pruner_pruned_set_rotations",
 		})
 	})
 }
@@ -96,7 +90,7 @@ func (m *mockPartitionWorker) addResult(partitionStart int, r mockPartitionWorke
 	m.results[partitionStart] = append(m.results[partitionStart], r)
 }
 
-func (m *mockPartitionWorker) worker(_ context.Context, _ uint32, start, count int, _ *PrunedTxSet) (int64, int64, error) {
+func (m *mockPartitionWorker) worker(_ context.Context, _ uint32, start, count int) (int64, int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 

@@ -486,7 +486,12 @@ func (u *Server) checkCounterConflictingOnCurrentChain(ctx context.Context, txHa
 
 			counterConflictingTxMeta := &meta.Data{}
 			if err := u.utxoStore.GetMeta(gCtx, &counterConflictingTxHash, counterConflictingTxMeta); err != nil {
-				return errors.NewProcessingError("[checkCounterConflictingOnCurrentChain][%s] failed to get counter conflicting tx meta", txHash.String(), err)
+				// Fail closed. The walk (GetCounterConflictingTxHashes) saw this counter alive
+				// moments ago; NOT_FOUND here can only be a delete racing this check (pruner DAH).
+				// Tolerating it would skip the mined-on-our-chain rejection for a counter that IS
+				// mined (TOCTOU fail-open on a consensus gate). On retry the walk re-runs and
+				// applies the marker discriminator: unmarked ghost → excluded, marked → fail closed.
+				return errors.NewProcessingError("[checkCounterConflictingOnCurrentChain][%s] failed to get counter conflicting tx meta for %s", txHash.String(), counterConflictingTxHash.String(), err)
 			}
 
 			counterConflictingTxMetas[idx] = counterConflictingTxMeta
@@ -503,6 +508,8 @@ func (u *Server) checkCounterConflictingOnCurrentChain(ctx context.Context, txHa
 	for _, counterConflictingTxHash := range counterConflictingTxHashes {
 		childTransactionHashes, err := utxo.GetConflictingChildren(ctx, u.utxoStore, counterConflictingTxHash)
 		if err != nil {
+			// GetConflictingChildren swallows NOT_FOUND internally (missing root or child
+			// records are evicted from the BFS), so any error here is a real failure.
 			return errors.NewProcessingError("[checkCounterConflictingOnCurrentChain][%s] failed to get child transactions", txHash.String(), err)
 		}
 
@@ -515,6 +522,12 @@ func (u *Server) checkCounterConflictingOnCurrentChain(ctx context.Context, txHa
 
 	// check whether the counter-conflicting transactions have already been mined on our chain
 	for _, counterConflictingTxMeta := range counterConflictingTxMetas {
+		// Defensive nil-guard: GetMeta now fails closed above, so no slot is left nil on the
+		// success path; keep the guard so a future change cannot turn this into a nil deref.
+		if counterConflictingTxMeta == nil {
+			continue
+		}
+
 		for _, blockID := range counterConflictingTxMeta.BlockIDs {
 			if blockIds[blockID] {
 				return errors.NewTxInvalidError("[checkCounterConflictingOnCurrentChain][%s] transaction is already mined on our chain", txHash.String())

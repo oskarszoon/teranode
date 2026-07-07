@@ -21,7 +21,27 @@ import (
 	spendpkg "github.com/bsv-blockchain/teranode/stores/utxo/spend"
 	"github.com/bsv-blockchain/teranode/util"
 	"github.com/bsv-blockchain/teranode/util/tracing"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"golang.org/x/sync/errgroup"
+)
+
+// prometheusUtxoCounterConflictingDanglingRefs counts every dangling reference tolerated
+// while resolving conflicts: a parent UTXO still records a spender whose own record has
+// been removed (pruned/reorged/deleted). These free functions have no logger, so a counter
+// is the observability surface — each tolerated ghost bumps it once. The "site" label
+// distinguishes where the ghost was tolerated: "walk" (GetCounterConflictingTxHashes) and
+// "bfs" (GetConflictingChildren).
+var prometheusUtxoCounterConflictingDanglingRefs = promauto.NewCounterVec(
+	prometheus.CounterOpts{
+		Namespace: "teranode",
+		Subsystem: "utxo",
+		Name:      "counter_conflicting_dangling_refs",
+		Help:      "Number of dangling spender references tolerated while resolving conflicts (site: walk, bfs)",
+	},
+	[]string{
+		"site", // where the ghost was tolerated: walk, bfs
+	},
 )
 
 // step5RetryDelays controls the bounded back-off when SetLocked(false) fails at the very
@@ -878,11 +898,25 @@ func MarkConflictingRecursively(ctx context.Context, s Store, hashes []chainhash
 	defer deferFn()
 
 	var allAffectedSpends []*Spend
-	toProcess := hashes
+
+	// The frozen sentinel (subtree.FrozenBytesTxHash == subtree.CoinbasePlaceholderHashValue,
+	// the all-0xFF hash) can reach here two ways: the counter-conflicting walk keeps it in the
+	// counter set on purpose, and a frozen parent slot can name it as a spending child in the
+	// batches SetConflicting returns below. It is a marker, not a transaction: it has no store
+	// record, marking it conflicting is meaningless, and feeding it to SetConflicting would
+	// nil-deref on aerospike (the fetch loop skips the placeholder, leaving a nil tx the
+	// processing loop derefs) and NOT_FOUND-error on SQL. Filter it out of BOTH the initial
+	// batch and every descendant batch so it never reaches SetConflicting.
+	toProcess := make([]chainhash.Hash, 0, len(hashes))
+	for _, h := range hashes {
+		if !h.Equal(subtree.FrozenBytesTxHash) {
+			toProcess = append(toProcess, h)
+		}
+	}
 
 	visited := make(map[chainhash.Hash]struct{}, len(hashes))
 	markedOrder := make([]chainhash.Hash, 0, len(hashes))
-	for _, h := range hashes {
+	for _, h := range toProcess {
 		if _, ok := visited[h]; !ok {
 			visited[h] = struct{}{}
 			markedOrder = append(markedOrder, h)
@@ -897,9 +931,14 @@ func MarkConflictingRecursively(ctx context.Context, s Store, hashes []chainhash
 
 		allAffectedSpends = append(allAffectedSpends, affectedParentSpends...)
 
-		// filter out already-visited hashes to prevent infinite loops
+		// filter out already-visited hashes to prevent infinite loops, and the frozen
+		// sentinel a frozen slot can surface as a spending child (see the note above).
 		nextBatch := spendingChildTxs[:0]
 		for _, child := range spendingChildTxs {
+			if child.Equal(subtree.FrozenBytesTxHash) {
+				continue
+			}
+
 			if _, ok := visited[child]; !ok {
 				visited[child] = struct{}{}
 				markedOrder = append(markedOrder, child)
@@ -1012,6 +1051,15 @@ func GetConflictingChildren(ctx context.Context, s Store, hash chainhash.Hash) (
 			g.Go(func() error {
 				txMeta, err := s.Get(gCtx, &current, fields.Utxos, fields.ConflictingChildren)
 				if err != nil {
+					// A parent may still record a spender whose own record has been removed
+					// (pruned/reorged/deleted). Tolerate the dangling ref: leave results[i] nil
+					// so the accumulation loop evicts and counts it (covering both the
+					// isNotFound-error and the (nil, nil) missing-record variants uniformly),
+					// then continue the BFS.
+					if errors.IsNotFound(err) {
+						return nil
+					}
+
 					return err
 				}
 				results[i] = txMeta
@@ -1024,8 +1072,17 @@ func GetConflictingChildren(ctx context.Context, s Store, hash chainhash.Hash) (
 		}
 
 		var nextLevel []chainhash.Hash
-		for _, txMeta := range results {
+		for i, txMeta := range results {
 			if txMeta == nil {
+				// Tolerated dangling ref (or a backend that surfaces a missing record as
+				// (nil, nil)): the hash has no record, so it must not appear in the result
+				// set either — callers feed the result into SetConflicting/GetMeta, which
+				// fail on missing records. Count both variants here (the goroutine no longer
+				// increments), exactly once per evicted node.
+				prometheusUtxoCounterConflictingDanglingRefs.WithLabelValues("bfs").Inc()
+
+				delete(visited, currentLevel[i])
+
 				continue
 			}
 
@@ -1033,6 +1090,16 @@ func GetConflictingChildren(ctx context.Context, s Store, hash chainhash.Hash) (
 				for _, child := range txMeta.ConflictingChildren {
 					if _, ok := visited[child]; !ok {
 						visited[child] = struct{}{}
+
+						// The frozen sentinel (subtree.FrozenBytesTxHash, == the coinbase
+						// placeholder — the all-0xFF hash) has no store record; descending
+						// into it would only evict it via the ghost tolerance above. Keep
+						// it IN the result — callers rely on its presence to reject frozen
+						// children — but do not BFS past it.
+						if child.Equal(subtree.FrozenBytesTxHash) {
+							continue
+						}
+
 						nextLevel = append(nextLevel, child)
 					}
 				}
@@ -1044,6 +1111,13 @@ func GetConflictingChildren(ctx context.Context, s Store, hash chainhash.Hash) (
 						child := *spendingData.TxID
 						if _, ok := visited[child]; !ok {
 							visited[child] = struct{}{}
+
+							// A frozen output records the frozen sentinel in its spend slot;
+							// same handling as above: visible in the result, never descended.
+							if child.Equal(subtree.FrozenBytesTxHash) {
+								continue
+							}
+
 							nextLevel = append(nextLevel, child)
 						}
 					}
@@ -1064,6 +1138,44 @@ func GetConflictingChildren(ctx context.Context, s Store, hash chainhash.Hash) (
 	return conflictingChildren, nil
 }
 
+// parentSpendInfo carries, per parent tx, the recorded spender of each output slot plus
+// the parent's deletedChildren set (aerospike bin / SQL deleted_children table; written
+// reliably as of this PR — see meta.Data.DeletedChildren). The deletedChildren set lets
+// GetCounterConflictingTxHashes discriminate a ghost spender the pruner deleted
+// deliberately (marker present → fail closed) from one to tolerate (marker absent).
+type parentSpendInfo struct {
+	spendingTxIDs   []*chainhash.Hash
+	deletedChildren map[chainhash.Hash]struct{}
+}
+
+// discriminateGhostSpender applies the deletedChildren discriminator to a recorded
+// spender whose own record is gone — surfaced either as a NOT_FOUND error or as a
+// (nil, nil) missing record. The pruner records a deletedChildren marker ONLY for a
+// reaped child that was mined on our longest chain (F1 write-side invariant: both
+// backends gate the marker on mined — aerospike isReapedChildMined, SQL insertMarkersQuery
+// mined predicate), so a marked ghost is a mined-then-pruned counter: it returns a
+// TxInvalidError so the walk fails closed. An unmarked ghost is a benign dangling ref —
+// including a conflicting/never-mined loser the setConflicting DAH branch tombstoned and
+// the pruner reaped WITHOUT a marker — so it bumps the tolerance counter once and returns
+// nil, and the caller tolerates it (excludes it from the counter set). Tolerating a
+// never-mined ghost is correct: it was never on our chain, so the tx under validation is
+// not double-spending a chain-mined counter, and permanently rejecting the block would be
+// a consensus split against a block the honest network accepted. Shared by the
+// NOT_FOUND-error and (nil, nil) paths so both apply the identical rule.
+func discriminateGhostSpender(txHash chainhash.Hash, spender *chainhash.Hash, deletedChildren map[chainhash.Hash]struct{}) error {
+	if _, deleted := deletedChildren[*spender]; deleted {
+		// A marked ghost is a mined-then-pruned counter (marker ⟹ mined-on-our-chain,
+		// enforced at the pruner write side), so the tx under validation double-spends a
+		// counter mined on our chain — genuinely INVALID (matches SubtreeValidation.go
+		// "already mined on our chain"), not a transient ProcessingError.
+		return errors.NewTxInvalidError("[GetCounterConflictingTxHashes][%s] recorded spender %s was deleted by the pruner (deletedChildren); cannot resolve conflict", txHash.String(), spender.String())
+	}
+
+	prometheusUtxoCounterConflictingDanglingRefs.WithLabelValues("walk").Inc()
+
+	return nil
+}
+
 func GetCounterConflictingTxHashes(ctx context.Context, s Store, txHash chainhash.Hash) ([]chainhash.Hash, error) {
 	ctx, _, deferFn := tracing.Tracer("utxo").Start(ctx, "GetCounterConflictingTxHashes")
 
@@ -1071,26 +1183,52 @@ func GetCounterConflictingTxHashes(ctx context.Context, s Store, txHash chainhas
 
 	txMeta, err := s.Get(ctx, &txHash, fields.Tx)
 	if err != nil {
+		// The queried tx itself may have been removed since it was flagged. There is no
+		// counter-conflicting set to compute for a tx that no longer exists — tolerate it
+		// and return an empty set rather than failing the caller with TX_NOT_FOUND.
+		if errors.IsNotFound(err) {
+			prometheusUtxoCounterConflictingDanglingRefs.WithLabelValues("walk").Inc()
+			return make([]chainhash.Hash, 0), nil
+		}
+
 		return nil, err
 	}
 
 	counterConflictingMap := make(map[chainhash.Hash]struct{})
 	counterConflictingMap[txHash] = struct{}{}
 
-	// get the unique parent txs
-	parentTxs := make(map[chainhash.Hash][]*chainhash.Hash)
+	// get the unique parent txs. Each parent carries its recorded spenders AND its
+	// deletedChildren set, so a ghost spender can be discriminated: a marker means the
+	// pruner deleted that spender deliberately (fail closed) vs. an unmarked ghost we
+	// tolerate.
+	parentTxs := make(map[chainhash.Hash]parentSpendInfo)
 
 	for _, input := range txMeta.Tx.Inputs {
 		// get the parent tx
-		parentTxs[*input.PreviousTxIDChainHash()] = nil
+		parentTxs[*input.PreviousTxIDChainHash()] = parentSpendInfo{}
 	}
 
 	for parentTx := range parentTxs {
 		parentTxHash := &parentTx
 
-		parentTxMeta, err := s.Get(ctx, parentTxHash, fields.Utxos)
+		parentTxMeta, err := s.Get(ctx, parentTxHash, fields.Utxos, fields.DeletedChildren)
 		if err != nil {
+			// Do NOT tolerate a missing PARENT record the way a missing spender/child record
+			// is tolerated. When only a spender's record is gone, the surviving parent's
+			// SpendingDatas still tells us who currently spends the output. When the parent
+			// record itself is gone, the entire spend graph for this input is lost: we can no
+			// longer tell whether a counter — including one that was mined on our chain and
+			// later pruned by retention — spends it. Silently dropping the input would turn
+			// this guard fail-open, so propagate the error and fail closed instead.
 			return nil, err
+		}
+
+		if parentTxMeta == nil {
+			// Some backends surface a missing record as (nil, nil) — aerospike returns nil
+			// data with no error for the coinbase-placeholder key (get.go). Same policy as
+			// the error branch above: a missing parent record erases the spend graph for
+			// this input, so fail closed rather than dereference nil SpendingDatas.
+			return nil, errors.NewTxNotFoundError("[GetCounterConflictingTxHashes][%s] parent %s not found", txHash.String(), parentTxHash.String())
 		}
 
 		spendingTxIDs := make([]*chainhash.Hash, len(parentTxMeta.SpendingDatas))
@@ -1103,12 +1241,17 @@ func GetCounterConflictingTxHashes(ctx context.Context, s Store, txHash chainhas
 			spendingTxIDs[idx] = spendingData.TxID
 		}
 
-		parentTxs[*parentTxHash] = spendingTxIDs
+		parentTxs[*parentTxHash] = parentSpendInfo{
+			spendingTxIDs:   spendingTxIDs,
+			deletedChildren: parentTxMeta.DeletedChildren,
+		}
 	}
 
 	for _, input := range txMeta.Tx.Inputs {
-		parenTxIDS, ok := parentTxs[*input.PreviousTxIDChainHash()]
+		parentInfo, ok := parentTxs[*input.PreviousTxIDChainHash()]
 		if ok {
+			parenTxIDS := parentInfo.spendingTxIDs
+
 			// check the length of the spending txs, if it's less than the index, then the input is not spent
 			if len(parenTxIDS) <= int(input.PreviousTxOutIndex) {
 				// throw an error
@@ -1117,10 +1260,109 @@ func GetCounterConflictingTxHashes(ctx context.Context, s Store, txHash chainhas
 
 			spendingTxID := parenTxIDS[input.PreviousTxOutIndex]
 			if spendingTxID != nil {
+				// Frozen sentinel: a frozen output records subtree.FrozenBytesTxHash
+				// (== subtree.CoinbasePlaceholderHashValue — both are the all-0xFF hash)
+				// in its spend slot. It has no store record, so the existence Get below
+				// would misclassify it as a ghost; skip that Get and the child BFS, but
+				// keep the sentinel IN the counter set. Consumers stay fail-safe on it:
+				// checkCounterConflictingOnCurrentChain rejects a placeholder counter as
+				// frozen (SubtreeValidation.go). If the sentinel reaches the losing set,
+				// MarkConflictingRecursively filters it out BEFORE SetConflicting is ever
+				// called (it is a marker, not a tx), so ProcessConflicting still resolves
+				// the conflict; both SetConflicting backends also skip the placeholder
+				// defensively (aerospike nil-skips it in the processing loop, SQL skips it
+				// before its Get) so neither panics nor errors on it.
+				if spendingTxID.Equal(subtree.FrozenBytesTxHash) {
+					counterConflictingMap[*spendingTxID] = struct{}{}
+
+					continue
+				}
+
+				// The recorded spender may itself have been removed while the parent still
+				// records its spend (dangling ref). A ghost must be excluded from the counter
+				// set entirely: callers feed this set into SetConflicting (ProcessConflicting
+				// step 1) and GetMeta, both of which fail on a missing record. The default
+				// GetConflictingChildren tolerates a missing root and returns an empty set, so
+				// existence must be checked explicitly here.
+				//
+				// Consensus safety of tolerating an UNMARKED ghost: the mined-on-chain gate
+				// (checkCounterConflictingOnCurrentChain) compares counters against blockIds
+				// built from retention*2 (576 blocks, check_block_subtrees.go), NOT the
+				// retention horizon (288) at which a mined-spent counter is pruned. The
+				// (288, 576] band — a MINED counter pruned but still inside the comparison
+				// window — is covered by the pruner's deletedChildren marker on BOTH backends
+				// (aerospike bin + SQL deleted_children table): a marked ghost fails closed
+				// below. The marker is written for MINED reaped children ONLY, gated on mined
+				// on both backends (F1 write-side invariant "marker present ⟹ mined-on-our-
+				// chain": aerospike isReapedChildMined, SQL insertMarkersQuery mined predicate),
+				// and reliably so for a mined child — aerospike writes it for every input's
+				// parent (the cuckoo consult that could skip it on a ~3% false positive was
+				// removed) and the SQL pruner freezes the deletable set in a temp table so no
+				// mined row is deleted unmarked under READ COMMITTED. The aerospike marker is
+				// page-keyed (bounded per page record) and the parent Get above is
+				// page-aggregating (get.go mergePageDeletedChildren unions every page's map),
+				// so a marker for any vout — including vout ≥ utxoBatchSize — is seen here
+				// regardless of which page holds it. A never-mined reaped ghost (a conflicting
+				// loser the setConflicting DAH branch tombstoned without a mined gate) is
+				// intentionally UNMARKED and tolerated here: it was never on our chain, so the
+				// tx under validation is not double-spending a chain-mined counter and the
+				// block the honest network accepted must not be rejected — that absence is
+				// correct, not an exposure. Residual unmarked-MINED-ghost exposure is
+				// historical/transient only: aerospike deletes done before the marker fix whose
+				// marker the cuckoo pre-filter suppressed, and SQL stores upgraded mid-life
+				// whose deleted_children table starts empty (transient — one retention*2
+				// window after upgrade, then fresh pruning has marked the live band). The
+				// aerospike blob-missing GC path does NOT contribute: it only reaps marker-less
+				// past DAH + retention + max(retention, CoinbaseMaturity), which — since block
+				// validation caps fork depth at CoinbaseMaturity — is outside every validatable
+				// block's comparison window, so a GC'd record can never be an in-window ghost.
+				// Any residual additionally requires an attacker fork inside the 576-block
+				// window AND is backstopped by the primary Spend double-spend defense: the
+				// surviving parent still records the spender in its slot, so a double-spender
+				// is rejected as ErrSpent regardless of this tolerate path. (That backstop is
+				// the validation/store guard: a ghost left in a winner-input slot simply fails
+				// ProcessConflicting's step-3 Spend with ErrSpent and rolls back cleanly rather
+				// than being cleared, so the GC horizon is set wide enough that GC'd records
+				// never reach the tolerate path.)
+				spenderMeta, err := s.Get(ctx, spendingTxID, fields.Conflicting)
+				if err != nil {
+					// A ghost (NOT_FOUND) is discriminated by the deletedChildren marker:
+					// marked → fail closed, unmarked → tolerated (counter bumped).
+					if errors.IsNotFound(err) {
+						if ghostErr := discriminateGhostSpender(txHash, spendingTxID, parentInfo.deletedChildren); ghostErr != nil {
+							return nil, ghostErr
+						}
+
+						continue
+					}
+
+					return nil, err
+				}
+
+				if spenderMeta == nil {
+					// Some backends surface a missing record as (nil, nil): same
+					// marker discriminator as the NOT_FOUND-error path above.
+					if ghostErr := discriminateGhostSpender(txHash, spendingTxID, parentInfo.deletedChildren); ghostErr != nil {
+						return nil, ghostErr
+					}
+
+					continue
+				}
+
 				counterConflictingMap[*spendingTxID] = struct{}{}
 
 				childHashes, err := s.GetConflictingChildren(ctx, *spendingTxID)
 				if err != nil {
+					// Fallback for Store implementations whose GetConflictingChildren still
+					// propagates NOT_FOUND for a spender deleted between the existence check
+					// above and this call.
+					if errors.IsNotFound(err) {
+						prometheusUtxoCounterConflictingDanglingRefs.WithLabelValues("walk").Inc()
+						delete(counterConflictingMap, *spendingTxID)
+
+						continue
+					}
+
 					return nil, err
 				}
 

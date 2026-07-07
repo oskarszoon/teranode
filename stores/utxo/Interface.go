@@ -352,7 +352,9 @@ type Store interface {
 	// Delete removes a UTXO and its associated metadata from the store.
 	Delete(ctx context.Context, hash *chainhash.Hash) error
 
-	GetSpend(ctx context.Context, spend *Spend) (*SpendResponse, error) // Remove? Only used in tests
+	// GetSpend reads a single output slot's spend state (targeted (TxID, Vout) read;
+	// no full-record fan-out). Used by ProcessConflicting's dangling-slot pre-flight.
+	GetSpend(ctx context.Context, spend *Spend) (*SpendResponse, error)
 	GetMeta(ctx context.Context, hash *chainhash.Hash, data *meta.Data) error
 
 	// Blockchain specific functions

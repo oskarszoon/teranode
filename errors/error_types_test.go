@@ -504,3 +504,16 @@ func TestNewBlobFooterSizeMismatchError(t *testing.T) {
 	assert.Equal(t, "test blob footer size mismatch error param1 42", err.Message(), "error message should match")
 	assert.Nil(t, err.Data(), "error data should be nil when params are provided")
 }
+
+// TestIsNotFound tests that IsNotFound matches both missing-record sentinels
+// (ErrTxNotFound from aerospike, ErrNotFound from the SQL stores), including
+// wrapped forms, and rejects unrelated errors and nil.
+func TestIsNotFound(t *testing.T) {
+	assert.True(t, IsNotFound(ErrTxNotFound))
+	assert.True(t, IsNotFound(ErrNotFound))
+	assert.True(t, IsNotFound(NewTxNotFoundError("tx %s not found", "abc")))
+	assert.True(t, IsNotFound(NewProcessingError("wrapped", ErrTxNotFound)))
+	assert.True(t, IsNotFound(NewProcessingError("wrapped", ErrNotFound)))
+	assert.False(t, IsNotFound(ErrProcessing))
+	assert.False(t, IsNotFound(nil))
+}

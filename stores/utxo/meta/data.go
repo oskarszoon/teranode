@@ -95,6 +95,30 @@ type Data struct {
 
 	// SpendingDatas is the transaction ID of the transaction that spent the given tx output idx
 	SpendingDatas []*spendpkg.SpendingData `json:"spendingDatas"`
+
+	// DeletedChildren, when populated (fields.DeletedChildren), is the set of child tx
+	// hashes the pruner deleted at their delete-at-height AND that were mined on our
+	// longest chain. Written by the pruner on the parent, gated on mined on BOTH backends
+	// (F1 write-side invariant "marker present ⟹ mined-on-our-chain"): the addDeletedChildren
+	// lua UDF on aerospike, called only when isReapedChildMined (unminedSince nil +
+	// blockHeights non-empty), and the deleted_children table on postgres/sqlite, INSERTed
+	// only for a reaped child with unmined_since NULL and a block_ids row, in the same
+	// transaction as the delete against a deletable set frozen in a temp table (so no mined
+	// row is deleted unmarked under READ COMMITTED). Consumed by the counter-conflicting
+	// fail-closed guards, which treat a marked ghost as a mined-then-pruned counter and fail
+	// closed. A never-mined reaped child (e.g. a conflicting loser the setConflicting DAH
+	// branch tombstoned) is intentionally left UNMARKED so the walk tolerates its ghost —
+	// that absence is correct, not a missing-marker exposure. A missing marker for a MINED
+	// child is historical/transient only — pre-fix aerospike deletes and freshly-upgraded
+	// SQL stores whose table starts empty (the blob-missing GC path reaps marker-less only
+	// past DAH + 2*retention, outside every validatable block's window, so it is not a
+	// missing-marker source). See GetCounterConflictingTxHashes. Transient read-side data:
+	// not part of the binary serialization in Bytes()/NewMetaDataFromBytes.
+	//
+	// json:"-": a chainhash.Hash map key has no TextMarshaler, so encoding/json cannot
+	// marshal this map (it panics/errors on non-string, non-TextMarshaler map keys).
+	// The field is populated by the backends per-read and never serialized as JSON.
+	DeletedChildren map[chainhash.Hash]struct{} `json:"-"`
 }
 
 // NewMetaDataFromBytes creates a new Data object from a byte slice.
