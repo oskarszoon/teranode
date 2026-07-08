@@ -57,6 +57,7 @@ package aerospike
 
 import (
 	"context"
+	"time"
 
 	"github.com/bsv-blockchain/aerospike-client-go/v8"
 	"github.com/bsv-blockchain/teranode/errors"
@@ -64,6 +65,14 @@ import (
 	"github.com/bsv-blockchain/teranode/util"
 	"github.com/bsv-blockchain/teranode/util/uaerospike"
 )
+
+// unspendBatchChunkSize bounds how many unspend BatchUDFs are sent to
+// Aerospike in a single BatchOperate round-trip. A consolidation-tx reversal
+// can carry tens of thousands of inputs; without chunking, a single
+// oversized batch risks hitting Aerospike's per-batch record limit and
+// blows out the request/response payload size. 1024 mirrors the chunk size
+// used elsewhere in the store for similar bulk operations.
+const unspendBatchChunkSize = 1024
 
 // Unspend operations handle reverting spent UTXOs back to an unspent state.
 // This is primarily used during blockchain reorganizations to handle
@@ -99,43 +108,169 @@ func (s *Store) Unspend(ctx context.Context, spends []*utxo.Spend, flagAsLocked 
 	return s.unspend(ctx, spends, flagAsLocked...)
 }
 
+// joinErr accumulates next into existing, working around a foot-gun in this
+// package's errors.Join: when its first argument is a bare nil error
+// (interface), Join does NOT preserve the second argument's concrete *Error
+// type (and thus its error code) — it degrades the result to a generic
+// errors.New(msg), so a later errors.Is(result, errors.ErrNotFound) would
+// silently fail. IncrementSpentRecordsMulti and SetDAHForChildRecordsMulti
+// (spend.go) guard against this the same way: assign directly on the first
+// error, only calling errors.Join once there's already an accumulated error.
+func joinErr(existing, next error) error {
+	if next == nil {
+		return existing
+	}
+
+	if existing == nil {
+		return next
+	}
+
+	return errors.Join(existing, next)
+}
+
+// chunkSpends splits spends into consecutive slices of at most size elements.
+// Pure helper (no I/O) so it can be unit-tested without an Aerospike
+// container: it drives the sizing behind the batched unspend below.
+func chunkSpends(spends []*utxo.Spend, size int) [][]*utxo.Spend {
+	if size <= 0 {
+		size = len(spends)
+	}
+
+	var chunks [][]*utxo.Spend
+
+	for i := 0; i < len(spends); i += size {
+		end := i + size
+		if end > len(spends) {
+			end = len(spends)
+		}
+
+		chunks = append(chunks, spends[i:end])
+	}
+
+	return chunks
+}
+
 // unspend implements the core unspend logic.
-// For each UTXO:
-//  1. Checks context cancellation
-//  2. Logs operation details
-//  3. Executes Lua script
-//  4. Handles response
+//
+// Unlike the previous implementation (one synchronous client.Execute Lua
+// call per UTXO), this batches UTXOs into chunks of up to
+// unspendBatchChunkSize and reverses each chunk with a single
+// BatchOperate of "unspend" BatchUDFs — the same Lua UDF, same mandatory
+// ownership check (a mismatched SpendingData is a no-op inside the UDF),
+// and the same per-record response handling as before (see
+// postProcessUnspendRecord). This turns a consolidation-tx reversal of
+// tens of thousands of inputs from N round-trips into ceil(N/1024).
+//
+// Semantics change (intentional): the previous serial loop returned on the
+// first per-UTXO error. This batched path attempts every record in every
+// chunk and aggregates all per-record errors via errors.Join, so a single
+// bad record does not abort the reversal of the rest of the batch — this is
+// necessary for the batch to finish reversing whatever it still can.
 func (s *Store) unspend(ctx context.Context, spends []*utxo.Spend, flagAsLocked ...bool) (err error) {
-	for i, spend := range spends {
-		select {
-		case <-ctx.Done():
-			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				return errors.NewStorageError("timeout un-spending %d of %d utxos", i, len(spends))
+	start := time.Now()
+	count := 0
+
+	batchPolicy := util.GetAerospikeBatchPolicy(s.settings)
+	batchUDFPolicy := aerospike.NewBatchUDFPolicy()
+
+	var aggErr error
+
+	for _, chunk := range chunkSpends(spends, unspendBatchChunkSize) {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			if errors.Is(ctxErr, context.DeadlineExceeded) {
+				return errors.NewStorageError("timeout un-spending after %d of %d utxos", count, len(spends), ctxErr)
 			}
 
-			return errors.NewStorageError("context cancelled un-spending %d of %d utxos", i, len(spends))
-		default:
-			if spend != nil {
-				s.logger.Warnf("un-spending utxo %s of tx %s:%d, spending data: %v", spend.UTXOHash.String(), spend.TxID.String(), spend.Vout, spend.SpendingData)
+			return errors.NewStorageError("context cancelled un-spending after %d of %d utxos", count, len(spends), ctxErr)
+		}
 
-				if err = s.unspendLua(ctx, spend); err != nil {
-					// just return the raw error, should already be wrapped
-					return err
+		batchRecords := make([]aerospike.BatchRecordIfc, 0, len(chunk))
+		chunkSpendsByIdx := make([]*utxo.Spend, 0, len(chunk))
+
+		for _, spend := range chunk {
+			if spend == nil {
+				continue
+			}
+
+			if spend.SpendingData == nil {
+				return errors.NewProcessingError("[Unspend] SpendingData is required for %s:%d", spend.TxID, spend.Vout)
+			}
+
+			s.logger.Debugf("un-spending utxo %s of tx %s:%d, spending data: %v", spend.UTXOHash.String(), spend.TxID.String(), spend.Vout, spend.SpendingData)
+
+			keySource := uaerospike.CalculateKeySource(spend.TxID, spend.Vout, s.utxoBatchSize)
+
+			key, aErr := aerospike.NewKey(s.namespace, s.setName, keySource)
+			if aErr != nil {
+				if e, ok := aErr.(*aerospike.AerospikeError); ok {
+					prometheusUtxoMapErrors.WithLabelValues("Reset", e.ResultCode.String()).Inc()
+				} else {
+					prometheusUtxoMapErrors.WithLabelValues("Reset", "unknown").Inc()
 				}
+
+				return errors.NewProcessingError("error in aerospike NewKey", aErr)
+			}
+
+			offset := s.calculateOffsetForOutput(spend.Vout)
+
+			batchRecords = append(batchRecords, aerospike.NewBatchUDF(batchUDFPolicy, key, LuaPackage, "unspend",
+				aerospike.NewIntegerValue(int(offset)),         // vout adjusted for utxoBatchSize
+				aerospike.NewValue(spend.UTXOHash[:]),          // utxo hash
+				aerospike.NewValue(spend.SpendingData.Bytes()), // expected stored spending data (mandatory ownership check)
+				aerospike.NewIntegerValue(int(s.blockHeight.Load())),
+				aerospike.NewValue(s.settings.GetUtxoStoreBlockHeightRetention()),
+			))
+			chunkSpendsByIdx = append(chunkSpendsByIdx, spend)
+		}
+
+		if len(batchRecords) == 0 {
+			continue
+		}
+
+		if opErr := s.batchOperate(batchPolicy, batchRecords); opErr != nil {
+			prometheusUtxoMapErrors.WithLabelValues("Reset", "batch error").Inc()
+			aggErr = joinErr(aggErr, errors.NewStorageError("error in aerospike unspend batch", opErr))
+
+			continue
+		}
+
+		for i := range batchRecords {
+			count++
+
+			batchRec := batchRecords[i].BatchRec()
+			if batchRec.Err != nil {
+				if e, ok := batchRec.Err.(*aerospike.AerospikeError); ok {
+					prometheusUtxoMapErrors.WithLabelValues("Reset", e.ResultCode.String()).Inc()
+				} else {
+					prometheusUtxoMapErrors.WithLabelValues("Reset", "unknown").Inc()
+				}
+
+				aggErr = joinErr(aggErr, errors.NewStorageError("error in aerospike unspend record", batchRec.Err))
+
+				continue
+			}
+
+			if recErr := s.postProcessUnspendRecord(ctx, chunkSpendsByIdx[i], batchRec.Record); recErr != nil {
+				aggErr = joinErr(aggErr, recErr)
 			}
 		}
 	}
 
-	return nil
+	s.logger.Debugf("[Unspend] reversed %d/%d utxos in %s", count, len(spends), time.Since(start))
+
+	return aggErr
 }
 
-// unspendLua executes the Lua script for a single UTXO unspend.
-// The operation:
-//  1. Calculates key and offset
-//  2. Executes Lua script
-//  3. Processes response
-//  4. Updates record counts
-//  5. Manages external storage
+// postProcessUnspendRecord mirrors the response handling previously done
+// inline in unspendLua for a single synchronous client.Execute call, applied
+// per-record to a BatchUDF response instead:
+//  1. Parses the Lua map response (record.Bins[LuaSuccess]).
+//  2. On OK + NOTALLSPENT signal, decrements spentExtraRecs on the master
+//     record via handleExtraRecords — this is required to keep pagination
+//     spent-counts correct; dropping it would corrupt master-record
+//     spent-counts for paginated transactions.
+//  3. On ERROR + TX_NOT_FOUND, surfaces a NotFoundError; any other error
+//     status surfaces as a StorageError.
 //
 // Lua Return Values:
 //   - Map response with status="OK" and optional signal
@@ -144,44 +279,13 @@ func (s *Store) unspend(ctx context.Context, spends []*utxo.Spend, flagAsLocked 
 // Metrics:
 //   - prometheusUtxoMapReset: Successful unspends
 //   - prometheusUtxoMapErrors: Failed operations
-func (s *Store) unspendLua(ctx context.Context, spend *utxo.Spend) error {
-	policy := util.GetAerospikeWritePolicy(s.settings, 0)
-
-	keySource := uaerospike.CalculateKeySource(spend.TxID, spend.Vout, s.utxoBatchSize)
-
-	key, aErr := aerospike.NewKey(s.namespace, s.setName, keySource)
-	if aErr != nil {
-		if e, ok := aErr.(*aerospike.AerospikeError); ok {
-			prometheusUtxoMapErrors.WithLabelValues("Reset", e.ResultCode.String()).Inc()
-		} else {
-			prometheusUtxoMapErrors.WithLabelValues("Reset", "unknown").Inc()
-		}
-		return errors.NewProcessingError("error in aerospike NewKey", aErr)
+func (s *Store) postProcessUnspendRecord(ctx context.Context, spend *utxo.Spend, record *aerospike.Record) error {
+	if record == nil || record.Bins == nil || record.Bins[LuaSuccess.String()] == nil {
+		prometheusUtxoMapErrors.WithLabelValues("Reset", "no response").Inc()
+		return errors.NewProcessingError("[Unspend] no response from Lua for %s:%d", spend.TxID, spend.Vout)
 	}
 
-	offset := s.calculateOffsetForOutput(spend.Vout)
-
-	if spend.SpendingData == nil {
-		return errors.NewProcessingError("[Unspend] SpendingData is required for %s:%d", spend.TxID, spend.Vout)
-	}
-
-	ret, aErr := s.client.Execute(policy, key, LuaPackage, "unspend",
-		aerospike.NewIntegerValue(int(offset)),         // vout adjusted for utxoBatchSize
-		aerospike.NewValue(spend.UTXOHash[:]),          // utxo hash
-		aerospike.NewValue(spend.SpendingData.Bytes()), // expected stored spending data (mandatory ownership check)
-		aerospike.NewIntegerValue(int(s.blockHeight.Load())),
-		aerospike.NewValue(s.settings.GetUtxoStoreBlockHeightRetention()),
-	)
-	if aErr != nil {
-		if e, ok := aErr.(*aerospike.AerospikeError); ok {
-			prometheusUtxoMapErrors.WithLabelValues("Reset", e.ResultCode.String()).Inc()
-		} else {
-			prometheusUtxoMapErrors.WithLabelValues("Reset", "unknown").Inc()
-		}
-		return errors.NewStorageError("error in aerospike unspend record", aErr)
-	}
-
-	res, err := s.ParseLuaMapResponse(ret)
+	res, err := s.ParseLuaMapResponse(record.Bins[LuaSuccess.String()])
 	if err != nil {
 		prometheusUtxoMapErrors.WithLabelValues("Reset", "error parsing response").Inc()
 		return errors.NewProcessingError("error parsing response", err)
