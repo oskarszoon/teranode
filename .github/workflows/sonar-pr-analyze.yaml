@@ -23,9 +23,8 @@ concurrency:
 
 permissions:
   contents: read
-  pull-requests: write
+  pull-requests: read
   statuses: write
-  id-token: write
 
 env:
   GO_VERSION: "1.26.0"
@@ -92,7 +91,6 @@ jobs:
             core.setOutput('number', prNumber);
             core.setOutput('base', pr.data.base.ref);
             core.setOutput('head', pr.data.head.ref);
-            core.setOutput('head_sha', pr.data.head.sha);
 
       - name: Checkout base branch
         if: github.event.workflow_run.conclusion == 'success'
@@ -173,9 +171,10 @@ jobs:
       # commit A's result onto B — a stale green on unscanned code, or a spurious
       # red — which is exactly what a required check must never do.
       #
-      # workflow_run runs in base-repo context, so this also works for fork PRs
-      # (their SONAR_TOKEN-less builds never reach here). Mark it a required check
-      # in branch protection under the context "SonarQube Quality Gate".
+      # workflow_run runs in base-repo context where SONAR_TOKEN is available, so
+      # fork PRs are scanned here too — the fork's own token-less test run never
+      # runs this job. Mark it a required check in branch protection under the
+      # context "SonarQube Quality Gate".
       #
       # if: !cancelled() — a self-cancelled sonar run (its own concurrency group)
       # must never post a transient error. On success/failure it resolves every
