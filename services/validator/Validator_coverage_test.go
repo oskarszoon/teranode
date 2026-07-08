@@ -495,7 +495,7 @@ func TestValidator_ReverseSpends_AllRetriesFail(t *testing.T) {
 
 	err = v.reverseSpends(ctx, spends)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "error resetting utxos")
+	assert.Contains(t, err.Error(), "error reversing utxo spends")
 
 	mockStore.AssertExpectations(t)
 }

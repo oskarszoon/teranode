@@ -1556,29 +1556,67 @@ func (v *Validator) sendToBlockAssembler(ctx context.Context, bData *blockassemb
 	return nil
 }
 
-// reverseSpends reverses previously spent UTXOs in case of validation failure.
-// Attempts up to 3 retries with exponential backoff.
-// Returns error if UTXO reversal fails.
+// reverseSpendBackoff is the bounded, sub-second backoff for partial-spend
+// reversal. Index i is the delay BEFORE attempt i (index 0 = immediate).
+// Declared as a package-level var so tests can shrink it.
+var reverseSpendBackoff = []time.Duration{0, 50 * time.Millisecond, 200 * time.Millisecond}
+
+// reverseSpends reverses previously-applied partial spends on a validation abort.
+// It filters to the spends that actually succeeded (Err == nil) — passing a
+// failed (e.g. missing-parent) spend would surface TX_NOT_FOUND inside Unspend
+// and poison the whole batch — and runs on a fresh, bounded context detached
+// from the (possibly already-cancelled) caller context.
 func (v *Validator) reverseSpends(ctx context.Context, spentUtxos []*utxo.Spend) error {
 	ctx, span, deferFn := tracing.Tracer("validator").Start(ctx, "reverseSpends")
 	defer deferFn()
 
-	for retries := uint(0); retries < 3; retries++ {
-		if errReset := v.utxoStore.Unspend(ctx, spentUtxos); errReset != nil {
-			if retries < 2 {
-				backoff := time.Duration(1<<retries) * time.Second
-				v.logger.Errorf("error resetting utxos, retrying in %s: %v", backoff.String(), errReset)
-				time.Sleep(backoff)
-			} else {
-				span.RecordError(errReset)
-				return errors.NewProcessingError("error resetting utxos", errReset)
-			}
-		} else {
-			break
+	applied := make([]*utxo.Spend, 0, len(spentUtxos))
+
+	for _, s := range spentUtxos {
+		if s != nil && s.Err == nil {
+			applied = append(applied, s)
 		}
 	}
 
-	return nil
+	if len(applied) == 0 {
+		return nil
+	}
+
+	// Detach from the caller context: a deadline-aborted validate (with tracing
+	// off, DecoupleTracingSpan does NOT strip cancellation) would otherwise hand
+	// an already-dead context to Unspend, silently skipping the reversal.
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+
+	prometheusSpendReversalInflight.Inc()
+	defer prometheusSpendReversalInflight.Dec()
+
+	start := time.Now()
+	defer func() { prometheusSpendReversalDuration.Observe(time.Since(start).Seconds()) }()
+
+	var lastErr error
+
+retryLoop:
+	for _, backoff := range reverseSpendBackoff {
+		if backoff > 0 {
+			select {
+			case <-rctx.Done():
+				lastErr = rctx.Err()
+				break retryLoop // bounded context expired; no point attempting further
+			case <-time.After(backoff):
+			}
+		}
+
+		if lastErr = v.utxoStore.Unspend(rctx, applied); lastErr == nil {
+			return nil
+		}
+	}
+
+	prometheusSpendReversalFailed.Inc()
+	span.RecordError(lastErr)
+	v.logger.Errorf("[reverseSpends] failed to reverse %d partial spends after %d attempts: %v", len(applied), len(reverseSpendBackoff), lastErr)
+
+	return errors.NewProcessingError("error reversing utxo spends", lastErr)
 }
 
 // extendTransaction adds previous output information to transaction inputs.

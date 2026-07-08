@@ -108,6 +108,15 @@ var (
 	// This histogram tracks database operations for storing and updating transaction metadata,
 	// including validation status, processing timestamps, and related transaction information. Units: seconds.
 	prometheusValidatorSetTxMeta prometheus.Histogram
+
+	// prometheusSpendReversalFailed counts partial-spend reversals that exhausted their retry budget.
+	prometheusSpendReversalFailed prometheus.Counter
+
+	// prometheusSpendReversalDuration measures wall-time of a partial-spend reversal (observability only).
+	prometheusSpendReversalDuration prometheus.Histogram
+
+	// prometheusSpendReversalInflight tracks in-flight partial-spend reversals (observability only).
+	prometheusSpendReversalInflight prometheus.Gauge
 )
 
 // Synchronization primitives
@@ -295,6 +304,34 @@ func _initPrometheusMetrics() {
 			Name:      "set_tx_meta",
 			Help:      "Histogram of validator set tx meta",
 			Buckets:   util.MetricsBucketsMilliSeconds,
+		},
+	)
+
+	prometheusSpendReversalFailed = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Namespace: "teranode",
+			Subsystem: "validator",
+			Name:      "spend_reversal_failed_total",
+			Help:      "Partial-spend reversals that exhausted their retry budget on validation abort",
+		},
+	)
+
+	prometheusSpendReversalDuration = promauto.NewHistogram(
+		prometheus.HistogramOpts{
+			Namespace: "teranode",
+			Subsystem: "validator",
+			Name:      "spend_reversal_duration_seconds",
+			Help:      "Wall-time of partial-spend reversal on validation abort",
+			Buckets:   prometheus.DefBuckets,
+		},
+	)
+
+	prometheusSpendReversalInflight = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: "teranode",
+			Subsystem: "validator",
+			Name:      "spend_reversal_inflight",
+			Help:      "In-flight partial-spend reversals",
 		},
 	)
 }
