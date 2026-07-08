@@ -578,11 +578,14 @@ func retryHTTP[T any](ctx context.Context, cfg retryConfig, attempt func(context
 
 		sleepFor := jitterDelay(delay)
 		if retryAfter > 0 {
-			// Server named a time — honor it (don't jitter an explicit instruction),
-			// clamped to maxDelay so a large or hostile hint can't stall us, but never
-			// discarded: a hint above maxDelay still pins the wait at maxDelay rather
-			// than falling back to the smaller jittered backoff and re-hitting early.
-			sleepFor = retryAfter
+			// Server named a minimum — honor it (never wake earlier), but add UPWARD jitter
+			// ([retryAfter, 1.5*retryAfter]) so a fan-out of concurrent same-peer fetches
+			// doesn't all re-issue on the same tick. This de-syncs the herd even when the
+			// per-peer client limiter is disabled (blockvalidation_per_peer_fetch_rate <= 0),
+			// where nothing else paces the Retry-After path. Clamp to maxDelay so a large or
+			// hostile hint can't stall us; never fall back to the smaller jittered backoff
+			// (which could wake before the server's minimum).
+			sleepFor = retryAfter + time.Duration(rand.Int64N(int64(retryAfter/2)+1))
 			if sleepFor > cfg.maxDelay {
 				sleepFor = cfg.maxDelay
 			}
