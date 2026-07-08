@@ -939,6 +939,7 @@ func GetAndLockChildren(ctx context.Context, s Store, hash chainhash.Hash) ([]ch
 				}
 				txMeta, err := s.Get(gCtx, &current, fields.Utxos)
 				if err != nil {
+					recordDanglingSpenderRef("get_and_lock_children", err)
 					return err
 				}
 				results[i] = txMeta
@@ -1012,6 +1013,7 @@ func GetConflictingChildren(ctx context.Context, s Store, hash chainhash.Hash) (
 			g.Go(func() error {
 				txMeta, err := s.Get(gCtx, &current, fields.Utxos, fields.ConflictingChildren)
 				if err != nil {
+					recordDanglingSpenderRef("get_conflicting_children", err)
 					return err
 				}
 				results[i] = txMeta
@@ -1090,6 +1092,7 @@ func GetCounterConflictingTxHashes(ctx context.Context, s Store, txHash chainhas
 
 		parentTxMeta, err := s.Get(ctx, parentTxHash, fields.Utxos)
 		if err != nil {
+			recordDanglingSpenderRef("get_counter_conflicting", err)
 			return nil, err
 		}
 
