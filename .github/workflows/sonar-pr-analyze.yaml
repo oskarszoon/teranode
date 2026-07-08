@@ -36,14 +36,20 @@ jobs:
     # arm64-safe: only downloads coverage artifacts + runs the sonar scanner CLI
     # (arm64-available); no Go build, no containers.
     runs-on: teranode-runner-4-core-arm
-    # Run for every PR-triggered test outcome (not only success) so the sonar
-    # commit status ALWAYS resolves — a fully skipped job would leave a required
-    # PR check stuck "pending". Only pull_request runs are handled (push-to-main
-    # test runs are filtered out). The analysis steps below are individually
-    # guarded to conclusion == 'success' because they need artifacts that failed
-    # runs never produce; on a non-success run we skip straight to posting a
-    # failure status.
-    if: github.event.workflow_run.event == 'pull_request'
+    # Run for PR-triggered test outcomes other than 'cancelled' so the sonar
+    # commit status resolves instead of leaving a required check stuck "pending".
+    # 'cancelled' is excluded on purpose: teranode_pr_tests uses
+    # cancel-in-progress, so every push to a PR with in-flight tests emits a
+    # cancelled completion for the *superseded* commit. Its successor run reports
+    # on the new head, so acting here would only stamp a spurious failure.
+    # Only pull_request runs are handled (push-to-main test runs are filtered
+    # out). The analysis steps below are individually guarded to
+    # conclusion == 'success' because they need artifacts that failed runs never
+    # produce; on a non-success (but not cancelled) run we skip straight to
+    # posting a failure status.
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion != 'cancelled'
 
     steps:
       - name: Get PR number and metadata
@@ -95,11 +101,29 @@ jobs:
           ref: ${{ steps.pr.outputs.base }}
           fetch-depth: 0
 
-      - name: Checkout PR head
+      # Check out the *tested* commit (workflow_run.head_sha), not the live PR
+      # head, so the scanned tree, the downloaded coverage, and the commit status
+      # all describe the same commit. The tested commit is normally an ancestor
+      # of the current head (a later push just adds commits on top), so fetching
+      # pull/N/head brings it into the object store; fall back to fetching the
+      # exact SHA, and bail if it's unreachable (force-push/rebase since the run
+      # — the head has moved, so this analysis is stale and its successor run
+      # will report on the new head).
+      - name: Checkout tested commit
         if: github.event.workflow_run.conclusion == 'success'
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          TESTED_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
-          git fetch origin pull/${{ steps.pr.outputs.number }}/head:pr-${{ steps.pr.outputs.number }}
-          git checkout pr-${{ steps.pr.outputs.number }}
+          git fetch --no-tags origin "pull/${PR_NUMBER}/head"
+          if ! git cat-file -e "${TESTED_SHA}^{commit}" 2>/dev/null; then
+            git fetch --no-tags origin "${TESTED_SHA}" || true
+          fi
+          if ! git cat-file -e "${TESTED_SHA}^{commit}" 2>/dev/null; then
+            echo "::error::Tested commit ${TESTED_SHA} is unreachable (PR head moved since the test run); refusing to scan a different tree."
+            exit 1
+          fi
+          git checkout --detach "${TESTED_SHA}"
 
       - name: Download coverage artifact
         if: github.event.workflow_run.conclusion == 'success'
@@ -141,25 +165,32 @@ jobs:
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
-      # Post the Quality Gate result as a commit status on the PR head SHA.
-      # workflow_run runs in base-repo context, so this also works for fork PRs
-      # (their SONAR_TOKEN-less builds never reach here). The status attaches to
-      # the PR head commit and can later be marked a required check in branch
-      # protection under the context "SonarQube Quality Gate".
+      # Post the Quality Gate result as a commit status on the *tested* commit
+      # (github.event.workflow_run.head_sha — the SHA the triggering test run
+      # actually ran and Sonar scanned), NOT the live PR head. If a newer commit
+      # was pushed meanwhile this vouches only for the commit that was scanned;
+      # the newer commit gets its own run. Posting to the live head would stamp
+      # commit A's result onto B — a stale green on unscanned code, or a spurious
+      # red — which is exactly what a required check must never do.
       #
-      # runs on always() and resolves every path: tests passed + gate PASSED or
-      # FAILED, tests passed but scan errored, or upstream tests did not succeed
-      # (analysis skipped) -> failure. This keeps a required check from hanging
-      # "pending". One case no workflow_run job can cover: if "Teranode PR tests"
-      # never runs at all (path filter, draft PR) this workflow never triggers,
-      # so require the tests check alongside this one when enforcing.
+      # workflow_run runs in base-repo context, so this also works for fork PRs
+      # (their SONAR_TOKEN-less builds never reach here). Mark it a required check
+      # in branch protection under the context "SonarQube Quality Gate".
+      #
+      # if: !cancelled() — a self-cancelled sonar run (its own concurrency group)
+      # must never post a transient error. On success/failure it resolves every
+      # path: gate PASSED/WARN -> success, FAILED -> failure, scan errored ->
+      # error, upstream tests failed/skipped -> failure. ('cancelled' upstream is
+      # already excluded at the job level.) One case no workflow_run job can
+      # cover: if "Teranode PR tests" never runs at all (path filter, draft PR)
+      # this never triggers, so require the tests check alongside this one.
       - name: Report Quality Gate as commit status
-        if: always()
+        if: ${{ !cancelled() }}
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         env:
           QG_STATUS: ${{ steps.qg.outputs.quality-gate-status }}
           TESTS_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
-          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
           PR_NUMBER: ${{ steps.pr.outputs.number }}
         with:
           script: |
@@ -167,10 +198,11 @@ jobs:
             const testsConclusion = process.env.TESTS_CONCLUSION || '';
             const sha = process.env.HEAD_SHA;
             const pr = process.env.PR_NUMBER;
+            // Keep in sync with sonar.projectKey in sonar-project.properties.
             const projectKey = 'bsv-blockchain_teranode';
 
             if (!sha) {
-              core.setFailed('No PR head SHA resolved; cannot post commit status.');
+              core.setFailed('No tested commit SHA on the workflow_run payload; cannot post commit status.');
               return;
             }
 
@@ -184,6 +216,9 @@ jobs:
             } else if (qg === 'PASSED') {
               state = 'success';
               description = 'Quality Gate passed';
+            } else if (qg === 'WARN') {
+              state = 'success';
+              description = 'Quality Gate passed with warnings';
             } else if (qg === 'FAILED') {
               state = 'failure';
               description = 'Quality Gate failed';
