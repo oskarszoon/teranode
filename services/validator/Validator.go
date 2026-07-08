@@ -912,6 +912,15 @@ func (v *Validator) validateInternal(ctx context.Context, tx *bt.Tx, blockHeight
 			}
 		}
 
+		// Atomicity: never return this abort with partial spends still applied.
+		// The saveAsConflicting branch (creates a record) and the blessed
+		// short-circuit (returns nil err) both return earlier and bypass this
+		// site, so reversal here is either necessary or an ownership-guarded
+		// no-op. reverseSpends filters to the Err==nil subset.
+		if reverseErr := v.reverseSpends(decoupledCtx, spentUtxos); reverseErr != nil {
+			v.logger.Errorf("[Validate][%s] partial-spend reversal failed on abort: %v", txID, reverseErr)
+		}
+
 		err = errors.NewProcessingError("[Validate][%s] error spending utxos", txID, err)
 		span.RecordError(err)
 
