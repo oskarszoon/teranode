@@ -147,8 +147,11 @@ func (u *Server) tryAlternativePeersForCatchup(ctx context.Context, block *model
 			return true
 		}
 
-		// Local error (our rate-wait budget / shutdown) — not the peer's fault, and
-		// another peer won't help; stop trying alternatives without degrading reputation.
+		// break, not continue: the only local errors that reach here are a global cancel
+		// (shutdown / catchup ctx done — no other peer helps) or a local StorageError (a
+		// blob-backend outage — failing over would re-run full catchup against every peer).
+		// There is no per-peer, ctx-live local error on this path (no deadline is set here),
+		// so continuing to the next alternative is never correct. Don't degrade reputation.
 		if errors.IsLocalError(altErr) {
 			u.logger.Warnf("[catchup] Local error trying peer %s for block %s, not blaming peer, stopping alternatives: %v", bestPeer.ID, blockHash.String(), altErr)
 			break

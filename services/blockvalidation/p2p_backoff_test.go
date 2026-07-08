@@ -12,10 +12,12 @@ import (
 	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/services/blockvalidation/testhelpers"
 	"github.com/bsv-blockchain/teranode/services/p2p"
+	"github.com/bsv-blockchain/teranode/stores/blob"
 	"github.com/bsv-blockchain/teranode/ulogger"
 	"github.com/bsv-blockchain/teranode/util"
 	"github.com/jarcoal/httpmock"
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -273,17 +275,83 @@ func TestGetPeersAtMaxHeight_SkipsPrunedPeers(t *testing.T) {
 	require.False(t, urls["http://pruned-1"], "pruned peers must be skipped")
 }
 
-// TestDistributeSubtreesAcrossPeers_SkipsPrunedPeers proves pruned peers are never
-// assigned subtree fetches when spreading load.
-func TestDistributeSubtreesAcrossPeers_SkipsPrunedPeers(t *testing.T) {
-	client := &fakeParallelFetchP2P{peers: []*p2p.PeerInfo{
-		mkTestPeer("pruned-1", "pruned", 100),
-	}}
+// TestClassifyDownloadErr proves the subtree_data error classifier: a dlCtx cancel is local
+// (shutdown — don't blame the peer); a dlCtx or read-error deadline is a non-local network
+// timeout (peer stalled — fail over + ding); a plain read error is left for the caller to
+// wrap as ProcessingError (genuine peer bad-data).
+func TestClassifyDownloadErr(t *testing.T) {
+	h := &chainhash.Hash{0x01}
 
-	res, err := DistributeSubtreesAcrossPeers(context.Background(), ulogger.TestLogger{}, client, "primary", "http://primary", 4)
-	require.NoError(t, err)
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	e := classifyDownloadErr(canceled, h, errors.NewProcessingError("some read error"))
+	require.NotNil(t, e)
+	require.True(t, errors.IsLocalError(e), "dlCtx cancel (shutdown) must be local; got %v", e)
+
+	deadlined, dcancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer dcancel()
+	e = classifyDownloadErr(deadlined, h, errors.NewProcessingError("x"))
+	require.NotNil(t, e)
+	require.False(t, errors.IsLocalError(e), "dlCtx deadline (peer stall) must NOT be local; got %v", e)
+	require.True(t, errors.IsNetworkError(e))
+
+	e = classifyDownloadErr(context.Background(), h, fmt.Errorf("read failed: %w", context.DeadlineExceeded))
+	require.NotNil(t, e)
+	require.False(t, errors.IsLocalError(e), "read-error deadline (peer stall) must NOT be local; got %v", e)
+	require.True(t, errors.IsNetworkError(e))
+
+	require.Nil(t, classifyDownloadErr(context.Background(), h, errors.NewProcessingError("bad subtree data")),
+		"genuine peer bad-data must fall through to the caller's ProcessingError")
+}
+
+// TestFetchAndStoreSubtreeData_StorageExistsErrorHalts proves a local storage failure on the
+// existence read classifies as ErrStorageError (halts loudly) rather than a ProcessingError
+// that fails over across every peer during a blob-backend outage.
+func TestFetchAndStoreSubtreeData_StorageExistsErrorHalts(t *testing.T) {
+	suite := NewCatchupTestSuite(t)
+	defer suite.Cleanup()
+
+	mockStore := &blob.MockStore{}
+	mockStore.On("Exists", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(false, errors.NewProcessingError("blob backend down"))
+	suite.Server.subtreeStore = mockStore
+
+	block := testhelpers.CreateTestBlockChain(t, 1)[0]
+	sh := &chainhash.Hash{0x02}
+	err := suite.Server.fetchAndStoreSubtreeData(suite.Ctx, suite.Ctx, block, sh, nil, "peer", "http://peer")
+	require.Error(t, err)
+	require.True(t, errors.Is(err, errors.ErrStorageError), "a storage existence-read failure must classify as ErrStorageError; got %T: %v", err, err)
+	require.True(t, errors.IsLocalError(err), "and therefore local (no peer blame)")
+}
+
+// TestDistributeSubtreesAcrossPeers_SkipsPrunedAlts proves pruned peers are never assigned
+// subtree fetches (the caller passes only non-pruned alts via catchupAltPeers).
+func TestDistributeSubtreesAcrossPeers_SkipsPrunedAlts(t *testing.T) {
+	// alts is already the non-pruned set (pruned peers filtered by catchupAltPeers), so pass
+	// only a non-pruned primary and empty alts — result must be all primary, no panic.
+	res := DistributeSubtreesAcrossPeers(ulogger.TestLogger{}, "primary", "http://primary", false, nil, 4)
+	require.Len(t, res, 4)
 	for _, p := range res {
-		require.NotEqual(t, "http://pruned-1", p.BaseURL, "pruned peer must not be assigned subtrees")
-		require.Equal(t, "http://primary", p.BaseURL, "only the (non-pruned) primary should remain")
+		require.Equal(t, "http://primary", p.BaseURL)
+	}
+}
+
+// TestDistributeSubtreesAcrossPeers_PrunedPrimaryDropped proves a pruned primary is dropped
+// from the round-robin seed when a non-pruned alternative exists.
+func TestDistributeSubtreesAcrossPeers_PrunedPrimaryDropped(t *testing.T) {
+	alts := []*p2p.PeerInfo{mkTestPeer("full-1", "full", 100)}
+	res := DistributeSubtreesAcrossPeers(ulogger.TestLogger{}, "pruned-primary", "http://pruned-primary", true, alts, 4)
+	require.Len(t, res, 4)
+	for _, p := range res {
+		require.Equal(t, "http://full-1", p.BaseURL, "pruned primary must not be assigned; only the non-pruned alt")
+	}
+}
+
+// TestDistributeSubtreesAcrossPeers_AllPrunedKeepsPrimary proves the all-pruned fallback:
+// a pruned primary with no alternatives is still seeded (round-robin has a target, no div-0).
+func TestDistributeSubtreesAcrossPeers_AllPrunedKeepsPrimary(t *testing.T) {
+	res := DistributeSubtreesAcrossPeers(ulogger.TestLogger{}, "pruned-primary", "http://pruned-primary", true, nil, 3)
+	require.Len(t, res, 3)
+	for _, p := range res {
+		require.Equal(t, "http://pruned-primary", p.BaseURL, "all-pruned segment must fall back to the primary, not panic")
 	}
 }

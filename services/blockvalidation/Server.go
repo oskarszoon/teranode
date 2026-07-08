@@ -1901,8 +1901,11 @@ func (u *Server) processCatchupChItem(ctx context.Context, c processBlockCatchup
 					catchupSucceeded = true
 					break
 				} else if errors.IsLocalError(altErr) {
-					// Local error (our rate-wait budget / shutdown) — not the peer's fault,
-					// and another peer won't help; stop trying alternatives.
+					// break, not continue: the only local errors reaching here are a global
+					// cancel (shutdown / catchup ctx done — no other peer helps) or a local
+					// StorageError (blob-backend outage — failing over would re-run full
+					// catchup against every peer). No per-peer, ctx-live local error exists on
+					// this path (no deadline is set here), so continuing is never correct.
 					u.logger.Warnf("[catchup] Local error trying cached alternative peer %s for block %s, not blaming peer: %v", alt.peerID, blockHash.String(), altErr)
 					break
 				} else {

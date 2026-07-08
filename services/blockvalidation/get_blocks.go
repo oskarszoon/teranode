@@ -16,6 +16,7 @@ import (
 	"github.com/bsv-blockchain/teranode/model"
 	"github.com/bsv-blockchain/teranode/pkg/adaptivefetch"
 	"github.com/bsv-blockchain/teranode/pkg/fileformat"
+	"github.com/bsv-blockchain/teranode/services/p2p"
 	"github.com/bsv-blockchain/teranode/stores/blob/options"
 	"github.com/bsv-blockchain/teranode/util"
 	"github.com/bsv-blockchain/teranode/util/tracing"
@@ -459,15 +460,23 @@ func (u *Server) fetchSubtreeDataForBlock(gCtx context.Context, block *model.Blo
 	}
 	g.SetLimit(subtreeConcurrency)
 
+	// Compute the block-level alternative peer set ONCE (a single GetPeersForCatchup for the
+	// whole block, not per subtree on failure) plus whether the primary itself is pruned.
+	var blockAltPeers []*p2p.PeerInfo
+	primaryPruned := false
+	if u.p2pClient != nil {
+		var apErr error
+		blockAltPeers, primaryPruned, apErr = catchupAltPeers(ctx, u.logger, u.p2pClient, peerID)
+		if apErr != nil {
+			u.logger.Warnf("[catchup:fetchSubtreeDataForBlock][%s] Failed to get alternative peers: %v", block.Hash().String(), apErr)
+			blockAltPeers = nil
+		}
+	}
+
 	// Get peer assignments for subtrees if parallel fetching is enabled
 	var peerAssignments []*PeerForSubtreeFetch
 	if u.settings.BlockValidation.CatchupParallelFetchEnabled && u.p2pClient != nil {
-		var err error
-		peerAssignments, err = DistributeSubtreesAcrossPeers(ctx, u.logger, u.p2pClient, peerID, baseURL, len(block.Subtrees))
-		if err != nil {
-			u.logger.Warnf("[catchup:fetchSubtreeDataForBlock][%s] Failed to distribute subtrees across peers: %v, using single peer", block.Hash().String(), err)
-			peerAssignments = nil
-		}
+		peerAssignments = DistributeSubtreesAcrossPeers(u.logger, peerID, baseURL, primaryPruned, blockAltPeers, len(block.Subtrees))
 	}
 
 	// Process each unique subtree concurrently
@@ -489,7 +498,7 @@ func (u *Server) fetchSubtreeDataForBlock(gCtx context.Context, block *model.Blo
 		capturedBaseURL := fetchBaseURL
 
 		g.Go(func() error {
-			servingPeerID, err := u.fetchAndStoreSubtreeAndSubtreeData(ctx, parentCtx, block, &subtreeHashCopy, capturedPeerID, capturedBaseURL)
+			servingPeerID, err := u.fetchAndStoreSubtreeAndSubtreeData(ctx, parentCtx, block, &subtreeHashCopy, capturedPeerID, capturedBaseURL, blockAltPeers)
 			if err != nil {
 				return err
 			}
@@ -606,6 +615,28 @@ func (u *Server) fetchAndStoreSubtree(ctx context.Context, block *model.Block, s
 	return subtree, nil
 }
 
+// classifyDownloadErr maps a subtree_data fetch/parse failure to the right error class so the
+// catchup reputation/failover gates don't misfire. dlCtx is the download context (a child of
+// shutdownCtx). Returns nil to mean "genuine peer bad-data — the caller wraps ProcessingError".
+//
+// Two subtleties, both load-bearing:
+//   - Order: a shutdown cancel and a peer stall (per-request streaming-timeout deadline) both
+//     surface here as read/parse errors; classify the cancel as LOCAL and the deadline as a
+//     (non-local) peer network-timeout, so a stalling peer — the wedge this PR targets — is
+//     failed over and dinged rather than silently absolved.
+//   - Do NOT wrap err in the timeout branch: (*Error).Is falls back to substring matching, so a
+//     chain that renders "context deadline exceeded" is infectious — no outer re-classification
+//     can undo it. NewNetworkTimeoutError with no wrapped error keeps the peer-fault class clean.
+func classifyDownloadErr(dlCtx context.Context, subtreeHash *chainhash.Hash, err error) error {
+	if errors.Is(dlCtx.Err(), context.Canceled) {
+		return errors.NewContextCanceledError("[catchup:fetchAndStoreSubtreeData] subtree data aborted (shutdown) for %s", subtreeHash.String(), context.Canceled)
+	}
+	if errors.Is(dlCtx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
+		return errors.NewNetworkTimeoutError("[catchup:fetchAndStoreSubtreeData] subtree data timed out for %s", subtreeHash.String())
+	}
+	return nil
+}
+
 // fetchAndStoreSubtreeData fetches and stores only the subtreeData. shutdownCtx is the
 // catchup parent context (NOT the per-subtree errgroup child): the download+store is
 // derived from it so a sibling subtree failing in the same batch can't abort this in-flight
@@ -624,7 +655,14 @@ func (u *Server) fetchAndStoreSubtreeData(ctx context.Context, shutdownCtx conte
 	// Check if we already have the subtreeData
 	subtreeDataExists, err := u.subtreeStore.Exists(ctx, subtreeHash[:], fileformat.FileTypeSubtreeData)
 	if err != nil {
-		return errors.NewProcessingError("[catchup:fetchAndStoreSubtreeData] Error checking subtreeData existence for %s: %v", subtreeHash.String(), err)
+		// A sibling/shutdown cancel of this existence read is local, not a storage fault.
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		// A genuine store failure (disk full / blob backend down) must classify as a STORAGE
+		// error so the loud local-storage gate halts catchup, rather than a ProcessingError
+		// (neither local nor storage) that fails over across every peer for a local outage.
+		return errors.NewStorageError("[catchup:fetchAndStoreSubtreeData] error checking subtreeData existence for %s", subtreeHash.String(), err)
 	}
 
 	if subtreeDataExists {
@@ -657,6 +695,9 @@ func (u *Server) fetchAndStoreSubtreeData(ctx context.Context, shutdownCtx conte
 	subtreeDataReader, err := u.fetchSubtreeDataFromPeer(ctx, subtreeHash, peerID, baseURL,
 		func(c context.Context) error { return u.awaitPeerFetchSlot(c, baseURL) })
 	if err != nil {
+		if c := classifyDownloadErr(ctx, subtreeHash, err); c != nil {
+			return c
+		}
 		return errors.NewProcessingError("[catchup:fetchAndStoreSubtreeData] Failed to fetch subtreeData for %s", subtreeHash.String(), err)
 	}
 	defer subtreeDataReader.Close()
@@ -674,6 +715,9 @@ func (u *Server) fetchAndStoreSubtreeData(ctx context.Context, shutdownCtx conte
 	// compared to the transactions in the subtree
 	subtreeData, err := subtreepkg.NewSubtreeDataFromReader(subtree, subtreeDataBufferedReader)
 	if err != nil {
+		if c := classifyDownloadErr(ctx, subtreeHash, err); c != nil {
+			return c
+		}
 		return errors.NewProcessingError("[catchup:fetchAndStoreSubtreeData] Failed to create subtreeData for %s", subtreeHash.String(), err)
 	}
 
@@ -690,6 +734,9 @@ func (u *Server) fetchAndStoreSubtreeData(ctx context.Context, shutdownCtx conte
 	// Try to serialize the subtreeData to validate it's complete
 	subtreeDataBytes, err := subtreeData.Serialize()
 	if err != nil {
+		if c := classifyDownloadErr(ctx, subtreeHash, err); c != nil {
+			return c
+		}
 		return errors.NewProcessingError("[catchup:fetchAndStoreSubtreeData] Peer %s (%s) provided incomplete subtree data for %s", peerID, baseURL, subtreeHash.String(), err)
 	}
 
@@ -712,7 +759,7 @@ func (u *Server) fetchAndStoreSubtreeData(ctx context.Context, shutdownCtx conte
 // at max height before giving up.
 // Returns the peer ID that actually served the data and any error.
 func (u *Server) fetchAndStoreSubtreeAndSubtreeData(ctx context.Context, shutdownCtx context.Context, block *model.Block, subtreeHash *chainhash.Hash,
-	peerID, baseURL string) (string, error) {
+	peerID, baseURL string, alts []*p2p.PeerInfo) (string, error) {
 	ctx, _, deferFn := tracing.Tracer("blockvalidation").Start(ctx, "fetchAndStoreSubtreeAndSubtreeData",
 		tracing.WithParentStat(u.stats),
 		// tracing.WithDebugLogMessage(u.logger, "[catchup:fetchAndStoreSubtreeAndSubtreeData] fetching subtree and data for %s", subtreeHash.String()),
@@ -739,20 +786,20 @@ func (u *Server) fetchAndStoreSubtreeAndSubtreeData(ctx context.Context, shutdow
 		u.logger.Warnf("[catchup:fetchAndStoreSubtreeAndSubtreeData] Primary peer %s failed to fetch subtree for %s: %v, trying alternatives", peerID, subtreeHash.String(), err)
 	}
 
-	// Primary peer failed, try alternative peers
+	// Primary peer failed, try the block-level alternative peers (computed once by the caller
+	// in fetchSubtreeDataForBlock, so no per-subtree GetPeersForCatchup gRPC).
 	var lastErr error = err
-	if u.p2pClient != nil {
-		alternativePeers, getPeersErr := GetPeersAtMaxHeight(ctx, u.logger, u.p2pClient, peerID)
-		if getPeersErr != nil {
-			u.logger.Warnf("[catchup:fetchAndStoreSubtreeAndSubtreeData] Failed to get alternative peers: %v", getPeersErr)
-		} else if len(alternativePeers) > 0 {
-			u.logger.Infof("[catchup:fetchAndStoreSubtreeAndSubtreeData] Trying %d alternative peers for subtree %s", len(alternativePeers), subtreeHash.String())
+	{
+		if len(alts) > 0 {
+			u.logger.Infof("[catchup:fetchAndStoreSubtreeAndSubtreeData] Trying %d alternative peers for subtree %s", len(alts), subtreeHash.String())
 
-			for _, altPeer := range alternativePeers {
+			for _, altPeer := range alts {
 				altPeerID := altPeer.ID.String()
 				altBaseURL := altPeer.DataHubURL
 
-				if altBaseURL == "" {
+				// Skip peers without a data hub and the assigned peer we already tried for
+				// THIS subtree (alts is the whole block set, not excluding this subtree's peer).
+				if altBaseURL == "" || altPeerID == peerID {
 					continue
 				}
 
