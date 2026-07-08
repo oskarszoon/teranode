@@ -132,14 +132,21 @@ func (e *env) deleteTxWithParents(ctx context.Context, txHash *chainhash.Hash, p
 			// deleted, or have had its outputs removed. SQL raises ErrNotFound
 			// ("output X:Y not found") while Aerospike raises ErrTxNotFound.
 			//
-			// NOTE: tolerance is batch-wide. Aerospike short-circuits on the
-			// first failing input (subsequent inputs are not unspent). SQL is
+			// NOTE: tolerance is batch-wide. Aerospike's Unspend now attempts
+			// every input in the batch and aggregates per-record errors via
+			// errors.Join (stores/utxo/aerospike/un_spend.go), so subsequent
+			// inputs ARE unspent even when an earlier one fails. SQL remains
 			// transactional and rolls back the entire batch on any failure —
-			// no inputs are unspent. Acceptable here because the tolerated
-			// outcome is "parent already gone": there is no UTXO row to
-			// un-mark, so the no-op is correct. If a future store gains
-			// per-input partial-success semantics, switch to single-input
-			// calls and aggregate errors.
+			// no inputs are unspent there. isNotFound walks the joined
+			// *Error chain, so a batch that is entirely NotFound/TxNotFound
+			// is still tolerated either way.
+			//
+			// Caveat (known follow-up, not fixed here): isNotFound matches if
+			// ANY link in the chain is NotFound, not only if ALL links are.
+			// A MIXED aggregate — one NotFound joined with a genuine
+			// StorageError on a different input — is therefore also
+			// tolerated here and the real error is swallowed, where the old
+			// first-error-return semantics would have surfaced it directly.
 			if !isNotFound(err) {
 				return false, errors.NewStorageError("Unspend tx %s: %w", txHash.String(), err)
 			}

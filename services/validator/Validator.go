@@ -917,6 +917,12 @@ func (v *Validator) validateInternal(ctx context.Context, tx *bt.Tx, blockHeight
 		// short-circuit (returns nil err) both return earlier and bypass this
 		// site, so reversal here is either necessary or an ownership-guarded
 		// no-op. reverseSpends filters to the Err==nil subset.
+		//
+		// Known carve-out: on the store's batch-timeout path, Spend returns a
+		// nil spends slice, so reverseSpends is a no-op and any spends that
+		// already completed before the timeout survive without a reversal
+		// record — the documented spend-WAL residual (design spec §7). The
+		// atomic-validate invariant holds everywhere except that timeout path.
 		if reverseErr := v.reverseSpends(decoupledCtx, spentUtxos); reverseErr != nil {
 			v.logger.Errorf("[Validate][%s] partial-spend reversal failed on abort: %v", txID, reverseErr)
 		}
