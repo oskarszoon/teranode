@@ -35,6 +35,9 @@ var (
 	// Class labels: tx_invalid, service, processing, policy, other.
 	prometheusLegacyNetsyncPrewarmErrors *prometheus.CounterVec
 
+	// prometheusLegacyOrphanParked counts transactions parked into the orphan pool, by reason.
+	prometheusLegacyOrphanParked *prometheus.CounterVec
+
 	prometheusMetricsInitOnce sync.Once
 )
 
@@ -210,4 +213,12 @@ func _initPrometheusMetrics() {
 		Help:      "Number of validator errors observed during the pre-warm path in validateTransactions, by class",
 	}, []string{"class"})
 	prometheus.MustRegister(prometheusLegacyNetsyncPrewarmErrors)
+
+	prometheusLegacyOrphanParked = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "teranode",
+		Subsystem: "legacy_netsync",
+		Name:      "orphan_parked_total",
+		Help:      "Transactions parked into the orphan pool, by reason",
+	}, []string{"reason"})
+	prometheus.MustRegister(prometheusLegacyOrphanParked)
 }

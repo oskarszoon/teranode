@@ -1095,9 +1095,16 @@ func (sm *SyncManager) handleTxMsg(tmsg *txMsg) {
 	if err != nil {
 		if errors.Is(err, errors.ErrTxMissingParent) || errors.Is(err, errors.ErrTxLocked) {
 			// this is an orphan transaction, we will accept it when the parent comes in
+			reason := "locked"
+			if errors.Is(err, errors.ErrTxMissingParent) {
+				reason = "missing-parent"
+			}
+
+			recordOrphanParked(reason)
+
 			// first check if the transaction already exists in the orphan pool, otherwise add it
 			if _, orphanTxExists := sm.orphanTxs.Get(*txHash); !orphanTxExists {
-				sm.logger.Debugf("orphan transaction %v added from %s", txHash, peer)
+				sm.logger.Warnf("orphan transaction %v parked (reason=%s) from %s", txHash, reason, peer)
 
 				// create a map of the parents of the transaction for faster lookups
 				txParents := txmap.NewSyncedMap[chainhash.Hash, struct{}]()
@@ -1145,6 +1152,14 @@ func (sm *SyncManager) handleTxMsg(tmsg *txMsg) {
 	if len(acceptedTxs) > 0 {
 		sm.peerNotifier.AnnounceNewTransactions(acceptedTxs)
 	}
+}
+
+// recordOrphanParked increments prometheusLegacyOrphanParked for the given reason.
+// Called once per park decision (every time a tx is deemed an orphan), regardless of
+// whether it was already present in the orphan pool, so the metric reflects park
+// events rather than only first-time insertions.
+func recordOrphanParked(reason string) {
+	prometheusLegacyOrphanParked.WithLabelValues(reason).Inc()
 }
 
 // processOrphanTransactions recursively processes orphan transactions that were waiting for a transaction to be accepted
