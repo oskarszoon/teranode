@@ -295,7 +295,7 @@ func TestClassifyDownloadErr(t *testing.T) {
 	require.False(t, errors.IsLocalError(e), "dlCtx deadline (peer stall) must NOT be local; got %v", e)
 	require.True(t, errors.IsNetworkError(e))
 
-	e = classifyDownloadErr(context.Background(), h, fmt.Errorf("read failed: %w", context.DeadlineExceeded))
+	e = classifyDownloadErr(context.Background(), h, errors.NewProcessingError("read failed", context.DeadlineExceeded))
 	require.NotNil(t, e)
 	require.False(t, errors.IsLocalError(e), "read-error deadline (peer stall) must NOT be local; got %v", e)
 	require.True(t, errors.IsNetworkError(e))
