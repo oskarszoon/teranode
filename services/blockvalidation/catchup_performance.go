@@ -387,6 +387,9 @@ func catchupAltPeers(ctx context.Context, logger ulogger.Logger, p2pClient P2PCl
 	// pruned; an unknown primary is left as-is (don't drop a peer we can't classify).
 	primaryPruned := false
 	for _, peer := range peers {
+		if peer == nil {
+			continue
+		}
 		if peer.ID.String() == primaryPeerID && isPrunedPeer(peer.Storage) {
 			primaryPruned = true
 			break

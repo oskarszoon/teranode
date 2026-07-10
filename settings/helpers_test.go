@@ -6,7 +6,16 @@ import (
 	"time"
 
 	"github.com/ordishs/gocore"
+	"github.com/stretchr/testify/require"
 )
+
+func TestGetInt64RejectsOverflow(t *testing.T) {
+	const key = "test_int64_overflow"
+	gocore.Config().Set(key, "9223372036854775808")
+	t.Cleanup(func() { gocore.Config().Unset(key) })
+
+	require.Panics(t, func() { _ = getInt64(key, 8*1024*1024*1024) })
+}
 
 func TestGetString(t *testing.T) {
 	gocore.Config().Set("test_string", "hello")

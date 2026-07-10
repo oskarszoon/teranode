@@ -45,7 +45,10 @@ func getInt32(key string, defaultValue int32, alternativeContext ...string) int3
 }
 
 func getInt64(key string, defaultValue int64, alternativeContext ...string) int64 {
-	value, _ := gocore.Config(alternativeContext...).GetInt64(key, defaultValue)
+	value, _, err := gocore.Config(alternativeContext...).TryGetInt64(key, defaultValue)
+	if err != nil {
+		panic(err)
+	}
 
 	return value
 }

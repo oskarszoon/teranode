@@ -585,6 +585,32 @@ func TestAwaitPeerFetchSlot_RateWaitErrorIsLocal(t *testing.T) {
 		"must stay local when double-wrapped in ServiceError (subtree path)")
 }
 
+func TestFetchSingleBlock_PreExpiredLimiterDeadlineStaysLocal(t *testing.T) {
+	suite := NewCatchupTestSuite(t)
+	defer suite.Cleanup()
+	suite.Server.settings.BlockValidation.PerPeerFetchRate = 1
+	suite.Server.settings.Policy.ExcessiveBlockSize = 0
+
+	const baseURL = "http://peer"
+	require.NoError(t, suite.Server.awaitPeerFetchSlot(context.Background(), baseURL), "consume initial limiter token")
+
+	var requests atomic.Int32
+	httpmock.ActivateNonDefault(util.HTTPClient())
+	defer httpmock.DeactivateAndReset()
+	httpmock.RegisterNoResponder(func(*http.Request) (*http.Response, error) {
+		requests.Add(1)
+		return httpmock.NewStringResponse(http.StatusOK, "unexpected"), nil
+	})
+
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	_, err := suite.Server.fetchSingleBlock(ctx, &chainhash.Hash{}, "peer", baseURL)
+	require.Error(t, err)
+	require.True(t, errors.IsLocalError(err), "expired local limiter wait must stay local: %v", err)
+	require.False(t, errors.IsNetworkError(err), "expired local limiter wait must not blame peer: %v", err)
+	require.Zero(t, requests.Load())
+}
+
 // TestSelectBestPeersForCatchup_PrunedFallback proves the catchup primary selection
 // deprioritises pruned peers but falls back to them when no non-pruned peer is
 // available, so an all-pruned peer set still gets an attempt instead of stranding.
@@ -711,6 +737,17 @@ func TestFilterMaxHeightPeers_PreservesInputOrderForEqualKeys(t *testing.T) {
 	}
 	require.Equal(t, wantHigh, gotHigh)
 	require.Equal(t, wantLow, gotLow)
+}
+
+func TestCatchupAltPeers_SkipsNilEntries(t *testing.T) {
+	primary := mkTestPeer("primary", "full", 100)
+	client := &catchupPeersP2PMock{peers: []*p2p.PeerInfo{nil, primary}}
+
+	peers, primaryPruned, err := catchupAltPeers(context.Background(), ulogger.TestLogger{}, client, primary.ID.String())
+
+	require.NoError(t, err)
+	require.False(t, primaryPruned)
+	require.Len(t, peers, 1)
 }
 
 // TestClassifyDownloadErr proves the subtree_data error classifier: a dlCtx cancel is local

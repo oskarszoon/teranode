@@ -290,6 +290,29 @@ func (sc *SyncCoordinator) HandleCatchupFailure(reason string) {
 	}
 }
 
+// HandleCatchupFailureForPeer handles an operation-level failure notification only
+// when the reported peer is still the active sync peer. Per-peer reputation is
+// updated by the direct RecordCatchupFailure path before this notification arrives;
+// this method only performs the peer switch, avoiding a duplicate failure count.
+func (sc *SyncCoordinator) HandleCatchupFailureForPeer(peerID, reason string) {
+	sc.logger.Infof("[SyncCoordinator] Handling catchup failure for peer %s: %s", peerID, reason)
+
+	sc.mu.Lock()
+	currentPeer := sc.currentSyncPeer
+	if peerID == "" || currentPeer != peerID {
+		sc.mu.Unlock()
+		sc.logger.Infof("[SyncCoordinator] Ignoring catchup failure for non-current peer %s (current: %s)", peerID, currentPeer)
+		return
+	}
+	sc.currentSyncPeer = ""
+	sc.mu.Unlock()
+
+	sc.logger.Infof("[SyncCoordinator] Cleared failed sync peer %s", peerID)
+	if err := sc.TriggerSync(); err != nil {
+		sc.logger.Errorf("[SyncCoordinator] Failed to trigger sync after failure: %v", err)
+	}
+}
+
 // selectNewSyncPeer selects a new sync peer based on current criteria.
 // The returned ID is a canonical libp2p ID string.
 func (sc *SyncCoordinator) selectNewSyncPeer() string {

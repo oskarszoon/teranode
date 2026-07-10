@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"runtime"
 	"sort"
 	"strings"
@@ -375,8 +376,8 @@ func readBlockFromReader(block *Block, buf io.Reader) (*Block, error) {
 		return nil, errors.NewBlockInvalidError("block subtree length mismatch, expected %d, actual %d", block.subtreeLength, block.Subtrees)
 	}
 
-	coinbaseTx := new(bt.Tx)
-	if _, err = coinbaseTx.ReadFrom(buf); err != nil {
+	coinbaseTx, err := readTransactionAllocationSafe(buf)
+	if err != nil {
 		return nil, errors.NewBlockInvalidError("error reading coinbase tx", err)
 	}
 
@@ -412,6 +413,139 @@ func readBlockFromReader(block *Block, buf io.Reader) (*Block, error) {
 	}
 
 	return block, nil
+}
+
+// readTransactionAllocationSafe consumes one serialized transaction without allocating
+// directly from attacker-controlled count or script-length prefixes. Raw bytes are buffered
+// only as they are actually received, then decoded by go-bt after every advertised field has
+// been proven present inside the reader's remaining transport budget.
+func readTransactionAllocationSafe(r io.Reader) (*bt.Tx, error) {
+	var raw bytes.Buffer
+	tee := io.TeeReader(r, &raw)
+	if err := scanSerializedTransaction(tee, r); err != nil {
+		return nil, err
+	}
+
+	tx, err := bt.NewTxFromBytes(raw.Bytes())
+	if err != nil {
+		return nil, err
+	}
+	return tx, nil
+}
+
+func scanSerializedTransaction(r io.Reader, budgetReader io.Reader) error {
+	var version [4]byte
+	if _, err := io.ReadFull(r, version[:]); err != nil {
+		return err
+	}
+
+	inputCount, err := wire.ReadVarInt(r, 0)
+	if err != nil {
+		return err
+	}
+
+	var outputCount uint64
+	extended := false
+	if inputCount == 0 {
+		outputCount, err = wire.ReadVarInt(r, 0)
+		if err != nil {
+			return err
+		}
+		if outputCount == 0 {
+			var markerOrLockTime [4]byte
+			if _, err = io.ReadFull(r, markerOrLockTime[:]); err != nil {
+				return err
+			}
+			if binary.BigEndian.Uint32(markerOrLockTime[:]) != 0xEF {
+				return nil
+			}
+			extended = true
+			inputCount, err = wire.ReadVarInt(r, 0)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	if err = validateTransactionElementCount(inputCount, remainingReaderBudget(budgetReader), 41, "input"); err != nil {
+		return err
+	}
+	for i := uint64(0); i < inputCount; i++ {
+		if err = discardExact(r, 36); err != nil { // previous hash + output index
+			return err
+		}
+		if err = discardSerializedScript(r, budgetReader, "unlocking script"); err != nil {
+			return err
+		}
+		if err = discardExact(r, 4); err != nil { // sequence
+			return err
+		}
+		if extended {
+			if err = discardExact(r, 8); err != nil { // previous satoshis
+				return err
+			}
+			if err = discardSerializedScript(r, budgetReader, "previous transaction script"); err != nil {
+				return err
+			}
+		}
+	}
+
+	if inputCount > 0 || extended {
+		outputCount, err = wire.ReadVarInt(r, 0)
+		if err != nil {
+			return err
+		}
+	}
+	if err = validateTransactionElementCount(outputCount, remainingReaderBudget(budgetReader), 9, "output"); err != nil {
+		return err
+	}
+	for i := uint64(0); i < outputCount; i++ {
+		if err = discardExact(r, 8); err != nil { // satoshis
+			return err
+		}
+		if err = discardSerializedScript(r, budgetReader, "locking script"); err != nil {
+			return err
+		}
+	}
+
+	return discardExact(r, 4) // lock time
+}
+
+func discardSerializedScript(r io.Reader, budgetReader io.Reader, label string) error {
+	scriptLength, err := wire.ReadVarInt(r, 0)
+	if err != nil {
+		return err
+	}
+	remaining := remainingReaderBudget(budgetReader)
+	if scriptLength > uint64(math.MaxInt64) || scriptLength > remaining {
+		return errors.NewBlockInvalidError("%s length %d exceeds remaining transport budget %d", label, scriptLength, remaining)
+	}
+	return discardExact(r, int64(scriptLength))
+}
+
+func discardExact(r io.Reader, n int64) error {
+	read, err := io.CopyN(io.Discard, r, n)
+	if err != nil {
+		return errors.NewBlockInvalidError("expected %d bytes, got %d", n, read, err)
+	}
+	return nil
+}
+
+func remainingReaderBudget(r io.Reader) uint64 {
+	if limited, ok := r.(*io.LimitedReader); ok {
+		if limited.N <= 0 {
+			return 0
+		}
+		return uint64(limited.N)
+	}
+	return math.MaxUint64
+}
+
+func validateTransactionElementCount(count, remaining, minimumSize uint64, label string) error {
+	if minimumSize > 0 && count > remaining/minimumSize {
+		return errors.NewBlockInvalidError("transaction %s count %d exceeds remaining transport budget %d", label, count, remaining)
+	}
+	return nil
 }
 
 // GetHash calculates the hash of the block header and caches it.

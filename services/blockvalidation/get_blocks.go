@@ -81,7 +81,7 @@ func (u *Server) awaitPeerFetchSlot(ctx context.Context, baseURL string) error {
 
 	if err := lim.Wait(ctx); err != nil {
 		if cerr := ctx.Err(); cerr != nil {
-			return cerr // already a context error → IsLocalError true
+			return errors.NewContextCanceledError("[peerFetchLimiter] local pacing wait aborted", cerr)
 		}
 		// x/time/rate.Wait returns a plain "would exceed context deadline" error here
 		// (ctx not yet done). Wrap the real context.DeadlineExceeded sentinel so the error
