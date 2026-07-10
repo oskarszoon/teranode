@@ -1,7 +1,13 @@
 name: Teranode PR tests
+run-name: sonar-pr/${{ github.event.pull_request.number }}/merge/${{ github.sha }}/base/${{ github.event.pull_request.base.sha }}/ref/${{ github.event.pull_request.base.ref }}
 
 on:
   pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - edited
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -152,4 +158,3 @@ jobs:
           name: sonar-filename-report
           path: sonar_filename_report.json
           retention-days: 1
-
