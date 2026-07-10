@@ -296,34 +296,34 @@ func DistributeSubtreesAcrossPeers(
 // excludePeerID (empty string excludes none), sorted by reputation then response time.
 // Pure helper over a provided list so the peer set can be fetched once per block.
 func filterMaxHeightPeers(peers []*p2p.PeerInfo, excludePeerID string) []*p2p.PeerInfo {
-	// Find max height, allowing 1 block tolerance for propagation delay.
+	candidates := make([]*p2p.PeerInfo, 0, len(peers))
 	var maxHeight uint32
 	for _, peer := range peers {
+		if peer == nil {
+			continue
+		}
+		if excludePeerID != "" && peer.ID.String() == excludePeerID {
+			continue
+		}
+		if peer.DataHubURL == "" || peer.IsBanned || peer.ReputationScore < 20.0 || isPrunedPeer(peer.Storage) {
+			continue
+		}
+		candidates = append(candidates, peer)
 		if peer.Height > maxHeight {
 			maxHeight = peer.Height
 		}
 	}
+
 	maxHeightThreshold := maxHeight
 	if maxHeight > 0 {
 		maxHeightThreshold = maxHeight - 1
 	}
 
-	eligiblePeers := make([]*p2p.PeerInfo, 0, len(peers))
-	for _, peer := range peers {
-		if excludePeerID != "" && peer.ID.String() == excludePeerID {
-			continue
+	eligiblePeers := make([]*p2p.PeerInfo, 0, len(candidates))
+	for _, peer := range candidates {
+		if peer.Height >= maxHeightThreshold {
+			eligiblePeers = append(eligiblePeers, peer)
 		}
-		if peer.DataHubURL == "" || peer.Height < maxHeightThreshold || peer.IsBanned || peer.ReputationScore < 20.0 {
-			continue
-		}
-		// Skip pruned peers: they 404 on archival subtree data during IBD, so there is no
-		// point including them for subtree fetches / distribution. (Primary/header selection
-		// in selectBestPeersForCatchup keeps a pruned fallback to avoid stranding; subtree
-		// fetches do not, because pruned peers cannot serve them.)
-		if isPrunedPeer(peer.Storage) {
-			continue
-		}
-		eligiblePeers = append(eligiblePeers, peer)
 	}
 
 	// Sort by reputation (descending) then by response time (ascending).

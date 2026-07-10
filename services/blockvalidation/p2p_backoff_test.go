@@ -275,6 +275,19 @@ func TestGetPeersAtMaxHeight_SkipsPrunedPeers(t *testing.T) {
 	require.False(t, urls["http://pruned-1"], "pruned peers must be skipped")
 }
 
+func TestFilterMaxHeightPeers_ComputesTipFromEligibleArchivalPeers(t *testing.T) {
+	peers := []*p2p.PeerInfo{
+		mkTestPeer("pruned-tip", "pruned", 100),
+		mkTestPeer("full-two-behind", "full", 98),
+		mkTestPeer("legacy-three-behind", "", 97),
+	}
+
+	got := filterMaxHeightPeers(peers, "")
+	require.Len(t, got, 2)
+	urls := []string{got[0].DataHubURL, got[1].DataHubURL}
+	require.ElementsMatch(t, []string{"http://full-two-behind", "http://legacy-three-behind"}, urls)
+}
+
 // TestClassifyDownloadErr proves the subtree_data error classifier: a dlCtx cancel is local
 // (shutdown — don't blame the peer); a dlCtx or read-error deadline is a non-local network
 // timeout (peer stalled — fail over + ding); a plain read error is left for the caller to
