@@ -398,3 +398,42 @@ func catchupAltPeers(ctx context.Context, logger ulogger.Logger, p2pClient P2PCl
 
 	return alts, primaryPruned, nil
 }
+
+type catchupPeerSnapshot struct {
+	once          sync.Once
+	load          func() ([]*p2p.PeerInfo, bool, error)
+	onError       func(error)
+	peers         []*p2p.PeerInfo
+	primaryPruned bool
+	err           error
+}
+
+func newCatchupPeerSnapshot(
+	ctx context.Context,
+	logger ulogger.Logger,
+	p2pClient P2PClientForParallelFetch,
+	primaryPeerID string,
+	blockHash string,
+) *catchupPeerSnapshot {
+	return &catchupPeerSnapshot{
+		load: func() ([]*p2p.PeerInfo, bool, error) {
+			return catchupAltPeers(ctx, logger, p2pClient, primaryPeerID)
+		},
+		onError: func(err error) {
+			logger.Warnf("[catchup:fetchSubtreeDataForBlock][%s] Failed to get alternative peers: %v", blockHash, err)
+		},
+	}
+}
+
+func (s *catchupPeerSnapshot) get() ([]*p2p.PeerInfo, bool, error) {
+	if s == nil {
+		return nil, false, nil
+	}
+	s.once.Do(func() {
+		s.peers, s.primaryPruned, s.err = s.load()
+		if s.err != nil && s.onError != nil {
+			s.onError(s.err)
+		}
+	})
+	return s.peers, s.primaryPruned, s.err
+}

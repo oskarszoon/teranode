@@ -4,12 +4,16 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
+	subtreepkg "github.com/bsv-blockchain/go-subtree"
 	"github.com/bsv-blockchain/teranode/errors"
+	"github.com/bsv-blockchain/teranode/model"
+	"github.com/bsv-blockchain/teranode/pkg/fileformat"
 	"github.com/bsv-blockchain/teranode/services/blockvalidation/testhelpers"
 	"github.com/bsv-blockchain/teranode/services/p2p"
 	"github.com/bsv-blockchain/teranode/stores/blob"
@@ -23,10 +27,15 @@ import (
 
 // catchupPeersP2PMock is a minimal P2PClientI returning a fixed peer set; all other
 // methods are no-ops. Used to drive selectBestPeersForCatchup in tests.
-type catchupPeersP2PMock struct{ peers []*p2p.PeerInfo }
+type catchupPeersP2PMock struct {
+	peers []*p2p.PeerInfo
+	err   error
+	calls atomic.Int32
+}
 
 func (m *catchupPeersP2PMock) GetPeersForCatchup(context.Context) ([]*p2p.PeerInfo, error) {
-	return m.peers, nil
+	m.calls.Add(1)
+	return m.peers, m.err
 }
 func (m *catchupPeersP2PMock) RecordCatchupAttempt(context.Context, string) error        { return nil }
 func (m *catchupPeersP2PMock) RecordCatchupSuccess(context.Context, string, int64) error { return nil }
@@ -69,6 +78,132 @@ func mkTestPeer(id, storage string, height uint32) *p2p.PeerInfo {
 		DataHubURL:      "http://" + id,
 		ReputationScore: 100,
 	}
+}
+
+func TestCatchupPeerSnapshot_IsLazyAndLoadsOnce(t *testing.T) {
+	var calls atomic.Int32
+	snapshot := &catchupPeerSnapshot{
+		load: func() ([]*p2p.PeerInfo, bool, error) {
+			calls.Add(1)
+			return []*p2p.PeerInfo{mkTestPeer("full", "full", 100)}, true, nil
+		},
+	}
+	require.Zero(t, calls.Load())
+
+	type snapshotResult struct {
+		peers         []*p2p.PeerInfo
+		primaryPruned bool
+		err           error
+	}
+	results := make(chan snapshotResult, 8)
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			peers, primaryPruned, err := snapshot.get()
+			results <- snapshotResult{peers: peers, primaryPruned: primaryPruned, err: err}
+		}()
+	}
+	wg.Wait()
+	close(results)
+	for result := range results {
+		require.NoError(t, result.err)
+		require.True(t, result.primaryPruned)
+		require.Len(t, result.peers, 1)
+	}
+	require.Equal(t, int32(1), calls.Load())
+}
+
+func TestCatchupPeerSnapshot_ReportsCachedErrorOnce(t *testing.T) {
+	var loads atomic.Int32
+	var reports atomic.Int32
+	snapshot := &catchupPeerSnapshot{
+		load: func() ([]*p2p.PeerInfo, bool, error) {
+			loads.Add(1)
+			return nil, false, errors.NewServiceError("registry unavailable")
+		},
+		onError: func(error) { reports.Add(1) },
+	}
+
+	for range 3 {
+		_, _, err := snapshot.get()
+		require.Error(t, err)
+	}
+	require.Equal(t, int32(1), loads.Load())
+	require.Equal(t, int32(1), reports.Load())
+}
+
+func TestSelectAlternativePeers_CapsAndSkipsTargets(t *testing.T) {
+	alt1 := mkTestPeer("alt-1", "full", 100)
+	alt1Duplicate := mkTestPeer("alt-1-duplicate", "full", 100)
+	alt1Duplicate.DataHubURL = alt1.DataHubURL
+	emptyURL := mkTestPeer("empty", "full", 100)
+	emptyURL.DataHubURL = ""
+
+	got := selectAlternativePeers([]*p2p.PeerInfo{
+		mkTestPeer("assigned-copy", "full", 100),
+		alt1,
+		alt1Duplicate,
+		emptyURL,
+		mkTestPeer("alt-2", "full", 100),
+		mkTestPeer("alt-3", "full", 100),
+	}, "assigned", "http://assigned-copy", 2)
+
+	require.Len(t, got, 2)
+	require.Equal(t, "http://alt-1", got[0].DataHubURL)
+	require.Equal(t, "http://alt-2", got[1].DataHubURL)
+}
+
+func TestSelectAlternativePeers_DefaultsNonPositiveLimit(t *testing.T) {
+	got := selectAlternativePeers([]*p2p.PeerInfo{
+		mkTestPeer("alt-1", "full", 100),
+		mkTestPeer("alt-2", "full", 100),
+		mkTestPeer("alt-3", "full", 100),
+		mkTestPeer("alt-4", "full", 100),
+	}, "assigned", "http://assigned", 0)
+	require.Len(t, got, 3)
+}
+
+func seedLocalSubtreeForPeerLookupTest(t *testing.T, server *Server, ctx context.Context) *model.Block {
+	t.Helper()
+	subtree, err := subtreepkg.NewIncompleteTreeByLeafCount(1)
+	require.NoError(t, err)
+	require.NoError(t, subtree.AddCoinbaseNode())
+	subtreeBytes, err := subtree.Serialize()
+	require.NoError(t, err)
+	hash := subtree.RootHash()
+	require.NoError(t, server.subtreeStore.Set(ctx, hash[:], fileformat.FileTypeSubtreeToCheck, subtreeBytes))
+	require.NoError(t, server.subtreeStore.Set(ctx, hash[:], fileformat.FileTypeSubtreeData, []byte{0x00}))
+	return &model.Block{Height: 100, Subtrees: []*chainhash.Hash{hash}}
+}
+
+func TestFetchSubtreeDataForBlock_PeerLookupMode(t *testing.T) {
+	t.Run("non-parallel healthy primary stays lazy", func(t *testing.T) {
+		suite := NewCatchupTestSuite(t)
+		defer suite.Cleanup()
+		client := &catchupPeersP2PMock{}
+		suite.Server.p2pClient = client
+		suite.Server.settings.BlockValidation.CatchupParallelFetchEnabled = false
+		block := seedLocalSubtreeForPeerLookupTest(t, suite.Server, suite.Ctx)
+
+		_, err := suite.Server.fetchSubtreeDataForBlock(suite.Ctx, block, "primary", "http://primary")
+		require.NoError(t, err)
+		require.Zero(t, client.calls.Load())
+	})
+
+	t.Run("parallel distribution loads once", func(t *testing.T) {
+		suite := NewCatchupTestSuite(t)
+		defer suite.Cleanup()
+		client := &catchupPeersP2PMock{}
+		suite.Server.p2pClient = client
+		suite.Server.settings.BlockValidation.CatchupParallelFetchEnabled = true
+		block := seedLocalSubtreeForPeerLookupTest(t, suite.Server, suite.Ctx)
+
+		_, err := suite.Server.fetchSubtreeDataForBlock(suite.Ctx, block, "primary", "http://primary")
+		require.NoError(t, err)
+		require.Equal(t, int32(1), client.calls.Load())
+	})
 }
 
 // TestFetchSubtreeFromPeer_BacksOffOn429 proves the subtree fetch path retries

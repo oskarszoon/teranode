@@ -450,6 +450,17 @@ func (u *Server) fetchSubtreeDataForBlock(gCtx context.Context, block *model.Blo
 	// in-flight subtree_data download survives sibling failures yet still aborts on shutdown.
 	parentCtx := ctx
 
+	var peerSnapshot *catchupPeerSnapshot
+	if u.p2pClient != nil {
+		peerSnapshot = newCatchupPeerSnapshot(
+			parentCtx,
+			u.logger,
+			u.p2pClient,
+			peerID,
+			block.Hash().String(),
+		)
+	}
+
 	// Create error group for concurrent subtree fetching
 	g, ctx := errgroup.WithContext(ctx)
 	// Limit concurrency to avoid overwhelming the peer
@@ -460,23 +471,18 @@ func (u *Server) fetchSubtreeDataForBlock(gCtx context.Context, block *model.Blo
 	}
 	g.SetLimit(subtreeConcurrency)
 
-	// Compute the block-level alternative peer set ONCE (a single GetPeersForCatchup for the
-	// whole block, not per subtree on failure) plus whether the primary itself is pruned.
-	var blockAltPeers []*p2p.PeerInfo
-	primaryPruned := false
-	if u.p2pClient != nil {
-		var apErr error
-		blockAltPeers, primaryPruned, apErr = catchupAltPeers(ctx, u.logger, u.p2pClient, peerID)
-		if apErr != nil {
-			u.logger.Warnf("[catchup:fetchSubtreeDataForBlock][%s] Failed to get alternative peers: %v", block.Hash().String(), apErr)
-			blockAltPeers = nil
-		}
-	}
-
 	// Get peer assignments for subtrees if parallel fetching is enabled
 	var peerAssignments []*PeerForSubtreeFetch
-	if u.settings.BlockValidation.CatchupParallelFetchEnabled && u.p2pClient != nil {
-		peerAssignments = DistributeSubtreesAcrossPeers(u.logger, peerID, baseURL, primaryPruned, blockAltPeers, len(block.Subtrees))
+	if u.settings.BlockValidation.CatchupParallelFetchEnabled && peerSnapshot != nil {
+		blockAltPeers, primaryPruned, _ := peerSnapshot.get()
+		peerAssignments = DistributeSubtreesAcrossPeers(
+			u.logger,
+			peerID,
+			baseURL,
+			primaryPruned,
+			blockAltPeers,
+			len(block.Subtrees),
+		)
 	}
 
 	// Process each unique subtree concurrently
@@ -498,7 +504,7 @@ func (u *Server) fetchSubtreeDataForBlock(gCtx context.Context, block *model.Blo
 		capturedBaseURL := fetchBaseURL
 
 		g.Go(func() error {
-			servingPeerID, err := u.fetchAndStoreSubtreeAndSubtreeData(ctx, parentCtx, block, &subtreeHashCopy, capturedPeerID, capturedBaseURL, blockAltPeers)
+			servingPeerID, err := u.fetchAndStoreSubtreeAndSubtreeData(ctx, parentCtx, block, &subtreeHashCopy, capturedPeerID, capturedBaseURL, peerSnapshot)
 			if err != nil {
 				return err
 			}
@@ -754,12 +760,45 @@ func (u *Server) fetchAndStoreSubtreeData(ctx context.Context, shutdownCtx conte
 	return nil
 }
 
+func selectAlternativePeers(
+	peers []*p2p.PeerInfo,
+	assignedPeerID string,
+	assignedBaseURL string,
+	maxAttempts int,
+) []*p2p.PeerInfo {
+	if maxAttempts <= 0 {
+		maxAttempts = 3
+	}
+
+	selected := make([]*p2p.PeerInfo, 0, min(maxAttempts, len(peers)))
+	seenURLs := make(map[string]struct{}, maxAttempts+1)
+	if assignedBaseURL != "" {
+		seenURLs[assignedBaseURL] = struct{}{}
+	}
+
+	for _, peer := range peers {
+		if peer == nil || peer.DataHubURL == "" || peer.ID.String() == assignedPeerID {
+			continue
+		}
+		if _, exists := seenURLs[peer.DataHubURL]; exists {
+			continue
+		}
+		seenURLs[peer.DataHubURL] = struct{}{}
+		selected = append(selected, peer)
+		if len(selected) == maxAttempts {
+			break
+		}
+	}
+
+	return selected
+}
+
 // fetchAndStoreSubtreeAndSubtreeData fetches both subtree and subtreeData for a single subtree hash
 // and stores them in the subtreeStore. If the primary peer fails, it will try alternative peers
 // at max height before giving up.
 // Returns the peer ID that actually served the data and any error.
 func (u *Server) fetchAndStoreSubtreeAndSubtreeData(ctx context.Context, shutdownCtx context.Context, block *model.Block, subtreeHash *chainhash.Hash,
-	peerID, baseURL string, alts []*p2p.PeerInfo) (string, error) {
+	peerID, baseURL string, peerSnapshot *catchupPeerSnapshot) (string, error) {
 	ctx, _, deferFn := tracing.Tracer("blockvalidation").Start(ctx, "fetchAndStoreSubtreeAndSubtreeData",
 		tracing.WithParentStat(u.stats),
 		// tracing.WithDebugLogMessage(u.logger, "[catchup:fetchAndStoreSubtreeAndSubtreeData] fetching subtree and data for %s", subtreeHash.String()),
@@ -786,22 +825,29 @@ func (u *Server) fetchAndStoreSubtreeAndSubtreeData(ctx context.Context, shutdow
 		u.logger.Warnf("[catchup:fetchAndStoreSubtreeAndSubtreeData] Primary peer %s failed to fetch subtree for %s: %v, trying alternatives", peerID, subtreeHash.String(), err)
 	}
 
-	// Primary peer failed, try the block-level alternative peers (computed once by the caller
-	// in fetchSubtreeDataForBlock, so no per-subtree GetPeersForCatchup gRPC).
+	var alternativePeers []*p2p.PeerInfo
+	if peerSnapshot != nil {
+		peers, _, snapshotErr := peerSnapshot.get()
+		if snapshotErr == nil {
+			alternativePeers = selectAlternativePeers(
+				peers,
+				peerID,
+				baseURL,
+				u.settings.BlockValidation.CatchupMaxRetries,
+			)
+		}
+	}
+
+	// Primary peer failed, try the block-level alternative peers. The snapshot loads at most
+	// once for this block, even when several subtree fetches fail concurrently.
 	var lastErr error = err
 	{
-		if len(alts) > 0 {
-			u.logger.Infof("[catchup:fetchAndStoreSubtreeAndSubtreeData] Trying %d alternative peers for subtree %s", len(alts), subtreeHash.String())
+		if len(alternativePeers) > 0 {
+			u.logger.Infof("[catchup:fetchAndStoreSubtreeAndSubtreeData] Trying %d alternative peers for subtree %s", len(alternativePeers), subtreeHash.String())
 
-			for _, altPeer := range alts {
+			for _, altPeer := range alternativePeers {
 				altPeerID := altPeer.ID.String()
 				altBaseURL := altPeer.DataHubURL
-
-				// Skip peers without a data hub and the assigned peer we already tried for
-				// THIS subtree (alts is the whole block set, not excluding this subtree's peer).
-				if altBaseURL == "" || altPeerID == peerID {
-					continue
-				}
 
 				u.logger.Debugf("[catchup:fetchAndStoreSubtreeAndSubtreeData] Trying alternative peer %s for subtree %s", altPeerID, subtreeHash.String())
 
