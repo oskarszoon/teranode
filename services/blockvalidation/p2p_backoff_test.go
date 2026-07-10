@@ -29,9 +29,12 @@ import (
 // catchupPeersP2PMock is a minimal P2PClientI returning a fixed peer set; all other
 // methods are no-ops. Used to drive selectBestPeersForCatchup in tests.
 type catchupPeersP2PMock struct {
-	peers []*p2p.PeerInfo
-	err   error
-	calls atomic.Int32
+	peers     []*p2p.PeerInfo
+	err       error
+	calls     atomic.Int32
+	mu        sync.Mutex
+	failures  []string
+	downloads map[string]uint64
 }
 
 func (m *catchupPeersP2PMock) GetPeersForCatchup(context.Context) ([]*p2p.PeerInfo, error) {
@@ -40,9 +43,14 @@ func (m *catchupPeersP2PMock) GetPeersForCatchup(context.Context) ([]*p2p.PeerIn
 }
 func (m *catchupPeersP2PMock) RecordCatchupAttempt(context.Context, string) error        { return nil }
 func (m *catchupPeersP2PMock) RecordCatchupSuccess(context.Context, string, int64) error { return nil }
-func (m *catchupPeersP2PMock) RecordCatchupFailure(context.Context, string) error        { return nil }
-func (m *catchupPeersP2PMock) RecordCatchupMalicious(context.Context, string) error      { return nil }
-func (m *catchupPeersP2PMock) UpdateCatchupError(context.Context, string, string) error  { return nil }
+func (m *catchupPeersP2PMock) RecordCatchupFailure(_ context.Context, peerID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.failures = append(m.failures, peerID)
+	return nil
+}
+func (m *catchupPeersP2PMock) RecordCatchupMalicious(context.Context, string) error     { return nil }
+func (m *catchupPeersP2PMock) UpdateCatchupError(context.Context, string, string) error { return nil }
 func (m *catchupPeersP2PMock) UpdateCatchupReputation(context.Context, string, float64) error {
 	return nil
 }
@@ -57,8 +65,26 @@ func (m *catchupPeersP2PMock) IsPeerMalicious(context.Context, string) (bool, st
 func (m *catchupPeersP2PMock) IsPeerUnhealthy(context.Context, string) (bool, string, float32, error) {
 	return false, "", 0, nil
 }
-func (m *catchupPeersP2PMock) RecordBytesDownloaded(context.Context, string, uint64) error {
+func (m *catchupPeersP2PMock) RecordBytesDownloaded(_ context.Context, peerID string, bytesDownloaded uint64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.downloads == nil {
+		m.downloads = make(map[string]uint64)
+	}
+	m.downloads[peerID] += bytesDownloaded
 	return nil
+}
+
+func (m *catchupPeersP2PMock) recordedFailures() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.failures...)
+}
+
+func (m *catchupPeersP2PMock) recordedBytes(peerID string) uint64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.downloads[peerID]
 }
 
 // fakeParallelFetchP2P is a minimal P2PClientForParallelFetch for selection tests.
@@ -229,6 +255,148 @@ func TestFetchSubtreeDataForBlock_PeerLookupMode(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, int32(1), client.calls.Load())
 	})
+}
+
+func TestFetchSubtreeDataForBlock_AggregatesActualFailedPeers(t *testing.T) {
+	suite := NewCatchupTestSuite(t)
+	defer suite.Cleanup()
+
+	origin := mkTestPeer("origin-pruned", "pruned", 100)
+	alt1 := mkTestPeer("alt-1", "full", 100)
+	alt2 := mkTestPeer("alt-2", "full", 100)
+	suite.Server.p2pClient = &catchupPeersP2PMock{peers: []*p2p.PeerInfo{origin, alt1, alt2}}
+	suite.Server.settings.BlockValidation.CatchupParallelFetchEnabled = true
+	suite.Server.settings.BlockValidation.SubtreeFetchConcurrency = 2
+	suite.Server.settings.BlockValidation.CatchupMaxRetries = 2
+
+	hash1 := chainhash.HashH([]byte("failed-subtree-1"))
+	hash2 := chainhash.HashH([]byte("failed-subtree-2"))
+	block := testhelpers.CreateTestBlockChain(t, 1)[0]
+	block.Subtrees = []*chainhash.Hash{&hash1, &hash2}
+
+	httpmock.ActivateNonDefault(util.HTTPClient())
+	defer httpmock.DeactivateAndReset()
+	var arrivals atomic.Int32
+	releaseFailures := make(chan struct{})
+	failAfterBothAssignedPeersArrive := func(*http.Request) (*http.Response, error) {
+		if arrivals.Add(1) == 2 {
+			close(releaseFailures)
+		}
+		select {
+		case <-releaseFailures:
+			return httpmock.NewStringResponse(http.StatusInternalServerError, "peer failure"), nil
+		case <-time.After(5 * time.Second):
+			return nil, errors.NewProcessingError("timed out waiting for both assigned peers")
+		}
+	}
+	for _, baseURL := range []string{alt1.DataHubURL, alt2.DataHubURL} {
+		for _, hash := range []*chainhash.Hash{&hash1, &hash2} {
+			httpmock.RegisterResponder("GET", fmt.Sprintf("%s/subtree/%s", baseURL, hash),
+				failAfterBothAssignedPeersArrive)
+		}
+	}
+
+	_, err := suite.Server.fetchSubtreeDataForBlock(suite.Ctx, block, origin.ID.String(), origin.DataHubURL)
+	require.Error(t, err)
+	require.True(t, errors.Is(err, errors.ErrExternal))
+	var carrier interface{ FailedPeerIDs() []string }
+	require.True(t, errors.As(err, &carrier), "actual-peer carrier must survive fetchSubtreeDataForBlock's ServiceError wrapper")
+	require.ElementsMatch(t, []string{alt1.ID.String(), alt2.ID.String()}, carrier.FailedPeerIDs())
+	require.NotContains(t, carrier.FailedPeerIDs(), origin.ID.String(), "pruned origin was not assigned or contacted")
+}
+
+func TestFetchSubtreeDataForBlock_LocalFailureHasNoPeerAttribution(t *testing.T) {
+	suite := NewCatchupTestSuite(t)
+	defer suite.Cleanup()
+
+	store := &blob.MockStore{}
+	store.On("Exists", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		Return(false, errors.NewStorageError("local store unavailable"))
+	suite.Server.subtreeStore = store
+	hash := chainhash.HashH([]byte("local-subtree-failure"))
+	block := testhelpers.CreateTestBlockChain(t, 1)[0]
+	block.Subtrees = []*chainhash.Hash{&hash}
+
+	_, err := suite.Server.fetchSubtreeDataForBlock(suite.Ctx, block, "peer", "http://peer")
+	require.Error(t, err)
+	require.True(t, errors.IsLocalError(err))
+	var carrier interface{ FailedPeerIDs() []string }
+	if errors.As(err, &carrier) {
+		require.Empty(t, carrier.FailedPeerIDs())
+	}
+}
+
+func TestFetchAndStoreSubtree_FallbackSuccessStillRecordsFailedPeer(t *testing.T) {
+	suite := NewCatchupTestSuite(t)
+	defer suite.Cleanup()
+
+	subtree, err := subtreepkg.NewIncompleteTreeByLeafCount(1)
+	require.NoError(t, err)
+	require.NoError(t, subtree.AddCoinbaseNode())
+	subtreeHash := subtree.RootHash()
+	require.NoError(t, suite.Server.subtreeStore.Set(suite.Ctx, subtreeHash[:], fileformat.FileTypeSubtreeData, []byte{0x00}))
+
+	primary := mkTestPeer("primary", "full", 100)
+	alternative := mkTestPeer("alternative", "full", 100)
+	snapshot := &catchupPeerSnapshot{load: func() ([]*p2p.PeerInfo, bool, error) {
+		return []*p2p.PeerInfo{alternative}, false, nil
+	}}
+	suite.Server.settings.BlockValidation.CatchupMaxRetries = 1
+	block := testhelpers.CreateTestBlockChain(t, 1)[0]
+
+	httpmock.ActivateNonDefault(util.HTTPClient())
+	defer httpmock.DeactivateAndReset()
+	httpmock.RegisterResponder("GET", fmt.Sprintf("%s/subtree/%s", primary.DataHubURL, subtreeHash),
+		httpmock.NewStringResponder(http.StatusInternalServerError, "primary failed"))
+	httpmock.RegisterResponder("GET", fmt.Sprintf("%s/subtree/%s", alternative.DataHubURL, subtreeHash),
+		httpmock.NewBytesResponder(http.StatusOK, subtreepkg.CoinbasePlaceholderHashValue[:]))
+
+	var failedPeerIDs []string
+	servingPeerID, err := suite.Server.fetchAndStoreSubtreeAndSubtreeDataWithRecorder(
+		suite.Ctx,
+		suite.Ctx,
+		block,
+		subtreeHash,
+		primary.ID.String(),
+		primary.DataHubURL,
+		snapshot,
+		func(peerID string) { failedPeerIDs = append(failedPeerIDs, peerID) },
+	)
+	require.NoError(t, err)
+	require.Equal(t, alternative.ID.String(), servingPeerID)
+	require.Equal(t, []string{primary.ID.String()}, failedPeerIDs)
+}
+
+func TestFetchAndStoreSubtree_CorruptLocalCacheDoesNotBlamePeer(t *testing.T) {
+	suite := NewCatchupTestSuite(t)
+	defer suite.Cleanup()
+
+	subtreeHash := chainhash.HashH([]byte("corrupt-local-subtree"))
+	require.NoError(t, suite.Server.subtreeStore.Set(suite.Ctx, subtreeHash[:], fileformat.FileTypeSubtreeToCheck, []byte("corrupt")))
+	block := testhelpers.CreateTestBlockChain(t, 1)[0]
+	var failedPeerIDs []string
+	var requests atomic.Int32
+	httpmock.ActivateNonDefault(util.HTTPClient())
+	defer httpmock.DeactivateAndReset()
+	httpmock.RegisterNoResponder(func(*http.Request) (*http.Response, error) {
+		requests.Add(1)
+		return httpmock.NewStringResponse(http.StatusInternalServerError, "unexpected request"), nil
+	})
+
+	_, err := suite.Server.fetchAndStoreSubtreeAndSubtreeDataWithRecorder(
+		suite.Ctx,
+		suite.Ctx,
+		block,
+		&subtreeHash,
+		"peer",
+		"http://peer",
+		nil,
+		func(peerID string) { failedPeerIDs = append(failedPeerIDs, peerID) },
+	)
+	require.Error(t, err)
+	require.True(t, errors.IsLocalError(err), "corrupt local cache is a local storage failure")
+	require.Empty(t, failedPeerIDs, "no HTTP peer was contacted")
+	require.Zero(t, requests.Load())
 }
 
 // TestFetchSubtreeFromPeer_BacksOffOn429 proves the subtree fetch path retries
@@ -448,6 +616,38 @@ func TestFilterMaxHeightPeers_ComputesTipFromEligibleArchivalPeers(t *testing.T)
 	require.ElementsMatch(t, []string{"http://full-two-behind", "http://legacy-three-behind"}, urls)
 }
 
+func TestFilterMaxHeightPeers_PreservesInputOrderForEqualKeys(t *testing.T) {
+	peers := make([]*p2p.PeerInfo, 0, 24)
+	wantHigh := make([]string, 0, 12)
+	wantLow := make([]string, 0, 12)
+	for i := 0; i < 24; i++ {
+		peer := mkTestPeer(fmt.Sprintf("stable-%02d", i), "full", 100)
+		peer.AvgResponseTime = 10
+		if i%2 == 0 {
+			peer.ReputationScore = 100
+			wantHigh = append(wantHigh, peer.DataHubURL)
+		} else {
+			peer.ReputationScore = 90
+			wantLow = append(wantLow, peer.DataHubURL)
+		}
+		peers = append(peers, peer)
+	}
+
+	got := filterMaxHeightPeers(peers, "")
+	require.Len(t, got, len(peers))
+	gotHigh := make([]string, 0, len(wantHigh))
+	gotLow := make([]string, 0, len(wantLow))
+	for _, peer := range got {
+		if peer.ReputationScore == 100 {
+			gotHigh = append(gotHigh, peer.DataHubURL)
+		} else {
+			gotLow = append(gotLow, peer.DataHubURL)
+		}
+	}
+	require.Equal(t, wantHigh, gotHigh)
+	require.Equal(t, wantLow, gotLow)
+}
+
 // TestClassifyDownloadErr proves the subtree_data error classifier: a dlCtx cancel is local
 // (shutdown — don't blame the peer); a dlCtx or read-error deadline is a non-local network
 // timeout (peer stalled — fail over + ding); a plain read error is left for the caller to
@@ -472,6 +672,15 @@ func TestClassifyDownloadErr(t *testing.T) {
 	require.NotNil(t, e)
 	require.False(t, errors.IsLocalError(e), "read-error deadline (peer stall) must NOT be local; got %v", e)
 	require.True(t, errors.IsNetworkError(e))
+
+	limiterErr := errors.NewServiceError("failed to fetch subtree data",
+		errors.NewContextCanceledError("[peerFetchLimiter] wait aborted", context.DeadlineExceeded))
+	require.True(t, errors.Is(limiterErr, errors.ErrContextCanceled), "precondition: limiter error must carry local classification")
+	e = classifyDownloadErr(deadlined, h, limiterErr)
+	require.NotNil(t, e)
+	require.True(t, errors.IsLocalError(e), "local limiter deadline must remain local even after download context expires; got %v", e)
+	require.True(t, errors.Is(e, errors.ErrContextCanceled))
+	require.False(t, errors.IsNetworkError(e), "local limiter deadline must not become a peer timeout")
 
 	require.Nil(t, classifyDownloadErr(context.Background(), h, errors.NewProcessingError("bad subtree data")),
 		"genuine peer bad-data must fall through to the caller's ProcessingError")

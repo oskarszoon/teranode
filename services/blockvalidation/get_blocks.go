@@ -3,10 +3,11 @@ package blockvalidation
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"fmt"
 	"io"
+	"math"
+	"sort"
 	"sync"
 	"sync/atomic"
 
@@ -113,6 +114,56 @@ type resultItem struct {
 type blockForValidation struct {
 	block             *model.Block
 	contributingPeers map[string]struct{}
+}
+
+type failedPeerIDsProvider interface {
+	FailedPeerIDs() []string
+}
+
+type failedPeerIDsError struct {
+	err     error
+	peerIDs []string
+}
+
+func (e *failedPeerIDsError) Error() string { return e.err.Error() }
+func (e *failedPeerIDsError) Unwrap() error { return e.err }
+func (e *failedPeerIDsError) FailedPeerIDs() []string {
+	return append([]string(nil), e.peerIDs...)
+}
+
+func normalizeFailedPeerIDs(peerIDs []string) []string {
+	seen := make(map[string]struct{}, len(peerIDs))
+	for _, peerID := range peerIDs {
+		if peerID != "" {
+			seen[peerID] = struct{}{}
+		}
+	}
+
+	normalized := make([]string, 0, len(seen))
+	for peerID := range seen {
+		normalized = append(normalized, peerID)
+	}
+	sort.Strings(normalized)
+	return normalized
+}
+
+func failedPeerIDsFromError(err error) ([]string, bool) {
+	var provider failedPeerIDsProvider
+	if !errors.As(err, &provider) {
+		return nil, false
+	}
+	return normalizeFailedPeerIDs(provider.FailedPeerIDs()), true
+}
+
+func wrapErrorWithFailedPeerIDs(root *errors.Error, wrapped error, peerIDs []string) error {
+	normalized := normalizeFailedPeerIDs(peerIDs)
+	if len(normalized) == 0 {
+		root.SetWrappedErr(wrapped)
+		return root
+	}
+
+	root.SetWrappedErr(&failedPeerIDsError{err: wrapped, peerIDs: normalized})
+	return root
 }
 
 // fetchBlocksConcurrently fetches blocks from a peer using a high-performance worker pool architecture.
@@ -443,6 +494,15 @@ func (u *Server) fetchSubtreeDataForBlock(gCtx context.Context, block *model.Blo
 	// Track which peers contributed subtree data for this block
 	var peersMu sync.Mutex
 	contributingPeers := make(map[string]struct{})
+	failedPeers := make(map[string]struct{})
+	recordFailedPeer := func(failedPeerID string) {
+		if failedPeerID == "" {
+			return
+		}
+		peersMu.Lock()
+		failedPeers[failedPeerID] = struct{}{}
+		peersMu.Unlock()
+	}
 
 	// parentCtx is the catchup context BEFORE the errgroup derivation below: it is cancelled
 	// by node shutdown / catchup cancel but NOT by a sibling subtree failing in this batch.
@@ -504,8 +564,16 @@ func (u *Server) fetchSubtreeDataForBlock(gCtx context.Context, block *model.Blo
 		capturedBaseURL := fetchBaseURL
 
 		g.Go(func() error {
-			servingPeerID, err := u.fetchAndStoreSubtreeAndSubtreeData(ctx, parentCtx, block, &subtreeHashCopy, capturedPeerID, capturedBaseURL, peerSnapshot)
+			servingPeerID, err := u.fetchAndStoreSubtreeAndSubtreeDataWithRecorder(ctx, parentCtx, block, &subtreeHashCopy, capturedPeerID, capturedBaseURL, peerSnapshot, recordFailedPeer)
 			if err != nil {
+				failedPeerIDs, _ := failedPeerIDsFromError(err)
+				if len(failedPeerIDs) > 0 {
+					peersMu.Lock()
+					for _, failedPeerID := range failedPeerIDs {
+						failedPeers[failedPeerID] = struct{}{}
+					}
+					peersMu.Unlock()
+				}
 				return err
 			}
 			if servingPeerID != "" {
@@ -519,7 +587,12 @@ func (u *Server) fetchSubtreeDataForBlock(gCtx context.Context, block *model.Blo
 
 	// Wait for all subtree fetching to complete
 	if err := g.Wait(); err != nil {
-		return nil, errors.NewServiceError("[catchup:fetchSubtreeDataForBlock] Failed to fetch subtree data for block %s", block.Hash().String(), err)
+		failedPeerIDs := make([]string, 0, len(failedPeers))
+		for failedPeerID := range failedPeers {
+			failedPeerIDs = append(failedPeerIDs, failedPeerID)
+		}
+		root := errors.NewServiceError("[catchup:fetchSubtreeDataForBlock] Failed to fetch subtree data for block %s", block.Hash().String())
+		return nil, wrapErrorWithFailedPeerIDs(root, err, failedPeerIDs)
 	}
 
 	return contributingPeers, nil
@@ -554,7 +627,7 @@ func (u *Server) fetchAndStoreSubtree(ctx context.Context, block *model.Block, s
 
 		subtree, err := subtreeFromBytesWithMmap(subtreeBytes, u.settings.BlockValidation.SubtreeMmapDir)
 		if err != nil {
-			return nil, errors.NewProcessingError("[catchup:fetchAndStoreSubtree] Failed to deserialize existing subtree for %s", subtreeHash.String(), err)
+			return nil, errors.NewStorageError("[catchup:fetchAndStoreSubtree] Failed to deserialize existing subtree for %s", subtreeHash.String(), err)
 		}
 
 		return subtree, nil
@@ -634,6 +707,9 @@ func (u *Server) fetchAndStoreSubtree(ctx context.Context, block *model.Block, s
 //     chain that renders "context deadline exceeded" is infectious — no outer re-classification
 //     can undo it. NewNetworkTimeoutError with no wrapped error keeps the peer-fault class clean.
 func classifyDownloadErr(dlCtx context.Context, subtreeHash *chainhash.Hash, err error) error {
+	if errors.Is(err, errors.ErrContextCanceled) {
+		return err
+	}
 	if errors.Is(dlCtx.Err(), context.Canceled) {
 		return errors.NewContextCanceledError("[catchup:fetchAndStoreSubtreeData] subtree data aborted (shutdown) for %s", subtreeHash.String(), context.Canceled)
 	}
@@ -804,11 +880,29 @@ func selectAlternativePeers(
 // Returns the peer ID that actually served the data and any error.
 func (u *Server) fetchAndStoreSubtreeAndSubtreeData(ctx context.Context, shutdownCtx context.Context, block *model.Block, subtreeHash *chainhash.Hash,
 	peerID, baseURL string, peerSnapshot *catchupPeerSnapshot) (string, error) {
+	return u.fetchAndStoreSubtreeAndSubtreeDataWithRecorder(ctx, shutdownCtx, block, subtreeHash, peerID, baseURL, peerSnapshot, nil)
+}
+
+func (u *Server) fetchAndStoreSubtreeAndSubtreeDataWithRecorder(ctx context.Context, shutdownCtx context.Context, block *model.Block, subtreeHash *chainhash.Hash,
+	peerID, baseURL string, peerSnapshot *catchupPeerSnapshot, onPeerFailure func(string)) (string, error) {
 	ctx, _, deferFn := tracing.Tracer("blockvalidation").Start(ctx, "fetchAndStoreSubtreeAndSubtreeData",
 		tracing.WithParentStat(u.stats),
 		// tracing.WithDebugLogMessage(u.logger, "[catchup:fetchAndStoreSubtreeAndSubtreeData] fetching subtree and data for %s", subtreeHash.String()),
 	)
 	defer deferFn()
+	failedPeerIDs := make([]string, 0, 1)
+	recordPeerFailure := func(failedPeerID string, err error) {
+		if failedPeerID != "" && !errors.IsLocalError(err) {
+			failedPeerIDs = append(failedPeerIDs, failedPeerID)
+			if onPeerFailure != nil {
+				onPeerFailure(failedPeerID)
+			}
+		}
+	}
+	localFailure := func(message string, err error) (string, error) {
+		root := errors.NewServiceError(message, subtreeHash.String())
+		return "", wrapErrorWithFailedPeerIDs(root, err, failedPeerIDs)
+	}
 
 	// Try primary peer first
 	subtree, err := u.fetchAndStoreSubtree(ctx, block, subtreeHash, peerID, baseURL)
@@ -819,14 +913,16 @@ func (u *Server) fetchAndStoreSubtreeAndSubtreeData(ctx context.Context, shutdow
 		}
 		// Check if error is local (not peer-related) - don't retry with other peers
 		if errors.IsLocalError(err) {
-			return "", errors.NewServiceError("[catchup:fetchAndStoreSubtreeAndSubtreeData] Local error fetching subtreeData for %s (not retrying with other peers)", subtreeHash.String(), err)
+			return localFailure("[catchup:fetchAndStoreSubtreeAndSubtreeData] Local error fetching subtreeData for %s (not retrying with other peers)", err)
 		}
+		recordPeerFailure(peerID, err)
 		u.logger.Warnf("[catchup:fetchAndStoreSubtreeAndSubtreeData] Primary peer %s failed to fetch subtreeData for %s: %v, trying alternatives", peerID, subtreeHash.String(), err)
 	} else {
 		// Check if error is local (not peer-related) - don't retry with other peers
 		if errors.IsLocalError(err) {
-			return "", errors.NewServiceError("[catchup:fetchAndStoreSubtreeAndSubtreeData] Local error fetching subtree for %s (not retrying with other peers)", subtreeHash.String(), err)
+			return localFailure("[catchup:fetchAndStoreSubtreeAndSubtreeData] Local error fetching subtree for %s (not retrying with other peers)", err)
 		}
+		recordPeerFailure(peerID, err)
 		u.logger.Warnf("[catchup:fetchAndStoreSubtreeAndSubtreeData] Primary peer %s failed to fetch subtree for %s: %v, trying alternatives", peerID, subtreeHash.String(), err)
 	}
 
@@ -863,8 +959,9 @@ func (u *Server) fetchAndStoreSubtreeAndSubtreeData(ctx context.Context, shutdow
 					lastErr = err
 					// Don't continue trying other peers if it's a local error
 					if errors.IsLocalError(err) {
-						return "", errors.NewServiceError("[catchup:fetchAndStoreSubtreeAndSubtreeData] Local error fetching subtree %s (aborting peer retry)", subtreeHash.String(), err)
+						return localFailure("[catchup:fetchAndStoreSubtreeAndSubtreeData] Local error fetching subtree %s (aborting peer retry)", err)
 					}
+					recordPeerFailure(altPeerID, err)
 					continue
 				}
 
@@ -874,8 +971,9 @@ func (u *Server) fetchAndStoreSubtreeAndSubtreeData(ctx context.Context, shutdow
 					lastErr = err
 					// Don't continue trying other peers if it's a local error
 					if errors.IsLocalError(err) {
-						return "", errors.NewServiceError("[catchup:fetchAndStoreSubtreeAndSubtreeData] Local error fetching subtreeData %s (aborting peer retry)", subtreeHash.String(), err)
+						return localFailure("[catchup:fetchAndStoreSubtreeAndSubtreeData] Local error fetching subtreeData %s (aborting peer retry)", err)
 					}
+					recordPeerFailure(altPeerID, err)
 					continue
 				}
 
@@ -900,10 +998,10 @@ func (u *Server) fetchAndStoreSubtreeAndSubtreeData(ctx context.Context, shutdow
 	// errors.Is(err, ErrServiceError) is also true. The handler therefore checks
 	// ErrExternal before ErrServiceError — see processCatchupChItem.
 	//
-	// errors.NewExternalError extracts the trailing error param as the wrapped error,
-	// so a "%v" placeholder for lastErr would render as %!v(MISSING). The wrapped error
-	// is preserved in the chain.
-	return "", errors.NewExternalError("[catchup:fetchAndStoreSubtreeAndSubtreeData] All peers failed to fetch subtree %s", subtreeHash.String(), lastErr)
+	// Insert the failed-peer carrier below the native ExternalError so Teranode's custom
+	// wrappers preserve both error-code matching and actual-peer attribution.
+	root := errors.NewExternalError("[catchup:fetchAndStoreSubtreeAndSubtreeData] All peers failed to fetch subtree %s", subtreeHash.String())
+	return "", wrapErrorWithFailedPeerIDs(root, lastErr, failedPeerIDs)
 }
 
 // fetchSubtreeFromPeer fetches subtree (for subtreeToCheck) from a peer via HTTP
@@ -1013,6 +1111,54 @@ func (u *Server) fetchSubtreeDataFromPeer(ctx context.Context, subtreeHash *chai
 	return countingReader, nil
 }
 
+const blockBatchCapacityHint = 100
+
+func blockResponseLimit(configured int) (int64, error) {
+	if configured <= 0 || uint64(configured) > uint64(math.MaxInt64) {
+		configErr := errors.NewConfigurationError("excessiveblocksize must be a positive int64 value for peer block downloads, got %d", configured)
+		return 0, errors.NewServiceError("invalid local peer block receive configuration", configErr)
+	}
+
+	return int64(configured), nil
+}
+
+func decodeBoundedBlock(reader io.Reader, maxBytes int64) (*model.Block, error) {
+	limited := &io.LimitedReader{R: reader, N: maxBytes}
+	block, err := model.NewBlockFromReader(limited)
+	if err != nil {
+		if limited.N == 0 {
+			return nil, errors.NewExternalError("peer block response reached excessiveblocksize limit of %d bytes", maxBytes)
+		}
+		return nil, err
+	}
+
+	if block == nil {
+		return nil, errors.NewBlockInvalidError("peer block response decoded to nil block")
+	}
+	if block.SizeInBytes > uint64(maxBytes) {
+		return nil, errors.NewExternalError("peer block declared size %d exceeds excessiveblocksize %d", block.SizeInBytes, maxBytes)
+	}
+
+	return block, nil
+}
+
+func (u *Server) trackedBlockResponse(ctx context.Context, reader io.ReadCloser, hash *chainhash.Hash, peerID, operation string) io.ReadCloser {
+	return &countingReadCloser{
+		reader: reader,
+		onClose: func(bytesRead uint64) {
+			if u.p2pClient == nil || peerID == "" {
+				return
+			}
+
+			trackCtx, _, deferFn := tracing.DecoupleTracingSpan(ctx, "blockvalidation", "recordBytesDownloaded")
+			defer deferFn()
+			if err := u.p2pClient.RecordBytesDownloaded(trackCtx, peerID, bytesRead); err != nil {
+				u.logger.Warnf("[%s][%s] failed to record %d bytes downloaded from peer %s: %v", operation, hash.String(), bytesRead, peerID, err)
+			}
+		},
+	}
+}
+
 // fetchBlocksBatch fetches a batch of blocks from a peer starting from the specified hash.
 //
 // Parameters:
@@ -1029,37 +1175,45 @@ func (u *Server) fetchBlocksBatch(ctx context.Context, hash *chainhash.Hash, n u
 		tracing.WithParentStat(u.stats),
 	)
 	defer deferFn()
+	if n == 0 {
+		return []*model.Block{}, nil
+	}
+
+	maxBlockBytes, err := blockResponseLimit(u.settings.Policy.ExcessiveBlockSize)
+	if err != nil {
+		return nil, err
+	}
 
 	// WithRetry backs off on 429/503 instead of failing the whole batch; the hook paces
 	// every attempt through the per-peer limiter so retries don't re-burst.
-	blockBytes, err := util.DoHTTPRequestWithRetry(ctx, fmt.Sprintf("%s/blocks/%s?n=%d", baseURL, hash.String(), n),
+	responseBody, err := util.DoHTTPRequestBodyReaderWithRetryFunc(ctx, fmt.Sprintf("%s/blocks/%s?n=%d", baseURL, hash.String(), n),
 		func(c context.Context) error { return u.awaitPeerFetchSlot(c, baseURL) })
 	if err != nil {
 		return nil, errors.NewProcessingError("[catchup:fetchBlocksBatch][%s] failed to get blocks from peer", hash.String(), err)
 	}
+	trackedBody := u.trackedBlockResponse(ctx, responseBody, hash, peerID, "fetchBlocksBatch")
+	defer func() { _ = trackedBody.Close() }()
 
-	// Track bytes downloaded from peer
-	if u.p2pClient != nil && peerID != "" {
-		if err := u.p2pClient.RecordBytesDownloaded(ctx, peerID, uint64(len(blockBytes))); err != nil {
-			u.logger.Warnf("[fetchBlocksBatch][%s] failed to record %d bytes downloaded from peer %s: %v", hash.String(), len(blockBytes), peerID, err)
-		}
+	blockReader := bufio.NewReaderSize(trackedBody, 16)
+	capacityHint := blockBatchCapacityHint
+	if n < uint32(capacityHint) {
+		capacityHint = int(n)
 	}
-
-	blockReader := bytes.NewReader(blockBytes)
-
-	blocks := make([]*model.Block, 0)
-
-	for {
-		block, err := model.NewBlockFromReader(blockReader)
-		if err != nil {
-			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-				break
-			}
-
-			return nil, errors.NewProcessingError("[catchup:fetchBlocksBatch][%s] failed to create block from bytes", hash.String(), err)
+	blocks := make([]*model.Block, 0, capacityHint)
+	for count := uint32(0); count < n; count++ {
+		if _, err = blockReader.Peek(1); err != nil {
+			return nil, errors.NewProcessingError("[catchup:fetchBlocksBatch][%s] truncated batch: expected %d blocks, got %d", hash.String(), n, count, err)
 		}
-
+		block, decodeErr := decodeBoundedBlock(blockReader, maxBlockBytes)
+		if decodeErr != nil {
+			return nil, errors.NewProcessingError("[catchup:fetchBlocksBatch][%s] failed to decode block %d of %d", hash.String(), count+1, n, decodeErr)
+		}
 		blocks = append(blocks, block)
+	}
+	if _, err = blockReader.Peek(1); err == nil {
+		return nil, errors.NewExternalError("[catchup:fetchBlocksBatch][%s] peer returned more than requested %d blocks or trailing data", hash.String(), n)
+	} else if !errors.Is(err, io.EOF) {
+		return nil, errors.NewProcessingError("[catchup:fetchBlocksBatch][%s] failed checking batch boundary", hash.String(), err)
 	}
 
 	return blocks, nil
@@ -1081,30 +1235,30 @@ func (u *Server) fetchSingleBlock(ctx context.Context, hash *chainhash.Hash, pee
 		tracing.WithParentStat(u.stats),
 	)
 	defer deferFn()
+	maxBlockBytes, err := blockResponseLimit(u.settings.Policy.ExcessiveBlockSize)
+	if err != nil {
+		return nil, err
+	}
 
 	// WithRetry backs off on 429/503 (peer rate limiting) instead of failing; the hook
 	// paces every attempt through the per-peer limiter so retries don't re-burst.
-	blockBytes, err := util.DoHTTPRequestWithRetry(ctx, fmt.Sprintf("%s/block/%s", baseURL, hash.String()),
+	responseBody, err := util.DoHTTPRequestBodyReaderWithRetryFunc(ctx, fmt.Sprintf("%s/block/%s", baseURL, hash.String()),
 		func(c context.Context) error { return u.awaitPeerFetchSlot(c, baseURL) })
 	if err != nil {
 		return nil, errors.NewProcessingError("[catchup:fetchSingleBlock][%s] failed to get block from peer", hash.String(), err)
 	}
+	trackedBody := u.trackedBlockResponse(ctx, responseBody, hash, peerID, "fetchSingleBlock")
+	defer func() { _ = trackedBody.Close() }()
 
-	// Track bytes downloaded from peer
-	if u.p2pClient != nil && peerID != "" {
-		if err := u.p2pClient.RecordBytesDownloaded(ctx, peerID, uint64(len(blockBytes))); err != nil {
-			u.logger.Warnf("[fetchSingleBlock][%s] failed to record %d bytes downloaded from peer %s: %v", hash.String(), len(blockBytes), peerID, err)
-		}
-	}
-
-	block, err := model.NewBlockFromBytes(blockBytes)
+	blockReader := bufio.NewReaderSize(trackedBody, 16)
+	block, err := decodeBoundedBlock(blockReader, maxBlockBytes)
 	if err != nil {
 		return nil, errors.NewProcessingError("[catchup:fetchSingleBlock][%s] failed to create block from bytes", hash.String(), err)
 	}
-
-	if block == nil {
-		return nil, errors.NewProcessingError("[catchup:fetchSingleBlock][%s] block could not be created from %d bytes received from peer",
-			hash.String(), len(blockBytes))
+	if _, err = blockReader.Peek(1); err == nil {
+		return nil, errors.NewExternalError("[catchup:fetchSingleBlock][%s] peer returned trailing block data", hash.String())
+	} else if !errors.Is(err, io.EOF) {
+		return nil, errors.NewProcessingError("[catchup:fetchSingleBlock][%s] failed checking block boundary", hash.String(), err)
 	}
 
 	// Reputation is credited post-validation in validateBlocksOnChannel via reportValidBlockForPeers

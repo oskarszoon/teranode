@@ -327,7 +327,7 @@ func filterMaxHeightPeers(peers []*p2p.PeerInfo, excludePeerID string) []*p2p.Pe
 	}
 
 	// Sort by reputation (descending) then by response time (ascending).
-	sort.Slice(eligiblePeers, func(i, j int) bool {
+	sort.SliceStable(eligiblePeers, func(i, j int) bool {
 		if eligiblePeers[i].ReputationScore != eligiblePeers[j].ReputationScore {
 			return eligiblePeers[i].ReputationScore > eligiblePeers[j].ReputationScore
 		}

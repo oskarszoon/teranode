@@ -28,6 +28,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type testFailedPeerIDsError struct {
+	err     error
+	peerIDs []string
+}
+
+func (e *testFailedPeerIDsError) Error() string           { return e.err.Error() }
+func (e *testFailedPeerIDsError) Unwrap() error           { return e.err }
+func (e *testFailedPeerIDsError) FailedPeerIDs() []string { return e.peerIDs }
+
 // TestCatchupAttemptCap is the #1057 regression: catchup retries for a single
 // block must be bounded so a block no peer can complete (or a persistent local
 // service error) cannot re-enter catchup forever and pin a worker + the catchup
@@ -309,7 +318,8 @@ func TestProcessCatchupChItem(t *testing.T) {
 		// fetchSubtreeFromPeer(HTTP failure) -> ExternalError(all peers failed)
 		// -> ServiceError(fetchSubtreeDataForBlock) -> ProcessingError(orderedDelivery).
 		httpErr := errors.NewServiceError("failed to fetch subtree from http://peer/subtree/aa")
-		allPeersErr := errors.NewExternalError("all peers failed to fetch subtree aa", httpErr)
+		allPeersErr := errors.NewExternalError("all peers failed to fetch subtree aa")
+		allPeersErr.SetWrappedErr(&testFailedPeerIDsError{err: httpErr, peerIDs: []string{"attempted-peer"}})
 		svcWrap := errors.NewServiceError("failed to fetch subtree data for block bb", allPeersErr)
 		chain := errors.NewProcessingError("worker failed for block bb", svcWrap)
 
@@ -335,7 +345,9 @@ func TestProcessCatchupChItem(t *testing.T) {
 	})
 
 	t.Run("plain external error takes the peer-failure path", func(t *testing.T) {
-		u, _ := newServer(3, errors.NewExternalError("all peers failed"))
+		external := errors.NewExternalError("all peers failed")
+		external.SetWrappedErr(&testFailedPeerIDsError{err: errors.NewServiceError("peer failed"), peerIDs: []string{"attempted-peer"}})
+		u, _ := newServer(3, external)
 		b := testBlock()
 		u.processBlockNotify.Set(*b.Hash(), true, ttlcache.DefaultTTL)
 
@@ -349,6 +361,79 @@ func TestProcessCatchupChItem(t *testing.T) {
 
 		mockBC := u.blockchainClient.(*blockchain.Mock)
 		mockBC.AssertCalled(t, "ReportPeerFailure", mock.Anything, mock.Anything, mock.Anything, "catchup", mock.Anything)
+	})
+
+	t.Run("external error reports only deduplicated peers actually attempted", func(t *testing.T) {
+		peerFailure := &testFailedPeerIDsError{
+			err:     errors.NewServiceError("alternative subtree peer failed"),
+			peerIDs: []string{"alt-1", "alt-2", "alt-1", ""},
+		}
+		external := errors.NewExternalError("parallel subtree peers failed")
+		external.SetWrappedErr(peerFailure)
+		chain := errors.NewProcessingError("worker failed",
+			errors.NewServiceError("subtree fetch failed", external))
+		require.True(t, errors.Is(chain, errors.ErrExternal))
+		var discovered interface{ FailedPeerIDs() []string }
+		require.True(t, errors.As(chain, &discovered), "failed-peer carrier must survive real Teranode wrappers")
+
+		u, _ := newServer(3, chain)
+		p2pClient := &catchupPeersP2PMock{}
+		u.p2pClient = p2pClient
+		b := testBlock()
+
+		u.processCatchupChItem(ctx, processBlockCatchup{block: b, peerID: "origin", baseURL: "http://origin"})
+
+		require.ElementsMatch(t, []string{"alt-1", "alt-2"}, p2pClient.recordedFailures())
+		mockBC := u.blockchainClient.(*blockchain.Mock)
+		mockBC.AssertNumberOfCalls(t, "ReportPeerFailure", 2)
+		mockBC.AssertCalled(t, "ReportPeerFailure", mock.Anything, mock.Anything, "alt-1", "catchup", mock.Anything)
+		mockBC.AssertCalled(t, "ReportPeerFailure", mock.Anything, mock.Anything, "alt-2", "catchup", mock.Anything)
+		mockBC.AssertNotCalled(t, "ReportPeerFailure", mock.Anything, mock.Anything, "origin", "catchup", mock.Anything)
+	})
+
+	t.Run("local failure never attributes carried peer attempts", func(t *testing.T) {
+		localFailure := &testFailedPeerIDsError{
+			err: errors.NewServiceError("local store failed",
+				errors.NewContextCanceledError("local cancellation", context.Canceled)),
+			peerIDs: []string{"alt-1"},
+		}
+		u, _ := newServer(3, localFailure)
+		p2pClient := &catchupPeersP2PMock{}
+		u.p2pClient = p2pClient
+		b := testBlock()
+
+		u.processCatchupChItem(ctx, processBlockCatchup{block: b, peerID: "origin", baseURL: "http://origin"})
+
+		require.Empty(t, p2pClient.recordedFailures())
+		u.blockchainClient.(*blockchain.Mock).AssertNotCalled(t, "ReportPeerFailure", mock.Anything, mock.Anything, mock.Anything, "catchup", mock.Anything)
+	})
+
+	t.Run("external error without carrier falls back to contacted origin", func(t *testing.T) {
+		u, _ := newServer(3, errors.NewExternalError("direct peer block response failed"))
+		p2pClient := &catchupPeersP2PMock{}
+		u.p2pClient = p2pClient
+		b := testBlock()
+
+		u.processCatchupChItem(ctx, processBlockCatchup{block: b, peerID: "origin", baseURL: "http://origin"})
+
+		require.Equal(t, []string{"origin"}, p2pClient.recordedFailures())
+		mockBC := u.blockchainClient.(*blockchain.Mock)
+		mockBC.AssertNumberOfCalls(t, "ReportPeerFailure", 1)
+		mockBC.AssertCalled(t, "ReportPeerFailure", mock.Anything, mock.Anything, "origin", "catchup", mock.Anything)
+	})
+
+	t.Run("external error with empty carrier does not blame uncontacted origin", func(t *testing.T) {
+		external := errors.NewExternalError("no peer was contacted")
+		external.SetWrappedErr(&testFailedPeerIDsError{err: errors.NewServiceError("selection failed")})
+		u, _ := newServer(3, external)
+		p2pClient := &catchupPeersP2PMock{}
+		u.p2pClient = p2pClient
+		b := testBlock()
+
+		u.processCatchupChItem(ctx, processBlockCatchup{block: b, peerID: "origin", baseURL: "http://origin"})
+
+		require.Empty(t, p2pClient.recordedFailures())
+		u.blockchainClient.(*blockchain.Mock).AssertNotCalled(t, "ReportPeerFailure", mock.Anything, mock.Anything, mock.Anything, "catchup", mock.Anything)
 	})
 
 	t.Run("invalid block clears notify without counting toward cap", func(t *testing.T) {

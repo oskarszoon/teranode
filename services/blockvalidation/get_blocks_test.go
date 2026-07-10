@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"runtime"
 	"strings"
@@ -34,6 +35,183 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
+
+type trackedBlockResponseBody struct {
+	data      []byte
+	offset    int
+	bytesRead atomic.Int64
+	closed    atomic.Bool
+}
+
+func (b *trackedBlockResponseBody) Read(p []byte) (int, error) {
+	if b.offset >= len(b.data) {
+		return 0, io.EOF
+	}
+	n := copy(p, b.data[b.offset:])
+	b.offset += n
+	b.bytesRead.Add(int64(n))
+	return n, nil
+}
+
+func (b *trackedBlockResponseBody) Close() error {
+	b.closed.Store(true)
+	return nil
+}
+
+func blockHTTPResponse(body io.ReadCloser) *http.Response {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       body,
+		Header:     http.Header{},
+	}
+}
+
+func TestPeerBlockFetches_StreamAndBoundResponses(t *testing.T) {
+	t.Run("single rejects trailing oversized body without reading it all", func(t *testing.T) {
+		suite := NewCatchupTestSuite(t)
+		defer suite.Cleanup()
+
+		block := testhelpers.CreateTestBlockChain(t, 2)[1]
+		blockBytes, err := block.Bytes()
+		require.NoError(t, err)
+		suite.Server.settings.Policy.ExcessiveBlockSize = len(blockBytes)
+
+		body := &trackedBlockResponseBody{data: append(append([]byte{}, blockBytes...), bytes.Repeat([]byte{0xaa}, 1<<20)...)}
+		httpmock.ActivateNonDefault(util.HTTPClient())
+		defer httpmock.DeactivateAndReset()
+		httpmock.RegisterResponder("GET", fmt.Sprintf("http://peer/block/%s", block.Hash()),
+			func(*http.Request) (*http.Response, error) { return blockHTTPResponse(body), nil })
+
+		_, err = suite.Server.fetchSingleBlock(suite.Ctx, block.Hash(), "peer", "http://peer")
+		require.Error(t, err)
+		require.Less(t, body.bytesRead.Load(), int64(len(body.data)), "stream decoder must not buffer the full hostile response")
+		require.True(t, body.closed.Load(), "response body must close on rejection")
+	})
+
+	t.Run("single rejects block larger than acceptance limit", func(t *testing.T) {
+		suite := NewCatchupTestSuite(t)
+		defer suite.Cleanup()
+
+		block := testhelpers.CreateTestBlockChain(t, 2)[1]
+		blockBytes, err := block.Bytes()
+		require.NoError(t, err)
+		suite.Server.settings.Policy.ExcessiveBlockSize = len(blockBytes) - 1
+
+		httpmock.ActivateNonDefault(util.HTTPClient())
+		defer httpmock.DeactivateAndReset()
+		httpmock.RegisterResponder("GET", fmt.Sprintf("http://peer/block/%s", block.Hash()), httpmock.NewBytesResponder(http.StatusOK, blockBytes))
+
+		_, err = suite.Server.fetchSingleBlock(suite.Ctx, block.Hash(), "peer", "http://peer")
+		require.Error(t, err)
+	})
+
+	t.Run("batch rejects too many blocks", func(t *testing.T) {
+		suite := NewCatchupTestSuite(t)
+		defer suite.Cleanup()
+
+		blocks := testhelpers.CreateTestBlockChain(t, 3)
+		first, err := blocks[1].Bytes()
+		require.NoError(t, err)
+		second, err := blocks[2].Bytes()
+		require.NoError(t, err)
+		suite.Server.settings.Policy.ExcessiveBlockSize = max(len(first), len(second))
+
+		body := &trackedBlockResponseBody{data: append(first, second...)}
+		httpmock.ActivateNonDefault(util.HTTPClient())
+		defer httpmock.DeactivateAndReset()
+		httpmock.RegisterResponder("GET", fmt.Sprintf("http://peer/blocks/%s?n=1", blocks[1].Hash()),
+			func(*http.Request) (*http.Response, error) { return blockHTTPResponse(body), nil })
+
+		_, err = suite.Server.fetchBlocksBatch(suite.Ctx, blocks[1].Hash(), 1, "peer", "http://peer")
+		require.Error(t, err)
+		require.True(t, body.closed.Load(), "response body must close on count rejection")
+	})
+
+	t.Run("batch rejects truncated response and huge requested count without preallocation", func(t *testing.T) {
+		suite := NewCatchupTestSuite(t)
+		defer suite.Cleanup()
+		suite.Server.settings.Policy.ExcessiveBlockSize = 1024
+
+		httpmock.ActivateNonDefault(util.HTTPClient())
+		defer httpmock.DeactivateAndReset()
+		httpmock.RegisterResponder("GET", fmt.Sprintf("http://peer/blocks/%s?n=%d", (&chainhash.Hash{}).String(), uint32(math.MaxUint32)),
+			httpmock.NewBytesResponder(http.StatusOK, nil))
+
+		_, err := suite.Server.fetchBlocksBatch(suite.Ctx, &chainhash.Hash{}, math.MaxUint32, "peer", "http://peer")
+		require.Error(t, err)
+	})
+
+	t.Run("zero count returns without request", func(t *testing.T) {
+		suite := NewCatchupTestSuite(t)
+		defer suite.Cleanup()
+		var requests atomic.Int32
+
+		httpmock.ActivateNonDefault(util.HTTPClient())
+		defer httpmock.DeactivateAndReset()
+		httpmock.RegisterNoResponder(func(*http.Request) (*http.Response, error) {
+			requests.Add(1)
+			return httpmock.NewStringResponse(http.StatusInternalServerError, "unexpected"), nil
+		})
+
+		blocks, err := suite.Server.fetchBlocksBatch(suite.Ctx, &chainhash.Hash{}, 0, "peer", "http://peer")
+		require.NoError(t, err)
+		require.Empty(t, blocks)
+		require.Zero(t, requests.Load())
+	})
+
+	t.Run("non-positive acceptance limit fails closed before request", func(t *testing.T) {
+		for _, limit := range []int{0, -1} {
+			t.Run(fmt.Sprintf("limit_%d", limit), func(t *testing.T) {
+				suite := NewCatchupTestSuite(t)
+				defer suite.Cleanup()
+				suite.Server.settings.Policy.ExcessiveBlockSize = limit
+				var requests atomic.Int32
+
+				httpmock.ActivateNonDefault(util.HTTPClient())
+				defer httpmock.DeactivateAndReset()
+				httpmock.RegisterNoResponder(func(*http.Request) (*http.Response, error) {
+					requests.Add(1)
+					return httpmock.NewStringResponse(http.StatusOK, "unexpected"), nil
+				})
+
+				_, err := suite.Server.fetchSingleBlock(suite.Ctx, &chainhash.Hash{}, "peer", "http://peer")
+				require.Error(t, err)
+				require.True(t, errors.Is(err, errors.ErrServiceError) || errors.IsLocalError(err),
+					"invalid local receive config must not be classified as a peer failure: %v", err)
+				require.Zero(t, requests.Load())
+			})
+		}
+	})
+
+	t.Run("valid streamed batch remains accepted", func(t *testing.T) {
+		suite := NewCatchupTestSuite(t)
+		defer suite.Cleanup()
+
+		blocks := testhelpers.CreateTestBlockChain(t, 3)
+		first, err := blocks[1].Bytes()
+		require.NoError(t, err)
+		second, err := blocks[2].Bytes()
+		require.NoError(t, err)
+		suite.Server.settings.Policy.ExcessiveBlockSize = max(len(first), len(second))
+		p2pClient := &catchupPeersP2PMock{}
+		suite.Server.p2pClient = p2pClient
+
+		body := &trackedBlockResponseBody{data: append(first, second...)}
+		httpmock.ActivateNonDefault(util.HTTPClient())
+		defer httpmock.DeactivateAndReset()
+		httpmock.RegisterResponder("GET", fmt.Sprintf("http://peer/blocks/%s?n=2", blocks[1].Hash()),
+			func(*http.Request) (*http.Response, error) { return blockHTTPResponse(body), nil })
+
+		got, err := suite.Server.fetchBlocksBatch(suite.Ctx, blocks[1].Hash(), 2, "peer", "http://peer")
+		require.NoError(t, err)
+		require.Len(t, got, 2)
+		require.Equal(t, blocks[1].Hash(), got[0].Hash())
+		require.Equal(t, blocks[2].Hash(), got[1].Hash())
+		require.Equal(t, int64(len(body.data)), body.bytesRead.Load())
+		require.True(t, body.closed.Load())
+		require.Equal(t, uint64(len(body.data)), p2pClient.recordedBytes("peer"))
+	})
+}
 
 // TestFetchBlocksConcurrently_CurrentImplementation tests the existing fetchBlocksConcurrently function behavior
 func TestFetchBlocksConcurrently_CurrentImplementation(t *testing.T) {
@@ -3007,10 +3185,10 @@ func TestFetchBlocksConcurrently_ErrorHandling(t *testing.T) {
 		// Call fetchBlocksBatch directly to test EOF handling
 		fetchedBlocks, err := suite.Server.fetchBlocksBatch(context.Background(), blocks[1].Header.Hash(), 2, "test-peer-id", "http://test-peer")
 
-		// Should succeed and return only the first block (EOF handled gracefully)
-		assert.NoError(t, err)
-		assert.Len(t, fetchedBlocks, 1)
-		assert.Equal(t, blocks[1].Header.Hash().String(), fetchedBlocks[0].Header.Hash().String())
+		// A peer must return exactly the requested count; clean EOF after one block is truncation.
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "truncated batch")
+		require.Nil(t, fetchedBlocks)
 	})
 }
 
