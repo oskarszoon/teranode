@@ -1172,7 +1172,10 @@ func decodeBoundedBlock(reader io.Reader, limits blockResponseLimits) (*model.Bl
 		if limited.N == 0 {
 			return nil, errors.NewExternalError("peer block response reached transport envelope limit of %d bytes", limits.maxTransportBytes)
 		}
-		return nil, err
+		// A block that fails to decode is the peer's bad payload, not a local fault:
+		// classify it as external so catchup fails over to another peer. The model's
+		// block-layer error (e.g. declared size / go-bt limit) is preserved as the cause.
+		return nil, errors.NewExternalError("peer block response failed to decode", err)
 	}
 
 	if block == nil {
