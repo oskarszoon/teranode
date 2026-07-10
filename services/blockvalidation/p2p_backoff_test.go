@@ -3,6 +3,7 @@ package blockvalidation
 import (
 	"context"
 	"fmt"
+	"math"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -156,13 +157,37 @@ func TestSelectAlternativePeers_CapsAndSkipsTargets(t *testing.T) {
 }
 
 func TestSelectAlternativePeers_DefaultsNonPositiveLimit(t *testing.T) {
-	got := selectAlternativePeers([]*p2p.PeerInfo{
-		mkTestPeer("alt-1", "full", 100),
-		mkTestPeer("alt-2", "full", 100),
-		mkTestPeer("alt-3", "full", 100),
-		mkTestPeer("alt-4", "full", 100),
-	}, "assigned", "http://assigned", 0)
-	require.Len(t, got, 3)
+	for _, limit := range []int{0, -1} {
+		t.Run(fmt.Sprintf("limit_%d", limit), func(t *testing.T) {
+			got := selectAlternativePeers([]*p2p.PeerInfo{
+				mkTestPeer("alt-1", "full", 100),
+				mkTestPeer("alt-2", "full", 100),
+				mkTestPeer("alt-3", "full", 100),
+				mkTestPeer("alt-4", "full", 100),
+			}, "assigned", "http://assigned", limit)
+			require.Len(t, got, 3)
+		})
+	}
+}
+
+func TestAlternativePeerCapacity(t *testing.T) {
+	tests := []struct {
+		name        string
+		maxAttempts int
+		peerCount   int
+		want        int
+	}{
+		{name: "huge limit", maxAttempts: math.MaxInt, peerCount: 1, want: 1},
+		{name: "zero defaults to three", maxAttempts: 0, peerCount: 4, want: 3},
+		{name: "negative defaults to three", maxAttempts: -1, peerCount: 4, want: 3},
+		{name: "positive limit", maxAttempts: 2, peerCount: 4, want: 2},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, alternativePeerCapacity(tt.maxAttempts, tt.peerCount))
+		})
+	}
 }
 
 func seedLocalSubtreeForPeerLookupTest(t *testing.T, server *Server, ctx context.Context) *model.Block {

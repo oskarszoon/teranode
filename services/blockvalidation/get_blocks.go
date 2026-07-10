@@ -760,18 +760,23 @@ func (u *Server) fetchAndStoreSubtreeData(ctx context.Context, shutdownCtx conte
 	return nil
 }
 
+func alternativePeerCapacity(maxAttempts, peerCount int) int {
+	if maxAttempts <= 0 {
+		maxAttempts = 3
+	}
+
+	return min(maxAttempts, peerCount)
+}
+
 func selectAlternativePeers(
 	peers []*p2p.PeerInfo,
 	assignedPeerID string,
 	assignedBaseURL string,
 	maxAttempts int,
 ) []*p2p.PeerInfo {
-	if maxAttempts <= 0 {
-		maxAttempts = 3
-	}
-
-	selected := make([]*p2p.PeerInfo, 0, min(maxAttempts, len(peers)))
-	seenURLs := make(map[string]struct{}, maxAttempts+1)
+	candidateCap := alternativePeerCapacity(maxAttempts, len(peers))
+	selected := make([]*p2p.PeerInfo, 0, candidateCap)
+	seenURLs := make(map[string]struct{}, candidateCap)
 	if assignedBaseURL != "" {
 		seenURLs[assignedBaseURL] = struct{}{}
 	}
@@ -785,7 +790,7 @@ func selectAlternativePeers(
 		}
 		seenURLs[peer.DataHubURL] = struct{}{}
 		selected = append(selected, peer)
-		if len(selected) == maxAttempts {
+		if len(selected) == candidateCap {
 			break
 		}
 	}
