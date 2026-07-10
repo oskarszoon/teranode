@@ -165,6 +165,33 @@ func TestSyncCoordinator_HandleCatchupFailureForPeer(t *testing.T) {
 		require.Equal(t, beforeScore, after.ReputationScore,
 			"operation-level notification must not double-count the direct peer failure metric")
 	})
+
+	t.Run("serializes compare clear and trigger", func(t *testing.T) {
+		sc, _ := newTestSyncCoordinator(t)
+		sc.mu.Lock()
+		sc.currentSyncPeer = "current"
+		sc.mu.Unlock()
+
+		sc.triggerMu.Lock()
+		done := make(chan struct{})
+		go func() {
+			sc.HandleCatchupFailureForPeer("current", "catchup failed")
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			t.Fatal("peer transition bypassed trigger serialization")
+		case <-time.After(25 * time.Millisecond):
+		}
+		require.Equal(t, "current", sc.GetCurrentSyncPeer(), "compare-clear must wait for transition lock")
+		sc.triggerMu.Unlock()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("serialized peer transition did not complete")
+		}
+	})
 }
 
 func TestSyncCoordinator_GetPeer_ByLibp2pID(t *testing.T) {

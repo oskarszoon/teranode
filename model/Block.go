@@ -294,6 +294,17 @@ func NewBlockFromBytes(blockBytes []byte) (block *Block, err error) {
 }
 
 func NewBlockFromReader(blockReader io.Reader) (block *Block, err error) {
+	return newBlockFromReader(blockReader, 0, false)
+}
+
+// NewBlockFromReaderWithDeclaredSizeLimit decodes a block while rejecting a
+// declared Bitcoin block size above maxDeclaredBytes before reading subtree or
+// coinbase payloads. The transport reader remains responsible for its byte cap.
+func NewBlockFromReaderWithDeclaredSizeLimit(blockReader io.Reader, maxDeclaredBytes uint64) (block *Block, err error) {
+	return newBlockFromReader(blockReader, maxDeclaredBytes, true)
+}
+
+func newBlockFromReader(blockReader io.Reader, maxDeclaredBytes uint64, enforceDeclaredSize bool) (block *Block, err error) {
 	startTime := time.Now()
 
 	defer func() {
@@ -319,10 +330,14 @@ func NewBlockFromReader(blockReader io.Reader) (block *Block, err error) {
 		return nil, errors.NewBlockInvalidError("invalid block header", err)
 	}
 
-	return readBlockFromReader(block, blockReader)
+	return readBlockFromReaderWithLimits(block, blockReader, maxDeclaredBytes, enforceDeclaredSize)
 }
 
 func readBlockFromReader(block *Block, buf io.Reader) (*Block, error) {
+	return readBlockFromReaderWithLimits(block, buf, 0, false)
+}
+
+func readBlockFromReaderWithLimits(block *Block, buf io.Reader, maxDeclaredBytes uint64, enforceDeclaredSize bool) (*Block, error) {
 	var err error
 
 	// read the transaction count
@@ -335,6 +350,9 @@ func readBlockFromReader(block *Block, buf io.Reader) (*Block, error) {
 	block.SizeInBytes, err = wire.ReadVarInt(buf, 0)
 	if err != nil {
 		return nil, errors.NewBlockInvalidError("error reading size in bytes", err)
+	}
+	if enforceDeclaredSize && block.SizeInBytes > maxDeclaredBytes {
+		return nil, errors.NewBlockInvalidError("block declared size %d exceeds limit %d", block.SizeInBytes, maxDeclaredBytes)
 	}
 
 	// read the length of the subtree list
@@ -420,9 +438,15 @@ func readBlockFromReader(block *Block, buf io.Reader) (*Block, error) {
 // only as they are actually received, then decoded by go-bt after every advertised field has
 // been proven present inside the reader's remaining transport budget.
 func readTransactionAllocationSafe(r io.Reader) (*bt.Tx, error) {
+	transactionBudget := int64(bt.MaxArenaAlloc)
+	if outer, ok := r.(*io.LimitedReader); ok && outer.N < transactionBudget {
+		transactionBudget = outer.N
+	}
+	limited := &io.LimitedReader{R: r, N: transactionBudget}
+
 	var raw bytes.Buffer
-	tee := io.TeeReader(r, &raw)
-	if err := scanSerializedTransaction(tee, r); err != nil {
+	tee := io.TeeReader(limited, &raw)
+	if err := scanSerializedTransaction(tee, limited); err != nil {
 		return nil, err
 	}
 
@@ -439,7 +463,7 @@ func scanSerializedTransaction(r io.Reader, budgetReader io.Reader) error {
 		return err
 	}
 
-	inputCount, err := wire.ReadVarInt(r, 0)
+	inputCount, err := readBTVarInt(r)
 	if err != nil {
 		return err
 	}
@@ -447,7 +471,7 @@ func scanSerializedTransaction(r io.Reader, budgetReader io.Reader) error {
 	var outputCount uint64
 	extended := false
 	if inputCount == 0 {
-		outputCount, err = wire.ReadVarInt(r, 0)
+		outputCount, err = readBTVarInt(r)
 		if err != nil {
 			return err
 		}
@@ -460,7 +484,7 @@ func scanSerializedTransaction(r io.Reader, budgetReader io.Reader) error {
 				return nil
 			}
 			extended = true
-			inputCount, err = wire.ReadVarInt(r, 0)
+			inputCount, err = readBTVarInt(r)
 			if err != nil {
 				return err
 			}
@@ -491,7 +515,7 @@ func scanSerializedTransaction(r io.Reader, budgetReader io.Reader) error {
 	}
 
 	if inputCount > 0 || extended {
-		outputCount, err = wire.ReadVarInt(r, 0)
+		outputCount, err = readBTVarInt(r)
 		if err != nil {
 			return err
 		}
@@ -512,15 +536,24 @@ func scanSerializedTransaction(r io.Reader, budgetReader io.Reader) error {
 }
 
 func discardSerializedScript(r io.Reader, budgetReader io.Reader, label string) error {
-	scriptLength, err := wire.ReadVarInt(r, 0)
+	scriptLength, err := readBTVarInt(r)
 	if err != nil {
 		return err
 	}
 	remaining := remainingReaderBudget(budgetReader)
+	if scriptLength > uint64(bt.MaxArenaAlloc) {
+		return errors.NewBlockInvalidError("%s length %d exceeds go-bt MaxArenaAlloc %d", label, scriptLength, bt.MaxArenaAlloc)
+	}
 	if scriptLength > uint64(math.MaxInt64) || scriptLength > remaining {
 		return errors.NewBlockInvalidError("%s length %d exceeds remaining transport budget %d", label, scriptLength, remaining)
 	}
 	return discardExact(r, int64(scriptLength))
+}
+
+func readBTVarInt(r io.Reader) (uint64, error) {
+	var value bt.VarInt
+	_, err := value.ReadFrom(r)
+	return uint64(value), err
 }
 
 func discardExact(r io.Reader, n int64) error {

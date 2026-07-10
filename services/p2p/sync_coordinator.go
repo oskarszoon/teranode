@@ -32,6 +32,7 @@ type SyncCoordinator struct {
 	ctx context.Context
 
 	// Current sync state. currentSyncPeer holds the canonical libp2p ID string.
+	triggerMu       sync.Mutex
 	mu              sync.RWMutex
 	currentSyncPeer string
 	syncStartTime   time.Time
@@ -200,6 +201,12 @@ func (sc *SyncCoordinator) ClearSyncPeer() {
 
 // TriggerSync triggers a new sync operation
 func (sc *SyncCoordinator) TriggerSync() error {
+	sc.triggerMu.Lock()
+	defer sc.triggerMu.Unlock()
+	return sc.triggerSync()
+}
+
+func (sc *SyncCoordinator) triggerSync() error {
 	sc.logger.Debugf("[SyncCoordinator] Sync triggered")
 
 	// Select new sync peer
@@ -266,6 +273,8 @@ func (sc *SyncCoordinator) HandlePeerDisconnected(peerID peer.ID) {
 // HandleCatchupFailure handles catchup failures
 func (sc *SyncCoordinator) HandleCatchupFailure(reason string) {
 	sc.logger.Infof("[SyncCoordinator] Handling catchup failure: %s", reason)
+	sc.triggerMu.Lock()
+	defer sc.triggerMu.Unlock()
 
 	// Get the failed peer before clearing
 	sc.mu.RLock()
@@ -285,7 +294,7 @@ func (sc *SyncCoordinator) HandleCatchupFailure(reason string) {
 	sc.ClearSyncPeer()
 
 	// Trigger new sync
-	if err := sc.TriggerSync(); err != nil {
+	if err := sc.triggerSync(); err != nil {
 		sc.logger.Errorf("[SyncCoordinator] Failed to trigger sync after failure: %v", err)
 	}
 }
@@ -296,6 +305,9 @@ func (sc *SyncCoordinator) HandleCatchupFailure(reason string) {
 // this method only performs the peer switch, avoiding a duplicate failure count.
 func (sc *SyncCoordinator) HandleCatchupFailureForPeer(peerID, reason string) {
 	sc.logger.Infof("[SyncCoordinator] Handling catchup failure for peer %s: %s", peerID, reason)
+
+	sc.triggerMu.Lock()
+	defer sc.triggerMu.Unlock()
 
 	sc.mu.Lock()
 	currentPeer := sc.currentSyncPeer
@@ -308,7 +320,7 @@ func (sc *SyncCoordinator) HandleCatchupFailureForPeer(peerID, reason string) {
 	sc.mu.Unlock()
 
 	sc.logger.Infof("[SyncCoordinator] Cleared failed sync peer %s", peerID)
-	if err := sc.TriggerSync(); err != nil {
+	if err := sc.triggerSync(); err != nil {
 		sc.logger.Errorf("[SyncCoordinator] Failed to trigger sync after failure: %v", err)
 	}
 }

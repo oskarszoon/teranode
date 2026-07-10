@@ -1161,7 +1161,13 @@ func classifyBlockStreamErr(ctx context.Context, hash *chainhash.Hash, err error
 
 func decodeBoundedBlock(reader io.Reader, limits blockResponseLimits) (*model.Block, error) {
 	limited := &io.LimitedReader{R: reader, N: limits.maxTransportBytes}
-	block, err := model.NewBlockFromReader(limited)
+	var block *model.Block
+	var err error
+	if limits.enforceDeclared {
+		block, err = model.NewBlockFromReaderWithDeclaredSizeLimit(limited, limits.maxDeclaredBytes)
+	} else {
+		block, err = model.NewBlockFromReader(limited)
+	}
 	if err != nil {
 		if limited.N == 0 {
 			return nil, errors.NewExternalError("peer block response reached transport envelope limit of %d bytes", limits.maxTransportBytes)

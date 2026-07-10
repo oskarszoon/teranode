@@ -416,7 +416,41 @@ func TestPeerBlockFetches_ClassifyStreamStalls(t *testing.T) {
 }
 
 func TestDecodeBoundedBlock_RejectsCoinbaseAllocationAmplification(t *testing.T) {
+	hostile := hostileCoinbaseBlock(t, 0, 16<<20)
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	_, err := decodeBoundedBlock(bytes.NewReader(hostile), blockResponseLimits{maxTransportBytes: 1024})
+	runtime.ReadMemStats(&after)
+
+	require.Error(t, err)
+	require.Less(t, after.TotalAlloc-before.TotalAlloc, uint64(4<<20),
+		"a tiny hostile response must not allocate its advertised 16 MiB script")
+}
+
+func TestDecodeBoundedBlock_RejectsDeterministicallyInvalidCoinbaseBeforeBuffering(t *testing.T) {
+	hostile := hostileCoinbaseBlock(t, 2048, uint64(bt.MaxArenaAlloc)+1)
+
+	_, err := decodeBoundedBlock(bytes.NewReader(hostile), blockResponseLimits{
+		maxTransportBytes: 8 << 30,
+		maxDeclaredBytes:  1024,
+		enforceDeclared:   true,
+	})
+
+	require.ErrorContains(t, err, "declared size 2048 exceeds limit 1024",
+		"declared policy must reject before scanning the hostile coinbase")
+
+	hostile = hostileCoinbaseBlock(t, 0, uint64(bt.MaxArenaAlloc)+1)
+	_, err = decodeBoundedBlock(bytes.NewReader(hostile), blockResponseLimits{maxTransportBytes: 8 << 30})
+	require.ErrorContains(t, err, "MaxArenaAlloc", "go-bt's deterministic script limit must reject before buffering")
+}
+
+func hostileCoinbaseBlock(t *testing.T, declaredSize, scriptLength uint64) []byte {
+	t.Helper()
 	block := testhelpers.CreateTestBlockChain(t, 1)[0]
+	if declaredSize > 0 {
+		block.SizeInBytes = declaredSize
+	}
 	blockBytes, err := block.Bytes()
 	require.NoError(t, err)
 
@@ -426,29 +460,18 @@ func TestDecodeBoundedBlock_RejectsCoinbaseAllocationAmplification(t *testing.T)
 		_, err = value.ReadFrom(reader)
 		require.NoError(t, err)
 	}
-	subtreeCount := uint64(value)
-	_, err = reader.Seek(int64(subtreeCount*chainhash.HashSize), io.SeekCurrent) //nolint:gosec // tiny test fixture
+	_, err = reader.Seek(int64(uint64(value)*chainhash.HashSize), io.SeekCurrent) //nolint:gosec // tiny test fixture
 	require.NoError(t, err)
 	coinbaseOffset := len(blockBytes) - reader.Len()
 
 	var hostileCoinbase bytes.Buffer
-	hostileCoinbase.Write([]byte{1, 0, 0, 0}) // version
+	hostileCoinbase.Write([]byte{1, 0, 0, 0})
 	_, err = bt.VarInt(1).WriteTo(&hostileCoinbase)
 	require.NoError(t, err)
-	hostileCoinbase.Write(make([]byte, 36)) // previous outpoint
-	_, err = bt.VarInt(16 << 20).WriteTo(&hostileCoinbase)
+	hostileCoinbase.Write(make([]byte, 36))
+	_, err = bt.VarInt(scriptLength).WriteTo(&hostileCoinbase)
 	require.NoError(t, err)
-
-	hostile := append(append([]byte{}, blockBytes[:coinbaseOffset]...), hostileCoinbase.Bytes()...)
-	runtime.GC()
-	var before, after runtime.MemStats
-	runtime.ReadMemStats(&before)
-	_, err = decodeBoundedBlock(bytes.NewReader(hostile), blockResponseLimits{maxTransportBytes: 1024})
-	runtime.ReadMemStats(&after)
-
-	require.Error(t, err)
-	require.Less(t, after.TotalAlloc-before.TotalAlloc, uint64(4<<20),
-		"a tiny hostile response must not allocate its advertised 16 MiB script")
+	return append(append([]byte{}, blockBytes[:coinbaseOffset]...), hostileCoinbase.Bytes()...)
 }
 
 // TestFetchBlocksConcurrently_CurrentImplementation tests the existing fetchBlocksConcurrently function behavior
