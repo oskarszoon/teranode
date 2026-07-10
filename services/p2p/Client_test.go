@@ -8,7 +8,9 @@ import (
 	"github.com/bsv-blockchain/teranode/services/p2p/p2p_api"
 	"github.com/bsv-blockchain/teranode/ulogger"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/known/emptypb"
 )
 
@@ -667,19 +669,22 @@ func TestSimpleClientResetReputation(t *testing.T) {
 
 func TestSimpleClientGetPeersForCatchup(t *testing.T) {
 	t.Run("ok", func(t *testing.T) {
+		apiPeer := &p2p_api.PeerInfoForCatchup{
+			Id:                     "12D3KooWBhWMmHCXuyfM48dEPRsBzkemQQu71yC9rR2zHGmAjzQz",
+			Height:                 42,
+			CatchupReputationScore: 88.5,
+			CatchupAttempts:        3,
+			CatchupSuccesses:       2,
+			CatchupFailures:        1,
+		}
+		storageField := apiPeer.ProtoReflect().Descriptor().Fields().ByName("storage")
+		require.NotNil(t, storageField)
+		apiPeer.ProtoReflect().Set(storageField, protoreflect.ValueOfString("pruned"))
+
 		client := newClientWithMock(&MockPeerServiceClient{
 			GetPeersForCatchupFunc: func(ctx context.Context, in *p2p_api.GetPeersForCatchupRequest, opts ...grpc.CallOption) (*p2p_api.GetPeersForCatchupResponse, error) {
 				return &p2p_api.GetPeersForCatchupResponse{
-					Peers: []*p2p_api.PeerInfoForCatchup{
-						{
-							Id:                     "12D3KooWBhWMmHCXuyfM48dEPRsBzkemQQu71yC9rR2zHGmAjzQz",
-							Height:                 42,
-							CatchupReputationScore: 88.5,
-							CatchupAttempts:        3,
-							CatchupSuccesses:       2,
-							CatchupFailures:        1,
-						},
-					},
+					Peers: []*p2p_api.PeerInfoForCatchup{apiPeer},
 				}, nil
 			},
 		})
@@ -689,6 +694,7 @@ func TestSimpleClientGetPeersForCatchup(t *testing.T) {
 		assert.Equal(t, uint32(42), peers[0].Height)
 		assert.InDelta(t, 88.5, peers[0].ReputationScore, 0.001)
 		assert.Equal(t, int64(3), peers[0].InteractionAttempts)
+		require.Equal(t, "pruned", peers[0].Storage)
 	})
 	t.Run("grpc_error", func(t *testing.T) {
 		client := newClientWithMock(&MockPeerServiceClient{
