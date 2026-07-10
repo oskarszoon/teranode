@@ -436,6 +436,25 @@ func TestProcessCatchupChItem(t *testing.T) {
 		u.blockchainClient.(*blockchain.Mock).AssertNotCalled(t, "ReportPeerFailure", mock.Anything, mock.Anything, mock.Anything, "catchup", mock.Anything)
 	})
 
+	t.Run("production wrapper preserves authoritative empty carrier", func(t *testing.T) {
+		external := errors.NewExternalError("no peer was contacted")
+		wrapped := wrapErrorWithFailedPeerIDs(external, errors.NewServiceError("selection failed"), nil)
+		chain := errors.NewProcessingError("ordered delivery failed",
+			errors.NewServiceError("subtree fetch failed", wrapped))
+		_, hasCarrier := failedPeerIDsFromError(chain)
+		require.True(t, hasCarrier, "production wrapper chain must retain an authoritative empty carrier")
+
+		u, _ := newServer(3, chain)
+		p2pClient := &catchupPeersP2PMock{}
+		u.p2pClient = p2pClient
+		b := testBlock()
+
+		u.processCatchupChItem(ctx, processBlockCatchup{block: b, peerID: "origin", baseURL: "http://origin"})
+
+		require.Empty(t, p2pClient.recordedFailures(), "carrier presence must suppress legacy origin fallback")
+		u.blockchainClient.(*blockchain.Mock).AssertNotCalled(t, "ReportPeerFailure", mock.Anything, mock.Anything, mock.Anything, "catchup", mock.Anything)
+	})
+
 	t.Run("invalid block clears notify without counting toward cap", func(t *testing.T) {
 		u, _ := newServer(3, errors.NewBlockInvalidError("bad block"))
 		b := testBlock()

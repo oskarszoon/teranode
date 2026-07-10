@@ -43,6 +43,34 @@ type trackedBlockResponseBody struct {
 	closed    atomic.Bool
 }
 
+type stallingBlockResponseBody struct {
+	ctx     context.Context
+	data    []byte
+	offset  int
+	started chan struct{}
+	once    sync.Once
+	closed  atomic.Bool
+}
+
+func (b *stallingBlockResponseBody) Read(p []byte) (int, error) {
+	if b.offset < len(b.data) {
+		n := copy(p, b.data[b.offset:])
+		b.offset += n
+		if b.offset == len(b.data) {
+			b.once.Do(func() { close(b.started) })
+		}
+		return n, nil
+	}
+
+	<-b.ctx.Done()
+	return 0, b.ctx.Err()
+}
+
+func (b *stallingBlockResponseBody) Close() error {
+	b.closed.Store(true)
+	return nil
+}
+
 func (b *trackedBlockResponseBody) Read(p []byte) (int, error) {
 	if b.offset >= len(b.data) {
 		return 0, io.EOF
@@ -93,9 +121,11 @@ func TestPeerBlockFetches_StreamAndBoundResponses(t *testing.T) {
 		defer suite.Cleanup()
 
 		block := testhelpers.CreateTestBlockChain(t, 2)[1]
+		block.TransactionCount = 1
+		block.SizeInBytes = 80 + util.VarintSize(block.TransactionCount) + uint64(block.CoinbaseTx.Size())
 		blockBytes, err := block.Bytes()
 		require.NoError(t, err)
-		suite.Server.settings.Policy.ExcessiveBlockSize = len(blockBytes) - 1
+		suite.Server.settings.Policy.ExcessiveBlockSize = int(block.SizeInBytes) - 1
 
 		httpmock.ActivateNonDefault(util.HTTPClient())
 		defer httpmock.DeactivateAndReset()
@@ -103,6 +133,7 @@ func TestPeerBlockFetches_StreamAndBoundResponses(t *testing.T) {
 
 		_, err = suite.Server.fetchSingleBlock(suite.Ctx, block.Hash(), "peer", "http://peer")
 		require.Error(t, err)
+		require.True(t, errors.Is(err, errors.ErrExternal), "declared policy rejection is peer-classified: %v", err)
 	})
 
 	t.Run("batch rejects too many blocks", func(t *testing.T) {
@@ -159,12 +190,52 @@ func TestPeerBlockFetches_StreamAndBoundResponses(t *testing.T) {
 		require.Zero(t, requests.Load())
 	})
 
-	t.Run("non-positive acceptance limit fails closed before request", func(t *testing.T) {
-		for _, limit := range []int{0, -1} {
+	t.Run("zero acceptance limit permits a valid peer block", func(t *testing.T) {
+		suite := NewCatchupTestSuite(t)
+		defer suite.Cleanup()
+
+		block := testhelpers.CreateTestBlockChain(t, 2)[1]
+		blockBytes, err := block.Bytes()
+		require.NoError(t, err)
+		suite.Server.settings.Policy.ExcessiveBlockSize = 0
+
+		httpmock.ActivateNonDefault(util.HTTPClient())
+		defer httpmock.DeactivateAndReset()
+		httpmock.RegisterResponder("GET", fmt.Sprintf("http://peer/block/%s", block.Hash()),
+			httpmock.NewBytesResponder(http.StatusOK, blockBytes))
+
+		got, err := suite.Server.fetchSingleBlock(suite.Ctx, block.Hash(), "peer", "http://peer")
+		require.NoError(t, err)
+		require.Equal(t, block.Hash(), got.Hash())
+	})
+
+	t.Run("negative acceptance limit fails locally before request", func(t *testing.T) {
+		suite := NewCatchupTestSuite(t)
+		defer suite.Cleanup()
+		suite.Server.settings.Policy.ExcessiveBlockSize = -1
+		var requests atomic.Int32
+
+		httpmock.ActivateNonDefault(util.HTTPClient())
+		defer httpmock.DeactivateAndReset()
+		httpmock.RegisterNoResponder(func(*http.Request) (*http.Response, error) {
+			requests.Add(1)
+			return httpmock.NewStringResponse(http.StatusOK, "unexpected"), nil
+		})
+
+		_, err := suite.Server.fetchSingleBlock(suite.Ctx, &chainhash.Hash{}, "peer", "http://peer")
+		require.Error(t, err)
+		require.True(t, errors.Is(err, errors.ErrServiceError) || errors.IsLocalError(err),
+			"invalid local policy config must not be classified as a peer failure: %v", err)
+		require.Zero(t, requests.Load())
+	})
+
+	t.Run("non-positive transport envelope fails locally before request", func(t *testing.T) {
+		for _, limit := range []int64{0, -1} {
 			t.Run(fmt.Sprintf("limit_%d", limit), func(t *testing.T) {
 				suite := NewCatchupTestSuite(t)
 				defer suite.Cleanup()
-				suite.Server.settings.Policy.ExcessiveBlockSize = limit
+				suite.Server.settings.Policy.ExcessiveBlockSize = 1024
+				suite.Server.settings.BlockValidation.MaxIncomingBlockBytes = limit
 				var requests atomic.Int32
 
 				httpmock.ActivateNonDefault(util.HTTPClient())
@@ -177,10 +248,62 @@ func TestPeerBlockFetches_StreamAndBoundResponses(t *testing.T) {
 				_, err := suite.Server.fetchSingleBlock(suite.Ctx, &chainhash.Hash{}, "peer", "http://peer")
 				require.Error(t, err)
 				require.True(t, errors.Is(err, errors.ErrServiceError) || errors.IsLocalError(err),
-					"invalid local receive config must not be classified as a peer failure: %v", err)
+					"invalid local transport config must not be classified as a peer failure: %v", err)
 				require.Zero(t, requests.Load())
 			})
 		}
+	})
+
+	t.Run("transport envelope rejects oversized serialized block without unbounded read", func(t *testing.T) {
+		suite := NewCatchupTestSuite(t)
+		defer suite.Cleanup()
+
+		block := testhelpers.CreateTestBlockChain(t, 2)[1]
+		blockBytes, err := block.Bytes()
+		require.NoError(t, err)
+		suite.Server.settings.Policy.ExcessiveBlockSize = 0
+		suite.Server.settings.BlockValidation.MaxIncomingBlockBytes = int64(len(blockBytes) - 1)
+		body := &trackedBlockResponseBody{data: append(append([]byte{}, blockBytes...), bytes.Repeat([]byte{0xaa}, 1<<20)...)}
+		var requests atomic.Int32
+
+		httpmock.ActivateNonDefault(util.HTTPClient())
+		defer httpmock.DeactivateAndReset()
+		httpmock.RegisterResponder("GET", fmt.Sprintf("http://peer/block/%s", block.Hash()),
+			func(*http.Request) (*http.Response, error) {
+				requests.Add(1)
+				return blockHTTPResponse(body), nil
+			})
+
+		_, err = suite.Server.fetchSingleBlock(suite.Ctx, block.Hash(), "peer", "http://peer")
+		require.Error(t, err)
+		require.Equal(t, int32(1), requests.Load(), "valid transport config must reach HTTP")
+		require.True(t, errors.Is(err, errors.ErrExternal), "transport overflow is peer-classified: %v", err)
+		// bufio.Reader may prefetch its 16-byte minimum buffer past the logical
+		// LimitedReader boundary, but must never drain the hostile tail.
+		require.LessOrEqual(t, body.bytesRead.Load(), suite.Server.settings.BlockValidation.MaxIncomingBlockBytes+16)
+		require.True(t, body.closed.Load())
+	})
+
+	t.Run("declared policy permits transport framing overhead", func(t *testing.T) {
+		suite := NewCatchupTestSuite(t)
+		defer suite.Cleanup()
+
+		block := testhelpers.CreateTestBlockChain(t, 2)[1]
+		block.TransactionCount = 1
+		block.SizeInBytes = 80 + util.VarintSize(block.TransactionCount) + uint64(block.CoinbaseTx.Size())
+		blockBytes, err := block.Bytes()
+		require.NoError(t, err)
+		require.Greater(t, len(blockBytes), int(block.SizeInBytes), "fixture must carry Teranode framing beyond declared Bitcoin size")
+		suite.Server.settings.Policy.ExcessiveBlockSize = int(block.SizeInBytes)
+
+		httpmock.ActivateNonDefault(util.HTTPClient())
+		defer httpmock.DeactivateAndReset()
+		httpmock.RegisterResponder("GET", fmt.Sprintf("http://peer/block/%s", block.Hash()),
+			httpmock.NewBytesResponder(http.StatusOK, blockBytes))
+
+		got, err := suite.Server.fetchSingleBlock(suite.Ctx, block.Hash(), "peer", "http://peer")
+		require.NoError(t, err)
+		require.Equal(t, block.SizeInBytes, got.SizeInBytes)
 	})
 
 	t.Run("valid streamed batch remains accepted", func(t *testing.T) {
@@ -211,6 +334,85 @@ func TestPeerBlockFetches_StreamAndBoundResponses(t *testing.T) {
 		require.True(t, body.closed.Load())
 		require.Equal(t, uint64(len(body.data)), p2pClient.recordedBytes("peer"))
 	})
+}
+
+func TestPeerBlockFetches_ClassifyStreamStalls(t *testing.T) {
+	tests := []struct {
+		name        string
+		bodyData    func([]byte) []byte
+		cancel      bool
+		wantLocal   bool
+		wantNetwork bool
+	}{
+		{
+			name:        "mid-block deadline is a peer timeout",
+			bodyData:    func(blockBytes []byte) []byte { return blockBytes[:40] },
+			wantNetwork: true,
+		},
+		{
+			name:        "complete block without EOF is a peer timeout",
+			bodyData:    func(blockBytes []byte) []byte { return blockBytes },
+			wantNetwork: true,
+		},
+		{
+			name:      "caller cancellation remains local",
+			bodyData:  func(blockBytes []byte) []byte { return blockBytes[:40] },
+			cancel:    true,
+			wantLocal: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			suite := NewCatchupTestSuite(t)
+			defer suite.Cleanup()
+
+			block := testhelpers.CreateTestBlockChain(t, 2)[1]
+			blockBytes, err := block.Bytes()
+			require.NoError(t, err)
+			suite.Server.settings.Policy.ExcessiveBlockSize = 1024
+
+			var (
+				ctx    context.Context
+				cancel context.CancelFunc
+			)
+			if tt.cancel {
+				ctx, cancel = context.WithCancel(context.Background())
+			} else {
+				ctx, cancel = context.WithTimeout(context.Background(), 75*time.Millisecond)
+			}
+			defer cancel()
+
+			var body *stallingBlockResponseBody
+			httpmock.ActivateNonDefault(util.HTTPClient())
+			defer httpmock.DeactivateAndReset()
+			httpmock.RegisterResponder("GET", fmt.Sprintf("http://peer/block/%s", block.Hash()),
+				func(req *http.Request) (*http.Response, error) {
+					body = &stallingBlockResponseBody{
+						ctx:     req.Context(),
+						data:    tt.bodyData(blockBytes),
+						started: make(chan struct{}),
+					}
+					if tt.cancel {
+						go func() {
+							<-body.started
+							cancel()
+						}()
+					}
+					return blockHTTPResponse(body), nil
+				})
+
+			_, err = suite.Server.fetchSingleBlock(ctx, block.Hash(), "peer", "http://peer")
+			require.Error(t, err)
+			require.Equal(t, tt.wantLocal, errors.IsLocalError(err), "unexpected local classification: %v", err)
+			require.Equal(t, tt.wantNetwork, errors.IsNetworkError(err), "unexpected network classification: %v", err)
+			if tt.wantNetwork {
+				require.False(t, errors.Is(err, context.DeadlineExceeded), "peer timeout must not retain infectious deadline sentinel: %v", err)
+			}
+			require.NotNil(t, body)
+			require.True(t, body.closed.Load(), "response body must close after stream failure")
+		})
+	}
 }
 
 // TestFetchBlocksConcurrently_CurrentImplementation tests the existing fetchBlocksConcurrently function behavior

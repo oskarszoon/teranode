@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"math"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -157,11 +156,6 @@ func failedPeerIDsFromError(err error) ([]string, bool) {
 
 func wrapErrorWithFailedPeerIDs(root *errors.Error, wrapped error, peerIDs []string) error {
 	normalized := normalizeFailedPeerIDs(peerIDs)
-	if len(normalized) == 0 {
-		root.SetWrappedErr(wrapped)
-		return root
-	}
-
 	root.SetWrappedErr(&failedPeerIDsError{err: wrapped, peerIDs: normalized})
 	return root
 }
@@ -593,6 +587,20 @@ func (u *Server) fetchSubtreeDataForBlock(gCtx context.Context, block *model.Blo
 		}
 		root := errors.NewServiceError("[catchup:fetchSubtreeDataForBlock] Failed to fetch subtree data for block %s", block.Hash().String())
 		return nil, wrapErrorWithFailedPeerIDs(root, err, failedPeerIDs)
+	}
+
+	failedPeerIDs := make([]string, 0, len(failedPeers))
+	for failedPeerID := range failedPeers {
+		failedPeerIDs = append(failedPeerIDs, failedPeerID)
+	}
+	for _, failedPeerID := range normalizeFailedPeerIDs(failedPeerIDs) {
+		u.reportCatchupFailure(parentCtx, failedPeerID)
+		if u.blockchainClient == nil {
+			continue
+		}
+		if reportErr := u.blockchainClient.ReportPeerFailure(parentCtx, block.Hash(), failedPeerID, "catchup", "peer subtree fetch failed before successful block recovery"); reportErr != nil {
+			u.logger.Errorf("[catchup:fetchSubtreeDataForBlock][%s] failed to report recovered peer failure for peer %s: %v", block.Hash().String(), failedPeerID, reportErr)
+		}
 	}
 
 	return contributingPeers, nil
@@ -1113,21 +1121,50 @@ func (u *Server) fetchSubtreeDataFromPeer(ctx context.Context, subtreeHash *chai
 
 const blockBatchCapacityHint = 100
 
-func blockResponseLimit(configured int) (int64, error) {
-	if configured <= 0 || uint64(configured) > uint64(math.MaxInt64) {
-		configErr := errors.NewConfigurationError("excessiveblocksize must be a positive int64 value for peer block downloads, got %d", configured)
-		return 0, errors.NewServiceError("invalid local peer block receive configuration", configErr)
-	}
-
-	return int64(configured), nil
+type blockResponseLimits struct {
+	maxTransportBytes int64
+	maxDeclaredBytes  uint64
+	enforceDeclared   bool
 }
 
-func decodeBoundedBlock(reader io.Reader, maxBytes int64) (*model.Block, error) {
-	limited := &io.LimitedReader{R: reader, N: maxBytes}
+func resolveBlockResponseLimits(maxTransportBytes int64, excessiveBlockSize int) (blockResponseLimits, error) {
+	if maxTransportBytes <= 0 {
+		configErr := errors.NewConfigurationError("blockvalidation_max_incoming_block_bytes must be positive, got %d", maxTransportBytes)
+		return blockResponseLimits{}, errors.NewServiceError("invalid local peer block receive configuration", configErr)
+	}
+	if excessiveBlockSize < 0 {
+		configErr := errors.NewConfigurationError("excessiveblocksize must be non-negative, got %d", excessiveBlockSize)
+		return blockResponseLimits{}, errors.NewServiceError("invalid local peer block acceptance configuration", configErr)
+	}
+
+	limits := blockResponseLimits{maxTransportBytes: maxTransportBytes}
+	if excessiveBlockSize > 0 {
+		limits.maxDeclaredBytes = uint64(excessiveBlockSize)
+		limits.enforceDeclared = true
+	}
+
+	return limits, nil
+}
+
+func classifyBlockStreamErr(ctx context.Context, hash *chainhash.Hash, err error) error {
+	if errors.Is(err, errors.ErrContextCanceled) {
+		return err
+	}
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return errors.NewContextCanceledError("[catchup:blockFetch][%s] block response aborted by caller", hash.String(), context.Canceled)
+	}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
+		return errors.NewNetworkTimeoutError("[catchup:blockFetch][%s] peer block response timed out", hash.String())
+	}
+	return nil
+}
+
+func decodeBoundedBlock(reader io.Reader, limits blockResponseLimits) (*model.Block, error) {
+	limited := &io.LimitedReader{R: reader, N: limits.maxTransportBytes}
 	block, err := model.NewBlockFromReader(limited)
 	if err != nil {
 		if limited.N == 0 {
-			return nil, errors.NewExternalError("peer block response reached excessiveblocksize limit of %d bytes", maxBytes)
+			return nil, errors.NewExternalError("peer block response reached transport envelope limit of %d bytes", limits.maxTransportBytes)
 		}
 		return nil, err
 	}
@@ -1135,8 +1172,8 @@ func decodeBoundedBlock(reader io.Reader, maxBytes int64) (*model.Block, error) 
 	if block == nil {
 		return nil, errors.NewBlockInvalidError("peer block response decoded to nil block")
 	}
-	if block.SizeInBytes > uint64(maxBytes) {
-		return nil, errors.NewExternalError("peer block declared size %d exceeds excessiveblocksize %d", block.SizeInBytes, maxBytes)
+	if limits.enforceDeclared && block.SizeInBytes > limits.maxDeclaredBytes {
+		return nil, errors.NewExternalError("peer block declared size %d exceeds excessiveblocksize %d", block.SizeInBytes, limits.maxDeclaredBytes)
 	}
 
 	return block, nil
@@ -1179,7 +1216,10 @@ func (u *Server) fetchBlocksBatch(ctx context.Context, hash *chainhash.Hash, n u
 		return []*model.Block{}, nil
 	}
 
-	maxBlockBytes, err := blockResponseLimit(u.settings.Policy.ExcessiveBlockSize)
+	limits, err := resolveBlockResponseLimits(
+		u.settings.BlockValidation.MaxIncomingBlockBytes,
+		u.settings.Policy.ExcessiveBlockSize,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -1189,6 +1229,9 @@ func (u *Server) fetchBlocksBatch(ctx context.Context, hash *chainhash.Hash, n u
 	responseBody, err := util.DoHTTPRequestBodyReaderWithRetryFunc(ctx, fmt.Sprintf("%s/blocks/%s?n=%d", baseURL, hash.String(), n),
 		func(c context.Context) error { return u.awaitPeerFetchSlot(c, baseURL) })
 	if err != nil {
+		if classified := classifyBlockStreamErr(ctx, hash, err); classified != nil {
+			return nil, classified
+		}
 		return nil, errors.NewProcessingError("[catchup:fetchBlocksBatch][%s] failed to get blocks from peer", hash.String(), err)
 	}
 	trackedBody := u.trackedBlockResponse(ctx, responseBody, hash, peerID, "fetchBlocksBatch")
@@ -1202,10 +1245,16 @@ func (u *Server) fetchBlocksBatch(ctx context.Context, hash *chainhash.Hash, n u
 	blocks := make([]*model.Block, 0, capacityHint)
 	for count := uint32(0); count < n; count++ {
 		if _, err = blockReader.Peek(1); err != nil {
+			if classified := classifyBlockStreamErr(ctx, hash, err); classified != nil {
+				return nil, classified
+			}
 			return nil, errors.NewProcessingError("[catchup:fetchBlocksBatch][%s] truncated batch: expected %d blocks, got %d", hash.String(), n, count, err)
 		}
-		block, decodeErr := decodeBoundedBlock(blockReader, maxBlockBytes)
+		block, decodeErr := decodeBoundedBlock(blockReader, limits)
 		if decodeErr != nil {
+			if classified := classifyBlockStreamErr(ctx, hash, decodeErr); classified != nil {
+				return nil, classified
+			}
 			return nil, errors.NewProcessingError("[catchup:fetchBlocksBatch][%s] failed to decode block %d of %d", hash.String(), count+1, n, decodeErr)
 		}
 		blocks = append(blocks, block)
@@ -1213,6 +1262,9 @@ func (u *Server) fetchBlocksBatch(ctx context.Context, hash *chainhash.Hash, n u
 	if _, err = blockReader.Peek(1); err == nil {
 		return nil, errors.NewExternalError("[catchup:fetchBlocksBatch][%s] peer returned more than requested %d blocks or trailing data", hash.String(), n)
 	} else if !errors.Is(err, io.EOF) {
+		if classified := classifyBlockStreamErr(ctx, hash, err); classified != nil {
+			return nil, classified
+		}
 		return nil, errors.NewProcessingError("[catchup:fetchBlocksBatch][%s] failed checking batch boundary", hash.String(), err)
 	}
 
@@ -1235,7 +1287,10 @@ func (u *Server) fetchSingleBlock(ctx context.Context, hash *chainhash.Hash, pee
 		tracing.WithParentStat(u.stats),
 	)
 	defer deferFn()
-	maxBlockBytes, err := blockResponseLimit(u.settings.Policy.ExcessiveBlockSize)
+	limits, err := resolveBlockResponseLimits(
+		u.settings.BlockValidation.MaxIncomingBlockBytes,
+		u.settings.Policy.ExcessiveBlockSize,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -1245,19 +1300,28 @@ func (u *Server) fetchSingleBlock(ctx context.Context, hash *chainhash.Hash, pee
 	responseBody, err := util.DoHTTPRequestBodyReaderWithRetryFunc(ctx, fmt.Sprintf("%s/block/%s", baseURL, hash.String()),
 		func(c context.Context) error { return u.awaitPeerFetchSlot(c, baseURL) })
 	if err != nil {
+		if classified := classifyBlockStreamErr(ctx, hash, err); classified != nil {
+			return nil, classified
+		}
 		return nil, errors.NewProcessingError("[catchup:fetchSingleBlock][%s] failed to get block from peer", hash.String(), err)
 	}
 	trackedBody := u.trackedBlockResponse(ctx, responseBody, hash, peerID, "fetchSingleBlock")
 	defer func() { _ = trackedBody.Close() }()
 
 	blockReader := bufio.NewReaderSize(trackedBody, 16)
-	block, err := decodeBoundedBlock(blockReader, maxBlockBytes)
+	block, err := decodeBoundedBlock(blockReader, limits)
 	if err != nil {
+		if classified := classifyBlockStreamErr(ctx, hash, err); classified != nil {
+			return nil, classified
+		}
 		return nil, errors.NewProcessingError("[catchup:fetchSingleBlock][%s] failed to create block from bytes", hash.String(), err)
 	}
 	if _, err = blockReader.Peek(1); err == nil {
 		return nil, errors.NewExternalError("[catchup:fetchSingleBlock][%s] peer returned trailing block data", hash.String())
 	} else if !errors.Is(err, io.EOF) {
+		if classified := classifyBlockStreamErr(ctx, hash, err); classified != nil {
+			return nil, classified
+		}
 		return nil, errors.NewProcessingError("[catchup:fetchSingleBlock][%s] failed checking block boundary", hash.String(), err)
 	}
 

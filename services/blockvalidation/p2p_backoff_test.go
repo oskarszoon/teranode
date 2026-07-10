@@ -367,6 +367,71 @@ func TestFetchAndStoreSubtree_FallbackSuccessStillRecordsFailedPeer(t *testing.T
 	require.Equal(t, []string{primary.ID.String()}, failedPeerIDs)
 }
 
+func TestFetchSubtreeDataForBlock_ReportsRecoveredPeerOnce(t *testing.T) {
+	suite := NewCatchupTestSuite(t)
+	defer suite.Cleanup()
+
+	origin := mkTestPeer("pruned-origin", "pruned", 100)
+	failing := mkTestPeer("failing", "full", 100)
+	successful := mkTestPeer("successful", "full", 100)
+	p2pClient := &catchupPeersP2PMock{peers: []*p2p.PeerInfo{origin, failing, successful}}
+	suite.Server.p2pClient = p2pClient
+	suite.Server.settings.BlockValidation.CatchupParallelFetchEnabled = true
+	suite.Server.settings.BlockValidation.CatchupMaxRetries = 2
+	suite.Server.settings.BlockValidation.SubtreeFetchConcurrency = 3
+
+	block := testhelpers.CreateTestBlockChain(t, 1)[0]
+	block.Subtrees = make([]*chainhash.Hash, 0, 3)
+	responses := make(map[string][]byte, 3)
+	for i := 0; i < 3; i++ {
+		leaf := chainhash.HashH([]byte(fmt.Sprintf("leaf-%d", i)))
+		subtree, err := subtreepkg.NewIncompleteTreeByLeafCount(2)
+		require.NoError(t, err)
+		require.NoError(t, subtree.AddCoinbaseNode())
+		require.NoError(t, subtree.AddNode(leaf, 0, 0))
+		subtreeHash := subtree.RootHash()
+		block.Subtrees = append(block.Subtrees, subtreeHash)
+		responses[subtreeHash.String()] = append(append([]byte{}, subtreepkg.CoinbasePlaceholderHashValue[:]...), leaf[:]...)
+		require.NoError(t, suite.Server.subtreeStore.Set(suite.Ctx, subtreeHash[:], fileformat.FileTypeSubtreeData, []byte{0x00}))
+	}
+
+	var originRequests, failingRequests, successfulRequests atomic.Int32
+	httpmock.ActivateNonDefault(util.HTTPClient())
+	defer httpmock.DeactivateAndReset()
+	for subtreeHash, response := range responses {
+		hash := subtreeHash
+		body := response
+		httpmock.RegisterResponder("GET", fmt.Sprintf("%s/subtree/%s", origin.DataHubURL, hash),
+			func(*http.Request) (*http.Response, error) {
+				originRequests.Add(1)
+				return httpmock.NewStringResponse(http.StatusInternalServerError, "origin must not be contacted"), nil
+			})
+		httpmock.RegisterResponder("GET", fmt.Sprintf("%s/subtree/%s", failing.DataHubURL, hash),
+			func(*http.Request) (*http.Response, error) {
+				failingRequests.Add(1)
+				return httpmock.NewStringResponse(http.StatusInternalServerError, "failed"), nil
+			})
+		httpmock.RegisterResponder("GET", fmt.Sprintf("%s/subtree/%s", successful.DataHubURL, hash),
+			func(*http.Request) (*http.Response, error) {
+				successfulRequests.Add(1)
+				return httpmock.NewBytesResponse(http.StatusOK, body), nil
+			})
+	}
+
+	suite.MockBlockchain.On("ReportPeerFailure", mock.Anything, mock.Anything, failing.ID.String(), "catchup", mock.Anything).
+		Return(nil).Once()
+
+	contributors, err := suite.Server.fetchSubtreeDataForBlock(suite.Ctx, block, origin.ID.String(), origin.DataHubURL)
+	require.NoError(t, err)
+	require.Equal(t, map[string]struct{}{successful.ID.String(): {}}, contributors)
+	require.Zero(t, originRequests.Load(), "pruned origin is authoritative uncontacted")
+	require.Equal(t, int32(2), failingRequests.Load(), "same peer fails two assigned subtrees")
+	require.Equal(t, int32(3), successfulRequests.Load(), "successful peer serves one assignment and two fallbacks")
+	require.Equal(t, []string{failing.ID.String()}, p2pClient.recordedFailures(), "recovered failures must be deduplicated per block")
+	suite.MockBlockchain.AssertNotCalled(t, "ReportPeerFailure", mock.Anything, mock.Anything, origin.ID.String(), "catchup", mock.Anything)
+	suite.MockBlockchain.AssertNotCalled(t, "ReportPeerFailure", mock.Anything, mock.Anything, successful.ID.String(), "catchup", mock.Anything)
+}
+
 func TestFetchAndStoreSubtree_CorruptLocalCacheDoesNotBlamePeer(t *testing.T) {
 	suite := NewCatchupTestSuite(t)
 	defer suite.Cleanup()
