@@ -1419,51 +1419,56 @@ func TestReadBodyWithRetry_PreResponseStallIsPeerFault(t *testing.T) {
 // which would send every catchup fetch unsigned, losing the asset rate-limit
 // exemption. All *WithRetry helpers must sign when a signer is configured.
 func TestWithRetryHelpers_SignRequests(t *testing.T) {
-	privKey, _, err := crypto.GenerateEd25519Key(crand.Reader)
-	require.NoError(t, err)
-	SetHTTPRequestSigner(NewEd25519RequestSigner(privKey))
-	// Restore the prior signer afterwards so this test doesn't leak its signer into the
-	// package-global atomic.Value and affect later tests.
-	orig := loadHTTPRequestSigner()
+	suiteOriginal := loadHTTPRequestSigner()
+	priorSigner := NewEd25519RequestSigner(nil)
+	SetHTTPRequestSigner(priorSigner)
 	t.Cleanup(func() {
-		if orig != nil {
-			SetHTTPRequestSigner(orig)
+		if suiteOriginal != nil {
+			SetHTTPRequestSigner(suiteOriginal)
 			return
 		}
-		// No signer before this test; SetHTTPRequestSigner ignores nil, so install a
-		// no-op (nil-key) signer — its SignRequest returns immediately, adding no headers.
 		SetHTTPRequestSigner(NewEd25519RequestSigner(nil))
 	})
 
-	var gotSig atomic.Bool
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-Peer-Signature") != "" && r.Header.Get("X-Peer-PubKey") != "" {
-			gotSig.Store(true)
-		}
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
-	}))
-	defer server.Close()
+	t.Run("signs all retry helpers", func(t *testing.T) {
+		privKey, _, err := crypto.GenerateEd25519Key(crand.Reader)
+		require.NoError(t, err)
+		original := loadHTTPRequestSigner()
+		SetHTTPRequestSigner(NewEd25519RequestSigner(privKey))
+		t.Cleanup(func() { SetHTTPRequestSigner(original) })
 
-	t.Run("DoHTTPRequestWithRetry", func(t *testing.T) {
-		gotSig.Store(false)
-		_, err := DoHTTPRequestWithRetry(context.Background(), server.URL, nil)
-		require.NoError(t, err)
-		require.True(t, gotSig.Load(), "DoHTTPRequestWithRetry must sign the request")
+		var gotSig atomic.Bool
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("X-Peer-Signature") != "" && r.Header.Get("X-Peer-PubKey") != "" {
+				gotSig.Store(true)
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("ok"))
+		}))
+		defer server.Close()
+
+		t.Run("DoHTTPRequestWithRetry", func(t *testing.T) {
+			gotSig.Store(false)
+			_, err := DoHTTPRequestWithRetry(context.Background(), server.URL, nil)
+			require.NoError(t, err)
+			require.True(t, gotSig.Load())
+		})
+		t.Run("DoHTTPRequestBoundedWithRetry", func(t *testing.T) {
+			gotSig.Store(false)
+			_, err := DoHTTPRequestBoundedWithRetry(context.Background(), server.URL, 1024, nil)
+			require.NoError(t, err)
+			require.True(t, gotSig.Load())
+		})
+		t.Run("DoHTTPRequestBodyReaderWithRetry", func(t *testing.T) {
+			gotSig.Store(false)
+			body, err := DoHTTPRequestBodyReaderWithRetry(context.Background(), server.URL)
+			require.NoError(t, err)
+			require.NoError(t, body.Close())
+			require.True(t, gotSig.Load())
+		})
 	})
-	t.Run("DoHTTPRequestBoundedWithRetry", func(t *testing.T) {
-		gotSig.Store(false)
-		_, err := DoHTTPRequestBoundedWithRetry(context.Background(), server.URL, 1024, nil)
-		require.NoError(t, err)
-		require.True(t, gotSig.Load(), "DoHTTPRequestBoundedWithRetry must sign the request")
-	})
-	t.Run("DoHTTPRequestBodyReaderWithRetry", func(t *testing.T) {
-		gotSig.Store(false)
-		body, err := DoHTTPRequestBodyReaderWithRetry(context.Background(), server.URL)
-		require.NoError(t, err)
-		_ = body.Close()
-		require.True(t, gotSig.Load(), "DoHTTPRequestBodyReaderWithRetry must sign the request")
-	})
+
+	require.Same(t, priorSigner, loadHTTPRequestSigner())
 }
 
 // TestRetryHTTP_DeadlineAfterPeerFaultIsPeerError proves that when the context deadline
