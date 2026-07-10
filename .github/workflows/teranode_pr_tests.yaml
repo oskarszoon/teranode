@@ -1,13 +1,12 @@
 name: Teranode PR tests
+# The run-name carries the tested PR/merge/base identity to the downstream
+# sonar-pr-analyze.yaml workflow, which validates every field before trusting
+# it. Base retargets do not rerun this workflow (default trigger types), so the
+# Sonar gate keeps the same staleness contract as every other required check.
 run-name: sonar-pr/${{ github.event.pull_request.number }}/merge/${{ github.sha }}/base/${{ github.event.pull_request.base.sha }}/ref/${{ github.event.pull_request.base.ref }}
 
 on:
   pull_request:
-    types:
-      - opened
-      - synchronize
-      - reopened
-      - edited
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
