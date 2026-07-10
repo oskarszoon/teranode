@@ -17,21 +17,18 @@ on:
     types:
       - completed
 
-permissions:
-  contents: read
-  pull-requests: read
-  statuses: write
-
 env:
   GO_VERSION: "1.26.0"
 
 jobs:
   resolve-pr:
     name: Resolve tested PR identity
-    if: >-
-      github.event.workflow_run.event == 'pull_request' &&
-      github.event.workflow_run.conclusion != 'cancelled'
+    if: github.event.workflow_run.event == 'pull_request'
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
     outputs:
       active: ${{ steps.resolve.outputs.active }}
       number: ${{ steps.resolve.outputs.number }}
@@ -48,6 +45,11 @@ jobs:
           script: |
             const run = context.payload.workflow_run;
             const title = run.display_title || '';
+            const runAttempt = run.run_attempt;
+            if (!Number.isSafeInteger(runAttempt) || runAttempt < 1) {
+              core.setFailed(`Invalid triggering source workflow run attempt: ${String(runAttempt)}.`);
+              return;
+            }
             const pattern = /^sonar-pr\/([1-9][0-9]*)\/merge\/([0-9a-f]{40})\/base\/([0-9a-f]{40})\/ref\/(.+)$/;
             const match = pattern.exec(title);
 
@@ -59,6 +61,216 @@ jobs:
             const [, numberText, mergeSha, baseSha, baseRef] = match;
             const prNumber = Number(numberText);
             const runHeadRepo = run.head_repository?.full_name || '';
+
+            const sourceRunParams = {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: run.workflow_id,
+              event: 'pull_request',
+              head_sha: run.head_sha,
+              per_page: 100,
+            };
+            const sourceRunIdentity = candidate => `${candidate.id}:${candidate.run_attempt}`;
+            const maxSnapshotAttempts = 2;
+            let sourceRuns;
+            let recheckPage;
+
+            for (let snapshotAttempt = 1; snapshotAttempt <= maxSnapshotAttempts; snapshotAttempt++) {
+              let stableTotal;
+              let paginatedRuns;
+              let snapshotInstability;
+              try {
+                paginatedRuns = await github.paginate(
+                  github.rest.actions.listWorkflowRuns,
+                  sourceRunParams,
+                  response => {
+                    const pageTotal = response.data.total_count;
+                    if (!Number.isSafeInteger(pageTotal)) {
+                      throw new Error(`Invalid source workflow run total_count: ${String(pageTotal)}.`);
+                    }
+                    if (stableTotal === undefined) {
+                      stableTotal = pageTotal;
+                    } else if (pageTotal !== stableTotal && !snapshotInstability) {
+                      snapshotInstability =
+                        `Source workflow run total_count changed during pagination: ` +
+                        `${stableTotal} to ${pageTotal}.`;
+                    }
+                    return response.data;
+                  }
+                );
+              } catch (error) {
+                core.setFailed(`Could not determine latest source workflow run: ${error.message}`);
+                return;
+              }
+
+              if (!snapshotInstability &&
+                  (!Number.isSafeInteger(stableTotal) || paginatedRuns.length !== stableTotal)) {
+                snapshotInstability =
+                  `Incomplete source workflow run result set: fetched ${paginatedRuns.length} of ` +
+                  `${String(stableTotal)} reported runs.`;
+              }
+
+              if (!snapshotInstability) {
+                const sourceRunIds = new Set();
+                for (const candidate of paginatedRuns) {
+                  if (sourceRunIds.has(candidate.id)) {
+                    snapshotInstability =
+                      `Duplicate source workflow run ID ${candidate.id}; refusing unstable recency state.`;
+                    break;
+                  }
+                  sourceRunIds.add(candidate.id);
+                }
+              }
+
+              if (snapshotInstability) {
+                if (snapshotAttempt < maxSnapshotAttempts) {
+                  core.info(`${snapshotInstability} Retrying complete source workflow run snapshot.`);
+                  continue;
+                }
+                core.setFailed(snapshotInstability);
+                return;
+              }
+
+              let recheckData;
+              try {
+                ({ data: recheckData } = await github.rest.actions.listWorkflowRuns({
+                  ...sourceRunParams,
+                  page: 1,
+                }));
+              } catch (error) {
+                core.setFailed(`Could not recheck latest source workflow runs: ${error.message}`);
+                return;
+              }
+
+              const recheckTotal = recheckData?.total_count;
+              const currentRecheckPage = recheckData?.workflow_runs;
+              if (!Number.isSafeInteger(recheckTotal)) {
+                core.setFailed(`Invalid source workflow run recheck total_count: ${String(recheckTotal)}.`);
+                return;
+              }
+              if (recheckTotal !== stableTotal) {
+                snapshotInstability =
+                  `Source workflow run total_count changed before recheck: ` +
+                  `${String(stableTotal)} to ${String(recheckTotal)}.`;
+              }
+
+              const expectedRecheckLength = Math.min(100, stableTotal);
+              if (!snapshotInstability &&
+                  (!Array.isArray(currentRecheckPage) ||
+                    currentRecheckPage.length !== expectedRecheckLength)) {
+                const fetchedCount = Array.isArray(currentRecheckPage)
+                  ? currentRecheckPage.length
+                  : 'invalid';
+                snapshotInstability =
+                  `Incomplete source workflow run recheck page: fetched ${fetchedCount} of ` +
+                  `${expectedRecheckLength} expected runs.`;
+              }
+
+              if (!snapshotInstability) {
+                const paginatedTopIdentities = paginatedRuns
+                  .slice(0, currentRecheckPage.length)
+                  .map(sourceRunIdentity);
+                const recheckTopIdentities = currentRecheckPage.map(sourceRunIdentity);
+                if (recheckTopIdentities.some(
+                  (identity, index) => identity !== paginatedTopIdentities[index]
+                )) {
+                  snapshotInstability = 'Source workflow run top page changed during recency validation.';
+                }
+              }
+
+              if (snapshotInstability) {
+                if (snapshotAttempt < maxSnapshotAttempts) {
+                  core.info(`${snapshotInstability} Retrying complete source workflow run snapshot.`);
+                  continue;
+                }
+                core.setFailed(snapshotInstability);
+                return;
+              }
+
+              sourceRuns = paginatedRuns;
+              recheckPage = currentRecheckPage;
+              break;
+            }
+
+            // Refresh the reused run ID after accepting the stable list snapshot.
+            let exactSourceRun;
+            try {
+              ({ data: exactSourceRun } = await github.rest.actions.getWorkflowRun({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: run.id,
+              }));
+            } catch (error) {
+              core.setFailed(`Could not recheck exact source workflow run ${run.id}: ${error.message}`);
+              return;
+            }
+
+            if (!exactSourceRun ||
+                exactSourceRun.id !== run.id ||
+                exactSourceRun.workflow_id !== run.workflow_id ||
+                exactSourceRun.head_sha !== run.head_sha ||
+                exactSourceRun.display_title !== title) {
+              core.setFailed(`Exact source workflow run ${run.id} identity did not match the trigger.`);
+              return;
+            }
+
+            const exactRunAttempt = exactSourceRun.run_attempt;
+            if (!Number.isSafeInteger(exactRunAttempt) || exactRunAttempt < 1) {
+              core.setFailed(
+                `Exact source workflow run ${run.id} has invalid attempt ${String(exactRunAttempt)}.`
+              );
+              return;
+            }
+            if (exactRunAttempt > runAttempt) {
+              core.info(
+                `Exact source workflow run ${run.id} attempt ${exactRunAttempt} superseded ` +
+                `trigger attempt ${runAttempt}; skipping Sonar analysis.`
+              );
+              core.setOutput('active', 'false');
+              return;
+            }
+            if (exactRunAttempt < runAttempt) {
+              core.setFailed(
+                `Exact source workflow run ${run.id} attempt ${exactRunAttempt} is older than ` +
+                `trigger attempt ${runAttempt}.`
+              );
+              return;
+            }
+
+            const isNewerSourceRun = candidate =>
+              candidate.display_title === title &&
+              (candidate.id > run.id ||
+                (candidate.id === run.id && candidate.run_attempt > runAttempt));
+            const newerRun =
+              recheckPage.find(isNewerSourceRun) ||
+              sourceRuns.slice(recheckPage.length).find(isNewerSourceRun);
+            if (newerRun) {
+              core.info(
+                `Source workflow run ${newerRun.id} attempt ${newerRun.run_attempt} superseded ` +
+                `trigger ${run.id} attempt ${runAttempt}; skipping Sonar analysis.`
+              );
+              core.setOutput('active', 'false');
+              return;
+            }
+
+            const listedTriggerRun = sourceRuns.find(candidate => candidate.id === run.id);
+            if (!listedTriggerRun) {
+              core.setFailed(`Trigger source workflow run ID ${run.id} is missing from the recency result set.`);
+              return;
+            }
+            if (!Number.isSafeInteger(listedTriggerRun.run_attempt)) {
+              core.setFailed(
+                `Listed trigger run ${run.id} has invalid attempt ${String(listedTriggerRun.run_attempt)}.`
+              );
+              return;
+            }
+            if (listedTriggerRun.run_attempt < runAttempt) {
+              core.setFailed(
+                `Listed trigger run ${run.id} attempt ${listedTriggerRun.run_attempt} is older than ` +
+                `trigger attempt ${runAttempt}.`
+              );
+              return;
+            }
 
             if (!runHeadRepo) {
               core.setFailed('workflow_run has no head repository; refusing unbound PR identity.');
@@ -103,6 +315,30 @@ jobs:
               core.setOutput('active', 'false');
               return;
             }
+            const currentBaseSha = pr.base.sha;
+            if (typeof currentBaseSha !== 'string' || !/^[0-9a-f]{40}$/.test(currentBaseSha)) {
+              core.setFailed(`PR ${prNumber} has invalid current base SHA.`);
+              return;
+            }
+
+            let baseComparison;
+            try {
+              ({ data: baseComparison } = await github.rest.repos.compareCommitsWithBasehead({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                basehead: `${baseSha}...${currentBaseSha}`,
+              }));
+            } catch (error) {
+              core.setFailed(`Could not validate tested base ${baseSha} against current target: ${error.message}`);
+              return;
+            }
+
+            const mergeBaseSha = baseComparison?.merge_base_commit?.sha;
+            if (mergeBaseSha !== baseSha ||
+                (baseComparison?.status !== 'identical' && baseComparison?.status !== 'ahead')) {
+              core.setFailed(`Tested base ${baseSha} is not an ancestor of the current PR target.`);
+              return;
+            }
 
             let mergeCommit;
             try {
@@ -116,7 +352,19 @@ jobs:
               return;
             }
 
-            const parents = mergeCommit.parents || [];
+            const verification = mergeCommit?.commit?.verification;
+            const signedCommitter = mergeCommit?.commit?.committer;
+            if (verification?.verified !== true ||
+                verification.reason !== 'valid' ||
+                mergeCommit?.committer?.login !== 'web-flow' ||
+                signedCommitter?.name !== 'GitHub' ||
+                signedCommitter?.email !== 'noreply@github.com' ||
+                mergeCommit?.commit?.message !== `Merge ${run.head_sha} into ${baseSha}`) {
+              core.setFailed(`Tested merge ${mergeSha} is not a verified GitHub synthetic merge.`);
+              return;
+            }
+
+            const parents = mergeCommit?.parents || [];
             if (parents.length !== 2 || parents[0].sha !== baseSha || parents[1].sha !== run.head_sha) {
               core.setFailed(`Tested merge ${mergeSha} does not match base ${baseSha} and head ${run.head_sha}.`);
               return;
@@ -134,12 +382,13 @@ jobs:
     name: SonarQube Analysis
     needs: resolve-pr
     if: needs.resolve-pr.outputs.active == 'true'
-    concurrency:
-      group: sonar-pr-${{ needs.resolve-pr.outputs.number }}
-      cancel-in-progress: true
-    # arm64-safe: only downloads coverage artifacts + runs the sonar scanner CLI
+    # arm64-safe: only downloads aggregate Sonar inputs + runs the scanner CLI
     # (arm64-available); no Go build, no containers.
     runs-on: teranode-runner-4-core-arm
+    permissions:
+      actions: read
+      contents: read
+      statuses: write
 
     steps:
       - name: Checkout base branch
@@ -175,28 +424,15 @@ jobs:
           fi
 
           git checkout --detach "${MERGE_SHA}"
+          git show "${BASE_SHA}:sonar-project.properties" > "${RUNNER_TEMP}/sonar-project.properties"
 
-      - name: Download coverage artifact
+      # The bundle is additive to fixed producer artifacts. After rollout, only
+      # producer runs already in flight across the merge can lack this bundle.
+      - name: Download Sonar input bundle
         if: github.event.workflow_run.conclusion == 'success'
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: coverage-report
-          run-id: ${{ github.event.workflow_run.id }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Download golangci-lint report
-        if: github.event.workflow_run.conclusion == 'success'
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: golangci-lint-report
-          run-id: ${{ github.event.workflow_run.id }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Download filename check report
-        if: github.event.workflow_run.conclusion == 'success'
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: sonar-filename-report
+          name: sonar-inputs-${{ github.event.workflow_run.run_attempt }}
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -204,9 +440,17 @@ jobs:
         if: github.event.workflow_run.conclusion == 'success'
         uses: SonarSource/sonarqube-scan-action@fd88b7d7ccbaefd23d8f36f73b59db7a3d246602 # v6
         env:
+          SONAR_HOST_URL: https://sonarcloud.io
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         with:
-          args: "-Dsonar.pullrequest.key=${{ needs.resolve-pr.outputs.number }} -Dsonar.pullrequest.branch=${{ needs.resolve-pr.outputs.head_ref }} -Dsonar.pullrequest.base=${{ needs.resolve-pr.outputs.base_ref }}"
+          args: >-
+            -Dproject.settings=${{ runner.temp }}/sonar-project.properties
+            -Dsonar.host.url=https://sonarcloud.io
+            -Dsonar.projectKey=bsv-blockchain_teranode
+            -Dsonar.organization=bsv
+            -Dsonar.pullrequest.key=${{ needs.resolve-pr.outputs.number }}
+            -Dsonar.pullrequest.branch=${{ needs.resolve-pr.outputs.head_ref }}
+            -Dsonar.pullrequest.base=${{ needs.resolve-pr.outputs.base_ref }}
 
       - name: SonarQube Quality Gate check
         id: qg
@@ -214,19 +458,20 @@ jobs:
         uses: sonarsource/sonarqube-quality-gate-action@cf038b0e0cdecfa9e56c198bbb7d21d751d62c3b # v1.2.0
         timeout-minutes: 10
         env:
+          SONAR_HOST_URL: https://sonarcloud.io
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
       # Post the Quality Gate result on the exact synthetic merge commit tested
       # by the source workflow. Coverage, lint reports, checkout, Sonar analysis,
       # and this status therefore describe one PR/head/base revision.
       #
-      # PR-number job concurrency prevents unrelated forks with identical branch
-      # names from canceling each other. A self-canceled run remains silent because
-      # its same-PR successor owns the current merge commit.
+      # Source-run recency fences keep delayed older attempts silent without
+      # relying on scheduler ordering. Every completed current attempt,
+      # including canceled attempts, owns the terminal status for its merge.
       #
-      # if: !cancelled() still resolves every non-canceled path: PASSED/WARN ->
-      # success, FAILED -> failure, scan/checkout failure -> error, and failed
-      # upstream tests -> failure.
+      # if: !cancelled() refers to this downstream job, not the source result.
+      # PASSED/WARN -> success, FAILED -> failure, scan/checkout failure ->
+      # error, and failed or canceled upstream tests -> failure.
       - name: Report Quality Gate as commit status
         if: ${{ !cancelled() }}
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
@@ -237,6 +482,13 @@ jobs:
           PR_NUMBER: ${{ needs.resolve-pr.outputs.number }}
         with:
           script: |
+            const run = context.payload.workflow_run;
+            const title = run.display_title || '';
+            const runAttempt = run.run_attempt;
+            if (!Number.isSafeInteger(runAttempt) || runAttempt < 1) {
+              core.setFailed(`Invalid triggering source workflow run attempt: ${String(runAttempt)}.`);
+              return;
+            }
             const qg = process.env.QG_STATUS || '';
             const testsConclusion = process.env.TESTS_CONCLUSION || '';
             const sha = process.env.MERGE_SHA;
@@ -246,6 +498,214 @@ jobs:
 
             if (!sha) {
               core.setFailed('No validated tested merge SHA; cannot post commit status.');
+              return;
+            }
+
+            const sourceRunParams = {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: run.workflow_id,
+              event: 'pull_request',
+              head_sha: run.head_sha,
+              per_page: 100,
+            };
+            const sourceRunIdentity = candidate => `${candidate.id}:${candidate.run_attempt}`;
+            const maxSnapshotAttempts = 2;
+            let sourceRuns;
+            let recheckPage;
+
+            for (let snapshotAttempt = 1; snapshotAttempt <= maxSnapshotAttempts; snapshotAttempt++) {
+              let stableTotal;
+              let paginatedRuns;
+              let snapshotInstability;
+              try {
+                paginatedRuns = await github.paginate(
+                  github.rest.actions.listWorkflowRuns,
+                  sourceRunParams,
+                  response => {
+                    const pageTotal = response.data.total_count;
+                    if (!Number.isSafeInteger(pageTotal)) {
+                      throw new Error(`Invalid source workflow run total_count: ${String(pageTotal)}.`);
+                    }
+                    if (stableTotal === undefined) {
+                      stableTotal = pageTotal;
+                    } else if (pageTotal !== stableTotal && !snapshotInstability) {
+                      snapshotInstability =
+                        `Source workflow run total_count changed during pagination: ` +
+                        `${stableTotal} to ${pageTotal}.`;
+                    }
+                    return response.data;
+                  }
+                );
+              } catch (error) {
+                core.setFailed(`Could not determine latest source workflow run: ${error.message}`);
+                return;
+              }
+
+              if (!snapshotInstability &&
+                  (!Number.isSafeInteger(stableTotal) || paginatedRuns.length !== stableTotal)) {
+                snapshotInstability =
+                  `Incomplete source workflow run result set: fetched ${paginatedRuns.length} of ` +
+                  `${String(stableTotal)} reported runs.`;
+              }
+
+              if (!snapshotInstability) {
+                const sourceRunIds = new Set();
+                for (const candidate of paginatedRuns) {
+                  if (sourceRunIds.has(candidate.id)) {
+                    snapshotInstability =
+                      `Duplicate source workflow run ID ${candidate.id}; refusing unstable recency state.`;
+                    break;
+                  }
+                  sourceRunIds.add(candidate.id);
+                }
+              }
+
+              if (snapshotInstability) {
+                if (snapshotAttempt < maxSnapshotAttempts) {
+                  core.info(`${snapshotInstability} Retrying complete source workflow run snapshot.`);
+                  continue;
+                }
+                core.setFailed(snapshotInstability);
+                return;
+              }
+
+              let recheckData;
+              try {
+                ({ data: recheckData } = await github.rest.actions.listWorkflowRuns({
+                  ...sourceRunParams,
+                  page: 1,
+                }));
+              } catch (error) {
+                core.setFailed(`Could not recheck latest source workflow runs: ${error.message}`);
+                return;
+              }
+
+              const recheckTotal = recheckData?.total_count;
+              const currentRecheckPage = recheckData?.workflow_runs;
+              if (!Number.isSafeInteger(recheckTotal)) {
+                core.setFailed(`Invalid source workflow run recheck total_count: ${String(recheckTotal)}.`);
+                return;
+              }
+              if (recheckTotal !== stableTotal) {
+                snapshotInstability =
+                  `Source workflow run total_count changed before recheck: ` +
+                  `${String(stableTotal)} to ${String(recheckTotal)}.`;
+              }
+
+              const expectedRecheckLength = Math.min(100, stableTotal);
+              if (!snapshotInstability &&
+                  (!Array.isArray(currentRecheckPage) ||
+                    currentRecheckPage.length !== expectedRecheckLength)) {
+                const fetchedCount = Array.isArray(currentRecheckPage)
+                  ? currentRecheckPage.length
+                  : 'invalid';
+                snapshotInstability =
+                  `Incomplete source workflow run recheck page: fetched ${fetchedCount} of ` +
+                  `${expectedRecheckLength} expected runs.`;
+              }
+
+              if (!snapshotInstability) {
+                const paginatedTopIdentities = paginatedRuns
+                  .slice(0, currentRecheckPage.length)
+                  .map(sourceRunIdentity);
+                const recheckTopIdentities = currentRecheckPage.map(sourceRunIdentity);
+                if (recheckTopIdentities.some(
+                  (identity, index) => identity !== paginatedTopIdentities[index]
+                )) {
+                  snapshotInstability = 'Source workflow run top page changed during recency validation.';
+                }
+              }
+
+              if (snapshotInstability) {
+                if (snapshotAttempt < maxSnapshotAttempts) {
+                  core.info(`${snapshotInstability} Retrying complete source workflow run snapshot.`);
+                  continue;
+                }
+                core.setFailed(snapshotInstability);
+                return;
+              }
+
+              sourceRuns = paginatedRuns;
+              recheckPage = currentRecheckPage;
+              break;
+            }
+
+            // Refresh the reused run ID after accepting the stable list snapshot.
+            let exactSourceRun;
+            try {
+              ({ data: exactSourceRun } = await github.rest.actions.getWorkflowRun({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: run.id,
+              }));
+            } catch (error) {
+              core.setFailed(`Could not recheck exact source workflow run ${run.id}: ${error.message}`);
+              return;
+            }
+
+            if (!exactSourceRun ||
+                exactSourceRun.id !== run.id ||
+                exactSourceRun.workflow_id !== run.workflow_id ||
+                exactSourceRun.head_sha !== run.head_sha ||
+                exactSourceRun.display_title !== title) {
+              core.setFailed(`Exact source workflow run ${run.id} identity did not match the trigger.`);
+              return;
+            }
+
+            const exactRunAttempt = exactSourceRun.run_attempt;
+            if (!Number.isSafeInteger(exactRunAttempt) || exactRunAttempt < 1) {
+              core.setFailed(
+                `Exact source workflow run ${run.id} has invalid attempt ${String(exactRunAttempt)}.`
+              );
+              return;
+            }
+            if (exactRunAttempt > runAttempt) {
+              core.info(
+                `Exact source workflow run ${run.id} attempt ${exactRunAttempt} superseded ` +
+                `trigger attempt ${runAttempt}; not posting commit status.`
+              );
+              return;
+            }
+            if (exactRunAttempt < runAttempt) {
+              core.setFailed(
+                `Exact source workflow run ${run.id} attempt ${exactRunAttempt} is older than ` +
+                `trigger attempt ${runAttempt}.`
+              );
+              return;
+            }
+
+            const isNewerSourceRun = candidate =>
+              candidate.display_title === title &&
+              (candidate.id > run.id ||
+                (candidate.id === run.id && candidate.run_attempt > runAttempt));
+            const newerRun =
+              recheckPage.find(isNewerSourceRun) ||
+              sourceRuns.slice(recheckPage.length).find(isNewerSourceRun);
+            if (newerRun) {
+              core.info(
+                `Source workflow run ${newerRun.id} attempt ${newerRun.run_attempt} superseded ` +
+                `trigger ${run.id} attempt ${runAttempt}; not posting commit status.`
+              );
+              return;
+            }
+
+            const listedTriggerRun = sourceRuns.find(candidate => candidate.id === run.id);
+            if (!listedTriggerRun) {
+              core.setFailed(`Trigger source workflow run ID ${run.id} is missing from the recency result set.`);
+              return;
+            }
+            if (!Number.isSafeInteger(listedTriggerRun.run_attempt)) {
+              core.setFailed(
+                `Listed trigger run ${run.id} has invalid attempt ${String(listedTriggerRun.run_attempt)}.`
+              );
+              return;
+            }
+            if (listedTriggerRun.run_attempt < runAttempt) {
+              core.setFailed(
+                `Listed trigger run ${run.id} attempt ${listedTriggerRun.run_attempt} is older than ` +
+                `trigger attempt ${runAttempt}.`
+              );
               return;
             }
 
