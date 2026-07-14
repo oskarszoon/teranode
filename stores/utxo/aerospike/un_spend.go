@@ -108,26 +108,6 @@ func (s *Store) Unspend(ctx context.Context, spends []*utxo.Spend, flagAsLocked 
 	return s.unspend(ctx, spends, flagAsLocked...)
 }
 
-// joinErr accumulates next into existing, working around a foot-gun in this
-// package's errors.Join: when its first argument is a bare nil error
-// (interface), Join does NOT preserve the second argument's concrete *Error
-// type (and thus its error code) — it degrades the result to a generic
-// errors.New(msg), so a later errors.Is(result, errors.ErrNotFound) would
-// silently fail. IncrementSpentRecordsMulti and SetDAHForChildRecordsMulti
-// (spend.go) guard against this the same way: assign directly on the first
-// error, only calling errors.Join once there's already an accumulated error.
-func joinErr(existing, next error) error {
-	if next == nil {
-		return existing
-	}
-
-	if existing == nil {
-		return next
-	}
-
-	return errors.Join(existing, next)
-}
-
 // chunkSpends splits spends into consecutive slices of at most size elements.
 // Pure helper (no I/O) so it can be unit-tested without an Aerospike
 // container: it drives the sizing behind the batched unspend below.
@@ -173,7 +153,12 @@ func (s *Store) unspend(ctx context.Context, spends []*utxo.Spend, flagAsLocked 
 	batchPolicy := util.GetAerospikeBatchPolicy(s.settings)
 	batchUDFPolicy := aerospike.NewBatchUDFPolicy()
 
-	var aggErr error
+	// Collect per-record failures and JoinCapped once at the end, matching the
+	// batched spend path (spend.go). Capping the aggregate at maxAggregatedSpendErrs
+	// keeps a mass-failure storm — the scenario reverseSpends exists for — from
+	// building a multi-thousand-link *Error chain that every downstream errors.Is
+	// would then walk in full.
+	var failedUnspends []error
 
 	for _, chunk := range chunkSpends(spends, unspendBatchChunkSize) {
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -229,7 +214,7 @@ func (s *Store) unspend(ctx context.Context, spends []*utxo.Spend, flagAsLocked 
 
 		if opErr := s.batchOperate(batchPolicy, batchRecords); opErr != nil {
 			prometheusUtxoMapErrors.WithLabelValues("Reset", "batch error").Inc()
-			aggErr = joinErr(aggErr, errors.NewStorageError("error in aerospike unspend batch", opErr))
+			failedUnspends = append(failedUnspends, errors.NewStorageError("error in aerospike unspend batch", opErr))
 			// Do NOT skip the per-record loop below on a partial batch failure:
 			// records that succeeded still have populated results and each needs
 			// postProcessUnspendRecord (the NOTALLSPENT spentExtraRecs decrement).
@@ -249,20 +234,24 @@ func (s *Store) unspend(ctx context.Context, spends []*utxo.Spend, flagAsLocked 
 					prometheusUtxoMapErrors.WithLabelValues("Reset", "unknown").Inc()
 				}
 
-				aggErr = joinErr(aggErr, errors.NewStorageError("error in aerospike unspend record", batchRec.Err))
+				failedUnspends = append(failedUnspends, errors.NewStorageError("error in aerospike unspend record", batchRec.Err))
 
 				continue
 			}
 
 			if recErr := s.postProcessUnspendRecord(ctx, chunkSpendsByIdx[i], batchRec.Record); recErr != nil {
-				aggErr = joinErr(aggErr, recErr)
+				failedUnspends = append(failedUnspends, recErr)
 			}
 		}
 	}
 
 	s.logger.Debugf("[Unspend] reversed %d/%d utxos in %s", count, len(spends), time.Since(start))
 
-	return aggErr
+	if len(failedUnspends) > 0 {
+		return errors.JoinCapped(maxAggregatedSpendErrs, failedUnspends...)
+	}
+
+	return nil
 }
 
 // postProcessUnspendRecord mirrors the response handling previously done
