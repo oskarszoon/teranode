@@ -153,11 +153,11 @@ func (s *Store) unspend(ctx context.Context, spends []*utxo.Spend, flagAsLocked 
 	batchPolicy := util.GetAerospikeBatchPolicy(s.settings)
 	batchUDFPolicy := aerospike.NewBatchUDFPolicy()
 
-	// Collect per-record failures and JoinCapped once at the end, matching the
-	// batched spend path (spend.go). Capping the aggregate at maxAggregatedSpendErrs
-	// keeps a mass-failure storm — the scenario reverseSpends exists for — from
-	// building a multi-thousand-link *Error chain that every downstream errors.Is
-	// would then walk in full.
+	// Collect per-record failures and aggregate once at the end (see
+	// aggregateUnspendErrors): genuine errors are capped at maxAggregatedSpendErrs
+	// to bound downstream errors.Is walks (as the batched spend path does), while a
+	// benign all-NotFound set is joined uncapped so the rewind delete's allNotFound
+	// tolerance still recognises it.
 	var failedUnspends []error
 
 	for _, chunk := range chunkSpends(spends, unspendBatchChunkSize) {
@@ -247,11 +247,36 @@ func (s *Store) unspend(ctx context.Context, spends []*utxo.Spend, flagAsLocked 
 
 	s.logger.Debugf("[Unspend] reversed %d/%d utxos in %s", count, len(spends), time.Since(start))
 
-	if len(failedUnspends) > 0 {
-		return errors.JoinCapped(maxAggregatedSpendErrs, failedUnspends...)
+	return aggregateUnspendErrors(failedUnspends)
+}
+
+// aggregateUnspendErrors combines per-record unspend failures into a single error.
+//
+// A storm of NotFound links is benign: a legitimately-gone parent (DAH-reaped,
+// already deleted) surfaces as ErrNotFound/ErrTxNotFound, which the rewind delete
+// tolerates via allNotFound. So an all-NotFound set is joined UNCAPPED to preserve
+// that signal — JoinCapped would append a generic "... and N more errors" summary
+// link (code ERR_ERROR) once there are >maxAggregatedSpendErrs failures, and
+// allNotFound would then read that summary as a real error and spuriously abort a
+// rewind of a consolidation tx whose parents are all gone. errors.Is on an
+// all-NotFound chain still matches its first node in O(1), so this does not
+// reintroduce the hot-loop concern.
+//
+// Once a GENUINE (non-NotFound) error is present, the chain is capped at
+// maxAggregatedSpendErrs — this is the mainnet-IBD-stall scenario the cap guards
+// against, where a large chain would be walked by every downstream errors.Is.
+func aggregateUnspendErrors(failedUnspends []error) error {
+	if len(failedUnspends) == 0 {
+		return nil
 	}
 
-	return nil
+	for _, e := range failedUnspends {
+		if !errors.Is(e, errors.ErrTxNotFound) && !errors.Is(e, errors.ErrNotFound) {
+			return errors.JoinCapped(maxAggregatedSpendErrs, failedUnspends...)
+		}
+	}
+
+	return errors.Join(failedUnspends...)
 }
 
 // postProcessUnspendRecord mirrors the response handling previously done

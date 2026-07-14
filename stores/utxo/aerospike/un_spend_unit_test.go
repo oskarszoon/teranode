@@ -7,6 +7,7 @@ import (
 
 	"github.com/bsv-blockchain/aerospike-client-go/v8"
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
+	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/stores/utxo"
 	"github.com/bsv-blockchain/teranode/ulogger"
 	"github.com/bsv-blockchain/teranode/util/test"
@@ -25,6 +26,58 @@ func TestChunkSpends_SizeZeroTreatsAsSingleChunk(t *testing.T) {
 	require.Len(t, chunks[0], 5)
 
 	require.Empty(t, chunkSpends(nil, 0))
+}
+
+// chainAllNotFound mirrors the rewind tool's allNotFound: every *Error node in
+// the chain must be a NotFound-family code. Used here to prove aggregateUnspendErrors
+// preserves the all-NotFound signal (no ERR_ERROR cap summary) for a benign storm.
+func chainAllNotFound(err error) bool {
+	for cur := err; cur != nil; {
+		var e *errors.Error
+		if !errors.As(cur, &e) {
+			return false
+		}
+
+		if e.Code() != errors.ErrTxNotFound.Code() && e.Code() != errors.ErrNotFound.Code() {
+			return false
+		}
+
+		cur = e.WrappedErr()
+	}
+
+	return true
+}
+
+func TestAggregateUnspendErrors(t *testing.T) {
+	require.NoError(t, aggregateUnspendErrors(nil))
+	require.NoError(t, aggregateUnspendErrors([]error{}))
+
+	// All-NotFound, more than the cap: joined UNCAPPED so the all-NotFound signal
+	// survives (a JoinCapped ERR_ERROR summary link would break allNotFound in the
+	// rewind path). This is the consolidation-tx-all-gone case.
+	nfs := make([]error, 15)
+	for i := range nfs {
+		nfs[i] = errors.NewNotFoundError("output gone %d", i)
+	}
+
+	allNF := aggregateUnspendErrors(nfs)
+	require.Error(t, allNF)
+	require.True(t, chainAllNotFound(allNF), "all-NotFound aggregate must stay all-NotFound")
+	require.True(t, errors.Is(allNF, errors.ErrNotFound))
+
+	// Mixed with more than the cap: capped, and the genuine error (or the cap
+	// summary link) breaks the all-NotFound classification, so the rewind path
+	// surfaces it instead of swallowing it.
+	mixed := make([]error, 0, 13)
+	for i := 0; i < 12; i++ {
+		mixed = append(mixed, errors.NewNotFoundError("gone %d", i))
+	}
+
+	mixed = append(mixed, errors.NewStorageError("device overload"))
+
+	gotMixed := aggregateUnspendErrors(mixed)
+	require.Error(t, gotMixed)
+	require.False(t, chainAllNotFound(gotMixed), "a genuine error must not be tolerated as all-NotFound")
 }
 
 func TestUnspend_ContextAbortReturnsError(t *testing.T) {
