@@ -881,6 +881,18 @@ func (v *Validator) validateInternal(ctx context.Context, tx *bt.Tx, blockHeight
 						return txMetaData, err
 					}
 
+					// Atomicity: the conflicting create failed, so no record was
+					// created — mirror the primary-create failure path below and
+					// reverse any partial spends. In practice the store already
+					// rolled these back (saveAsConflicting is only entered on
+					// ErrSpent/ErrTxConflicting, the store's needsSpendRollback
+					// classes), so this is an idempotent safety-net that keeps the
+					// two create seams consistent if those trigger classes ever
+					// diverge from the rollback classes.
+					if reverseErr := v.reverseSpends(decoupledCtx, spentUtxos); reverseErr != nil {
+						v.logger.Errorf("[Validate][%s] partial-spend reversal failed on conflicting-create abort: %v", txID, reverseErr)
+					}
+
 					err = errors.NewProcessingError("[Validate][%s] CreateInUtxoStore failed: %v", txID, utxoMapErr)
 					span.RecordError(err)
 

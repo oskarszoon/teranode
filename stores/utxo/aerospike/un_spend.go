@@ -230,8 +230,12 @@ func (s *Store) unspend(ctx context.Context, spends []*utxo.Spend, flagAsLocked 
 		if opErr := s.batchOperate(batchPolicy, batchRecords); opErr != nil {
 			prometheusUtxoMapErrors.WithLabelValues("Reset", "batch error").Inc()
 			aggErr = joinErr(aggErr, errors.NewStorageError("error in aerospike unspend batch", opErr))
-
-			continue
+			// Do NOT skip the per-record loop below on a partial batch failure:
+			// records that succeeded still have populated results and each needs
+			// postProcessUnspendRecord (the NOTALLSPENT spentExtraRecs decrement).
+			// Skipping the whole chunk would leave a paginated parent's master
+			// spent-count drifted high. The loop already aggregates per-record
+			// errors and skips records whose BatchRec().Err is set.
 		}
 
 		for i := range batchRecords {
