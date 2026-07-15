@@ -13,27 +13,27 @@ import (
 // StorageError — must surface, where the old isNotFound (any-link match) would
 // have swallowed the real error.
 func TestAllNotFound(t *testing.T) {
-	require.False(t, allNotFound(nil), "nil is not a tolerated NotFound")
+	require.False(t, errors.AllNotFound(nil), "nil is not a tolerated NotFound")
 
 	// Single-error cases.
-	require.True(t, allNotFound(errors.NewNotFoundError("output 1:2 not found")))
-	require.True(t, allNotFound(errors.NewTxNotFoundError("tx gone")))
-	require.False(t, allNotFound(errors.NewStorageError("device overload")))
-	require.False(t, allNotFound(errors.NewProcessingError("some processing error")))
+	require.True(t, errors.AllNotFound(errors.NewNotFoundError("output 1:2 not found")))
+	require.True(t, errors.AllNotFound(errors.NewTxNotFoundError("tx gone")))
+	require.False(t, errors.AllNotFound(errors.NewStorageError("device overload")))
+	require.False(t, errors.AllNotFound(errors.NewProcessingError("some processing error")))
 
 	// Aggregated (errors.Join) cases — fresh instances per call because Join
 	// mutates its first arg's wrapped-error chain.
-	require.True(t, allNotFound(errors.Join(
+	require.True(t, errors.AllNotFound(errors.Join(
 		errors.NewTxNotFoundError("a"),
 		errors.NewNotFoundError("b"),
 	)), "all-NotFound aggregate is tolerated")
 
-	require.False(t, allNotFound(errors.Join(
+	require.False(t, errors.AllNotFound(errors.Join(
 		errors.NewTxNotFoundError("a"),
 		errors.NewStorageError("boom"),
 	)), "mixed aggregate (NotFound first) must NOT be tolerated")
 
-	require.False(t, allNotFound(errors.Join(
+	require.False(t, errors.AllNotFound(errors.Join(
 		errors.NewStorageError("boom"),
 		errors.NewTxNotFoundError("a"),
 	)), "mixed aggregate (StorageError first) must NOT be tolerated")

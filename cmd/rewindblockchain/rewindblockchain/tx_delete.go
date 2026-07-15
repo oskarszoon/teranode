@@ -18,37 +18,6 @@ func isNotFound(err error) bool {
 	return errors.Is(err, errors.ErrTxNotFound) || errors.Is(err, errors.ErrNotFound)
 }
 
-// allNotFound reports whether EVERY error in a (possibly aggregated) chain is a
-// NotFound-family error. isNotFound errors.Is-matches if ANY link is NotFound;
-// this requires ALL links to be NotFound. The batched Aerospike Unspend
-// aggregates per-record errors via errors.Join (stores/utxo/aerospike/un_spend.go),
-// so a mixed aggregate — a legitimately-gone parent (NotFound) joined with a
-// genuine StorageError on another input — must NOT be silently tolerated. Walks
-// the linear *Error chain via the public Code()/WrappedErr() accessors; a
-// non-*Error link or any non-NotFound code makes it return false (surface, don't
-// swallow). SQL's Unspend is transactional and returns a single error, for which
-// this reduces to isNotFound.
-func allNotFound(err error) bool {
-	if err == nil {
-		return false
-	}
-
-	for cur := err; cur != nil; {
-		var e *errors.Error
-		if !errors.As(cur, &e) {
-			return false
-		}
-
-		if e.Code() != errors.ErrTxNotFound.Code() && e.Code() != errors.ErrNotFound.Code() {
-			return false
-		}
-
-		cur = e.WrappedErr()
-	}
-
-	return true
-}
-
 // removalCollector accumulates cross-record cleanup work so we can flush via
 // Aerospike batch APIs. Callers add (parent, child) tuples and (tx, blockIDs)
 // trims across many txs in a phase, then invoke flushCollector once per batch.
@@ -170,11 +139,11 @@ func (e *env) deleteTxWithParents(ctx context.Context, txHash *chainhash.Hash, p
 			// transactional and rolls back the entire batch on any failure —
 			// no inputs are unspent there.
 			//
-			// Use allNotFound (not isNotFound): we tolerate only when EVERY
+			// Use errors.AllNotFound (not isNotFound): we tolerate only when EVERY
 			// error in the aggregate is NotFound. A MIXED aggregate — a
 			// legitimately-gone parent joined with a genuine StorageError on
 			// another input — surfaces the real error instead of swallowing it.
-			if !allNotFound(err) {
+			if !errors.AllNotFound(err) {
 				return false, errors.NewStorageError("Unspend tx %s: %w", txHash.String(), err)
 			}
 		}

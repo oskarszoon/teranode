@@ -1031,6 +1031,34 @@ func As(err error, target any) bool {
 	return errors.As(err, target)
 }
 
+// AllNotFound reports whether err and every error joined into its chain is a
+// NotFound-family error (ErrNotFound or ErrTxNotFound). Unlike Is — which
+// returns true if ANY link in the chain matches — this requires ALL links, so a
+// mixed aggregate (a NotFound joined with a genuine error) returns false. Use it
+// to decide whether a best-effort batch failure is entirely "already gone" and
+// therefore safe to tolerate. A non-*Error link or any non-NotFound code makes
+// it return false (surface, don't swallow).
+func AllNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	for cur := err; cur != nil; {
+		e, ok := cur.(*Error)
+		if !ok {
+			return false
+		}
+
+		if e.code != ERR_NOT_FOUND && e.code != ERR_TX_NOT_FOUND {
+			return false
+		}
+
+		cur = e.wrappedErr
+	}
+
+	return true
+}
+
 // isGRPCWrappedError checks if the error is a gRPC wrapped error.
 func isGRPCWrappedError(err error) bool {
 	_, ok := status.FromError(err)

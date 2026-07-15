@@ -1654,6 +1654,16 @@ retryLoop:
 		if lastErr = v.utxoStore.Unspend(rctx, applied); lastErr == nil {
 			return nil
 		}
+
+		// A concurrently DAH-reaped/deleted parent makes Unspend return TX_NOT_FOUND:
+		// there is nothing to reverse and no dangling ref can form (no parent record
+		// => no spender pointer). Tolerate an ALL-NotFound result — don't burn the
+		// remaining retries or pollute spend_reversal_failed_total. A mixed aggregate
+		// (NotFound + a genuine error) is not all-NotFound, so it keeps retrying.
+		if errors.AllNotFound(lastErr) {
+			v.logger.Debugf("[reverseSpends] %d partial spends already gone (all NotFound); nothing to reverse", len(applied))
+			return nil
+		}
 	}
 
 	prometheusSpendReversalFailed.Inc()
