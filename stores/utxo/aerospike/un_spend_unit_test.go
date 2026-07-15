@@ -18,16 +18,6 @@ import (
 // (chunking, context abort, nil-spend skip, and per-record response handling).
 // The happy path is exercised by the container-backed tests in un_spend_batch_test.go.
 
-func TestChunkSpends_SizeZeroTreatsAsSingleChunk(t *testing.T) {
-	spends := make([]*utxo.Spend, 5)
-	// size <= 0 falls back to len(spends): the whole slice becomes one chunk.
-	chunks := chunkSpends(spends, 0)
-	require.Len(t, chunks, 1)
-	require.Len(t, chunks[0], 5)
-
-	require.Empty(t, chunkSpends(nil, 0))
-}
-
 // chainAllNotFound mirrors the rewind tool's allNotFound: every *Error node in
 // the chain must be a NotFound-family code. Used here to prove aggregateUnspendErrors
 // preserves the all-NotFound signal (no ERR_ERROR cap summary) for a benign storm.

@@ -57,6 +57,7 @@ package aerospike
 
 import (
 	"context"
+	"slices"
 	"time"
 
 	"github.com/bsv-blockchain/aerospike-client-go/v8"
@@ -108,28 +109,6 @@ func (s *Store) Unspend(ctx context.Context, spends []*utxo.Spend, flagAsLocked 
 	return s.unspend(ctx, spends, flagAsLocked...)
 }
 
-// chunkSpends splits spends into consecutive slices of at most size elements.
-// Pure helper (no I/O) so it can be unit-tested without an Aerospike
-// container: it drives the sizing behind the batched unspend below.
-func chunkSpends(spends []*utxo.Spend, size int) [][]*utxo.Spend {
-	if size <= 0 {
-		size = len(spends)
-	}
-
-	var chunks [][]*utxo.Spend
-
-	for i := 0; i < len(spends); i += size {
-		end := i + size
-		if end > len(spends) {
-			end = len(spends)
-		}
-
-		chunks = append(chunks, spends[i:end])
-	}
-
-	return chunks
-}
-
 // unspend implements the core unspend logic.
 //
 // Unlike the previous implementation (one synchronous client.Execute Lua
@@ -153,6 +132,12 @@ func (s *Store) unspend(ctx context.Context, spends []*utxo.Spend, flagAsLocked 
 	batchPolicy := util.GetAerospikeBatchPolicy(s.settings)
 	batchUDFPolicy := aerospike.NewBatchUDFPolicy()
 
+	// Hoisted out of the per-record loop: both are constant for the whole call and
+	// aerospike Values are immutable, so one instance is safe to share across every
+	// BatchUDF (also freezes a single DAH height for the whole reversal).
+	blockHeightVal := aerospike.NewIntegerValue(int(s.blockHeight.Load()))
+	retentionVal := aerospike.NewValue(s.settings.GetUtxoStoreBlockHeightRetention())
+
 	// Collect per-record failures and aggregate once at the end (see
 	// aggregateUnspendErrors): genuine errors are capped at maxAggregatedSpendErrs
 	// to bound downstream errors.Is walks (as the batched spend path does), while a
@@ -160,7 +145,7 @@ func (s *Store) unspend(ctx context.Context, spends []*utxo.Spend, flagAsLocked 
 	// tolerance still recognises it.
 	var failedUnspends []error
 
-	for _, chunk := range chunkSpends(spends, unspendBatchChunkSize) {
+	for chunk := range slices.Chunk(spends, unspendBatchChunkSize) {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			if errors.Is(ctxErr, context.DeadlineExceeded) {
 				return errors.NewStorageError("timeout un-spending after %d of %d utxos", count, len(spends), ctxErr)
@@ -178,7 +163,12 @@ func (s *Store) unspend(ctx context.Context, spends []*utxo.Spend, flagAsLocked 
 			}
 
 			if spend.SpendingData == nil {
-				return errors.NewProcessingError("[Unspend] SpendingData is required for %s:%d", spend.TxID, spend.Vout)
+				// Aggregate-and-continue rather than hard-return: a mid-batch return
+				// would discard already-applied unspends from prior chunks and the rest
+				// of this one, violating the attempt-all contract. SpendingData is
+				// mandatory for real callers, so this is defensive.
+				failedUnspends = append(failedUnspends, errors.NewProcessingError("[Unspend] SpendingData is required for %s:%d", spend.TxID, spend.Vout))
+				continue
 			}
 
 			s.logger.Debugf("un-spending utxo %s of tx %s:%d, spending data: %v", spend.UTXOHash.String(), spend.TxID.String(), spend.Vout, spend.SpendingData)
@@ -193,7 +183,8 @@ func (s *Store) unspend(ctx context.Context, spends []*utxo.Spend, flagAsLocked 
 					prometheusUtxoMapErrors.WithLabelValues("Reset", "unknown").Inc()
 				}
 
-				return errors.NewProcessingError("error in aerospike NewKey", aErr)
+				failedUnspends = append(failedUnspends, errors.NewProcessingError("error in aerospike NewKey", aErr))
+				continue
 			}
 
 			offset := s.calculateOffsetForOutput(spend.Vout)
@@ -202,8 +193,8 @@ func (s *Store) unspend(ctx context.Context, spends []*utxo.Spend, flagAsLocked 
 				aerospike.NewIntegerValue(int(offset)),         // vout adjusted for utxoBatchSize
 				aerospike.NewValue(spend.UTXOHash[:]),          // utxo hash
 				aerospike.NewValue(spend.SpendingData.Bytes()), // expected stored spending data (mandatory ownership check)
-				aerospike.NewIntegerValue(int(s.blockHeight.Load())),
-				aerospike.NewValue(s.settings.GetUtxoStoreBlockHeightRetention()),
+				blockHeightVal,
+				retentionVal,
 			))
 			chunkSpendsByIdx = append(chunkSpendsByIdx, spend)
 		}
