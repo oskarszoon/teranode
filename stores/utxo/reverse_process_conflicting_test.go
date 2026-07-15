@@ -11,6 +11,7 @@ import (
 	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/stores/utxo/meta"
 	spendpkg "github.com/bsv-blockchain/teranode/stores/utxo/spend"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -338,6 +339,28 @@ func TestIsReverseFullyApplied(t *testing.T) {
 		_, err := isReverseFullyApplied(context.Background(), mockStore, demotedTx, demotedHash)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "error getting recorded spender")
+		mockStore.AssertExpectations(t)
+	})
+
+	t.Run("recorded spender NotFound (dangling ref) -> false, nil + counted", func(t *testing.T) {
+		// Finding 5: a followed spender ref resolving to an absent record is a
+		// dangling spender ref. Rather than aborting the whole reverse, report
+		// not-fully-applied so the idempotent reverse re-runs and heals it — and
+		// bump the detection counter for the fourth (previously uninstrumented) site.
+		mockStore := &MockUtxostore{}
+		mockStore.On("Get", mock.Anything, &parentHash, mock.Anything).
+			Return(&meta.Data{SpendingDatas: []*spendpkg.SpendingData{
+				{TxID: &otherSpenderHash, Vin: 0},
+			}}, nil).Once()
+		mockStore.On("Get", mock.Anything, &otherSpenderHash, mock.Anything).
+			Return((*meta.Data)(nil), errors.NewTxNotFoundError("spender gone")).Once()
+
+		before := testutil.ToFloat64(prometheusDanglingSpenderRef.WithLabelValues("is_reverse_fully_applied"))
+		got, err := isReverseFullyApplied(context.Background(), mockStore, demotedTx, demotedHash)
+		require.NoError(t, err)
+		assert.False(t, got)
+		after := testutil.ToFloat64(prometheusDanglingSpenderRef.WithLabelValues("is_reverse_fully_applied"))
+		assert.Equal(t, before+1, after)
 		mockStore.AssertExpectations(t)
 	})
 

@@ -175,21 +175,38 @@ func TestProcessConflicting_UnspendError(t *testing.T) {
 	mockStore.On("SetConflicting", mock.Anything, []chainhash.Hash{losingTxHash}, true).
 		Return(affectedSpends, []chainhash.Hash{}, nil)
 
-	// Mock Unspend call returning error
+	// Mock Unspend call returning error (step 2 fails)
 	mockStore.On("Unspend", mock.Anything, mock.Anything, mock.Anything).
 		Return(errors.NewProcessingError("unspend failed"))
 
-	// step 2 failed → rollback only undoes step 1 (clear conflicting flag).
+	// Finding 1 (torn-state fix): step 2 is marked ATTEMPTED *before* the Unspend, so
+	// a failed/partial step-2 Unspend now triggers the FULL step-2 rollback undo —
+	// re-spend the cascade and unlock the parents — not just the step-1 flag clear.
+	// The batched Unspend can apply partial unspends before returning an aggregate
+	// error; without this the parents would be left unspent while step 1's losers are
+	// cleared non-conflicting — a double-spendable-in-store window. Re-spend of a
+	// never-unspent parent is idempotent, so running the undo on a partial step 2 is
+	// safe.
+	losingTx := createTestTransaction()
+	mockStore.On("Get", mock.Anything, &losingTxHash, mock.Anything).Return(&meta.Data{
+		Tx: losingTx,
+	}, nil)
+	mockStore.On("Spend", mock.Anything, losingTx, mock.Anything, mock.Anything).
+		Return([]*Spend{}, nil)
 	mockStore.On("SetConflicting", mock.Anything, []chainhash.Hash{losingTxHash}, false).
 		Return([]*Spend{}, []chainhash.Hash{}, nil)
+	mockStore.On("SetLocked", mock.Anything, []chainhash.Hash{losingTxHash}, false).
+		Return(nil)
 
 	// Execute test
 	result, _, err := ProcessConflicting(ctx, mockStore, 1, chainhash.Hash{}, conflictingTxHashes, map[chainhash.Hash]struct{}{})
 
-	// Assertions
+	// ProcessConflicting still surfaces the step-2 error...
 	assert.Nil(t, result)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "error unspending affected parent spends")
+	// ...and the rollback ran the step-2 undo (Get + re-Spend) and the step-2 unlock
+	// (SetLocked false) — verified via AssertExpectations.
 	mockStore.AssertExpectations(t)
 }
 

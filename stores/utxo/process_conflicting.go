@@ -112,7 +112,7 @@ func ProcessConflicting(ctx context.Context, s Store, blockHeight uint32, blockH
 	// return before the deferred runs, so we keep a parallel copy that survives.
 	var (
 		step1Committed        bool
-		step2Committed        bool
+		step2Attempted        bool
 		step4Committed        bool
 		step5Failed           bool // distinct from "not committed" — rollback is intentionally skipped
 		affectedParentSpends  []*Spend
@@ -135,7 +135,7 @@ func ProcessConflicting(ctx context.Context, s Store, blockHeight uint32, blockH
 
 		rollbackErr := rollbackProcessConflicting(ctx, s, conflictingTxHashes,
 			allMarkedHashes, markedAsNotSpendable, step3SuccessfulSpends, blockHeight,
-			step2Committed, step4Committed)
+			step2Attempted, step4Committed)
 		if rollbackErr != nil {
 			err = errors.NewProcessingError("[ProcessConflicting] MANUAL INTERVENTION REQUIRED: original=%v rollback=%v", err, rollbackErr)
 		}
@@ -231,14 +231,15 @@ func ProcessConflicting(ctx context.Context, s Store, blockHeight uint32, blockH
 	allMarkedConflicting = allMarkedHashes
 	step1Committed = true
 
-	// - 2: un-spend txa, marking the input txs as not spendable (txp & txq)
-	if err = s.Unspend(ctx, affectedParentSpends, true); err != nil {
-		return nil, nil, errors.NewProcessingError("error unspending affected parent spends", err)
-	}
-
-	step2Committed = true
-
-	// get the unique hashes of the transactions that were marked as not spendable
+	// Compute markedAsNotSpendable (the parents step 2 unspends + locks) and mark
+	// step 2 as ATTEMPTED before the Unspend. The batched Unspend applies partial
+	// unspends and then returns an aggregate error, so a mid-batch failure leaves
+	// most parents unspent; gating the rollback's step-2 undo on full success would
+	// leave those parents unspent while step 1's losers are cleared non-conflicting
+	// — a double-spendable-in-store window. Re-spending / unlocking a parent that
+	// was never actually unspent is idempotent on both backends (Lua spendMulti and
+	// SQL both treat a same-spending-data re-spend as success), so triggering the
+	// undo on a partial step 2 is safe.
 	markedAsNotSpendableHashesUnique := make(map[chainhash.Hash]struct{})
 	for _, spend := range affectedParentSpends {
 		markedAsNotSpendableHashesUnique[*spend.TxID] = struct{}{}
@@ -247,6 +248,12 @@ func ProcessConflicting(ctx context.Context, s Store, blockHeight uint32, blockH
 	markedAsNotSpendable = make([]chainhash.Hash, 0, len(markedAsNotSpendableHashesUnique))
 	for hash := range markedAsNotSpendableHashesUnique {
 		markedAsNotSpendable = append(markedAsNotSpendable, hash)
+	}
+
+	// - 2: un-spend txa, marking the input txs as not spendable (txp & txq)
+	step2Attempted = true
+	if err = s.Unspend(ctx, affectedParentSpends, true); err != nil {
+		return nil, nil, errors.NewProcessingError("error unspending affected parent spends", err)
 	}
 
 	// - 3: spend tx_double_spend as normal (ignoring the not spendable flag)
@@ -540,6 +547,18 @@ func isReverseFullyApplied(ctx context.Context, s Store, demotedTx *bt.Tx, demot
 		// with C still Conflicting=true; that is NOT a fully-applied reverse.
 		spenderMeta, err := s.Get(ctx, sd.TxID, fields.Conflicting)
 		if err != nil {
+			recordDanglingSpenderRef("is_reverse_fully_applied", err)
+
+			// This Get follows a recorded spender ref (parent[vout] -> sd.TxID); an
+			// absent record is a dangling spender ref — the bug class this PR targets.
+			// Treat it like the "cannot confirm" nil-meta branch below: report
+			// not-fully-applied so the idempotent reverse re-runs and heals it
+			// (Unspend clears the stale ref, Spend restores a valid counter) instead
+			// of aborting ReverseProcessConflicting. Other Get errors still abort.
+			if errors.Is(err, errors.ErrTxNotFound) {
+				return false, nil
+			}
+
 			return false, errors.NewProcessingError("[isReverseFullyApplied][%s] error getting recorded spender %s meta", demotedHash.String(), sd.TxID.String(), err)
 		}
 
@@ -759,7 +778,7 @@ func UnmarkConflictingRecursively(ctx context.Context, s Store, hashes []chainha
 // block which tags this as MANUAL INTERVENTION REQUIRED.
 func rollbackProcessConflicting(ctx context.Context, s Store, conflictingTxHashes,
 	allMarkedHashes, markedAsNotSpendable []chainhash.Hash,
-	step3SuccessfulSpends []*Spend, blockHeight uint32, step2Committed, step4Committed bool) error {
+	step3SuccessfulSpends []*Spend, blockHeight uint32, step2Attempted, step4Committed bool) error {
 	var rollbackErr error
 
 	// 1. Undo step 4 first (re-mark winners as conflicting) so the system briefly observes
@@ -789,7 +808,11 @@ func rollbackProcessConflicting(ctx context.Context, s Store, conflictingTxHashe
 	// MUST set IgnoreLocked; the cascade is still flagged conflicting, so IgnoreConflicting.
 	// A descendant's body may be unfetchable (pruned, frozen placeholder, or missing) —
 	// log via rollbackErr and continue rather than abort the rest of the unwind.
-	if step2Committed {
+	//
+	// Gated on step2Attempted (not fully-committed): the batched Unspend can apply
+	// partial unspends before failing, so the undo must run whenever step 2 was
+	// entered. Re-spend is idempotent for parents that were never unspent.
+	if step2Attempted {
 		for _, h := range allMarkedHashes {
 			h := h
 
@@ -822,8 +845,9 @@ func rollbackProcessConflicting(ctx context.Context, s Store, conflictingTxHashe
 		}
 	}
 
-	// 5. Undo the lock applied at step 2 (only attempted if step 2 actually committed).
-	if step2Committed && len(markedAsNotSpendable) > 0 {
+	// 5. Undo the lock applied at step 2 (run whenever step 2 was attempted; SetLocked
+	// false on a parent that was never locked is a harmless no-op).
+	if step2Attempted && len(markedAsNotSpendable) > 0 {
 		if e := s.SetLocked(ctx, markedAsNotSpendable, false); e != nil {
 			rollbackErr = errors.Join(rollbackErr, errors.NewProcessingError("rollback step 2 lock (SetLocked false) failed", e))
 		}
