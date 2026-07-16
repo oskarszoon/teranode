@@ -1436,14 +1436,17 @@ func (sm *SyncManager) handleBlockMsg(bmsg *blockQueueMsg) error {
 	// from processing.
 	//
 	// We test bmsg.peer — the exact peer OnBlock queued and awaitBlockResult
-	// disconnects (sp.Peer) — NOT the resolved primary: for a BlockPriority stream
-	// the failure disconnects only the stream sub-peer while its association
-	// primary stays connected, so the resolved `peer` would miss precisely the
-	// streaming case this guards. The ServiceError is benign to
-	// shouldDisconnectOnBlockErr, so it only makes awaitBlockResult release budget
-	// and log — no second disconnect. Gated on UsePrefetchIngestion so the
-	// regtest/synchronous path, where block-acceptance tooling feeds blocks in
-	// ways this must not disturb, is completely untouched.
+	// tears down (sp.Peer) — NOT the resolved primary. On a bad block
+	// awaitBlockResult calls disconnectMisbehaving, which drops the WHOLE
+	// association (the primary first, then the stream sub-peer), so either flag
+	// would flip for the misbehaviour case; but bmsg.peer is the peer that queued
+	// this tail, and it also drops on sub-peer-scoped teardowns (TCP loss,
+	// RemoveStream) that a primary check would not reflect — so it is the tighter
+	// guard. The ServiceError is benign to shouldDisconnectOnBlockErr, so it only
+	// makes awaitBlockResult release budget and log — no second disconnect. Gated
+	// on UsePrefetchIngestion so the regtest/synchronous path, where
+	// block-acceptance tooling feeds blocks in ways this must not disturb, is
+	// completely untouched.
 	if sm.UsePrefetchIngestion() && !bmsg.peer.Connected() {
 		sm.logger.Debugf("[handleBlockMsg][%s] skipping block from disconnected peer %s", bmsg.blockHash, bmsg.peer)
 		return errors.NewServiceError("[handleBlockMsg] skipping block %s from disconnected peer %s", bmsg.blockHash, bmsg.peer)
