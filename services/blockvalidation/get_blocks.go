@@ -538,12 +538,14 @@ func (u *Server) fetchSubtreeDataForBlock(gCtx context.Context, block *model.Blo
 	var peerAssignments []*PeerForSubtreeFetch
 	if u.settings.BlockValidation.CatchupParallelFetchEnabled && peerSnapshot != nil {
 		blockAltPeers, primaryPruned, _ := peerSnapshot.get()
+		// Never proactively assign subtrees to pruned peers (they 404 on archival subtree_data);
+		// they stay reachable only as last-resort failover via filterMaxHeightPeers' tail.
 		peerAssignments = DistributeSubtreesAcrossPeers(
 			u.logger,
 			peerID,
 			baseURL,
 			primaryPruned,
-			blockAltPeers,
+			nonPrunedPeers(blockAltPeers),
 			len(block.Subtrees),
 		)
 	}

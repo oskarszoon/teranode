@@ -298,7 +298,9 @@ func TestFetchSubtreeDataForBlock_AggregatesActualFailedPeers(t *testing.T) {
 			return nil, errors.NewProcessingError("timed out waiting for both assigned peers")
 		}
 	}
-	for _, baseURL := range []string{alt1.DataHubURL, alt2.DataHubURL} {
+	// origin is never proactively assigned (distribution drops pruned peers) but, at max height,
+	// it is now a last-resort failover target, so register it too — it fails like the alts.
+	for _, baseURL := range []string{alt1.DataHubURL, alt2.DataHubURL, origin.DataHubURL} {
 		for _, hash := range []*chainhash.Hash{&hash1, &hash2} {
 			httpmock.RegisterResponder("GET", fmt.Sprintf("%s/subtree/%s", baseURL, hash),
 				failAfterBothAssignedPeersArrive)
@@ -310,8 +312,9 @@ func TestFetchSubtreeDataForBlock_AggregatesActualFailedPeers(t *testing.T) {
 	require.True(t, errors.Is(err, errors.ErrExternal))
 	var carrier interface{ FailedPeerIDs() []string }
 	require.True(t, errors.As(err, &carrier), "actual-peer carrier must survive fetchSubtreeDataForBlock's ServiceError wrapper")
-	require.ElementsMatch(t, []string{alt1.ID.String(), alt2.ID.String()}, carrier.FailedPeerIDs())
-	require.NotContains(t, carrier.FailedPeerIDs(), origin.ID.String(), "pruned origin was not assigned or contacted")
+	// Every peer actually contacted and failed is aggregated: the two assigned alts plus the
+	// pruned origin reached as last-resort failover (pruned peers are no longer excluded).
+	require.ElementsMatch(t, []string{alt1.ID.String(), alt2.ID.String(), origin.ID.String()}, carrier.FailedPeerIDs())
 }
 
 func TestFetchSubtreeDataForBlock_LocalFailureHasNoPeerAttribution(t *testing.T) {
@@ -736,28 +739,26 @@ func TestReleaseCatchupLock_LocalErrorNotBlamedOnPeer(t *testing.T) {
 		"a local rate-wait/shutdown error must classify as local_error, not network_error (which would degrade the peer)")
 }
 
-// TestGetPeersAtMaxHeight_SkipsPrunedPeers proves archival-aware selection: pruned
-// peers (which 404 on archival subtree data and re-wedge IBD per #1174) are excluded,
-// while full and legacy/empty-storage peers remain eligible.
-func TestGetPeersAtMaxHeight_SkipsPrunedPeers(t *testing.T) {
-	client := &fakeParallelFetchP2P{peers: []*p2p.PeerInfo{
-		mkTestPeer("full-1", "full", 100),
-		mkTestPeer("pruned-1", "pruned", 100),
-		mkTestPeer("legacy-1", "", 100),
-	}}
+// TestFilterMaxHeightPeers_PrunedDeprioritizedNotExcluded proves pruned peers are no longer
+// excluded from the failover set: at equal height they are returned AFTER every non-pruned peer,
+// and a pruned-only set is still returned so a warm follower whose only max-height peers are pruned
+// isn't stranded.
+func TestFilterMaxHeightPeers_PrunedDeprioritizedNotExcluded(t *testing.T) {
+	full1 := mkTestPeer("full-1", "full", 100)
+	full1.ReputationScore = 90
+	pruned1 := mkTestPeer("pruned-1", "pruned", 100)
+	pruned1.ReputationScore = 100 // a higher pruned reputation must NOT float it above non-pruned
+	legacy1 := mkTestPeer("legacy-1", "", 100)
 
-	peers, err := GetPeersAtMaxHeight(context.Background(), ulogger.TestLogger{}, client, "")
-	require.NoError(t, err)
+	got := filterMaxHeightPeers([]*p2p.PeerInfo{pruned1, full1, legacy1}, "")
+	require.Len(t, got, 3)
+	require.NotEqual(t, "pruned", got[0].Storage, "non-pruned peers come first")
+	require.NotEqual(t, "pruned", got[1].Storage, "non-pruned peers come first")
+	require.Equal(t, "http://pruned-1", got[2].DataHubURL, "pruned peer is deprioritized to the tail")
 
-	// Key on DataHubURL (raw) — peer.ID.String() base58-encodes, so don't assume it equals the id.
-	urls := map[string]bool{}
-	for _, p := range peers {
-		urls[p.DataHubURL] = true
-		require.NotEqual(t, "pruned", p.Storage, "pruned peers must be skipped")
-	}
-	require.True(t, urls["http://full-1"], "full peers stay eligible")
-	require.True(t, urls["http://legacy-1"], "empty/unknown storage stays eligible (don't exclude old archival peers)")
-	require.False(t, urls["http://pruned-1"], "pruned peers must be skipped")
+	prunedOnly := filterMaxHeightPeers([]*p2p.PeerInfo{mkTestPeer("pruned-only", "pruned", 100)}, "")
+	require.Len(t, prunedOnly, 1, "a pruned-only set must not strand a warm follower")
+	require.Equal(t, "http://pruned-only", prunedOnly[0].DataHubURL)
 }
 
 func TestFilterMaxHeightPeers_ComputesTipFromEligibleArchivalPeers(t *testing.T) {
@@ -768,9 +769,12 @@ func TestFilterMaxHeightPeers_ComputesTipFromEligibleArchivalPeers(t *testing.T)
 	}
 
 	got := filterMaxHeightPeers(peers, "")
-	require.Len(t, got, 2)
-	urls := []string{got[0].DataHubURL, got[1].DataHubURL}
-	require.ElementsMatch(t, []string{"http://full-two-behind", "http://legacy-three-behind"}, urls)
+	// Tip is computed from the non-pruned peers (98), not the pruned peer at 100 — otherwise the
+	// threshold (99) would drop full-98 and legacy-97 and leave only the pruned peer.
+	require.Len(t, got, 3)
+	require.ElementsMatch(t, []string{"http://full-two-behind", "http://legacy-three-behind"},
+		[]string{got[0].DataHubURL, got[1].DataHubURL}, "archival peers lead")
+	require.Equal(t, "http://pruned-tip", got[2].DataHubURL, "pruned tip is retained but deprioritized")
 }
 
 func TestFilterMaxHeightPeers_PreservesInputOrderForEqualKeys(t *testing.T) {
@@ -803,6 +807,43 @@ func TestFilterMaxHeightPeers_PreservesInputOrderForEqualKeys(t *testing.T) {
 	}
 	require.Equal(t, wantHigh, gotHigh)
 	require.Equal(t, wantLow, gotLow)
+}
+
+// TestFetchAndStoreSubtree_PrunedPeerServesFailover proves a pruned peer is used as last-resort
+// failover for a warm follower: the primary and the non-pruned alternative both fail the subtree,
+// and only the pruned peer (still holding the recent data) recovers it.
+func TestFetchAndStoreSubtree_PrunedPeerServesFailover(t *testing.T) {
+	suite := NewCatchupTestSuite(t)
+	defer suite.Cleanup()
+
+	subtree, err := subtreepkg.NewIncompleteTreeByLeafCount(1)
+	require.NoError(t, err)
+	require.NoError(t, subtree.AddCoinbaseNode())
+	subtreeHash := subtree.RootHash()
+	require.NoError(t, suite.Server.subtreeStore.Set(suite.Ctx, subtreeHash[:], fileformat.FileTypeSubtreeData, []byte{0x00}))
+
+	primary := mkTestPeer("primary", "full", 100)
+	altFull := mkTestPeer("alt-full", "full", 100)
+	altPruned := mkTestPeer("alt-pruned", "pruned", 100)
+	snapshot := &catchupPeerSnapshot{load: func() ([]*p2p.PeerInfo, bool, error) {
+		return filterMaxHeightPeers([]*p2p.PeerInfo{altFull, altPruned}, ""), false, nil
+	}}
+	suite.Server.settings.BlockValidation.CatchupMaxRetries = 3
+	block := testhelpers.CreateTestBlockChain(t, 1)[0]
+
+	httpmock.ActivateNonDefault(util.HTTPClient())
+	defer httpmock.DeactivateAndReset()
+	httpmock.RegisterResponder("GET", fmt.Sprintf("%s/subtree/%s", primary.DataHubURL, subtreeHash),
+		httpmock.NewStringResponder(http.StatusInternalServerError, "primary failed"))
+	httpmock.RegisterResponder("GET", fmt.Sprintf("%s/subtree/%s", altFull.DataHubURL, subtreeHash),
+		httpmock.NewStringResponder(http.StatusInternalServerError, "alt-full failed"))
+	httpmock.RegisterResponder("GET", fmt.Sprintf("%s/subtree/%s", altPruned.DataHubURL, subtreeHash),
+		httpmock.NewBytesResponder(http.StatusOK, subtreepkg.CoinbasePlaceholderHashValue[:]))
+
+	servingPeerID, err := suite.Server.fetchAndStoreSubtreeAndSubtreeData(
+		suite.Ctx, suite.Ctx, block, subtreeHash, primary.ID.String(), primary.DataHubURL, snapshot)
+	require.NoError(t, err)
+	require.Equal(t, altPruned.ID.String(), servingPeerID, "pruned peer recovered the subtree archival peers could not serve")
 }
 
 func TestCatchupAltPeers_SkipsNilEntries(t *testing.T) {

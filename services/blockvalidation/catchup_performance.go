@@ -23,6 +23,19 @@ func isPrunedPeer(storage string) bool {
 	return storage == "pruned"
 }
 
+// nonPrunedPeers returns the peers that do not announce pruned storage, preserving order. Used to
+// keep pruned peers out of proactive subtree distribution (they remain reachable only on failover
+// via filterMaxHeightPeers' deprioritized tail).
+func nonPrunedPeers(peers []*p2p.PeerInfo) []*p2p.PeerInfo {
+	out := make([]*p2p.PeerInfo, 0, len(peers))
+	for _, peer := range peers {
+		if peer != nil && !isPrunedPeer(peer.Storage) {
+			out = append(out, peer)
+		}
+	}
+	return out
+}
+
 // P2PClientForParallelFetch is a subset of P2PClientI needed for parallel fetch operations
 type P2PClientForParallelFetch interface {
 	GetPeersForCatchup(ctx context.Context) ([]*p2p.PeerInfo, error)
@@ -291,13 +304,57 @@ func DistributeSubtreesAcrossPeers(
 	return result
 }
 
-// filterMaxHeightPeers filters an already-fetched peer set down to non-pruned, non-banned,
-// adequately-reputed peers at (near) max height that advertise a DataHubURL, excluding
-// excludePeerID (empty string excludes none), sorted by reputation then response time.
-// Pure helper over a provided list so the peer set can be fetched once per block.
+// peersAtHeightThreshold returns the candidates at or within one block of maxHeight, preserving
+// input order.
+func peersAtHeightThreshold(candidates []*p2p.PeerInfo, maxHeight uint32) []*p2p.PeerInfo {
+	threshold := maxHeight
+	if maxHeight > 0 {
+		threshold = maxHeight - 1
+	}
+	out := make([]*p2p.PeerInfo, 0, len(candidates))
+	for _, peer := range candidates {
+		if peer.Height >= threshold {
+			out = append(out, peer)
+		}
+	}
+	return out
+}
+
+// sortPeersByReputationThenSpeed orders peers by reputation (descending) then response time
+// (ascending), stably so equal-key input order is preserved.
+func sortPeersByReputationThenSpeed(peers []*p2p.PeerInfo) {
+	sort.SliceStable(peers, func(i, j int) bool {
+		if peers[i].ReputationScore != peers[j].ReputationScore {
+			return peers[i].ReputationScore > peers[j].ReputationScore
+		}
+		iHasTime := peers[i].AvgResponseTime > 0
+		jHasTime := peers[j].AvgResponseTime > 0
+		if iHasTime != jHasTime {
+			return iHasTime // Prefer peer with a measured response time
+		}
+		if iHasTime && jHasTime && peers[i].AvgResponseTime != peers[j].AvgResponseTime {
+			return peers[i].AvgResponseTime < peers[j].AvgResponseTime
+		}
+		return false
+	})
+}
+
+// filterMaxHeightPeers filters an already-fetched peer set down to non-banned, adequately-reputed
+// peers at (near) max height that advertise a DataHubURL, excluding excludePeerID (empty string
+// excludes none), sorted by reputation then response time. Pure helper over a provided list so the
+// peer set can be fetched once per block.
+//
+// Pruned peers are NOT excluded: a warm follower catching up recent blocks may find that the only
+// peers holding the recent subtree_data are pruned (pruned != useless for recent data). Instead
+// they are deprioritized to the tail so they are only reached on failover after every non-pruned
+// peer, and the tip/height threshold is computed from the non-pruned candidates alone so a pruned
+// peer advertising a higher height cannot lift the bar above the archival peers that serve deep
+// IBD. Subtree distribution filters pruned peers out at the call site, so they are never
+// proactively assigned — only used as last-resort failover.
 func filterMaxHeightPeers(peers []*p2p.PeerInfo, excludePeerID string) []*p2p.PeerInfo {
 	candidates := make([]*p2p.PeerInfo, 0, len(peers))
-	var maxHeight uint32
+	prunedCandidates := make([]*p2p.PeerInfo, 0)
+	var maxHeight, prunedMaxHeight uint32
 	for _, peer := range peers {
 		if peer == nil {
 			continue
@@ -305,7 +362,14 @@ func filterMaxHeightPeers(peers []*p2p.PeerInfo, excludePeerID string) []*p2p.Pe
 		if excludePeerID != "" && peer.ID.String() == excludePeerID {
 			continue
 		}
-		if peer.DataHubURL == "" || peer.IsBanned || peer.ReputationScore < 20.0 || isPrunedPeer(peer.Storage) {
+		if peer.DataHubURL == "" || peer.IsBanned || peer.ReputationScore < 20.0 {
+			continue
+		}
+		if isPrunedPeer(peer.Storage) {
+			prunedCandidates = append(prunedCandidates, peer)
+			if peer.Height > prunedMaxHeight {
+				prunedMaxHeight = peer.Height
+			}
 			continue
 		}
 		candidates = append(candidates, peer)
@@ -314,58 +378,21 @@ func filterMaxHeightPeers(peers []*p2p.PeerInfo, excludePeerID string) []*p2p.Pe
 		}
 	}
 
-	maxHeightThreshold := maxHeight
-	if maxHeight > 0 {
-		maxHeightThreshold = maxHeight - 1
+	eligible := peersAtHeightThreshold(candidates, maxHeight)
+	sortPeersByReputationThenSpeed(eligible)
+
+	if len(eligible) > 0 {
+		// Append pruned peers reaching the same non-pruned tip as a deprioritized failover tail.
+		prunedTail := peersAtHeightThreshold(prunedCandidates, maxHeight)
+		sortPeersByReputationThenSpeed(prunedTail)
+		return append(eligible, prunedTail...)
 	}
 
-	eligiblePeers := make([]*p2p.PeerInfo, 0, len(candidates))
-	for _, peer := range candidates {
-		if peer.Height >= maxHeightThreshold {
-			eligiblePeers = append(eligiblePeers, peer)
-		}
-	}
-
-	// Sort by reputation (descending) then by response time (ascending).
-	sort.SliceStable(eligiblePeers, func(i, j int) bool {
-		if eligiblePeers[i].ReputationScore != eligiblePeers[j].ReputationScore {
-			return eligiblePeers[i].ReputationScore > eligiblePeers[j].ReputationScore
-		}
-		iHasTime := eligiblePeers[i].AvgResponseTime > 0
-		jHasTime := eligiblePeers[j].AvgResponseTime > 0
-		if iHasTime != jHasTime {
-			return iHasTime // Prefer peer with a measured response time
-		}
-		if iHasTime && jHasTime && eligiblePeers[i].AvgResponseTime != eligiblePeers[j].AvgResponseTime {
-			return eligiblePeers[i].AvgResponseTime < eligiblePeers[j].AvgResponseTime
-		}
-		return false
-	})
-
-	return eligiblePeers
-}
-
-// GetPeersAtMaxHeight returns non-pruned peers at max height (excluding excludePeerID),
-// sorted by reputation and speed. Useful for parallel fetching.
-func GetPeersAtMaxHeight(
-	ctx context.Context,
-	logger ulogger.Logger,
-	p2pClient P2PClientForParallelFetch,
-	excludePeerID string,
-) ([]*p2p.PeerInfo, error) {
-	if p2pClient == nil {
-		return nil, errors.NewInvalidArgumentError("p2pClient is nil")
-	}
-
-	peers, err := p2pClient.GetPeersForCatchup(ctx)
-	if err != nil {
-		return nil, errors.NewServiceError("failed to get peers for catchup: %v", err)
-	}
-
-	eligiblePeers := filterMaxHeightPeers(peers, excludePeerID)
-	logger.Debugf("[GetPeersAtMaxHeight] Found %d eligible peers", len(eligiblePeers))
-
-	return eligiblePeers, nil
+	// No eligible non-pruned peer: pruned peers are the only failover option, so compute their own
+	// tip and return them rather than stranding a warm follower with no target.
+	prunedOnly := peersAtHeightThreshold(prunedCandidates, prunedMaxHeight)
+	sortPeersByReputationThenSpeed(prunedOnly)
+	return prunedOnly
 }
 
 // catchupAltPeers fetches the peer set ONCE per block and returns (a) the non-pruned
