@@ -218,8 +218,7 @@ type Server struct {
 	// rate limiter that paces catchup heavy fetches (subtree, subtree_data, block
 	// batches) so the combined fan-out cannot burst into a peer's asset heavy-route
 	// limiter and wedge IBD (see issue #1174). Lazily populated by peerFetchLimiter;
-	// guarded by peerFetchLimitersMu. The catchup peer set is small, so the map is
-	// not actively evicted.
+	// guarded by peerFetchLimitersMu.
 	// Bounded (LRU) so a peer churning its advertised DataHubURL across catchup cycles
 	// can't grow this map without limit on a long-running node.
 	peerFetchLimiters   *lru.Cache[string, *rate.Limiter]

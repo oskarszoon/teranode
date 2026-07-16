@@ -459,8 +459,12 @@ func executeHTTPRequest(ctx context.Context, cancelFn context.CancelFunc, rawURL
 
 // maxErrorBodyBytes caps how much of a non-OK response body is drained on error paths.
 // The body is peer-controlled and is NOT embedded in the error message (see buildHTTPError),
-// so this only bounds the drain read used to keep the connection reusable.
-const maxErrorBodyBytes = 4 << 10 // 4 KiB
+// so this only bounds the drain read used to keep the connection reusable. Sized generously
+// (64 KiB): real 429/503 error bodies from the asset server are tiny, and draining them in full
+// lets net/http return the connection to the pool instead of forcing a fresh TCP+TLS handshake on
+// the next backoff retry. A body larger than this is anomalous/hostile and its connection is
+// intentionally left undrained (dropped rather than reused).
+const maxErrorBodyBytes = 64 << 10 // 64 KiB
 
 // buildHTTPError constructs an appropriate error from a non-OK HTTP response.
 //
@@ -669,15 +673,11 @@ func doHTTPRequestBodyReaderWithRetry(ctx context.Context, url string, cfg retry
 	})
 }
 
-// DoHTTPRequestWithRetry behaves like DoHTTPRequest (reads the full body into memory)
+// doHTTPRequestWithRetry behaves like DoHTTPRequest (reads the full body into memory)
 // but retries on HTTP 503/429 with jittered exponential backoff. Intended for catchup
 // heavy fetches (e.g. /blocks batches, single blocks) that must back off when a peer's
 // asset endpoint rate-limits, instead of re-bursting and re-tripping the limiter.
 // beforeAttempt (nil = no-op) runs before every attempt, e.g. a per-peer rate-limit wait.
-func DoHTTPRequestWithRetry(ctx context.Context, url string, beforeAttempt func(context.Context) error, requestBody ...[]byte) ([]byte, error) {
-	return doHTTPRequestWithRetry(ctx, url, defaultRetryConfig, beforeAttempt, requestBody...)
-}
-
 func doHTTPRequestWithRetry(ctx context.Context, url string, cfg retryConfig, beforeAttempt func(context.Context) error, requestBody ...[]byte) ([]byte, error) {
 	return retryHTTP(ctx, cfg, func(c context.Context) ([]byte, time.Duration, error) {
 		if beforeAttempt != nil {

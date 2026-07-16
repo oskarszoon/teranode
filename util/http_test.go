@@ -1358,7 +1358,7 @@ func TestReadBodyWithRetry_MidStreamStallIsPeerFault(t *testing.T) {
 	defer close(release)
 
 	// No parent deadline → the transport timeout (httpRequestTimeout) governs the read.
-	_, err := DoHTTPRequestWithRetry(context.Background(), server.URL, nil)
+	_, err := doHTTPRequestWithRetry(context.Background(), server.URL, defaultRetryConfig, nil)
 	require.Error(t, err)
 	require.False(t, errors.IsLocalError(err),
 		"a peer stalling mid-body must be a peer fault (non-local), not absolved as local; got %T: %v", err, err)
@@ -1386,7 +1386,7 @@ func TestReadBodyWithRetry_ShutdownCancelIsLocal(t *testing.T) {
 		cancel() // simulate shutdown mid-read
 	}()
 
-	_, err := DoHTTPRequestWithRetry(ctx, server.URL, nil)
+	_, err := doHTTPRequestWithRetry(ctx, server.URL, defaultRetryConfig, nil)
 	require.Error(t, err)
 	require.True(t, errors.IsLocalError(err),
 		"a shutdown cancel mid-read must be local (not a peer fault); got %T: %v", err, err)
@@ -1408,7 +1408,7 @@ func TestReadBodyWithRetry_PreResponseStallIsPeerFault(t *testing.T) {
 	defer server.Close()
 	defer close(release)
 
-	_, err := DoHTTPRequestWithRetry(context.Background(), server.URL, nil)
+	_, err := doHTTPRequestWithRetry(context.Background(), server.URL, defaultRetryConfig, nil)
 	require.Error(t, err)
 	require.False(t, errors.IsLocalError(err),
 		"a peer stalling before headers must be a peer fault (non-local); got %T: %v", err, err)
@@ -1447,9 +1447,9 @@ func TestWithRetryHelpers_SignRequests(t *testing.T) {
 		}))
 		defer server.Close()
 
-		t.Run("DoHTTPRequestWithRetry", func(t *testing.T) {
+		t.Run("doHTTPRequestWithRetry", func(t *testing.T) {
 			gotSig.Store(false)
-			_, err := DoHTTPRequestWithRetry(context.Background(), server.URL, nil)
+			_, err := doHTTPRequestWithRetry(context.Background(), server.URL, defaultRetryConfig, nil)
 			require.NoError(t, err)
 			require.True(t, gotSig.Load())
 		})

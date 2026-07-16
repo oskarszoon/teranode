@@ -845,6 +845,11 @@ func (u *Server) fetchAndStoreSubtreeData(ctx context.Context, shutdownCtx conte
 		options.WithAllowOverwrite(true),
 		options.WithDeleteAt(dah),
 	); err != nil {
+		// A shutdown/catchup cancel mid-Set surfaces here; classify it local (like the fetch/parse
+		// paths above) so it doesn't trip the loud storage-error gate on a clean shutdown.
+		if c := classifyDownloadErr(ctx, subtreeHash, err); c != nil {
+			return c
+		}
 		return errors.NewStorageError("[catchup:fetchAndStoreSubtreeData] Failed to store subtreeData for %s", subtreeHash.String(), err)
 	}
 

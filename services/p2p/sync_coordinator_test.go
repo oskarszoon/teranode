@@ -196,11 +196,6 @@ func TestSyncCoordinator_HandlePeerDisconnected_RemovesPeer(t *testing.T) {
 	require.False(t, ok)
 }
 
-func TestSyncCoordinator_HandleCatchupFailure_NoSyncPeer(t *testing.T) {
-	sc, _ := newTestSyncCoordinator(t)
-	require.NotPanics(t, func() { sc.HandleCatchupFailure("test") })
-}
-
 func TestSyncCoordinator_HandleCatchupFailureForPeer(t *testing.T) {
 	t.Run("ignores failure for non-current peer", func(t *testing.T) {
 		sc, _ := newTestSyncCoordinator(t)

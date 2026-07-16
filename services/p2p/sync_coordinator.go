@@ -496,35 +496,6 @@ func (sc *SyncCoordinator) HandlePeerDisconnected(peerID peer.ID) {
 	}
 }
 
-// HandleCatchupFailure handles catchup failures
-func (sc *SyncCoordinator) HandleCatchupFailure(reason string) {
-	sc.logger.Infof("[SyncCoordinator] Handling catchup failure: %s", reason)
-	sc.triggerMu.Lock()
-	defer sc.triggerMu.Unlock()
-
-	// Get the failed peer before clearing
-	sc.mu.RLock()
-	failedPeer := sc.currentSyncPeer
-	sc.mu.RUnlock()
-
-	// Record failure for the failed peer BEFORE clearing and triggering sync
-	// This ensures reputation is updated so the peer selector won't re-select the same peer
-	if failedPeer != "" {
-		sc.logger.Infof("[SyncCoordinator] Recording failure for failed peer %s", failedPeer)
-		if err := sc.registry.UpdatePeerMetrics(sc.ctx, failedPeer, 0, 0, 0, false, true, false, 0); err != nil {
-			sc.logger.Warnf("[SyncCoordinator] UpdatePeerMetrics(failure) for %s: %v", failedPeer, err)
-		}
-	}
-
-	// Clear current sync peer
-	sc.ClearSyncPeer()
-
-	// Trigger new sync
-	if err := sc.triggerSync(); err != nil {
-		sc.logger.Errorf("[SyncCoordinator] Failed to trigger sync after failure: %v", err)
-	}
-}
-
 // HandleCatchupFailureForPeer handles an operation-level failure notification only
 // when the reported peer is still the active sync peer. Per-peer reputation is
 // updated by the direct RecordCatchupFailure path before this notification arrives;

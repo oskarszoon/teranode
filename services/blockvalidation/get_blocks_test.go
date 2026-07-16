@@ -24,6 +24,7 @@ import (
 	"github.com/bsv-blockchain/teranode/services/blockvalidation/testhelpers"
 	"github.com/bsv-blockchain/teranode/stores/blob"
 	"github.com/bsv-blockchain/teranode/stores/blob/memory"
+	"github.com/bsv-blockchain/teranode/stores/blob/options"
 	"github.com/bsv-blockchain/teranode/test/utils/transactions"
 	"github.com/bsv-blockchain/teranode/ulogger"
 	"github.com/bsv-blockchain/teranode/util"
@@ -2622,6 +2623,20 @@ func TestFetchSubtreeDataForBlock_SiblingFailureDoesNotCancelInFlight(t *testing
 }
 
 // TestFetchAndStoreSubtreeAndSubtreeData tests the fetchAndStoreSubtreeAndSubtreeData function comprehensively
+// cancelOnSetSubtreeStore delegates to an embedded store but, on Set, cancels the supplied context
+// (simulating node shutdown / catchup-cancel arriving mid-write) and returns the resulting cancel
+// error, so tests can exercise the Set-path error classification.
+type cancelOnSetSubtreeStore struct {
+	blob.Store
+	cancel context.CancelFunc
+}
+
+func (s *cancelOnSetSubtreeStore) Set(ctx context.Context, _ []byte, _ fileformat.FileType, _ []byte, _ ...options.FileOption) error {
+	s.cancel()
+	<-ctx.Done()
+	return ctx.Err()
+}
+
 func TestFetchAndStoreSubtreeData(t *testing.T) {
 	baseURL := "http://test-peer:8080"
 	ctx := context.Background()
@@ -2690,6 +2705,32 @@ func TestFetchAndStoreSubtreeData(t *testing.T) {
 		}
 		_, err := server.fetchAndStoreSubtreeAndSubtreeData(ctx, ctx, testBlock, subtreeHash, "12D3KooWL1NF6fdTJ9cucEuwvuX8V8KtpJZZnUE4umdLBuK15eUZ", baseURL, nil)
 		assert.NoError(t, err)
+	})
+
+	t.Run("SetCancelIsNotStorageError", func(t *testing.T) {
+		// A shutdown/catchup cancel arriving during subtreeStore.Set must classify local, not as a
+		// loud ErrStorageError that would trip the "node may fall behind" gate on a clean shutdown.
+		logger := ulogger.TestLogger{}
+		settings := test.CreateBaseTestSettings(t)
+		shutdownCtx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		server := &Server{
+			logger:       logger,
+			subtreeStore: &cancelOnSetSubtreeStore{Store: memory.New(), cancel: cancel},
+			settings:     settings,
+		}
+		httpmock.ActivateNonDefault(util.HTTPClient())
+		defer httpmock.DeactivateAndReset()
+		httpmock.RegisterResponder("GET",
+			fmt.Sprintf("%s/subtree_data/%s", baseURL, subtreeHash.String()),
+			httpmock.NewBytesResponder(200, subtreeDataBytes))
+
+		testBlock := &model.Block{Height: 100}
+		err := server.fetchAndStoreSubtreeData(ctx, shutdownCtx, testBlock, subtreeHash, subtree, "peer", baseURL)
+		require.Error(t, err)
+		require.False(t, errors.Is(err, errors.ErrStorageError),
+			"a shutdown cancel during Set must not raise a loud storage error; got %T: %v", err, err)
+		require.True(t, errors.IsLocalError(err), "it must classify local (clean shutdown, no storage/peer blame)")
 	})
 
 	t.Run("SubtreeFetchError", func(t *testing.T) {
