@@ -616,6 +616,19 @@ func isUnvalidatablePeerError(err error) bool {
 //   - ctx: Context for initialization operations and service setup
 //
 // Returns an error if initialization fails due to configuration issues or service unavailability
+// validateCatchupSettings rejects catchup configuration that would deterministically fail every
+// block fetch, so an operator sees the problem at service startup rather than as a silent IBD
+// stall. blockvalidation_max_incoming_block_bytes bounds the per-block transport envelope decoded
+// through decodeBoundedBlock's io.LimitedReader (a DoS guard added alongside this path); a
+// non-positive value is NOT "unlimited" — it leaves the decode with no finite budget — so it is
+// rejected loudly here instead of failing every catchup fetch downstream.
+func validateCatchupSettings(s *settings.Settings) error {
+	if s.BlockValidation.MaxIncomingBlockBytes <= 0 {
+		return errors.NewConfigurationError("blockvalidation_max_incoming_block_bytes must be positive, got %d", s.BlockValidation.MaxIncomingBlockBytes)
+	}
+	return nil
+}
+
 func (u *Server) Init(ctx context.Context) (err error) {
 	u.logger.Infof("[Init] Starting block validation initialization")
 
@@ -640,6 +653,10 @@ func (u *Server) Init(ctx context.Context) (err error) {
 	storeURL := u.settings.UtxoStore.UtxoStore
 	if storeURL == nil {
 		return errors.NewConfigurationError("could not get utxostore URL", err)
+	}
+
+	if cfgErr := validateCatchupSettings(u.settings); cfgErr != nil {
+		return cfgErr
 	}
 
 	// Only create a new BlockValidation if one wasn't already set (for testing)
