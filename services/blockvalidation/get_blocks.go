@@ -146,6 +146,15 @@ func normalizeFailedPeerIDs(peerIDs []string) []string {
 	return normalized
 }
 
+// sortedFailedPeerIDs flattens the failed-peer set into a deduplicated, sorted slice.
+func sortedFailedPeerIDs(failedPeers map[string]struct{}) []string {
+	ids := make([]string, 0, len(failedPeers))
+	for peerID := range failedPeers {
+		ids = append(ids, peerID)
+	}
+	return normalizeFailedPeerIDs(ids)
+}
+
 func failedPeerIDsFromError(err error) ([]string, bool) {
 	var provider failedPeerIDsProvider
 	if !errors.As(err, &provider) {
@@ -581,26 +590,22 @@ func (u *Server) fetchSubtreeDataForBlock(gCtx context.Context, block *model.Blo
 
 	// Wait for all subtree fetching to complete
 	if err := g.Wait(); err != nil {
-		failedPeerIDs := make([]string, 0, len(failedPeers))
-		for failedPeerID := range failedPeers {
-			failedPeerIDs = append(failedPeerIDs, failedPeerID)
-		}
 		root := errors.NewServiceError("[catchup:fetchSubtreeDataForBlock] Failed to fetch subtree data for block %s", block.Hash().String())
-		return nil, wrapErrorWithFailedPeerIDs(root, err, failedPeerIDs)
+		return nil, wrapErrorWithFailedPeerIDs(root, err, sortedFailedPeerIDs(failedPeers))
 	}
 
-	failedPeerIDs := make([]string, 0, len(failedPeers))
-	for failedPeerID := range failedPeers {
-		failedPeerIDs = append(failedPeerIDs, failedPeerID)
-	}
-	for _, failedPeerID := range normalizeFailedPeerIDs(failedPeerIDs) {
-		u.reportCatchupFailure(parentCtx, failedPeerID)
-		if u.blockchainClient == nil {
+	// Block fully recovered (every subtree fetched, possibly via failover). Apply a
+	// reputation-only ding to peers that failed a subtree but did NOT ultimately
+	// contribute data to this block. Deliberately NOT a ReportPeerFailure: that clears
+	// and reselects the sync peer, and churning away from a working peer on a block that
+	// recovered is exactly the IBD wedge this path avoids. A peer that both failed one
+	// subtree and served another is skipped entirely so a transient hiccup on an
+	// otherwise-healthy peer is not penalised.
+	for _, failedPeerID := range sortedFailedPeerIDs(failedPeers) {
+		if _, contributed := contributingPeers[failedPeerID]; contributed {
 			continue
 		}
-		if reportErr := u.blockchainClient.ReportPeerFailure(parentCtx, block.Hash(), failedPeerID, "catchup", "peer subtree fetch failed before successful block recovery"); reportErr != nil {
-			u.logger.Errorf("[catchup:fetchSubtreeDataForBlock][%s] failed to report recovered peer failure for peer %s: %v", block.Hash().String(), failedPeerID, reportErr)
-		}
+		u.reportCatchupFailure(parentCtx, failedPeerID)
 	}
 
 	return contributingPeers, nil

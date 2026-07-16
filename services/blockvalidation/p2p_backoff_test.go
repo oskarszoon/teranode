@@ -376,7 +376,7 @@ func TestFetchAndStoreSubtree_FallbackSuccessStillRecordsFailedPeer(t *testing.T
 	require.Equal(t, []string{primary.ID.String()}, failedPeerIDs)
 }
 
-func TestFetchSubtreeDataForBlock_ReportsRecoveredPeerOnce(t *testing.T) {
+func TestFetchSubtreeDataForBlock_RecoveredBlockDoesNotReportPeerFailure(t *testing.T) {
 	suite := NewCatchupTestSuite(t)
 	defer suite.Cleanup()
 
@@ -427,18 +427,75 @@ func TestFetchSubtreeDataForBlock_ReportsRecoveredPeerOnce(t *testing.T) {
 			})
 	}
 
-	suite.MockBlockchain.On("ReportPeerFailure", mock.Anything, mock.Anything, failing.ID.String(), "catchup", mock.Anything).
-		Return(nil).Once()
-
 	contributors, err := suite.Server.fetchSubtreeDataForBlock(suite.Ctx, block, origin.ID.String(), origin.DataHubURL)
 	require.NoError(t, err)
 	require.Equal(t, map[string]struct{}{successful.ID.String(): {}}, contributors)
 	require.Zero(t, originRequests.Load(), "pruned origin is authoritative uncontacted")
 	require.Equal(t, int32(2), failingRequests.Load(), "same peer fails two assigned subtrees")
 	require.Equal(t, int32(3), successfulRequests.Load(), "successful peer serves one assignment and two fallbacks")
+	// A non-contributing failed peer still gets a reputation-only ding (deduplicated per block)...
 	require.Equal(t, []string{failing.ID.String()}, p2pClient.recordedFailures(), "recovered failures must be deduplicated per block")
-	suite.MockBlockchain.AssertNotCalled(t, "ReportPeerFailure", mock.Anything, mock.Anything, origin.ID.String(), "catchup", mock.Anything)
-	suite.MockBlockchain.AssertNotCalled(t, "ReportPeerFailure", mock.Anything, mock.Anything, successful.ID.String(), "catchup", mock.Anything)
+	// ...but a block that fully recovered must NEVER emit a ReportPeerFailure, which would
+	// clear/reselect the sync peer and churn the node away from a working peer.
+	suite.MockBlockchain.AssertNotCalled(t, "ReportPeerFailure", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+}
+
+// TestFetchSubtreeDataForBlock_ContributingPeerNotDinged covers the case where one peer both
+// serves a subtree (contributes) and fails another that a backup then recovers. A peer that
+// ultimately helped the recovered block must not be reputation-dinged for the subtree it missed.
+func TestFetchSubtreeDataForBlock_ContributingPeerNotDinged(t *testing.T) {
+	suite := NewCatchupTestSuite(t)
+	defer suite.Cleanup()
+
+	origin := mkTestPeer("pruned-origin", "pruned", 100)
+	mixed := mkTestPeer("mixed", "full", 100)   // serves subtree 0 + 1, fails subtree 2
+	backup := mkTestPeer("backup", "full", 100) // recovers subtree 2
+	p2pClient := &catchupPeersP2PMock{peers: []*p2p.PeerInfo{origin, mixed, backup}}
+	suite.Server.p2pClient = p2pClient
+	suite.Server.settings.BlockValidation.CatchupParallelFetchEnabled = true
+	suite.Server.settings.BlockValidation.CatchupMaxRetries = 2
+	suite.Server.settings.BlockValidation.SubtreeFetchConcurrency = 3
+
+	// Peers after pruning the origin: [mixed, backup]. Round-robin over 3 subtrees assigns
+	// subtree 0 + 2 to mixed and subtree 1 to backup, so mixed is the primary for subtree 2.
+	block := testhelpers.CreateTestBlockChain(t, 1)[0]
+	block.Subtrees = make([]*chainhash.Hash, 0, 3)
+	bodies := make(map[string][]byte, 3)
+	for i := 0; i < 3; i++ {
+		leaf := chainhash.HashH([]byte(fmt.Sprintf("t2-leaf-%d", i)))
+		subtree, err := subtreepkg.NewIncompleteTreeByLeafCount(2)
+		require.NoError(t, err)
+		require.NoError(t, subtree.AddCoinbaseNode())
+		require.NoError(t, subtree.AddNode(leaf, 0, 0))
+		h := subtree.RootHash()
+		block.Subtrees = append(block.Subtrees, h)
+		bodies[h.String()] = append(append([]byte{}, subtreepkg.CoinbasePlaceholderHashValue[:]...), leaf[:]...)
+		require.NoError(t, suite.Server.subtreeStore.Set(suite.Ctx, h[:], fileformat.FileTypeSubtreeData, []byte{0x00}))
+	}
+	poison := block.Subtrees[2].String() // mixed's second assignment, which it fails
+
+	httpmock.ActivateNonDefault(util.HTTPClient())
+	defer httpmock.DeactivateAndReset()
+	reg := func(peer *p2p.PeerInfo, hash string, ok bool) {
+		httpmock.RegisterResponder("GET", fmt.Sprintf("%s/subtree/%s", peer.DataHubURL, hash),
+			func(*http.Request) (*http.Response, error) {
+				if ok {
+					return httpmock.NewBytesResponse(http.StatusOK, bodies[hash]), nil
+				}
+				return httpmock.NewStringResponse(http.StatusInternalServerError, "fail"), nil
+			})
+	}
+	for _, h := range block.Subtrees {
+		reg(mixed, h.String(), h.String() != poison) // mixed serves everything except the poison subtree
+		reg(backup, h.String(), true)                // backup serves everything (recovers the poison)
+	}
+
+	contributors, err := suite.Server.fetchSubtreeDataForBlock(suite.Ctx, block, origin.ID.String(), origin.DataHubURL)
+	require.NoError(t, err)
+	require.Contains(t, contributors, mixed.ID.String(), "mixed served subtrees, so it contributed")
+	require.NotContains(t, p2pClient.recordedFailures(), mixed.ID.String(),
+		"a peer that contributed data to the block must not be dinged for another subtree it failed")
+	suite.MockBlockchain.AssertNotCalled(t, "ReportPeerFailure", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything)
 }
 
 func TestFetchAndStoreSubtree_CorruptLocalCacheDoesNotBlamePeer(t *testing.T) {
