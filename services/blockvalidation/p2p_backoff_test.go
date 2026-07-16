@@ -205,6 +205,20 @@ func TestSelectAlternativePeers_DefaultsNonPositiveLimit(t *testing.T) {
 	}
 }
 
+func TestSelectAlternativePeers_FailoverBreadthReachesMinorityPeer(t *testing.T) {
+	// Failover breadth is now maxSubtreeFailoverPeers, decoupled from CatchupMaxRetries (default 3).
+	// A subtree whose data lives on the 5th eligible peer must still be reachable — the old cap of
+	// 3 would have dropped it.
+	require.Greater(t, maxSubtreeFailoverPeers, 3, "failover breadth must exceed the old retry cap")
+	peers := make([]*p2p.PeerInfo, 0, 8)
+	for i := 0; i < 8; i++ {
+		peers = append(peers, mkTestPeer(fmt.Sprintf("alt-%d", i), "full", 100))
+	}
+	got := selectAlternativePeers(peers, "assigned", "http://assigned", maxSubtreeFailoverPeers)
+	require.Len(t, got, 8, "all eligible alternatives within the cap are returned")
+	require.Equal(t, "http://alt-4", got[4].DataHubURL, "the 5th eligible peer remains reachable")
+}
+
 func TestAlternativePeerCapacity(t *testing.T) {
 	tests := []struct {
 		name        string

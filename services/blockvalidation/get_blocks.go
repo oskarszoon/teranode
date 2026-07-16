@@ -851,6 +851,14 @@ func (u *Server) fetchAndStoreSubtreeData(ctx context.Context, shutdownCtx conte
 	return nil
 }
 
+// maxSubtreeFailoverPeers bounds how many alternative peers a single subtree fetch tries after its
+// assigned peer fails. It is deliberately NOT CatchupMaxRetries (which bounds peer retries WITHIN
+// one catchup operation): failover BREADTH should track how many max-height peers might hold a
+// subtree whose data is skewed to a minority, not a retry count. Each alternative is itself up to
+// the retry helper's paced HTTP attempts, and the catchup iteration deadline is the hard stop, so
+// this only caps the per-subtree fan-out width.
+const maxSubtreeFailoverPeers = 10
+
 func alternativePeerCapacity(maxAttempts, peerCount int) int {
 	if maxAttempts <= 0 {
 		maxAttempts = 3
@@ -949,7 +957,7 @@ func (u *Server) fetchAndStoreSubtreeAndSubtreeDataWithRecorder(ctx context.Cont
 				peers,
 				peerID,
 				baseURL,
-				u.settings.BlockValidation.CatchupMaxRetries,
+				maxSubtreeFailoverPeers,
 			)
 		}
 	}
