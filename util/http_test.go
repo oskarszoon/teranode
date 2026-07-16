@@ -1217,7 +1217,7 @@ func TestDoHTTPRequestBodyReaderWithRetry_RetriesOn429ThenSucceeds(t *testing.T)
 		if n < 3 {
 			// First two attempts: 429 rate limited with no Retry-After header, exercising
 			// the jittered exponential-backoff path (the Retry-After path is covered
-			// separately by TestRetryHTTP_RetryAfterAboveMaxDelayClamps / _HonorsRetryAfter).
+			// separately by TestRetryHTTP_RetryAfterClampedToCeiling / _RetryAfterAboveMaxDelayHonored).
 			w.WriteHeader(http.StatusTooManyRequests)
 			_, _ = w.Write([]byte(`{"message":"rate limit exceeded"}`))
 			return
@@ -1532,15 +1532,16 @@ func TestBuildHTTPError_DoesNotEchoOrTrustPeerBody(t *testing.T) {
 		"a peer's HTTP error must never classify as local, even if its body contains context-sentinel text; got %v", err)
 }
 
-// TestRetryHTTP_RetryAfterAboveMaxDelayClamps proves a Retry-After hint larger than
-// maxDelay is clamped to maxDelay (honored, not discarded back to the smaller jittered
-// backoff).
-func TestRetryHTTP_RetryAfterAboveMaxDelayClamps(t *testing.T) {
+// TestRetryHTTP_RetryAfterClampedToCeiling proves a Retry-After hint larger than the ceiling
+// (maxRetryAfter) is clamped to that ceiling — honored, not discarded to the smaller jittered
+// backoff, and not stalling for the hostile 999s. maxDelay is set tiny so the wait pinning at
+// ~maxRetryAfter proves the clamp uses the ceiling, not the backoff cap.
+func TestRetryHTTP_RetryAfterClampedToCeiling(t *testing.T) {
 	var attempts int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := atomic.AddInt32(&attempts, 1)
 		if n == 1 {
-			w.Header().Set("Retry-After", "999") // far above maxDelay
+			w.Header().Set("Retry-After", "999") // far above the ceiling
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
@@ -1549,16 +1550,41 @@ func TestRetryHTTP_RetryAfterAboveMaxDelayClamps(t *testing.T) {
 	}))
 	defer server.Close()
 
-	// initialDelay tiny so jittered backoff would be ~ms; maxDelay 200ms. A clamped
-	// Retry-After should pin the wait at ~200ms, well above the jitter and far below 999s.
-	cfg := retryConfig{maxAttempts: 4, initialDelay: time.Millisecond, maxDelay: 200 * time.Millisecond}
+	cfg := retryConfig{maxAttempts: 4, initialDelay: time.Millisecond, maxDelay: 20 * time.Millisecond, maxRetryAfter: 200 * time.Millisecond}
 	start := time.Now()
 	body, err := doHTTPRequestBodyReaderWithRetry(context.Background(), server.URL, cfg, nil)
 	elapsed := time.Since(start)
 	require.NoError(t, err)
 	defer body.Close()
-	require.GreaterOrEqual(t, elapsed, 150*time.Millisecond, "clamped Retry-After should wait ~maxDelay, not the tiny jittered backoff")
+	require.GreaterOrEqual(t, elapsed, 150*time.Millisecond, "clamped Retry-After should wait ~maxRetryAfter, not the tiny maxDelay")
 	require.Less(t, elapsed, 3*time.Second, "must not wait the full 999s Retry-After")
+}
+
+// TestRetryHTTP_RetryAfterAboveMaxDelayHonored proves a Retry-After between maxDelay and
+// maxRetryAfter is honored in full (waits ~the hint) rather than clamped down to maxDelay, which
+// would re-hit an honest-but-busy peer every maxDelay and re-open the #1174 wedge.
+func TestRetryHTTP_RetryAfterAboveMaxDelayHonored(t *testing.T) {
+	var attempts int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&attempts, 1)
+		if n == 1 {
+			w.Header().Set("Retry-After", "1") // 1s: above maxDelay, below maxRetryAfter
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer server.Close()
+
+	cfg := retryConfig{maxAttempts: 4, initialDelay: time.Millisecond, maxDelay: 50 * time.Millisecond, maxRetryAfter: 5 * time.Second}
+	start := time.Now()
+	body, err := doHTTPRequestBodyReaderWithRetry(context.Background(), server.URL, cfg, nil)
+	elapsed := time.Since(start)
+	require.NoError(t, err)
+	defer body.Close()
+	require.GreaterOrEqual(t, elapsed, time.Second, "a Retry-After above maxDelay must be honored, not clamped to maxDelay")
+	require.Less(t, elapsed, 3*time.Second, "but bounded well under a hostile hint")
 }
 
 // TestDoHTTPRequestWithRetry_BeforeAttemptFiresEveryAttempt guards the anti-re-burst

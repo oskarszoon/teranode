@@ -525,12 +525,18 @@ type retryConfig struct {
 	maxAttempts  int
 	initialDelay time.Duration
 	maxDelay     time.Duration
+	// maxRetryAfter caps an honored server Retry-After hint. It is deliberately larger than
+	// maxDelay (which bounds the jittered exponential backoff): a legitimate peer whose advertised
+	// backoff exceeds the 5s backoff cap must still be honored rather than re-hit every 5s. Zero
+	// falls back to maxDelay (keeps shrunk test configs valid).
+	maxRetryAfter time.Duration
 }
 
 var defaultRetryConfig = retryConfig{
-	maxAttempts:  6,
-	initialDelay: 250 * time.Millisecond,
-	maxDelay:     5 * time.Second,
+	maxAttempts:   6,
+	initialDelay:  250 * time.Millisecond,
+	maxDelay:      5 * time.Second,
+	maxRetryAfter: 30 * time.Second,
 }
 
 // jitterDelay returns a randomised duration in [d/2, d] — i.e. "equal jitter"
@@ -554,9 +560,9 @@ func jitterDelay(d time.Duration) time.Duration {
 // to both HTTP 503 and HTTP 429). Any other error is returned immediately.
 //
 // attempt returns its result T, an optional server Retry-After hint (0 if none),
-// and an error. A positive Retry-After (within maxDelay) is honored verbatim;
-// otherwise the jittered exponential backoff is used. ctx cancellation aborts
-// the loop and returns the ctx error.
+// and an error. A positive Retry-After is honored (jittered upward, clamped to
+// maxRetryAfter); otherwise the jittered exponential backoff is used. ctx
+// cancellation aborts the loop and returns the ctx error.
 func retryHTTP[T any](ctx context.Context, cfg retryConfig, attempt func(context.Context) (T, time.Duration, error)) (T, error) {
 	var zero T
 	delay := cfg.initialDelay
@@ -582,12 +588,18 @@ func retryHTTP[T any](ctx context.Context, cfg retryConfig, attempt func(context
 			// ([retryAfter, 1.5*retryAfter]) so a fan-out of concurrent same-peer fetches
 			// doesn't all re-issue on the same tick. This de-syncs the herd even when the
 			// per-peer client limiter is disabled (blockvalidation_per_peer_fetch_rate <= 0),
-			// where nothing else paces the Retry-After path. Clamp to maxDelay so a large or
-			// hostile hint can't stall us; never fall back to the smaller jittered backoff
-			// (which could wake before the server's minimum).
+			// where nothing else paces the Retry-After path. Clamp to maxRetryAfter — an absolute
+			// ceiling well above the backoff cap (maxDelay) — so an honest-but-busy peer whose hint
+			// exceeds maxDelay is honored rather than re-hit every maxDelay, while a hostile hint
+			// still can't stall us indefinitely. Never fall back to the smaller jittered backoff
+			// (which could wake before the server's stated minimum).
 			sleepFor = retryAfter + time.Duration(rand.Int64N(int64(retryAfter/2)+1))
-			if sleepFor > cfg.maxDelay {
-				sleepFor = cfg.maxDelay
+			ceiling := cfg.maxRetryAfter
+			if ceiling <= 0 {
+				ceiling = cfg.maxDelay
+			}
+			if sleepFor > ceiling {
+				sleepFor = ceiling
 			}
 		}
 
