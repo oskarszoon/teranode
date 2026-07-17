@@ -1419,18 +1419,34 @@ func (sm *SyncManager) handleBlockMsg(bmsg *blockQueueMsg) error {
 	// queue FIFO until handleDonePeerMsg evicts peerStates — a racy window in
 	// which we would validate the whole tail of a peer that has already proven it
 	// serves bad blocks. Peer.Disconnect* flips the connected flag synchronously
-	// (atomic), so skipping here as soon as that flag drops deterministically
-	// stops the tail, bounding wasted validation to the block already in flight
-	// (disconnect on first validation failure before draining the rest). We test
-	// bmsg.peer — the exact peer OnBlock queued and awaitBlockResult disconnects
-	// (sp.Peer) — NOT the resolved primary: for a BlockPriority stream the failure
-	// disconnects only the stream sub-peer while its association primary stays
-	// connected, so the resolved `peer` would miss precisely the streaming case
-	// this guards. The ServiceError is benign to shouldDisconnectOnBlockErr, so
-	// it only makes awaitBlockResult release budget and log — no second
-	// disconnect. Gated on UsePrefetchIngestion so the regtest/synchronous path,
-	// where block-acceptance tooling feeds blocks in ways this must not disturb,
-	// is completely untouched.
+	// (atomic), so skipping here once that flag drops stops the rest of the tail.
+	//
+	// This is a BEST-EFFORT tail-stop, NOT a barrier (#1280). awaitBlockResult
+	// runs in its own goroutine and only disconnects after it receives block N's
+	// failure reply, so in the window between N failing and that flag flipping,
+	// this FIFO consumer can dequeue and fully validate N+1, N+2, … . The guard
+	// bounds the wasted work to the handful of blocks dequeued inside that
+	// async-disconnect window — not strictly one — and that is an accepted,
+	// self-limiting cost: the peer is being dropped regardless, the window is
+	// short, and total in-flight bytes are already capped by the prefetch budget.
+	// A true barrier (mark the peer un-processable synchronously on failure, in
+	// this single FIFO consumer, and skip its whole queued tail) was considered
+	// and deliberately not taken — not worth the hot-path state and teardown
+	// lifecycle for a bounded, low-severity cost inherent to decoupling download
+	// from processing.
+	//
+	// We test bmsg.peer — the exact peer OnBlock queued and awaitBlockResult
+	// tears down (sp.Peer) — NOT the resolved primary. On a bad block
+	// awaitBlockResult calls disconnectMisbehaving, which drops the WHOLE
+	// association (the primary first, then the stream sub-peer), so either flag
+	// would flip for the misbehaviour case; but bmsg.peer is the peer that queued
+	// this tail, and it also drops on sub-peer-scoped teardowns (TCP loss,
+	// RemoveStream) that a primary check would not reflect — so it is the tighter
+	// guard. The ServiceError is benign to shouldDisconnectOnBlockErr, so it only
+	// makes awaitBlockResult release budget and log — no second disconnect. Gated
+	// on UsePrefetchIngestion so the regtest/synchronous path, where
+	// block-acceptance tooling feeds blocks in ways this must not disturb, is
+	// completely untouched.
 	if sm.UsePrefetchIngestion() && !bmsg.peer.Connected() {
 		sm.logger.Debugf("[handleBlockMsg][%s] skipping block from disconnected peer %s", bmsg.blockHash, bmsg.peer)
 		return errors.NewServiceError("[handleBlockMsg] skipping block %s from disconnected peer %s", bmsg.blockHash, bmsg.peer)
