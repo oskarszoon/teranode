@@ -1514,6 +1514,15 @@ func (u *BlockValidation) ValidateBlockWithOptions(ctx context.Context, block *m
 			}
 		}
 
+		// NOTE on block-version (BIP34/66/65) enforcement and error ordering:
+		// The mandatory version floor is enforced authoritatively by model.CheckBlockVersion inside
+		// block.Valid (and on the quick-validation catchup path), which runs with the block's settled
+		// height. We deliberately do NOT also run it as an outer prefilter here. svnode rejects
+		// bad-version in ContextualCheckBlockHeader ahead of the body/coinbase checks; teranode does not
+		// replicate that exact error ordering at this outer stage. A complete below-floor block is
+		// rejected by block.Valid with the bad-version token; a below-floor block that ALSO fails the
+		// outer coinbase prechecks below returns earlier with the documented non-parity reason
+		// (block-incomplete or bad-coinbase-length) instead. Either way the block is rejected.
 		if block.CoinbaseTx == nil || block.CoinbaseTx.Inputs == nil || len(block.CoinbaseTx.Inputs) == 0 {
 			// Use BlockIncomplete rather than BlockInvalid — a missing coinbase likely means the peer
 			// doesn't have full block data (e.g. seeded peer). Don't store as invalid so we can
