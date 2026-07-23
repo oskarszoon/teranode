@@ -2181,6 +2181,9 @@ func peerInfoToP2PProto(p *blockchain.PeerInfo) *p2p_api.PeerRegistryInfo {
 		ClientName:             p.ClientName,
 		LastCatchupError:       p.LastCatchupError,
 		LastCatchupErrorTime:   timeToUnix(p.LastCatchupErrorTime),
+		CatchupAttempts:        p.CatchupAttempts,
+		CatchupSuccesses:       p.CatchupSuccesses,
+		CatchupFailures:        p.CatchupFailures,
 	}
 }
 
