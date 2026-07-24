@@ -117,12 +117,12 @@ func (e *env) resolveTarget(ctx context.Context) (uint32, *chainhash.Hash, error
 
 	stateBytes, err := e.blockchainStore.GetState(ctx, blockassembly.StateKey)
 	if err != nil {
-		return 0, nil, errors.NewStorageError(`failed to read state["BlockAssembler"] (pass --target-height to override): %w`, err)
+		return 0, nil, errors.NewStorageError(`failed to read state["BlockAssembler"] (pass --target-height to override)`, err)
 	}
 
 	header, height, err := blockassembly.DecodeState(stateBytes)
 	if err != nil {
-		return 0, nil, errors.NewProcessingError(`failed to decode state["BlockAssembler"] (pass --target-height to override): %w`, err)
+		return 0, nil, errors.NewProcessingError(`failed to decode state["BlockAssembler"] (pass --target-height to override)`, err)
 	}
 
 	return height, header.Hash(), nil

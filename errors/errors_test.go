@@ -2820,6 +2820,13 @@ func TestNewStripsOrphanedWrapVerbs(t *testing.T) {
 			wantContain: []string{"GetBlock hash -> "},
 			wantAbsent:  []string{"%w", "GetBlock hash:"},
 		},
+		{
+			// The ')' inside the format string must not truncate stripping (#1335, ChiR1).
+			name:        "closing paren before trailing %w",
+			build:       func() *Error { return NewStorageError(`read state (pass --flag to override): %w`, inner) },
+			wantContain: []string{"read state (pass --flag to override) -> "},
+			wantAbsent:  []string{"%w", "%!w", "override):"},
+		},
 	}
 
 	for _, tc := range tests {
@@ -2854,6 +2861,8 @@ func TestStripOrphanedWrapVerbs(t *testing.T) {
 		"a [%w] b":             "a [] b",            // mid-string verb dropped, brackets remain
 		"x %w y %w":            "x y",               // both verbs dropped
 		"trailing text %w end": "trailing text end", // verb dropped, surrounding text kept
+		// a ')' inside the format before %w must not confuse stripping (#1335, ChiR1).
+		"read state (pass --flag to override): %w": "read state (pass --flag to override)",
 	}
 
 	for in, want := range cases {
