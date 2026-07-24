@@ -84,8 +84,8 @@ func extractCoinbaseHeightAndText(sigScript bscript.Script, raw bool) (uint32, s
 	}
 
 	// Enforce canonical minimal encoding (SV Node prefix-equality parity): the consumed prefix must
-	// equal CScript() << value byte-for-byte.
-	if !bytes.Equal(EncodeCoinbaseHeightPush(value), sigScript[:consumed]) {
+	// equal CScript() << value byte-for-byte. value is guaranteed to be in [0, MaxUint32] here.
+	if !bytes.Equal(EncodeCoinbaseHeightPush(uint32(value)), sigScript[:consumed]) {
 		return 0, arbitraryText, errors.NewBlockCoinbaseMissingHeightError("the coinbase signature script block height is not minimally encoded")
 	}
 
@@ -187,20 +187,21 @@ func decodeScriptNum(b []byte) int64 {
 }
 
 // EncodeCoinbaseHeightPush returns the canonical BIP34 coinbase-height push for height, matching
-// bitcoin-sv's CScript() << nHeight (push_int64):
+// bitcoin-sv's CScript() << nHeight (push_int64) for non-negative heights:
 //
 //   - 0        => OP_0
 //   - 1..16    => OP_1..OP_16
 //   - otherwise => a minimal-length CScriptNum push (0x01<b>, 0x02<b><b>, ...)
 //
 // It is the single source of truth for the encoding: extractCoinbaseHeightAndText uses it to enforce
-// SV Node parity, and makeCoinbase1 uses it to build Teranode's own coinbase. height must be
-// non-negative (block heights always are).
-func EncodeCoinbaseHeightPush(height int64) []byte {
+// SV Node parity, and makeCoinbase1 uses it to build Teranode's own coinbase. The uint32 argument
+// makes the non-negative contract explicit — block heights are always non-negative and fit in
+// uint32, and OP_1NEGATE (the push_int64 case for -1) can never be a height.
+func EncodeCoinbaseHeightPush(height uint32) []byte {
 	switch {
 	case height == 0:
 		return []byte{bscript.Op0}
-	case height >= 1 && height <= 16:
+	case height <= 16:
 		return []byte{bscript.Op1 + byte(height-1)}
 	default:
 		num := encodeScriptNumMinimal(height)
@@ -212,32 +213,18 @@ func EncodeCoinbaseHeightPush(height int64) []byte {
 	}
 }
 
-// encodeScriptNumMinimal encodes n as a minimal little-endian sign-magnitude CScriptNum (the byte
-// form pushed by bitcoin-sv's CScriptNum::serialize), appending a padding byte when the top bit
+// encodeScriptNumMinimal encodes a non-negative n as a minimal little-endian CScriptNum (the byte
+// form pushed by bitcoin-sv's CScriptNum::serialize), appending a 0x00 padding byte when the top bit
 // would otherwise be misread as the sign.
-func encodeScriptNumMinimal(n int64) []byte {
-	if n == 0 {
-		return nil
-	}
-
-	negative := n < 0
-	if negative {
-		n = -n
-	}
-
+func encodeScriptNumMinimal(n uint32) []byte {
 	var result []byte
 	for n > 0 {
 		result = append(result, byte(n&0xff))
 		n >>= 8
 	}
 
-	switch {
-	case result[len(result)-1]&0x80 == 0 && negative:
-		result[len(result)-1] |= 0x80
-	case result[len(result)-1]&0x80 != 0 && negative:
-		result = append(result, 0x80)
-	case result[len(result)-1]&0x80 != 0:
-		result = append(result, 0x00)
+	if len(result) > 0 && result[len(result)-1]&0x80 != 0 {
+		result = append(result, 0x00) // sign-bit pad
 	}
 
 	return result

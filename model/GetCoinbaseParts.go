@@ -182,7 +182,7 @@ func makeCoinbase1(height uint32, coinbaseText string) []byte {
 	// BIP34 block height, encoded canonically (CScript() << nHeight) so it is minimally encoded and
 	// accepted by SV Node and by Teranode's own coinbase-height parser. A fixed 3-byte push is
 	// non-minimal below height 32768 and truncates above 16777215.
-	arbitraryData = append(arbitraryData, util.EncodeCoinbaseHeightPush(int64(height))...)
+	arbitraryData = append(arbitraryData, util.EncodeCoinbaseHeightPush(height)...)
 	arbitraryData = append(arbitraryData, []byte(coinbaseText)...)
 
 	// Arbitrary data should leave enough space for the extra nonce

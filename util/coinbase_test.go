@@ -218,6 +218,36 @@ func TestExtractCoinbaseHeightAndTextScripts(t *testing.T) {
 			expectError: true,
 		},
 		{
+			name:        "OP_DATA3 declares 3 bytes, only 2 present",
+			script:      "03bfea",
+			expectError: true,
+		},
+		{
+			name:        "OP_PUSHDATA1 with no length byte",
+			script:      "4c",
+			expectError: true,
+		},
+		{
+			name:        "OP_PUSHDATA1 declares 3 bytes, only 2 present",
+			script:      "4c03bfea",
+			expectError: true,
+		},
+		{
+			name:        "OP_PUSHDATA2 with truncated length header",
+			script:      "4d03",
+			expectError: true,
+		},
+		{
+			name:        "OP_PUSHDATA4 with truncated length header",
+			script:      "4e030000",
+			expectError: true,
+		},
+		{
+			name:        "OP_PUSHDATA4 declares 3 bytes, payload truncated",
+			script:      "4e03000000",
+			expectError: true,
+		},
+		{
 			name:        "non-minimal 2-byte push of height 1 (canonical is OP_1)",
 			script:      "0201002f7361746f7368692f",
 			expectError: true,
@@ -499,13 +529,13 @@ func TestExtractCoinbaseMinerRaw(t *testing.T) {
 // referenceHeightPush is a deliberately independent implementation of bitcoin-sv's
 // CScript() << nHeight (push_int64). It is written separately from the production
 // EncodeCoinbaseHeightPush so the round-trip test below cross-checks the two against each other
-// rather than against a shared implementation. n must be non-negative (block heights always are).
-func referenceHeightPush(n int64) []byte {
+// rather than against a shared implementation. Heights are always non-negative, hence uint32.
+func referenceHeightPush(n uint32) []byte {
 	if n == 0 {
 		return []byte{0x00} // OP_0
 	}
 
-	if n >= 1 && n <= 16 {
+	if n <= 16 {
 		return []byte{byte(0x50 + n)} // OP_1..OP_16
 	}
 
@@ -530,7 +560,7 @@ func TestCoinbaseHeightPushRoundTrip(t *testing.T) {
 	// has trailing arbitrary text to skip over.
 	const minerTagHex = "0f222f47616c74732d47756c63682f22"
 
-	heights := []int64{0, 1, 2, 16, 17, 127, 128, 255, 256, 1000, 21111, 227931, 518847, 4294967295}
+	heights := []uint32{0, 1, 2, 16, 17, 127, 128, 255, 256, 1000, 21111, 227931, 518847, 4294967295}
 
 	for _, h := range heights {
 		t.Run(fmt.Sprintf("height_%d", h), func(t *testing.T) {
@@ -546,7 +576,7 @@ func TestCoinbaseHeightPushRoundTrip(t *testing.T) {
 
 			height, miner, err := extractCoinbaseHeightAndText(*script, false)
 			require.NoError(t, err)
-			require.Equal(t, uint32(h), height) //nolint:gosec // h is a non-negative height <= MaxUint32
+			require.Equal(t, h, height)
 			require.Equal(t, "/Galts-Gulch/", miner)
 		})
 	}
