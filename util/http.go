@@ -520,6 +520,12 @@ func parseRetryAfter(h string) time.Duration {
 	if err != nil || secs <= 0 {
 		return 0
 	}
+	// Clamp so secs*time.Second cannot overflow int64 (which would wrap to a negative duration
+	// and be silently dropped). retryHTTP clamps again to its own ceiling before use.
+	const maxRetryAfterSeconds = 1 << 33 // ~272 years
+	if secs > maxRetryAfterSeconds {
+		secs = maxRetryAfterSeconds
+	}
 	return time.Duration(secs) * time.Second
 }
 
@@ -534,13 +540,21 @@ type retryConfig struct {
 	// backoff exceeds the 5s backoff cap must still be honored rather than re-hit every 5s. Zero
 	// falls back to maxDelay (keeps shrunk test configs valid).
 	maxRetryAfter time.Duration
+	// maxBackoffTotal bounds the CUMULATIVE time spent sleeping between attempts of one call
+	// (both exponential backoff and honored Retry-After waits). Without it, a peer answering
+	// every request with a max-ceiling Retry-After could pin a single fetch for
+	// maxAttempts*maxRetryAfter before failover. When the next wait would breach the budget the
+	// loop stops and returns the terminal error rather than sleeping a truncated wait. Zero = no
+	// cumulative bound (attempt-count only), keeping shrunk test configs valid.
+	maxBackoffTotal time.Duration
 }
 
 var defaultRetryConfig = retryConfig{
-	maxAttempts:   6,
-	initialDelay:  250 * time.Millisecond,
-	maxDelay:      5 * time.Second,
-	maxRetryAfter: 30 * time.Second,
+	maxAttempts:     6,
+	initialDelay:    250 * time.Millisecond,
+	maxDelay:        5 * time.Second,
+	maxRetryAfter:   30 * time.Second,
+	maxBackoffTotal: 60 * time.Second,
 }
 
 // jitterDelay returns a randomised duration in [d/2, d] — i.e. "equal jitter"
@@ -571,8 +585,11 @@ func retryHTTP[T any](ctx context.Context, cfg retryConfig, attempt func(context
 	var zero T
 	delay := cfg.initialDelay
 	var lastErr error
+	var sleptTotal time.Duration
+	attemptsMade := 0
 
 	for n := 1; n <= cfg.maxAttempts; n++ {
+		attemptsMade = n
 		res, retryAfter, err := attempt(ctx)
 		if err == nil {
 			return res, nil
@@ -589,23 +606,36 @@ func retryHTTP[T any](ctx context.Context, cfg retryConfig, attempt func(context
 		sleepFor := jitterDelay(delay)
 		if retryAfter > 0 {
 			// Server named a minimum — honor it (never wake earlier), but add UPWARD jitter
-			// ([retryAfter, 1.5*retryAfter]) so a fan-out of concurrent same-peer fetches
-			// doesn't all re-issue on the same tick. This de-syncs the herd even when the
-			// per-peer client limiter is disabled (blockvalidation_per_peer_fetch_rate <= 0),
-			// where nothing else paces the Retry-After path. Clamp to maxRetryAfter — an absolute
-			// ceiling well above the backoff cap (maxDelay) — so an honest-but-busy peer whose hint
-			// exceeds maxDelay is honored rather than re-hit every maxDelay, while a hostile hint
-			// still can't stall us indefinitely. Never fall back to the smaller jittered backoff
-			// (which could wake before the server's stated minimum).
-			sleepFor = retryAfter + time.Duration(rand.Int64N(int64(retryAfter/2)+1))
+			// ([retryAfter, 1.5*retryAfter]) so a fan-out of concurrent same-peer fetches doesn't
+			// all re-issue on the same tick (de-syncs the herd even when the per-peer client
+			// limiter is disabled). Clamp to maxRetryAfter — an absolute ceiling above the backoff
+			// cap (maxDelay) — so an honest-but-busy peer whose hint exceeds maxDelay is honored,
+			// while a hostile hint can't stall us indefinitely.
 			ceiling := cfg.maxRetryAfter
 			if ceiling <= 0 {
 				ceiling = cfg.maxDelay
 			}
+			// Clamp the hint to the ceiling BEFORE adding jitter: a hostile Retry-After can put
+			// retryAfter within 2^63 ns of overflow, where retryAfter+jitter wraps negative and
+			// time.After(negative) fires immediately (no backoff at all). With retryAfter <= ceiling,
+			// retryAfter + retryAfter/2 + 1 cannot overflow.
+			if retryAfter > ceiling {
+				retryAfter = ceiling
+			}
+			sleepFor = retryAfter + time.Duration(rand.Int64N(int64(retryAfter/2)+1))
 			if sleepFor > ceiling {
 				sleepFor = ceiling
 			}
 		}
+
+		// Bound the CUMULATIVE backoff so a peer answering every attempt with a max-ceiling
+		// Retry-After can't pin one fetch for maxAttempts*ceiling. When the next wait would breach
+		// the budget, stop and fail over rather than sleep a truncated (sub-minimum) wait —
+		// catchup always has other peers.
+		if cfg.maxBackoffTotal > 0 && sleptTotal+sleepFor > cfg.maxBackoffTotal {
+			break
+		}
+		sleptTotal += sleepFor
 
 		select {
 		case <-ctx.Done():
@@ -631,7 +661,7 @@ func retryHTTP[T any](ctx context.Context, cfg retryConfig, attempt func(context
 		}
 	}
 
-	return zero, errors.NewServiceUnavailableError("http request still failing after %d attempts", cfg.maxAttempts, lastErr)
+	return zero, errors.NewServiceUnavailableError("http request still failing after %d attempt(s)", attemptsMade, lastErr)
 }
 
 // DoHTTPRequestBodyReaderWithRetry behaves like DoHTTPRequestBodyReader but retries on

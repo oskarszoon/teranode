@@ -5,6 +5,7 @@ import (
 	crand "crypto/rand"
 	"encoding/json"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -1585,6 +1586,69 @@ func TestRetryHTTP_RetryAfterAboveMaxDelayHonored(t *testing.T) {
 	defer body.Close()
 	require.GreaterOrEqual(t, elapsed, time.Second, "a Retry-After above maxDelay must be honored, not clamped to maxDelay")
 	require.Less(t, elapsed, 3*time.Second, "but bounded well under a hostile hint")
+}
+
+// TestRetryHTTP_CumulativeBackoffBudget proves a peer answering every attempt with a max-ceiling
+// Retry-After cannot pin one fetch for maxAttempts*ceiling: the loop stops once the cumulative
+// sleep would breach maxBackoffTotal, and reports the real attempt count.
+func TestRetryHTTP_CumulativeBackoffBudget(t *testing.T) {
+	cfg := retryConfig{maxAttempts: 6, initialDelay: time.Millisecond, maxDelay: 4 * time.Millisecond, maxRetryAfter: 40 * time.Millisecond, maxBackoffTotal: 60 * time.Millisecond}
+	var calls int32
+	attempt := func(context.Context) (int, time.Duration, error) {
+		atomic.AddInt32(&calls, 1)
+		return 0, 40 * time.Millisecond, errors.NewServiceUnavailableError("peer 429")
+	}
+	start := time.Now()
+	_, err := retryHTTP(context.Background(), cfg, attempt)
+	elapsed := time.Since(start)
+	require.Error(t, err)
+	require.True(t, errors.Is(err, errors.ErrServiceUnavailable))
+	// Two ~40ms waits fit the 60ms budget for only the first; the loop abandons well before the
+	// 6-attempt cap would allow ~200ms of sleeping.
+	require.Less(t, elapsed, 150*time.Millisecond, "cumulative backoff must be bounded by maxBackoffTotal")
+	require.Less(t, atomic.LoadInt32(&calls), int32(6), "must fail over before exhausting all attempts")
+}
+
+// TestRetryHTTP_ZeroBudgetRetainsAttemptOnlyBehavior guards shrunk test configs: with
+// maxBackoffTotal == 0 every attempt runs (attempt-count only, no cumulative bound).
+func TestRetryHTTP_ZeroBudgetRetainsAttemptOnlyBehavior(t *testing.T) {
+	cfg := retryConfig{maxAttempts: 4, initialDelay: time.Millisecond, maxDelay: 2 * time.Millisecond} // maxBackoffTotal defaults to 0
+	var calls int32
+	attempt := func(context.Context) (int, time.Duration, error) {
+		atomic.AddInt32(&calls, 1)
+		return 0, 0, errors.NewServiceUnavailableError("peer 503")
+	}
+	_, err := retryHTTP(context.Background(), cfg, attempt)
+	require.Error(t, err)
+	require.Equal(t, int32(4), atomic.LoadInt32(&calls), "all maxAttempts must run when no cumulative budget is set")
+}
+
+// TestRetryHTTP_HostileRetryAfterNearOverflowStillBacksOff proves a Retry-After near int64
+// overflow is clamped to the ceiling (not wrapped negative → immediate re-fire): the loop still
+// sleeps a bounded, positive amount between attempts.
+func TestRetryHTTP_HostileRetryAfterNearOverflowStillBacksOff(t *testing.T) {
+	cfg := retryConfig{maxAttempts: 3, initialDelay: time.Millisecond, maxDelay: 5 * time.Millisecond, maxRetryAfter: 20 * time.Millisecond, maxBackoffTotal: time.Second}
+	attempt := func(context.Context) (int, time.Duration, error) {
+		return 0, time.Duration(math.MaxInt64 - 1), errors.NewServiceUnavailableError("hostile 429")
+	}
+	start := time.Now()
+	_, err := retryHTTP(context.Background(), cfg, attempt)
+	elapsed := time.Since(start)
+	require.Error(t, err)
+	// 2 backoff gaps clamped to the 20ms ceiling → ≥ ~40ms; NOT the ~0ms an overflow wrap would give.
+	require.GreaterOrEqual(t, elapsed, 30*time.Millisecond, "clamped hostile hint must still back off, not fire immediately")
+	require.Less(t, elapsed, 500*time.Millisecond, "and stay bounded by the ceiling")
+}
+
+func TestParseRetryAfter_HugeSeconds(t *testing.T) {
+	// int64-max seconds: clamped to a positive duration (not wrapped negative).
+	require.Positive(t, parseRetryAfter("9223372036854775807"))
+	// Atoi overflow → treated as no hint.
+	require.Equal(t, time.Duration(0), parseRetryAfter("99999999999999999999"))
+	// Existing behavior preserved.
+	require.Equal(t, time.Duration(0), parseRetryAfter("-5"))
+	require.Equal(t, time.Duration(0), parseRetryAfter("0"))
+	require.Equal(t, 3*time.Second, parseRetryAfter("3"))
 }
 
 // TestDoHTTPRequestWithRetry_BeforeAttemptFiresEveryAttempt guards the anti-re-burst
