@@ -2099,8 +2099,16 @@ func TestGenesisBytesFromModelBlock(t *testing.T) {
 
 func TestBlock_ExtractCoinbaseHeight(t *testing.T) {
 	t.Run("valid coinbase with height", func(t *testing.T) {
-		// Use the existing coinbase transaction from the test constants
-		coinbaseTx, err := bt.NewTxFromString(CoinbaseHex)
+		// Build a canonical coinbase via the production path. GetCoinbaseParts/makeCoinbase1 encode
+		// the height minimally (matching SV Node), so it round-trips through the strict extractor.
+		// The shared CoinbaseHex constant uses a legacy non-minimal 3-byte height push and is
+		// deliberately not used here (extracting it would now, correctly, fail SV Node parity).
+		const wantHeight = uint32(1019)
+
+		c1, c2, err := GetCoinbaseParts(wantHeight, 5000000000, "/m2-us/", []string{"1DkmRkb5iQFkDu4NBysog5bugnsyx7kwtn"})
+		require.NoError(t, err)
+
+		coinbaseTx, err := bt.NewTxFromBytes(BuildCoinbase(c1, c2, "0000000000000000", "00000000"))
 		require.NoError(t, err)
 
 		blockHeaderBytes, _ := hex.DecodeString(block1Header)
@@ -2112,7 +2120,7 @@ func TestBlock_ExtractCoinbaseHeight(t *testing.T) {
 
 		height, err := b.ExtractCoinbaseHeight()
 		require.NoError(t, err)
-		assert.Equal(t, uint32(1019), height) // Height extracted from coinbase scriptSig
+		assert.Equal(t, wantHeight, height) // Height extracted from coinbase scriptSig
 	})
 
 	t.Run("no coinbase transaction", func(t *testing.T) {
