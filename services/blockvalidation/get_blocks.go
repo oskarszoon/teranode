@@ -709,9 +709,10 @@ func (u *Server) fetchAndStoreSubtree(ctx context.Context, block *model.Block, s
 	return subtree, nil
 }
 
-// classifyDownloadErr maps a subtree_data fetch/parse failure to the right error class so the
-// catchup reputation/failover gates don't misfire. dlCtx is the download context (a child of
-// shutdownCtx). Returns nil to mean "genuine peer bad-data — the caller wraps ProcessingError".
+// classifyPeerFetchCtxErr is the single source of truth for classifying a catchup fetch/parse
+// error as a local cancel vs a peer network-timeout. ctx is the fetch context; canceledMsg and
+// timeoutMsg are the fully-formatted messages for the two peer-facing branches. Returns nil to
+// mean "genuine peer bad-data — the caller wraps ProcessingError".
 //
 // Two subtleties, both load-bearing:
 //   - Order: a shutdown cancel and a peer stall (per-request streaming-timeout deadline) both
@@ -721,17 +722,25 @@ func (u *Server) fetchAndStoreSubtree(ctx context.Context, block *model.Block, s
 //   - Do NOT wrap err in the timeout branch: (*Error).Is falls back to substring matching, so a
 //     chain that renders "context deadline exceeded" is infectious — no outer re-classification
 //     can undo it. NewNetworkTimeoutError with no wrapped error keeps the peer-fault class clean.
-func classifyDownloadErr(dlCtx context.Context, subtreeHash *chainhash.Hash, err error) error {
+func classifyPeerFetchCtxErr(ctx context.Context, err error, canceledMsg, timeoutMsg string) error {
 	if errors.Is(err, errors.ErrContextCanceled) {
 		return err
 	}
-	if errors.Is(dlCtx.Err(), context.Canceled) {
-		return errors.NewContextCanceledError("[catchup:fetchAndStoreSubtreeData] subtree data aborted (shutdown) for %s", subtreeHash.String(), context.Canceled)
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return errors.NewContextCanceledError(canceledMsg, context.Canceled)
 	}
-	if errors.Is(dlCtx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
-		return errors.NewNetworkTimeoutError("[catchup:fetchAndStoreSubtreeData] subtree data timed out for %s", subtreeHash.String())
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
+		return errors.NewNetworkTimeoutError(timeoutMsg)
 	}
 	return nil
+}
+
+// classifyDownloadErr classifies a subtree_data fetch/parse failure. dlCtx is the download context
+// (a child of shutdownCtx). See classifyPeerFetchCtxErr for the load-bearing subtleties.
+func classifyDownloadErr(dlCtx context.Context, subtreeHash *chainhash.Hash, err error) error {
+	return classifyPeerFetchCtxErr(dlCtx, err,
+		fmt.Sprintf("[catchup:fetchAndStoreSubtreeData] subtree data aborted (shutdown) for %s", subtreeHash.String()),
+		fmt.Sprintf("[catchup:fetchAndStoreSubtreeData] subtree data timed out for %s", subtreeHash.String()))
 }
 
 // fetchAndStoreSubtreeData fetches and stores only the subtreeData. shutdownCtx is the
@@ -1166,17 +1175,12 @@ func resolveBlockResponseLimits(maxTransportBytes int64, excessiveBlockSize int)
 	return limits, nil
 }
 
+// classifyBlockStreamErr classifies a block-stream fetch/parse failure. See classifyPeerFetchCtxErr
+// for the load-bearing subtleties.
 func classifyBlockStreamErr(ctx context.Context, hash *chainhash.Hash, err error) error {
-	if errors.Is(err, errors.ErrContextCanceled) {
-		return err
-	}
-	if errors.Is(ctx.Err(), context.Canceled) {
-		return errors.NewContextCanceledError("[catchup:blockFetch][%s] block response aborted by caller", hash.String(), context.Canceled)
-	}
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
-		return errors.NewNetworkTimeoutError("[catchup:blockFetch][%s] peer block response timed out", hash.String())
-	}
-	return nil
+	return classifyPeerFetchCtxErr(ctx, err,
+		fmt.Sprintf("[catchup:blockFetch][%s] block response aborted by caller", hash.String()),
+		fmt.Sprintf("[catchup:blockFetch][%s] peer block response timed out", hash.String()))
 }
 
 func decodeBoundedBlock(reader io.Reader, limits blockResponseLimits) (*model.Block, error) {

@@ -912,6 +912,48 @@ func TestClassifyDownloadErr(t *testing.T) {
 		"genuine peer bad-data must fall through to the caller's ProcessingError")
 }
 
+// TestClassifyPeerFetchCtxErr_BothWrappersAgree proves classifyDownloadErr and
+// classifyBlockStreamErr (thin wrappers over the shared classifyPeerFetchCtxErr) classify every
+// input class identically by error code, so the two fetch paths can't drift on the cancel-vs-
+// deadline distinction this PR spent rounds getting right.
+func TestClassifyPeerFetchCtxErr_BothWrappersAgree(t *testing.T) {
+	h := &chainhash.Hash{0x07}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	deadlined, dcancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer dcancel()
+
+	cases := []struct {
+		name                 string
+		ctx                  context.Context
+		err                  error
+		wantNil              bool
+		wantLocal, wantNetTO bool
+	}{
+		{"context-canceled passthrough", context.Background(), errors.NewContextCanceledError("x", context.Canceled), false, true, false},
+		{"ctx canceled (shutdown)", canceled, errors.NewProcessingError("read"), false, true, false},
+		{"ctx deadline (peer stall)", deadlined, errors.NewProcessingError("read"), false, false, true},
+		{"plain bad data -> nil", context.Background(), errors.NewProcessingError("bad data"), true, false, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			d := classifyDownloadErr(c.ctx, h, c.err)
+			s := classifyBlockStreamErr(c.ctx, h, c.err)
+			if c.wantNil {
+				require.Nil(t, d)
+				require.Nil(t, s)
+				return
+			}
+			require.NotNil(t, d)
+			require.NotNil(t, s)
+			require.Equal(t, c.wantLocal, errors.IsLocalError(d))
+			require.Equal(t, c.wantLocal, errors.IsLocalError(s), "wrappers must agree on local classification")
+			require.Equal(t, c.wantNetTO, errors.IsNetworkError(d))
+			require.Equal(t, c.wantNetTO, errors.IsNetworkError(s), "wrappers must agree on network classification")
+		})
+	}
+}
+
 // TestFetchAndStoreSubtreeData_StorageExistsErrorHalts proves a local storage failure on the
 // existence read classifies as ErrStorageError (halts loudly) rather than a ProcessingError
 // that fails over across every peer during a blob-backend outage.
