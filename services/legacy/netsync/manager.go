@@ -1662,21 +1662,6 @@ func (sm *SyncManager) handleBlockMsg(bmsg *blockQueueMsg) error {
 		}
 	}
 
-	// Track block size for dynamic in-flight adjustment during headers-first mode.
-	// This allows us to start aggressive (20 blocks) and automatically reduce
-	// to 1 block when encountering large (>2GB) blocks on mainnet.
-	if sm.headersFirstMode.Load() && bmsg.block != nil {
-		blockSize := int64(bmsg.block.SerializeSize())
-		sm.blockSizeTracker.addBlockSize(blockSize)
-
-		dynamicMax := sm.blockSizeTracker.calculateMaxInFlightBlocks()
-		avgSize := sm.blockSizeTracker.getAverageSize()
-		sm.logger.Debugf("[handleBlockMsg][%s] Block size: %d bytes, avg: %d bytes, dynamic max in-flight: %d",
-			bmsg.blockHash, blockSize, avgSize, dynamicMax)
-	}
-
-	sm.logger.Debugf("[handleBlockMsg][%s] calling HandleBlockDirect", bmsg.blockHash)
-
 	// Hand sole ownership of the decoded block to HandleBlockDirect. The
 	// blockHandler goroutine keeps *bmsg alive until the reply is sent, so
 	// leaving the field set would pin the multi-GB wire block (and its decode
@@ -1691,12 +1676,16 @@ func (sm *SyncManager) handleBlockMsg(bmsg *blockQueueMsg) error {
 	bmsg.block = nil
 
 	// #1333: if this block's parent recently failed to store/validate, skip the
-	// descendant before any RPC. Each descendant would otherwise fail its parent
-	// lookup and log a misleading "previous block NOT_FOUND" ERROR, burying the
-	// one root failure that matters. Mark this block failed too so the whole
-	// descendant chain is suppressed transitively; refresh the delivering peer's
-	// stall timer (the fault is a rejected ancestor, not the peer); and still
-	// answer with a getblocks so sync recovers once the root block is resolved.
+	// descendant before the block-lookup RPCs. Each descendant would otherwise
+	// fail its parent lookup and log a misleading "previous block NOT_FOUND"
+	// ERROR, burying the one root failure that matters. Mark this block failed too
+	// so the whole descendant chain is suppressed transitively; refresh the
+	// delivering peer's stall timer (the fault is a rejected ancestor, not the
+	// peer); and still answer with a getblocks so sync recovers once the root
+	// block is resolved. Placed before the block-size sampling below (like the
+	// #1187 backoff skip above) so a skipped, re-delivered descendant does not
+	// keep re-sampling its size into the moving average and biasing
+	// calculateMaxInFlightBlocks().
 	if sm.recentlyFailedBlocks != nil {
 		if _, failed := sm.recentlyFailedBlocks.Get(prevBlockHash); failed {
 			sm.recentlyFailedBlocks.Set(bmsg.blockHash, struct{}{})
@@ -1711,6 +1700,21 @@ func (sm *SyncManager) handleBlockMsg(bmsg *blockQueueMsg) error {
 			return nil
 		}
 	}
+
+	// Track block size for dynamic in-flight adjustment during headers-first mode.
+	// This allows us to start aggressive (20 blocks) and automatically reduce
+	// to 1 block when encountering large (>2GB) blocks on mainnet.
+	if sm.headersFirstMode.Load() {
+		blockSize := int64(msgBlock.SerializeSize())
+		sm.blockSizeTracker.addBlockSize(blockSize)
+
+		dynamicMax := sm.blockSizeTracker.calculateMaxInFlightBlocks()
+		avgSize := sm.blockSizeTracker.getAverageSize()
+		sm.logger.Debugf("[handleBlockMsg][%s] Block size: %d bytes, avg: %d bytes, dynamic max in-flight: %d",
+			bmsg.blockHash, blockSize, avgSize, dynamicMax)
+	}
+
+	sm.logger.Debugf("[handleBlockMsg][%s] calling HandleBlockDirect", bmsg.blockHash)
 
 	// Process the block directly. A missing-parent error (ErrBlockNotFound)
 	// always triggers a getblocks request from our best block so block
