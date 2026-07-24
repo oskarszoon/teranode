@@ -297,7 +297,7 @@ func (u *Server) catchupGetBlockHeaders(ctx context.Context, blockUpTo *model.Bl
 				return catchup.CreateCatchupResult(
 					allCatchupHeaders, blockUpTo.Hash(), startHash, startHeight, startTime, baseURL,
 					iteration, failedIterations, false, "Malicious peer detected",
-				), nil, markCatchupFailureReported(errors.NewNetworkPeerMaliciousError("peer returned malicious response: %w", err))
+				), nil, markCatchupFailureReported(errors.NewNetworkPeerMaliciousError("peer returned malicious response", err))
 			}
 
 			return catchup.CreateCatchupResult(
@@ -332,7 +332,7 @@ func (u *Server) catchupGetBlockHeaders(ctx context.Context, blockUpTo *model.Bl
 				return catchup.CreateCatchupResult(
 					allCatchupHeaders, blockUpTo.Hash(), startHash, startHeight, startTime, baseURL,
 					iteration, failedIterations, false, "Malicious headers detected",
-				), nil, errors.NewNetworkPeerMaliciousError("peer sent invalid headers: %w", parseErr)
+				), nil, errors.NewNetworkPeerMaliciousError("peer sent invalid headers", parseErr)
 			}
 
 			// For non-malicious parse errors, still fail but with different error type
@@ -343,7 +343,7 @@ func (u *Server) catchupGetBlockHeaders(ctx context.Context, blockUpTo *model.Bl
 			return catchup.CreateCatchupResult(
 				allCatchupHeaders, blockUpTo.Hash(), startHash, startHeight, startTime, baseURL,
 				iteration, failedIterations, false, "Header parse failed",
-			), nil, errors.NewNetworkInvalidResponseError("failed to parse headers: %w", parseErr)
+			), nil, errors.NewNetworkInvalidResponseError("failed to parse headers", parseErr)
 		}
 
 		// Check if we got any headers
@@ -502,7 +502,7 @@ func (u *Server) getPeerChainTip(ctx context.Context, peerID string) (*chainhash
 	// Get peer info from P2P registry
 	peerInfo, err := u.p2pClient.GetPeer(ctx, peerID)
 	if err != nil {
-		return nil, errors.NewServiceError("failed to get peer info from P2P service: %w", err)
+		return nil, errors.NewServiceError("failed to get peer info from P2P service", err)
 	}
 
 	// Check if peer was found

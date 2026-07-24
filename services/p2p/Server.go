@@ -1133,7 +1133,7 @@ func (s *Server) handleBlockNotification(ctx context.Context, hash *chainhash.Ha
 
 	h, meta, err := s.blockchainClient.GetBlockHeader(ctx, hash)
 	if err != nil {
-		return errors.NewError("error getting block header and meta for BlockMessage: %w", err)
+		return errors.NewError("error getting block header and meta for BlockMessage", err)
 	}
 
 	if meta.Invalid {
@@ -1153,11 +1153,11 @@ func (s *Server) handleBlockNotification(ctx context.Context, hash *chainhash.Ha
 
 	msgBytes, err = json.Marshal(blockMessage)
 	if err != nil {
-		return errors.NewError("blockMessage - json marshal error: %w", err)
+		return errors.NewError("blockMessage - json marshal error", err)
 	}
 
 	if err = s.P2PClient.Publish(ctx, s.blockTopicName, msgBytes); err != nil {
-		return errors.NewError("blockMessage - publish error: %w", err)
+		return errors.NewError("blockMessage - publish error", err)
 	}
 
 	// Also send a node_status update when best block changes
@@ -1506,14 +1506,14 @@ func (s *Server) handleNodeStatusNotification(ctx context.Context) error {
 
 	msgBytes, err := json.Marshal(nodeStatusMessage)
 	if err != nil {
-		return errors.NewError("nodeStatusMessage - json marshal error: %w", err)
+		return errors.NewError("nodeStatusMessage - json marshal error", err)
 	}
 
 	s.logger.Infof("[handleNodeStatusNotification] P2P publishing node_status to topic %s (height=%d, version=%s, storage=%q)", s.nodeStatusTopicName, nodeStatusMessage.BestHeight, nodeStatusMessage.Version, nodeStatusMessage.Storage)
 	s.logger.Debugf("[handleNodeStatusNotification] JSON payload: %s", string(msgBytes))
 
 	if err = s.P2PClient.Publish(ctx, s.nodeStatusTopicName, msgBytes); err != nil {
-		return errors.NewError("nodeStatusMessage - publish error: %w", err)
+		return errors.NewError("nodeStatusMessage - publish error", err)
 	}
 
 	s.logger.Debugf("[handleNodeStatusNotification] Successfully published node_status message")
@@ -1544,11 +1544,11 @@ func (s *Server) handleSubtreeNotification(ctx context.Context, hash *chainhash.
 
 	msgBytes, err := json.Marshal(subtreeMessage)
 	if err != nil {
-		return errors.NewError("subtreeMessage - json marshal error: %w", err)
+		return errors.NewError("subtreeMessage - json marshal error", err)
 	}
 
 	if err := s.P2PClient.Publish(ctx, s.subtreeTopicName, msgBytes); err != nil {
-		return errors.NewError("subtreeMessage - publish error: %w", err)
+		return errors.NewError("subtreeMessage - publish error", err)
 	}
 
 	return nil
@@ -1580,7 +1580,7 @@ func (s *Server) processBlockchainNotification(ctx context.Context, notification
 	hash, err := chainhash.NewHash(notification.Hash)
 	if err != nil {
 		// Specific error about hash conversion, not logged here, but returned to caller.
-		return errors.NewError(fmt.Sprintf("error getting chainhash from notification hash %s: %%w", notification.Hash), err)
+		return errors.NewError("error getting chainhash from notification hash %s", notification.Hash, err)
 	}
 
 	switch notification.Type {
