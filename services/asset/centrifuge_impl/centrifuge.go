@@ -329,6 +329,8 @@ func (c *Centrifuge) startP2PListener(ctx context.Context) error {
 //   - client: Atomic pointer to the WebSocket connection
 //   - clientConnected: Atomic boolean indicating connection status
 func (c *Centrifuge) connect(ctx context.Context, u url.URL, client *atomic.Pointer[websocket.Conn], clientConnected *atomic.Bool) {
+	// dial and sleep are set by New for every Centrifuge; the nil-guards only cover
+	// a zero-value struct-literal construction (defence, not a live path).
 	dial := c.dialWebsocket
 	if dial == nil {
 		dial = func(urlStr string) (*websocket.Conn, *http.Response, error) {
@@ -343,8 +345,12 @@ func (c *Centrifuge) connect(ctx context.Context, u url.URL, client *atomic.Poin
 
 	// failures counts consecutive dial failures; backoff grows exponentially while
 	// they persist so a stack with no reachable p2p server does not log an ERROR
-	// every second (#1334). Both reset on a successful connect.
-	var failures int
+	// every second (#1334). cappedWarned ensures the "still failing" reminder is
+	// emitted only once per streak. All three reset on a successful connect.
+	var (
+		failures     int
+		cappedWarned bool
+	)
 
 	backoff := p2pDialInitialBackoff
 
@@ -384,6 +390,15 @@ func (c *Centrifuge) connect(ctx context.Context, u url.URL, client *atomic.Poin
 
 					wait = backoff
 					backoff = retry.CappedExponentialBackoff(backoff, p2pDialBackoffFactor, p2pDialMaxBackoff)
+
+					// Once the backoff saturates at the cap, emit a single WARN so a
+					// permanently peerless node leaves a durable breadcrumb that it is
+					// still retrying — otherwise it goes silent at INFO level after the
+					// first WARN. Reset on a successful connect below.
+					if backoff >= p2pDialMaxBackoff && !cappedWarned {
+						cappedWarned = true
+						c.logger.Warnf("[Centrifuge] still cannot reach p2p server %s after %d attempts; continuing to retry every %s (set asset_centrifuge_disable=true if this deployment has no p2p service)", u.String(), failures, p2pDialMaxBackoff)
+					}
 				} else {
 					if failures > 0 {
 						c.logger.Infof("[Centrifuge] connected to p2p server on: %s (after %d failed attempt(s))", u.String(), failures)
@@ -396,6 +411,7 @@ func (c *Centrifuge) connect(ctx context.Context, u url.URL, client *atomic.Poin
 
 					failures = 0
 					backoff = p2pDialInitialBackoff
+					cappedWarned = false
 				}
 			}
 

@@ -3,6 +3,7 @@ package centrifuge_impl
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -1170,6 +1171,49 @@ func TestCentrifuge_connect(t *testing.T) {
 // exponentially (capped) and logs at WARN once then DEBUG, instead of an ERROR
 // every second; the backoff resets after a successful connect; and a context
 // cancellation during backoff returns promptly.
+// capturingLogger records the formatted log message per level so tests can assert
+// on message content, which mocklogger.MockLogger (call-counts only) cannot — e.g.
+// to confirm the DNS-hint WARN branch actually ran, not just that some WARN fired
+// (#1337 review). It embeds MockLogger for the rest of the ulogger.Logger surface.
+type capturingLogger struct {
+	*mocklogger.MockLogger
+
+	mu   sync.Mutex
+	msgs map[string][]string
+}
+
+func newCapturingLogger() *capturingLogger {
+	return &capturingLogger{MockLogger: mocklogger.NewTestLogger(), msgs: make(map[string][]string)}
+}
+
+func (l *capturingLogger) capture(level, format string, args ...interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.msgs[level] = append(l.msgs[level], fmt.Sprintf(format, args...))
+}
+
+func (l *capturingLogger) Warnf(format string, args ...interface{}) {
+	l.MockLogger.Warnf(format, args...)
+	l.capture("Warnf", format, args...)
+}
+
+func (l *capturingLogger) Debugf(format string, args ...interface{}) {
+	l.MockLogger.Debugf(format, args...)
+	l.capture("Debugf", format, args...)
+}
+
+func (l *capturingLogger) Errorf(format string, args ...interface{}) {
+	l.MockLogger.Errorf(format, args...)
+	l.capture("Errorf", format, args...)
+}
+
+func (l *capturingLogger) messages(level string) []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	return append([]string(nil), l.msgs[level]...)
+}
+
 func TestCentrifuge_connectBackoff(t *testing.T) {
 	mockRepo := &repository.Repository{}
 
@@ -1192,8 +1236,8 @@ func TestCentrifuge_connectBackoff(t *testing.T) {
 
 	dialURL := url.URL{Scheme: "ws", Host: "peer:9906", Path: "/p2p-ws"}
 
-	t.Run("backoff grows and caps; one WARN then DEBUG, never ERROR", func(t *testing.T) {
-		ml := mocklogger.NewTestLogger()
+	t.Run("backoff grows and caps; WARN at start and at the cap, DEBUG between, never ERROR", func(t *testing.T) {
+		ml := newCapturingLogger()
 		c := newCentrifuge(t, ml)
 
 		c.dialWebsocket = func(string) (*websocket.Conn, *http.Response, error) {
@@ -1216,12 +1260,29 @@ func TestCentrifuge_connectBackoff(t *testing.T) {
 			1 * time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second,
 			16 * time.Second, 32 * time.Second, 60 * time.Second, 60 * time.Second,
 		}, waits, "backoff must grow 2x and cap at 60s")
-		ml.AssertNumberOfCalls(t, "Errorf", 0)
-		ml.AssertNumberOfCalls(t, "Warnf", 1)
+
+		require.Empty(t, ml.messages("Errorf"), "must never log at ERROR")
+
+		// Two WARNs per streak: the first failure, then a single "still failing"
+		// breadcrumb once the backoff saturates at the cap.
+		warns := ml.messages("Warnf")
+		require.Len(t, warns, 2)
+		require.Contains(t, warns[0], "retrying with backoff")
+		require.Contains(t, warns[1], "still cannot reach")
+
+		// The DEBUG lines between must carry the attempt/backoff detail.
+		hasDetail := false
+		for _, d := range ml.messages("Debugf") {
+			if strings.Contains(d, "attempt") && strings.Contains(d, "next retry") {
+				hasDetail = true
+				break
+			}
+		}
+		require.True(t, hasDetail, "steady-state DEBUG lines should carry attempt/backoff detail")
 	})
 
-	t.Run("unresolvable host logs a WARN with a config hint, never ERROR", func(t *testing.T) {
-		ml := mocklogger.NewTestLogger()
+	t.Run("unresolvable host logs a WARN carrying the config hint, never ERROR", func(t *testing.T) {
+		ml := newCapturingLogger()
 		c := newCentrifuge(t, ml)
 
 		c.dialWebsocket = func(string) (*websocket.Conn, *http.Response, error) {
@@ -1233,8 +1294,14 @@ func TestCentrifuge_connectBackoff(t *testing.T) {
 
 		c.connect(ctx, dialURL, &atomic.Pointer[websocket.Conn]{}, &atomic.Bool{})
 
-		ml.AssertNumberOfCalls(t, "Errorf", 0)
-		ml.AssertNumberOfCalls(t, "Warnf", 1)
+		require.Empty(t, ml.messages("Errorf"))
+
+		// Assert the specific DNS-hint branch ran, not just that some WARN fired:
+		// the message must name the unresolvable host and carry the config hint.
+		warns := ml.messages("Warnf")
+		require.Len(t, warns, 1)
+		require.Contains(t, warns[0], "cannot resolve p2p server host")
+		require.Contains(t, warns[0], "asset_centrifuge_disable")
 	})
 
 	t.Run("backoff resets after a successful connect", func(t *testing.T) {
