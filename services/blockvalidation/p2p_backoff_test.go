@@ -58,6 +58,9 @@ func (m *catchupPeersP2PMock) RecordCatchupFailureWithKind(_ context.Context, pe
 func (m *catchupPeersP2PMock) ReportValidatedChainProgress(context.Context, string, uint32, string, []byte) error {
 	return nil
 }
+func (m *catchupPeersP2PMock) ReportValidBlockHeaders(context.Context, string, int64) error {
+	return nil
+}
 func (m *catchupPeersP2PMock) RecordCatchupMalicious(context.Context, string) error     { return nil }
 func (m *catchupPeersP2PMock) UpdateCatchupError(context.Context, string, string) error { return nil }
 func (m *catchupPeersP2PMock) UpdateCatchupReputation(context.Context, string, float64) error {

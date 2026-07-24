@@ -372,16 +372,18 @@ func TestBlock_Valid_ComprehensiveCoverage(t *testing.T) {
 		coinbase, err := bt.NewTxFromString(CoinbaseHex)
 		require.NoError(t, err)
 
-		// Set height higher than LastV1Block to trigger height validation
-		block, err := NewBlock(blockHeader, coinbase, []*chainhash.Hash{}, 1, 123, LastV1Block+100, 0)
+		// With regtest params (CreateBaseTestSettings) BIP34 activates at 1e8, so height 300000 is
+		// below it and the coinbase-height check is not reached.
+		const testHeight = 300000
+		block, err := NewBlock(blockHeader, coinbase, []*chainhash.Hash{}, 1, 123, testHeight, 0)
 		require.NoError(t, err)
 
 		ctx := context.Background()
 		logger := ulogger.TestLogger{}
 
-		// This should hit the coinbase height validation path
+		// Exercises Block.Valid past the version floor (a v2 header is not below any active floor)
+		// without reaching the coinbase-height check. No assertions — this is a code-path smoke case.
 		valid, err := block.Valid(ctx, logger, nil, createTestUTXOStore(t), txmap.NewSyncedMap[chainhash.Hash, []uint32](), []*BlockHeader{}, []uint32{}, tSettings, nil)
-		// Will likely fail due to height mismatch, but we're testing the code path
 		_ = valid
 		_ = err
 	})
@@ -516,6 +518,90 @@ func TestBlock_Valid_CoinbaseScriptSigLength(t *testing.T) {
 		require.False(t, valid)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "bad coinbase length")
+		require.True(t, errors.Is(err, errors.ErrBlockInvalid))
+	})
+}
+
+// TestBlock_CheckHeaderContextual exercises the header checks factored out of Valid() so the
+// optimistic-mining path can run them synchronously at block-receipt time (issue #1149): the
+// 2-hours-in-the-future timestamp bound, the median-time-past rule, and the block-version floor.
+func TestBlock_CheckHeaderContextual(t *testing.T) {
+	logger := ulogger.TestLogger{}
+
+	// buildBlock returns a coinbase-only block whose header carries the given timestamp; height 1
+	// keeps it below every BIP34/66/65 activation on the params used below, so the version check
+	// never fires and each subtest isolates the timestamp/MTP behaviour under test.
+	buildBlock := func(t *testing.T, timestamp uint32) *Block {
+		t.Helper()
+
+		bits, err := NewNBitFromString("207fffff")
+		require.NoError(t, err)
+
+		header := &BlockHeader{
+			Version:        1,
+			HashPrevBlock:  &chainhash.Hash{},
+			HashMerkleRoot: &chainhash.Hash{},
+			Timestamp:      timestamp,
+			Bits:           *bits,
+			Nonce:          1,
+		}
+
+		coinbase, err := bt.NewTxFromString(CoinbaseHex)
+		require.NoError(t, err)
+
+		block, err := NewBlock(header, coinbase, []*chainhash.Hash{}, 1, 123, 1, 0)
+		require.NoError(t, err)
+
+		return block
+	}
+
+	t.Run("timestamp more than two hours in the future is rejected at call time", func(t *testing.T) {
+		tSettings := test.CreateBaseTestSettings(t)
+		block := buildBlock(t, uint32(time.Now().Add(3*time.Hour).Unix())) // nolint:gosec
+
+		err := block.CheckHeaderContextual([]*BlockHeader{}, tSettings, logger)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "two hours in the future")
+		require.True(t, errors.Is(err, errors.ErrBlockInvalid))
+	})
+
+	t.Run("current timestamp is accepted", func(t *testing.T) {
+		tSettings := test.CreateBaseTestSettings(t)
+		block := buildBlock(t, uint32(time.Now().Unix())) // nolint:gosec
+
+		require.NoError(t, block.CheckHeaderContextual([]*BlockHeader{}, tSettings, logger))
+	})
+
+	t.Run("timestamp just under two hours in the future is accepted", func(t *testing.T) {
+		tSettings := test.CreateBaseTestSettings(t)
+		block := buildBlock(t, uint32(time.Now().Add(2*time.Hour-time.Minute).Unix())) // nolint:gosec
+
+		require.NoError(t, block.CheckHeaderContextual([]*BlockHeader{}, tSettings, logger))
+	})
+
+	t.Run("timestamp not after median time past is rejected when generate is not supported", func(t *testing.T) {
+		// Mainnet params have GenerateSupported == false, so an MTP violation is a hard error
+		// (on regtest it is only a warning). BIP34Height is 227931, so height 1 stays below the
+		// version floor and the version check does not interfere.
+		tSettings := test.CreateBaseTestSettings(t)
+		mainParams := chaincfg.MainNetParams
+		tSettings.ChainCfgParams = &mainParams
+
+		now := uint32(time.Now().Unix()) // nolint:gosec
+
+		// 11 previous headers all stamped "now"; their median is "now".
+		currentChain := make([]*BlockHeader, 11)
+		for i := range currentChain {
+			currentChain[i] = &BlockHeader{Timestamp: now}
+		}
+
+		// Block timestamp equal to the median violates the strictly-after rule, while staying
+		// well inside the 2-hours-in-the-future bound so the earlier check passes.
+		block := buildBlock(t, now)
+
+		err := block.CheckHeaderContextual(currentChain, tSettings, logger)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "median time past")
 		require.True(t, errors.Is(err, errors.ErrBlockInvalid))
 	})
 }

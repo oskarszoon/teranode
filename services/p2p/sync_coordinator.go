@@ -32,8 +32,15 @@ type SyncCoordinator struct {
 	// Per-RPC contexts are derived from this when needed.
 	ctx context.Context
 
+	// decisionMu serialises compound sync decisions (clear -> select -> activate)
+	// so only one decision is in flight at a time. Without it, concurrent triggers
+	// from the FSM monitor, periodic evaluation, catchup-failure and disconnect
+	// handlers can each select a peer and emit conflicting Kafka sync triggers, or
+	// clear a peer another path just activated. decisionMu is always acquired
+	// before mu and never while holding mu; mu remains the field-level lock.
+	decisionMu sync.Mutex
+
 	// Current sync state. currentSyncPeer holds the canonical libp2p ID string.
-	triggerMu                  sync.Mutex
 	mu                         sync.RWMutex
 	currentSyncPeer            string
 	syncStartTime              time.Time
@@ -382,8 +389,13 @@ func (sc *SyncCoordinator) GetCurrentSyncPeer() string {
 	return sc.currentSyncPeer
 }
 
-// ClearSyncPeer clears the current sync peer
+// ClearSyncPeer clears the current sync peer. It serialises behind any
+// in-flight sync decision so an external clear cannot interleave with a
+// select-and-activate sequence; decision paths that already hold decisionMu
+// call clearSyncPeerIfCurrent directly.
 func (sc *SyncCoordinator) ClearSyncPeer() {
+	sc.decisionMu.Lock()
+	defer sc.decisionMu.Unlock()
 	sc.clearSyncPeerIfCurrent("")
 }
 
@@ -442,6 +454,7 @@ func (sc *SyncCoordinator) syncPeerNoProgressTimedOut(now time.Time) (string, ti
 	return currentPeer, progressAge, progressAge > sc.syncPeerNoProgressLimit()
 }
 
+// clearNoProgressSyncPeer requires decisionMu to be held by the caller.
 func (sc *SyncCoordinator) clearNoProgressSyncPeer(peerID string, progressAge time.Duration) bool {
 	sc.logger.Warnf("[SyncCoordinator] Sync peer %s made no validated progress for %v", peerID, progressAge.Round(time.Second))
 	if err := sc.registry.RecordSyncAttempt(sc.ctx, peerID); err != nil {
@@ -450,18 +463,20 @@ func (sc *SyncCoordinator) clearNoProgressSyncPeer(peerID string, progressAge ti
 	if !sc.clearSyncPeerIfCurrent(peerID) {
 		return false
 	}
-	_ = sc.TriggerSync()
+	_ = sc.triggerSyncLocked()
 	return true
 }
 
 // TriggerSync triggers a new sync operation
 func (sc *SyncCoordinator) TriggerSync() error {
-	sc.triggerMu.Lock()
-	defer sc.triggerMu.Unlock()
-	return sc.triggerSync()
+	sc.decisionMu.Lock()
+	defer sc.decisionMu.Unlock()
+	return sc.triggerSyncLocked()
 }
 
-func (sc *SyncCoordinator) triggerSync() error {
+// triggerSyncLocked runs the select-and-activate decision. It requires
+// decisionMu to be held by the caller.
+func (sc *SyncCoordinator) triggerSyncLocked() error {
 	sc.logger.Debugf("[SyncCoordinator] Sync triggered")
 
 	localHeight := sc.getLocalHeightSafe()
@@ -480,13 +495,14 @@ func (sc *SyncCoordinator) HandlePeerDisconnected(peerID peer.ID) {
 		sc.logger.Warnf("[SyncCoordinator] RemovePeer %s failed: %v", idStr, err)
 	}
 
-	sc.mu.RLock()
-	isSyncPeer := sc.currentSyncPeer == idStr
-	sc.mu.RUnlock()
+	// Check-and-clear under decisionMu so the clear cannot interleave with an
+	// in-flight activation of a different peer.
+	sc.decisionMu.Lock()
+	isSyncPeer := sc.clearSyncPeerIfCurrent(idStr)
+	sc.decisionMu.Unlock()
 
 	if isSyncPeer {
 		sc.logger.Infof("[SyncCoordinator] Sync peer %s disconnected", idStr)
-		sc.ClearSyncPeer()
 
 		// Trigger selection of new sync peer
 		go func() {
@@ -503,21 +519,24 @@ func (sc *SyncCoordinator) HandlePeerDisconnected(peerID peer.ID) {
 func (sc *SyncCoordinator) HandleCatchupFailureForPeer(peerID, reason string) {
 	sc.logger.Infof("[SyncCoordinator] Handling catchup failure for peer %s: %s", peerID, reason)
 
-	sc.triggerMu.Lock()
-	defer sc.triggerMu.Unlock()
+	// Hold decisionMu across the whole compare-clear-retrigger so a concurrent trigger
+	// cannot activate a new peer between the check and the clear.
+	sc.decisionMu.Lock()
+	defer sc.decisionMu.Unlock()
 
-	sc.mu.Lock()
-	currentPeer := sc.currentSyncPeer
-	if peerID == "" || currentPeer != peerID {
-		sc.mu.Unlock()
-		sc.logger.Infof("[SyncCoordinator] Ignoring catchup failure for non-current peer %s (current: %s)", peerID, currentPeer)
+	if peerID == "" {
+		sc.logger.Infof("[SyncCoordinator] Ignoring catchup failure without peer attribution")
 		return
 	}
-	sc.currentSyncPeer = ""
-	sc.mu.Unlock()
+	// Only switch when the failure names the current sync peer. clearSyncPeerIfCurrent is the
+	// atomic compare-and-clear shared with the other decision paths.
+	if !sc.clearSyncPeerIfCurrent(peerID) {
+		sc.logger.Infof("[SyncCoordinator] Ignoring catchup failure for non-current peer %s", peerID)
+		return
+	}
 
 	sc.logger.Infof("[SyncCoordinator] Cleared failed sync peer %s", peerID)
-	if err := sc.triggerSync(); err != nil {
+	if err := sc.triggerSyncLocked(); err != nil {
 		sc.logger.Errorf("[SyncCoordinator] Failed to trigger sync after failure: %v", err)
 	}
 }
@@ -596,12 +615,18 @@ func (sc *SyncCoordinator) monitorFSM(ctx context.Context) {
 	}
 }
 
-// checkFSMState checks FSM state and triggers sync if needed
+// checkFSMState checks FSM state and triggers sync if needed. It holds
+// decisionMu for the whole check so the transition handling and the RUNNING-state
+// activation below run as one serialised sync decision.
 func (sc *SyncCoordinator) checkFSMState(ctx context.Context) {
 	if sc.blockchainClient == nil {
 		sc.logger.Warnf("[SyncCoordinator] No blockchain client available for FSM monitoring")
 		return
 	}
+
+	sc.decisionMu.Lock()
+	defer sc.decisionMu.Unlock()
+
 	sc.refreshProbeBudgetFromLocalTip(ctx)
 
 	// Check if we're in backoff mode
@@ -632,7 +657,8 @@ func (sc *SyncCoordinator) checkFSMState(ctx context.Context) {
 	}
 }
 
-// handleFSMTransition checks for FSM state transitions and handles them
+// handleFSMTransition checks for FSM state transitions and handles them.
+// It requires decisionMu to be held by the caller.
 func (sc *SyncCoordinator) handleFSMTransition(currentState *blockchain_api.FSMStateType) bool {
 	if *currentState == blockchain_api.FSMStateType_RUNNING {
 		// Get current sync peer and check if we should consider this a failure
@@ -654,8 +680,8 @@ func (sc *SyncCoordinator) handleFSMTransition(currentState *blockchain_api.FSMS
 			if !exists {
 				// Peer no longer exists in registry (likely disconnected)
 				sc.logger.Infof("[SyncCoordinator] Sync peer %s no longer in registry, clearing", currentPeer)
-				sc.ClearSyncPeer()
-				_ = sc.TriggerSync()
+				sc.clearSyncPeerIfCurrent("")
+				_ = sc.triggerSyncLocked()
 				return true // Transition handled
 			}
 
@@ -673,22 +699,23 @@ func (sc *SyncCoordinator) handleFSMTransition(currentState *blockchain_api.FSMS
 			if peerAheadByValidatedWork(peerInfo, localChainWork) {
 				sc.logger.Infof("[SyncCoordinator] Sync with peer %s considered failed; peer still has higher validated work",
 					currentPeer)
-				sc.ClearSyncPeer()
-				_ = sc.TriggerSync()
+				sc.clearSyncPeerIfCurrent("")
+				_ = sc.triggerSyncLocked()
 				return true // Transition handled
 			}
 			// We've caught up or surpassed the peer, this is success not failure
 			sc.logger.Infof("[SyncCoordinator] Sync completed successfully with peer %s by validated work", currentPeer)
 			sc.resetBackoff()
-			sc.ClearSyncPeer()
-			_ = sc.TriggerSync()
+			sc.clearSyncPeerIfCurrent("")
+			_ = sc.triggerSyncLocked()
 			return true // Transition handled
 		}
 	}
 	return false // No transition to handle
 }
 
-// handleRunningState handles the FSM RUNNING state logic
+// handleRunningState handles the FSM RUNNING state logic.
+// It requires decisionMu to be held by the caller.
 func (sc *SyncCoordinator) handleRunningState(_ context.Context) {
 	localHeight := sc.getLocalHeightSafe()
 
@@ -711,6 +738,8 @@ func (sc *SyncCoordinator) getLocalHeightSafe() uint32 {
 
 // selectAndActivateNewPeer selects a new sync peer and activates it.
 // oldPeer is the previously selected peer's canonical libp2p ID string (or empty).
+// It requires decisionMu to be held by the caller so the select -> claim ->
+// send-to-Kafka sequence runs as one serialised decision.
 func (sc *SyncCoordinator) selectAndActivateNewPeer(localHeight uint32, oldPeer string) error {
 	if oldPeer != "" {
 		sc.logger.Debugf("[SyncCoordinator] Sync peer %s already active; skipping new activation", oldPeer)
@@ -906,8 +935,13 @@ func (sc *SyncCoordinator) periodicEvaluation(ctx context.Context) {
 	}
 }
 
-// evaluateSyncPeer evaluates current sync peer performance
+// evaluateSyncPeer evaluates current sync peer performance. It holds decisionMu
+// for the whole evaluation so its clear/re-trigger/preempt outcomes cannot
+// interleave with other sync decisions.
 func (sc *SyncCoordinator) evaluateSyncPeer() {
+	sc.decisionMu.Lock()
+	defer sc.decisionMu.Unlock()
+
 	now := time.Now()
 	sc.mu.RLock()
 	currentPeer := sc.currentSyncPeer
@@ -925,16 +959,16 @@ func (sc *SyncCoordinator) evaluateSyncPeer() {
 	}
 	if !exists {
 		sc.logger.Warnf("[SyncCoordinator] Sync peer %s no longer exists", currentPeer)
-		sc.ClearSyncPeer()
-		_ = sc.TriggerSync()
+		sc.clearSyncPeerIfCurrent("")
+		_ = sc.triggerSyncLocked()
 		return
 	}
 
 	// Check if peer has low reputation
 	if peerInfo.ReputationScore < 20.0 {
 		sc.logger.Warnf("[SyncCoordinator] Sync peer %s has low reputation (%.2f)", currentPeer, peerInfo.ReputationScore)
-		sc.ClearSyncPeer()
-		_ = sc.TriggerSync()
+		sc.clearSyncPeerIfCurrent("")
+		_ = sc.triggerSyncLocked()
 		return
 	}
 
@@ -959,8 +993,8 @@ func (sc *SyncCoordinator) evaluateSyncPeer() {
 		// Don't clear peer yet, but look for better peer.
 		if betterPeer := sc.selectNewSyncPeer(); betterPeer != currentPeer && betterPeer != "" {
 			sc.logger.Infof("[SyncCoordinator] Found better sync peer %s", betterPeer)
-			sc.ClearSyncPeer()
-			_ = sc.TriggerSync()
+			sc.clearSyncPeerIfCurrent("")
+			_ = sc.triggerSyncLocked()
 		}
 		return
 	}
@@ -1070,14 +1104,18 @@ func (sc *SyncCoordinator) UpdateBanStatus(peerID peer.ID) {
 		return
 	}
 
-	sc.mu.RLock()
-	isSyncPeer := sc.currentSyncPeer == idStr
-	sc.mu.RUnlock()
+	if !banned {
+		return
+	}
 
-	if isSyncPeer && banned {
+	// Check-clear-retrigger as one serialised decision so the clear cannot evict
+	// a different peer activated by a concurrent trigger.
+	sc.decisionMu.Lock()
+	defer sc.decisionMu.Unlock()
+
+	if sc.clearSyncPeerIfCurrent(idStr) {
 		sc.logger.Warnf("[SyncCoordinator] Sync peer %s got banned", idStr)
-		sc.ClearSyncPeer()
-		_ = sc.TriggerSync()
+		_ = sc.triggerSyncLocked()
 	}
 }
 
