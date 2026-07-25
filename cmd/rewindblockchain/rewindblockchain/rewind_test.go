@@ -1177,3 +1177,40 @@ func TestPhase4Verify_BlockPersisterHeightIncrease(t *testing.T) {
 			"with no baseline there is nothing to compare against")
 	})
 }
+
+// TestRewind_PersisterHeightBelowTargetLeftAlone runs the whole pipeline with
+// --verify against a node whose persister sits far behind the target — the
+// issue #1340 shape. Target equals the tip, so no blocks are deleted and the
+// run exercises Phase 0/1/3/4 wiring end to end.
+func TestRewind_PersisterHeightBelowTargetLeftAlone(t *testing.T) {
+	ctx := context.Background()
+	bcStore, utxoStore, subtreeStore, tSettings := newTestStores(t, ctx)
+
+	bits, err := model.NewNBitFromString("207fffff")
+	require.NoError(t, err)
+
+	blocks := buildLinearChain(t, ctx, bcStore, 4, bits, tSettings.ChainCfgParams.GenesisHash)
+	require.NoError(t, bcStore.SetFSMState(ctx, "IDLE"))
+	require.NoError(t, setBlockAssemblerState(ctx, bcStore, 4, blocks[3].Header))
+	setPersisterHeight(t, ctx, bcStore, 1)
+
+	stats, err := Rewind(ctx, logger(), tSettings, Options{
+		TargetHeight: 4,
+		AssumeYes:    true,
+		Verify:       true,
+		Stores: &Stores{
+			Blockchain: bcStore,
+			UTXO:       utxoStore,
+			Subtree:    subtreeStore,
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, stats)
+	require.Zero(t, stats.BlocksDeleted)
+
+	got, err := bcStore.GetState(ctx, "BlockPersisterHeight")
+	require.NoError(t, err)
+	require.Len(t, got, 4)
+	require.Equal(t, uint32(1), binary.LittleEndian.Uint32(got),
+		"a lagging persister height must survive a full rewind run untouched")
+}
