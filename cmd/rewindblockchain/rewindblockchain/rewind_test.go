@@ -844,10 +844,14 @@ func TestRewindBlockchain_ForceDeep(t *testing.T) {
 type errOnGetStateStore struct {
 	blockchain_store.Store
 	getStateErr error
+	// onlyKey, when non-empty, limits the injected failure to that one state
+	// key. Without it a test cannot tell "the persister read aborted preflight"
+	// from "the first read of any key aborted preflight".
+	onlyKey string
 }
 
 func (e *errOnGetStateStore) GetState(ctx context.Context, key string) ([]byte, error) {
-	if e.getStateErr != nil {
+	if e.getStateErr != nil && (e.onlyKey == "" || e.onlyKey == key) {
 		return nil, e.getStateErr
 	}
 	return e.Store.GetState(ctx, key)
@@ -1128,8 +1132,8 @@ func TestPreflight_MissingBlockPersisterHeightIsNotKnown(t *testing.T) {
 // TestPreflight_BlockPersisterHeightReadErrorFailsFast checks that a genuine
 // storage failure on the state read aborts during preflight, before Phase 0
 // touches any store — rather than surfacing in Phase 3 with phases 0-2 already
-// applied. TargetHeight is set so preflight never reads state["BlockAssembler"],
-// leaving the persister read as the only GetState call.
+// applied. The injected failure is scoped to the persister key so the test
+// cannot pass by aborting on some other state read.
 func TestPreflight_BlockPersisterHeightReadErrorFailsFast(t *testing.T) {
 	ctx := context.Background()
 	bcStore, utxoStore, subtreeStore, tSettings := newTestStores(t, ctx)
@@ -1141,7 +1145,7 @@ func TestPreflight_BlockPersisterHeightReadErrorFailsFast(t *testing.T) {
 	require.NoError(t, bcStore.SetFSMState(ctx, "IDLE"))
 
 	simulated := errors.NewStorageError("simulated db read failure")
-	wrapped := &errOnGetStateStore{Store: bcStore, getStateErr: simulated}
+	wrapped := &errOnGetStateStore{Store: bcStore, getStateErr: simulated, onlyKey: blockPersisterHeightKey}
 
 	e := &env{
 		logger:          logger(),
@@ -1208,7 +1212,7 @@ func TestPhase4Verify_BlockPersisterHeightIncrease(t *testing.T) {
 		require.NoError(t, e.phase4Verify(ctx, pf))
 	})
 
-	t.Run("unknown pre-run value skips the check", func(t *testing.T) {
+	t.Run("unreadable before and set after fails verify", func(t *testing.T) {
 		bcStore, _, _, tSettings := newTestStores(t, ctx)
 
 		bits, err := model.NewNBitFromString("207fffff")
@@ -1224,8 +1228,60 @@ func TestPhase4Verify_BlockPersisterHeightIncrease(t *testing.T) {
 			persisterHeightKnown: false,
 		}
 
-		require.NoError(t, e.phase4Verify(ctx, pf),
-			"with no baseline there is nothing to compare against")
+		// An unreadable baseline is still a baseline: this tool never creates the
+		// key, so a value appearing across the run is an anomaly, not a no-op.
+		err = e.phase4Verify(ctx, pf)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "was unreadable before the run and is now 9999")
+	})
+
+	t.Run("force-not-idle downgrades a concurrent increase to a warning", func(t *testing.T) {
+		bcStore, _, _, tSettings := newTestStores(t, ctx)
+
+		bits, err := model.NewNBitFromString("207fffff")
+		require.NoError(t, err)
+
+		blocks := buildLinearChain(t, ctx, bcStore, 4, bits, tSettings.ChainCfgParams.GenesisHash)
+		setPersisterHeight(t, ctx, bcStore, 2)
+
+		log := &capturingLogger{}
+		e := &env{logger: log, blockchainStore: bcStore, opts: Options{ForceNotIdle: true}}
+		pf := &preflightResult{
+			target:               4,
+			targetHash:           blocks[3].Hash(),
+			persisterHeight:      1,
+			persisterHeightKnown: true,
+		}
+
+		// With the node left running, block persister raises this key itself. A
+		// hard failure here would condemn a run that actually succeeded, after
+		// every mutation is already applied.
+		require.NoError(t, e.phase4Verify(ctx, pf))
+		require.Contains(t, log.warnText(), "--force-not-idle")
+	})
+
+	t.Run("value lost during the run is reported as lost, not as zero", func(t *testing.T) {
+		bcStore, _, _, tSettings := newTestStores(t, ctx)
+
+		bits, err := model.NewNBitFromString("207fffff")
+		require.NoError(t, err)
+
+		blocks := buildLinearChain(t, ctx, bcStore, 4, bits, tSettings.ChainCfgParams.GenesisHash)
+		require.NoError(t, bcStore.SetState(ctx, "BlockPersisterHeight", []byte{0x01, 0x02}))
+
+		log := &capturingLogger{}
+		e := &env{logger: log, blockchainStore: bcStore}
+		pf := &preflightResult{
+			target:               4,
+			targetHash:           blocks[3].Hash(),
+			persisterHeight:      422492,
+			persisterHeightKnown: true,
+		}
+
+		require.NoError(t, e.phase4Verify(ctx, pf))
+		require.Contains(t, log.warnText(), "is no longer readable")
+		require.NotContains(t, log.infoText(), "=0 did not increase",
+			"an unreadable value must never be reported as a live 0")
 	})
 }
 
