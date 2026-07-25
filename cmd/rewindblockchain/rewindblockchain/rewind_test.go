@@ -1107,3 +1107,73 @@ func TestPreflight_BlockPersisterHeightReadErrorFailsFast(t *testing.T) {
 	require.Error(t, err)
 	require.True(t, errors.Is(err, simulated), "real read failure must abort preflight, got %v", err)
 }
+
+// TestPhase4Verify_BlockPersisterHeightIncrease asserts the --verify guard
+// catches a persister height that went up during the run. The fixture points
+// the target at the existing tip so the best-block checks pass and only the
+// persister comparison decides the outcome.
+func TestPhase4Verify_BlockPersisterHeightIncrease(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("increase fails verify", func(t *testing.T) {
+		bcStore, _, _, tSettings := newTestStores(t, ctx)
+
+		bits, err := model.NewNBitFromString("207fffff")
+		require.NoError(t, err)
+
+		blocks := buildLinearChain(t, ctx, bcStore, 4, bits, tSettings.ChainCfgParams.GenesisHash)
+		setPersisterHeight(t, ctx, bcStore, 2)
+
+		e := &env{logger: logger(), blockchainStore: bcStore}
+		pf := &preflightResult{
+			target:               4,
+			targetHash:           blocks[3].Hash(),
+			persisterHeight:      1,
+			persisterHeightKnown: true,
+		}
+
+		err = e.phase4Verify(ctx, pf)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "increased from 1 to 2")
+	})
+
+	t.Run("unchanged passes verify", func(t *testing.T) {
+		bcStore, _, _, tSettings := newTestStores(t, ctx)
+
+		bits, err := model.NewNBitFromString("207fffff")
+		require.NoError(t, err)
+
+		blocks := buildLinearChain(t, ctx, bcStore, 4, bits, tSettings.ChainCfgParams.GenesisHash)
+		setPersisterHeight(t, ctx, bcStore, 1)
+
+		e := &env{logger: logger(), blockchainStore: bcStore}
+		pf := &preflightResult{
+			target:               4,
+			targetHash:           blocks[3].Hash(),
+			persisterHeight:      1,
+			persisterHeightKnown: true,
+		}
+
+		require.NoError(t, e.phase4Verify(ctx, pf))
+	})
+
+	t.Run("unknown pre-run value skips the check", func(t *testing.T) {
+		bcStore, _, _, tSettings := newTestStores(t, ctx)
+
+		bits, err := model.NewNBitFromString("207fffff")
+		require.NoError(t, err)
+
+		blocks := buildLinearChain(t, ctx, bcStore, 4, bits, tSettings.ChainCfgParams.GenesisHash)
+		setPersisterHeight(t, ctx, bcStore, 9999)
+
+		e := &env{logger: logger(), blockchainStore: bcStore}
+		pf := &preflightResult{
+			target:               4,
+			targetHash:           blocks[3].Hash(),
+			persisterHeightKnown: false,
+		}
+
+		require.NoError(t, e.phase4Verify(ctx, pf),
+			"with no baseline there is nothing to compare against")
+	})
+}
