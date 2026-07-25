@@ -78,6 +78,38 @@ func (e *env) readBlockPersisterHeight(ctx context.Context) (uint32, bool, error
 	return binary.LittleEndian.Uint32(existing), true, nil
 }
 
+// blockPersisterGroundTruth derives the block persister's real position from the
+// blocks table — the lowest block with persisted_at IS NULL, minus one — which
+// is the same derivation block persister performs on startup
+// (services/blockpersister/Server.go:322-334). The state key is only a cache of
+// this; the table is the truth.
+//
+// known is false when there is no pending block above genesis to derive from,
+// or when the query fails. Diagnostics only, so a failure is logged and never
+// fatal. The query is backed by idx_not_persisted_height
+// (stores/blockchain/sql/sql.go:786), so it stays cheap on a full chain.
+//
+// Genesis is skipped: it carries persisted_at IS NULL for the life of the
+// database, so it would otherwise mask every real pending block. Block
+// persister skips it the same way, via its blocks[0].Height > 0 guard — hence
+// asking for two rows, since an unpersisted genesis always sorts first.
+func (e *env) blockPersisterGroundTruth(ctx context.Context) (uint32, bool) {
+	blocks, err := e.blockchainStore.GetBlocksNotPersisted(ctx, 2)
+	if err != nil {
+		e.logger.Debugf("could not derive the real block persister position: %v", err)
+		return 0, false
+	}
+
+	for _, b := range blocks {
+		if b.Height == 0 {
+			continue
+		}
+		return b.Height - 1, true
+	}
+
+	return 0, false
+}
+
 // resetBlockPersisterHeight moves the persisted height down to the target. It
 // never moves it forward: when the block persister is behind the target —
 // normal on a recently-resynced node — the value is left alone.

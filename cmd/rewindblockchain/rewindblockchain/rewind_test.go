@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/hex"
+	"fmt"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/bsv-blockchain/go-bt/v2"
@@ -1262,4 +1264,162 @@ func TestRewind_PersisterHeightBelowTargetLeftAlone(t *testing.T) {
 	require.Len(t, got, 4)
 	require.Equal(t, uint32(1), binary.LittleEndian.Uint32(got),
 		"a lagging persister height must survive a full rewind run untouched")
+}
+
+// capturingLogger records Infof/Warnf output so tests can assert on the
+// operator-facing diagnostics. On the skip path the log IS the deliverable —
+// the tool deliberately changes nothing — so it is worth asserting on.
+type capturingLogger struct {
+	ulogger.TestLogger
+	mu    sync.Mutex
+	infos []string
+	warns []string
+}
+
+func (c *capturingLogger) Infof(format string, args ...interface{}) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.infos = append(c.infos, fmt.Sprintf(format, args...))
+}
+
+func (c *capturingLogger) Warnf(format string, args ...interface{}) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.warns = append(c.warns, fmt.Sprintf(format, args...))
+}
+
+func (c *capturingLogger) infoText() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return strings.Join(c.infos, "\n")
+}
+
+func (c *capturingLogger) warnText() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return strings.Join(c.warns, "\n")
+}
+
+// TestBlockPersisterGroundTruth derives the persister's real position from the
+// blocks table instead of trusting the state key — the same derivation block
+// persister itself uses on startup.
+func TestBlockPersisterGroundTruth(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("lowest unpersisted block minus one", func(t *testing.T) {
+		bcStore, _, _, tSettings := newTestStores(t, ctx)
+
+		bits, err := model.NewNBitFromString("207fffff")
+		require.NoError(t, err)
+
+		blocks := buildLinearChain(t, ctx, bcStore, 4, bits, tSettings.ChainCfgParams.GenesisHash)
+		require.NoError(t, bcStore.SetBlockPersistedAt(ctx, blocks[0].Hash()))
+		require.NoError(t, bcStore.SetBlockPersistedAt(ctx, blocks[1].Hash()))
+
+		e := &env{logger: logger(), blockchainStore: bcStore}
+		height, known := e.blockPersisterGroundTruth(ctx)
+		require.True(t, known)
+		require.Equal(t, uint32(2), height, "blocks 1-2 persisted, lowest pending is 3, so the real position is 2")
+	})
+
+	t.Run("nothing pending is not a baseline", func(t *testing.T) {
+		bcStore, _, _, tSettings := newTestStores(t, ctx)
+
+		bits, err := model.NewNBitFromString("207fffff")
+		require.NoError(t, err)
+
+		blocks := buildLinearChain(t, ctx, bcStore, 2, bits, tSettings.ChainCfgParams.GenesisHash)
+		for _, b := range blocks {
+			require.NoError(t, bcStore.SetBlockPersistedAt(ctx, b.Hash()))
+		}
+
+		e := &env{logger: logger(), blockchainStore: bcStore}
+		_, known := e.blockPersisterGroundTruth(ctx)
+		require.False(t, known, "with no pending block there is nothing to compare against")
+	})
+}
+
+// TestPreflight_WarnsOnInflatedAndLaggingPersisterHeight covers the two
+// operator-facing diagnostics: a key already inflated past the real position by
+// an earlier buggy run (issue 1340 leaves exactly this state behind, and the
+// fixed tool cannot repair it), and a persister lagging the target far enough
+// that the rewind will not change where it resumes.
+func TestPreflight_WarnsOnInflatedAndLaggingPersisterHeight(t *testing.T) {
+	ctx := context.Background()
+
+	newEnv := func(t *testing.T, bcStore blockchain_store.Store, utxoStore utxo.Store, subtreeStore *memory.Memory, tSettings *settings.Settings, log *capturingLogger, target int64) *env {
+		return &env{
+			logger:          log,
+			settings:        tSettings,
+			blockchainStore: bcStore,
+			utxoStore:       utxoStore,
+			subtreeStore:    subtreeStore,
+			opts:            Options{TargetHeight: target, AssumeYes: true},
+			stats:           &Stats{},
+			concurrency:     1,
+		}
+	}
+
+	t.Run("inflated key is called out", func(t *testing.T) {
+		bcStore, utxoStore, subtreeStore, tSettings := newTestStores(t, ctx)
+
+		bits, err := model.NewNBitFromString("207fffff")
+		require.NoError(t, err)
+
+		blocks := buildLinearChain(t, ctx, bcStore, 4, bits, tSettings.ChainCfgParams.GenesisHash)
+		require.NoError(t, bcStore.SetFSMState(ctx, "IDLE"))
+		require.NoError(t, bcStore.SetBlockPersistedAt(ctx, blocks[0].Hash()))
+		// Real position is 1, but the key claims 4 — the shape a pre-fix run leaves.
+		setPersisterHeight(t, ctx, bcStore, 4)
+
+		log := &capturingLogger{}
+		pf, err := newEnv(t, bcStore, utxoStore, subtreeStore, tSettings, log, 3).preflight(ctx)
+		require.NoError(t, err)
+		require.Equal(t, uint32(4), pf.persisterHeight)
+
+		require.Contains(t, log.warnText(), "is ahead of the real block persister position 1",
+			"an inflated key must be reported, not silently accepted")
+	})
+
+	t.Run("large lag is called out", func(t *testing.T) {
+		bcStore, utxoStore, subtreeStore, tSettings := newTestStores(t, ctx)
+
+		bits, err := model.NewNBitFromString("207fffff")
+		require.NoError(t, err)
+
+		buildLinearChain(t, ctx, bcStore, 150, bits, tSettings.ChainCfgParams.GenesisHash)
+		require.NoError(t, bcStore.SetFSMState(ctx, "IDLE"))
+		// Nothing persisted at all: real position 0, target 149 — a 149-block lag.
+		setPersisterHeight(t, ctx, bcStore, 0)
+
+		log := &capturingLogger{}
+		_, err = newEnv(t, bcStore, utxoStore, subtreeStore, tSettings, log, 149).preflight(ctx)
+		require.NoError(t, err)
+
+		require.Contains(t, log.warnText(), "blocks behind the target",
+			"a persister lagging past coinbase maturity must warn")
+	})
+
+	t.Run("healthy persister stays quiet and the decision is logged", func(t *testing.T) {
+		bcStore, utxoStore, subtreeStore, tSettings := newTestStores(t, ctx)
+
+		bits, err := model.NewNBitFromString("207fffff")
+		require.NoError(t, err)
+
+		blocks := buildLinearChain(t, ctx, bcStore, 4, bits, tSettings.ChainCfgParams.GenesisHash)
+		require.NoError(t, bcStore.SetFSMState(ctx, "IDLE"))
+		for _, b := range blocks[:3] {
+			require.NoError(t, bcStore.SetBlockPersistedAt(ctx, b.Hash()))
+		}
+		// Real position 3, key agrees, target 2 → the write-down case.
+		setPersisterHeight(t, ctx, bcStore, 3)
+
+		log := &capturingLogger{}
+		_, err = newEnv(t, bcStore, utxoStore, subtreeStore, tSettings, log, 2).preflight(ctx)
+		require.NoError(t, err)
+
+		require.Empty(t, log.warnText(), "a healthy, slightly-ahead persister is not an anomaly")
+		require.Contains(t, log.infoText(), "it will be rewritten down to the target",
+			"the preflight log must state the decision, not just the numbers")
+	})
 }
