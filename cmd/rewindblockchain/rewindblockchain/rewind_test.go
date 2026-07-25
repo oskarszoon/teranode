@@ -932,3 +932,85 @@ func TestConfirmPrompt(t *testing.T) {
 		require.Contains(t, err.Error(), "--assume-yes")
 	})
 }
+
+// setPersisterHeight seeds state["BlockPersisterHeight"] with an LE uint32,
+// the format services/blockpersister/Server.go writes.
+func setPersisterHeight(t *testing.T, ctx context.Context, store blockchain_store.Store, height uint32) {
+	t.Helper()
+	payload := make([]byte, 4)
+	binary.LittleEndian.PutUint32(payload, height)
+	require.NoError(t, store.SetState(ctx, "BlockPersisterHeight", payload))
+}
+
+// TestResetBlockPersisterHeight_NeverMovesForward covers issue #1340: the tool
+// used to write LE(target) unconditionally, which raised the recorded persister
+// height on nodes whose persister was behind the target (normal after a
+// resync). Raising it tells the pruner and the p2p storage-mode check that
+// blocks were persisted when they were not.
+func TestResetBlockPersisterHeight_NeverMovesForward(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("below target is left untouched", func(t *testing.T) {
+		bcStore, _, _, _ := newTestStores(t, ctx)
+		setPersisterHeight(t, ctx, bcStore, 422492)
+
+		e := &env{logger: logger(), blockchainStore: bcStore}
+		require.NoError(t, e.resetBlockPersisterHeight(ctx, &preflightResult{target: 1749334}))
+
+		got, err := bcStore.GetState(ctx, "BlockPersisterHeight")
+		require.NoError(t, err)
+		require.Len(t, got, 4)
+		require.Equal(t, uint32(422492), binary.LittleEndian.Uint32(got),
+			"persister height behind the target must not be moved forward")
+	})
+
+	t.Run("equal to target is left untouched", func(t *testing.T) {
+		bcStore, _, _, _ := newTestStores(t, ctx)
+		setPersisterHeight(t, ctx, bcStore, 7)
+
+		e := &env{logger: logger(), blockchainStore: bcStore}
+		require.NoError(t, e.resetBlockPersisterHeight(ctx, &preflightResult{target: 7}))
+
+		got, err := bcStore.GetState(ctx, "BlockPersisterHeight")
+		require.NoError(t, err)
+		require.Equal(t, uint32(7), binary.LittleEndian.Uint32(got))
+	})
+
+	t.Run("above target is rewritten down", func(t *testing.T) {
+		bcStore, _, _, _ := newTestStores(t, ctx)
+		setPersisterHeight(t, ctx, bcStore, 10)
+
+		e := &env{logger: logger(), blockchainStore: bcStore}
+		require.NoError(t, e.resetBlockPersisterHeight(ctx, &preflightResult{target: 4}))
+
+		got, err := bcStore.GetState(ctx, "BlockPersisterHeight")
+		require.NoError(t, err)
+		require.Len(t, got, 4)
+		require.Equal(t, uint32(4), binary.LittleEndian.Uint32(got),
+			"persister height ahead of the target must be rewritten down to it")
+	})
+
+	t.Run("payload shorter than 4 bytes is left untouched", func(t *testing.T) {
+		bcStore, _, _, _ := newTestStores(t, ctx)
+		require.NoError(t, bcStore.SetState(ctx, "BlockPersisterHeight", []byte{0x01, 0x02}))
+
+		e := &env{logger: logger(), blockchainStore: bcStore}
+		require.NoError(t, e.resetBlockPersisterHeight(ctx, &preflightResult{target: 4}),
+			"an undecodable payload must not fail the run")
+
+		got, err := bcStore.GetState(ctx, "BlockPersisterHeight")
+		require.NoError(t, err)
+		require.Equal(t, []byte{0x01, 0x02}, got,
+			"cannot prove a write would be downward, so leave the value alone")
+	})
+
+	t.Run("absent key stays absent", func(t *testing.T) {
+		bcStore, _, _, _ := newTestStores(t, ctx)
+
+		e := &env{logger: logger(), blockchainStore: bcStore}
+		require.NoError(t, e.resetBlockPersisterHeight(ctx, &preflightResult{target: 4}))
+
+		_, err := bcStore.GetState(ctx, "BlockPersisterHeight")
+		require.Error(t, err, "the tool must not create the key when it was never set")
+	})
+}

@@ -52,20 +52,52 @@ func (e *env) resetBlockAssemblerState(ctx context.Context, pf *preflightResult)
 	return nil
 }
 
-// resetBlockPersisterHeight writes the persisted height down to the target.
-// The underlying value is a LE uint32 — see services/blockpersister/Server.go.
-func (e *env) resetBlockPersisterHeight(ctx context.Context, pf *preflightResult) error {
+// readBlockPersisterHeight reads and decodes state["BlockPersisterHeight"].
+// known is false when the key is absent, empty, or too short to decode — in
+// those cases the caller cannot assume anything about the persister's real
+// position. Genuine storage failures are returned as errors.
+func (e *env) readBlockPersisterHeight(ctx context.Context) (uint32, bool, error) {
 	existing, err := e.blockchainStore.GetState(ctx, blockPersisterHeightKey)
 	if err != nil {
 		// SQL blockchain store returns sql.ErrNoRows directly for missing keys;
 		// future implementations may wrap into errors.ErrNotFound.
 		if errors.Is(err, sql.ErrNoRows) || errors.Is(err, errors.ErrNotFound) {
 			e.logger.Debugf("state[%s] not present: %v", blockPersisterHeightKey, err)
-			return nil
+			return 0, false, nil
 		}
-		return errors.NewStorageError("failed to read state[%s]", blockPersisterHeightKey, err)
+		return 0, false, errors.NewStorageError("failed to read state[%s]", blockPersisterHeightKey, err)
 	}
+
 	if len(existing) == 0 {
+		return 0, false, nil
+	}
+
+	if len(existing) < 4 {
+		e.logger.Warnf("state[%s] is %d bytes, too short to decode as LE uint32; leaving it untouched", blockPersisterHeightKey, len(existing))
+		return 0, false, nil
+	}
+
+	return binary.LittleEndian.Uint32(existing), true, nil
+}
+
+// resetBlockPersisterHeight moves the persisted height down to the target. It
+// never moves it forward: when the block persister is behind the target —
+// normal on a recently-resynced node — the value is left alone. Raising it
+// would tell the pruner's safe-prune calculation and the p2p storage-mode check
+// that blocks were persisted when they were not. The underlying value is a LE
+// uint32 — see services/blockpersister/Server.go.
+func (e *env) resetBlockPersisterHeight(ctx context.Context, pf *preflightResult) error {
+	existingHeight, known, err := e.readBlockPersisterHeight(ctx)
+	if err != nil {
+		return err
+	}
+
+	if !known {
+		return nil
+	}
+
+	if existingHeight <= pf.target {
+		e.logger.Infof("state[%s]=%d already at/below target %d; leaving it untouched", blockPersisterHeightKey, existingHeight, pf.target)
 		return nil
 	}
 
@@ -76,7 +108,7 @@ func (e *env) resetBlockPersisterHeight(ctx context.Context, pf *preflightResult
 		return errors.NewStorageError("failed to rewrite state[%s]", blockPersisterHeightKey, err)
 	}
 
-	e.logger.Infof("state[%s] rewritten to %d", blockPersisterHeightKey, pf.target)
+	e.logger.Infof("state[%s] rewritten from %d down to %d", blockPersisterHeightKey, existingHeight, pf.target)
 	return nil
 }
 
