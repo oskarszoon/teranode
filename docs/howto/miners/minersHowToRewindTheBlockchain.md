@@ -147,14 +147,16 @@ inherits that service's image, volumes, environment, and `SETTINGS_CONTEXT`, and
 allocates a TTY by default so the confirmation prompt works. Borrow the
 `blockchain` service definition; it shares the same `x-teranode-base` anchor as
 every other Teranode service, so its `settings_local.conf` and data mounts are
-the node's:
+the node's. Open a shell rather than a single command — the remaining steps run
+several commands in it:
 
 ```bash
-docker compose run --rm --entrypoint teranode-cli blockchain rewindblockchain --help
+docker compose run --rm --entrypoint sh blockchain
 ```
 
-`--rm` removes the throwaway container on exit. `run` does not start the
-service's own process, so nothing competes with the rewind for the stores.
+`--rm` removes the throwaway container when you exit the shell. `run` does not
+start the service's own process, so nothing competes with the rewind for the
+stores. Every `teranode-cli` command in the steps below runs inside this shell.
 
 Kubernetes — start a one-off pod from the same image, with the same configmap
 and volume mounts the Teranode pods used, then exec into it. The exact image
