@@ -1014,3 +1014,96 @@ func TestResetBlockPersisterHeight_NeverMovesForward(t *testing.T) {
 		require.Error(t, err, "the tool must not create the key when it was never set")
 	})
 }
+
+// TestPreflight_CapturesBlockPersisterHeight checks that preflight records the
+// pre-run persister height so Phase 4 has a baseline to compare against.
+func TestPreflight_CapturesBlockPersisterHeight(t *testing.T) {
+	ctx := context.Background()
+	bcStore, utxoStore, subtreeStore, tSettings := newTestStores(t, ctx)
+
+	bits, err := model.NewNBitFromString("207fffff")
+	require.NoError(t, err)
+
+	buildLinearChain(t, ctx, bcStore, 4, bits, tSettings.ChainCfgParams.GenesisHash)
+	require.NoError(t, bcStore.SetFSMState(ctx, "IDLE"))
+	setPersisterHeight(t, ctx, bcStore, 1)
+
+	e := &env{
+		logger:          logger(),
+		settings:        tSettings,
+		blockchainStore: bcStore,
+		utxoStore:       utxoStore,
+		subtreeStore:    subtreeStore,
+		opts:            Options{TargetHeight: 2, AssumeYes: true},
+		stats:           &Stats{},
+		concurrency:     1,
+	}
+
+	pf, err := e.preflight(ctx)
+	require.NoError(t, err)
+	require.True(t, pf.persisterHeightKnown, "a decodable key must be reported as known")
+	require.Equal(t, uint32(1), pf.persisterHeight)
+}
+
+// TestPreflight_MissingBlockPersisterHeightIsNotKnown checks the absent-key
+// path: preflight succeeds and reports the value as unknown.
+func TestPreflight_MissingBlockPersisterHeightIsNotKnown(t *testing.T) {
+	ctx := context.Background()
+	bcStore, utxoStore, subtreeStore, tSettings := newTestStores(t, ctx)
+
+	bits, err := model.NewNBitFromString("207fffff")
+	require.NoError(t, err)
+
+	buildLinearChain(t, ctx, bcStore, 4, bits, tSettings.ChainCfgParams.GenesisHash)
+	require.NoError(t, bcStore.SetFSMState(ctx, "IDLE"))
+
+	e := &env{
+		logger:          logger(),
+		settings:        tSettings,
+		blockchainStore: bcStore,
+		utxoStore:       utxoStore,
+		subtreeStore:    subtreeStore,
+		opts:            Options{TargetHeight: 2, AssumeYes: true},
+		stats:           &Stats{},
+		concurrency:     1,
+	}
+
+	pf, err := e.preflight(ctx)
+	require.NoError(t, err)
+	require.False(t, pf.persisterHeightKnown)
+	require.Zero(t, pf.persisterHeight)
+}
+
+// TestPreflight_BlockPersisterHeightReadErrorFailsFast checks that a genuine
+// storage failure on the state read aborts during preflight, before Phase 0
+// touches any store — rather than surfacing in Phase 3 with phases 0-2 already
+// applied. TargetHeight is set so preflight never reads state["BlockAssembler"],
+// leaving the persister read as the only GetState call.
+func TestPreflight_BlockPersisterHeightReadErrorFailsFast(t *testing.T) {
+	ctx := context.Background()
+	bcStore, utxoStore, subtreeStore, tSettings := newTestStores(t, ctx)
+
+	bits, err := model.NewNBitFromString("207fffff")
+	require.NoError(t, err)
+
+	buildLinearChain(t, ctx, bcStore, 4, bits, tSettings.ChainCfgParams.GenesisHash)
+	require.NoError(t, bcStore.SetFSMState(ctx, "IDLE"))
+
+	simulated := errors.NewStorageError("simulated db read failure")
+	wrapped := &errOnGetStateStore{Store: bcStore, getStateErr: simulated}
+
+	e := &env{
+		logger:          logger(),
+		settings:        tSettings,
+		blockchainStore: wrapped,
+		utxoStore:       utxoStore,
+		subtreeStore:    subtreeStore,
+		opts:            Options{TargetHeight: 2, AssumeYes: true},
+		stats:           &Stats{},
+		concurrency:     1,
+	}
+
+	_, err = e.preflight(ctx)
+	require.Error(t, err)
+	require.True(t, errors.Is(err, simulated), "real read failure must abort preflight, got %v", err)
+}

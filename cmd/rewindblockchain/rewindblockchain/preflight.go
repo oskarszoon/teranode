@@ -20,6 +20,12 @@ type preflightResult struct {
 	deleteList  []blockToDelete
 	deleteByID  map[uint32]struct{}
 	deleteByHsh map[chainhash.Hash]struct{}
+
+	// persisterHeight is state["BlockPersisterHeight"] as read before any
+	// mutation, and persisterHeightKnown says whether it decoded. Phase 3
+	// refuses to raise it; Phase 4 asserts it never went up.
+	persisterHeight      uint32
+	persisterHeightKnown bool
 }
 
 // blockToDelete is one row from the enumeration query, preserving processing
@@ -72,7 +78,20 @@ func (e *env) preflight(ctx context.Context) (*preflightResult, error) {
 		return nil, errors.NewProcessingError("rewind depth %d exceeds coinbase maturity (%d); pass --force-deep to override", tip-target, coinbaseMaturity)
 	}
 
-	// 5. Enumerate blocks above target.
+	// 5. Capture the pre-run block persister height. Reading it here means a
+	// genuine storage failure aborts before Phase 0 mutates anything.
+	persisterHeight, persisterHeightKnown, err := e.readBlockPersisterHeight(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	if persisterHeightKnown {
+		e.logger.Infof("state[%s]=%d (target %d)", blockPersisterHeightKey, persisterHeight, target)
+	} else {
+		e.logger.Infof("state[%s] not set or undecodable; it will be left untouched", blockPersisterHeightKey)
+	}
+
+	// 6. Enumerate blocks above target.
 	deleteList, err := e.enumerateBlocksAboveTarget(ctx, target)
 	if err != nil {
 		return nil, err
@@ -86,15 +105,17 @@ func (e *env) preflight(ctx context.Context) (*preflightResult, error) {
 	}
 
 	res := &preflightResult{
-		target:      target,
-		tip:         tip,
-		targetHash:  targetHash,
-		deleteList:  deleteList,
-		deleteByID:  byID,
-		deleteByHsh: byHash,
+		target:               target,
+		tip:                  tip,
+		targetHash:           targetHash,
+		deleteList:           deleteList,
+		deleteByID:           byID,
+		deleteByHsh:          byHash,
+		persisterHeight:      persisterHeight,
+		persisterHeightKnown: persisterHeightKnown,
 	}
 
-	// 6. Interactive confirmation.
+	// 7. Interactive confirmation.
 	if !e.opts.AssumeYes && !e.opts.DryRun {
 		if err = e.confirmPrompt(res); err != nil {
 			return nil, err
