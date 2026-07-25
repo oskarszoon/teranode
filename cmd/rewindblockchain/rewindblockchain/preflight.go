@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
@@ -160,8 +161,16 @@ func (e *env) confirmPrompt(r *preflightResult) error {
 	}
 
 	reader := bufio.NewReader(e.opts.Stdin)
+
+	// ReadString returns the data read *and* io.EOF when the input has no
+	// trailing newline, so `printf y | teranode-cli ...` must not be treated
+	// as a read failure.
 	line, err := reader.ReadString('\n')
-	if err != nil {
+	if err != nil && !(errors.Is(err, io.EOF) && line != "") {
+		if errors.Is(err, io.EOF) {
+			return errors.NewProcessingError("no input on stdin (not a TTY?); re-run with an interactive shell (kubectl exec -it / docker exec -it) or pass --assume-yes")
+		}
+
 		return errors.NewProcessingError("failed to read confirmation", err)
 	}
 

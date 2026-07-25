@@ -874,3 +874,61 @@ func TestResetBlockPersisterHeight_RealErrorPropagates(t *testing.T) {
 	require.Contains(t, err.Error(), "failed to read state")
 	require.True(t, errors.Is(err, simulated), "real error must propagate, not be swallowed as missing")
 }
+
+// TestConfirmPrompt exercises the y/N gate in isolation. confirmPrompt only
+// reads Options.Stdin and writes Options.Stdout, so no stores or chain fixture
+// are required.
+func TestConfirmPrompt(t *testing.T) {
+	pf := &preflightResult{tip: 1749337, target: 1749330}
+
+	newEnv := func(stdin string, out *bytes.Buffer) *env {
+		return &env{
+			logger: logger(),
+			opts: Options{
+				Stdin:  strings.NewReader(stdin),
+				Stdout: out,
+			},
+		}
+	}
+
+	t.Run("accepts affirmative answers", func(t *testing.T) {
+		// "y" without a trailing newline is the regression guard: ReadString
+		// returns ("y", io.EOF) and must still count as a yes.
+		for _, in := range []string{"y\n", "yes\n", "Y\n", "YES\n", " y \n", "y"} {
+			var out bytes.Buffer
+
+			require.NoError(t, newEnv(in, &out).confirmPrompt(pf), "input %q must be accepted", in)
+			require.Contains(t, out.String(), "DESTRUCTIVE", "input %q must still print the warning", in)
+			require.Contains(t, out.String(), "1749330", "input %q must print the target height", in)
+		}
+	})
+
+	t.Run("rejects negative and unrecognised answers", func(t *testing.T) {
+		for _, in := range []string{"n\n", "no\n", "\n", "maybe\n"} {
+			var out bytes.Buffer
+
+			err := newEnv(in, &out).confirmPrompt(pf)
+			require.Error(t, err, "input %q must be rejected", in)
+			require.Contains(t, err.Error(), "aborted by user", "input %q", in)
+		}
+	})
+
+	t.Run("names the remedy when stdin is closed", func(t *testing.T) {
+		var out bytes.Buffer
+
+		err := newEnv("", &out).confirmPrompt(pf)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "--assume-yes",
+			"an operator hitting EOF on a non-TTY must be told how to proceed")
+	})
+
+	t.Run("names the remedy when stdin is absent", func(t *testing.T) {
+		var out bytes.Buffer
+
+		e := &env{logger: logger(), opts: Options{Stdout: &out}}
+
+		err := e.confirmPrompt(pf)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "--assume-yes")
+	})
+}
