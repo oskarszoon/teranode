@@ -436,17 +436,7 @@ func Start(args []string, version, commit string) {
 			return fixChainwork(*dbURL, *dryRun, *batchSize, uint32(*startHeight), uint32(*endHeight))
 		}
 	case "rewindblockchain":
-		rewind := registerRewindFlags(cmd.FlagSet)
-
-		cmd.Execute = func(args []string) error {
-			if len(args) > 0 {
-				return errors.NewProcessingError("rewindblockchain takes no positional arguments (got %v); use --target-height", args)
-			}
-
-			_, err := rewindblockchain.Rewind(context.Background(), logger, tSettings, rewind.options())
-
-			return err
-		}
+		cmd.Execute = rewindExecute(logger, tSettings, registerRewindFlags(cmd.FlagSet))
 	case "validate-utxo-set":
 		verbose := cmd.FlagSet.Bool("verbose", false, "verbose output showing individual UTXOs")
 
@@ -640,8 +630,7 @@ type rewindFlags struct {
 
 // registerRewindFlags registers the rewindblockchain flags on fs. Names and
 // defaults are copied verbatim from cmd/rewindblockchain/main.go and are
-// documented in docs/howto/miners/minersHowToRewindTheBlockchain.md; do not
-// rename them.
+// documented in docs/howto/miners/minersHowToTeranodeCLI.md; do not rename them.
 func registerRewindFlags(fs *flag.FlagSet) *rewindFlags {
 	return &rewindFlags{
 		targetHeight: fs.Int64("target-height", -1, "Target height to rewind to (default: read state[\"BlockAssembler\"])"),
@@ -654,9 +643,32 @@ func registerRewindFlags(fs *flag.FlagSet) *rewindFlags {
 	}
 }
 
+// rewindExecute builds the Execute closure for the rewindblockchain command.
+// Split out of the dispatch switch so the positional-argument guard below is
+// reachable from a test: the guard returns before Rewind is called, so a test
+// can drive it without opening any store.
+//
+// The guard matters because Go's flag package stops parsing at the first
+// non-flag argument. Without it, `rewindblockchain --assume-yes 1749330
+// --force-deep` parses only --assume-yes and discards the rest, leaving
+// TargetHeight at -1 so resolveTarget silently falls back to
+// state["BlockAssembler"] — an irreversible rewind to an unasked-for height,
+// with the confirmation prompt skipped.
+func rewindExecute(logger ulogger.Logger, tSettings *settings.Settings, rewind *rewindFlags) func(args []string) error {
+	return func(args []string) error {
+		if len(args) > 0 {
+			return errors.NewProcessingError("rewindblockchain takes no positional arguments (got %v); use --target-height", args)
+		}
+
+		_, err := rewindblockchain.Rewind(context.Background(), logger, tSettings, rewind.options())
+
+		return err
+	}
+}
+
 // options converts the parsed flags into rewindblockchain.Options, wiring the
 // process stdin/stdout so the destructive-action confirmation prompt works
-// under `kubectl exec -it` / `docker exec -it`.
+// under `kubectl exec -it` / `docker compose run`.
 func (f *rewindFlags) options() rewindblockchain.Options {
 	return rewindblockchain.Options{
 		TargetHeight: *f.targetHeight,

@@ -106,7 +106,6 @@ nav:
               - CPU Mining Setup: howto/miners/minersHowToCPUMiner.md
               - Teranode CLI: howto/miners/minersHowToTeranodeCLI.md
               - Managing Disk Space: howto/miners/minersManagingDiskSpace.md
-              - Rewind the Blockchain: howto/miners/minersHowToRewindTheBlockchain.md
               - Using Listen Mode: howto/miners/minersHowToUseListenMode.md
   - Key Topics:
       - Teranode Introduction: topics/teranodeIntro.md
