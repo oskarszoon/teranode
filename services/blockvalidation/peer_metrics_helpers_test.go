@@ -54,7 +54,7 @@ func TestReportCatchupFailureForError_SkipsAlreadyReported(t *testing.T) {
 	t.Run("marker survives teranode error wrapping", func(t *testing.T) {
 		u, client := newServer()
 		// Same shape fetchHeaders produces: ProcessingError wrapping the marked error.
-		err := errors.NewProcessingError("failed to get block headers: %w",
+		err := errors.NewProcessingError("failed to get block headers",
 			markCatchupFailureReported(errors.NewServiceError("http request returned status code [429]")))
 		u.reportCatchupFailureForError(context.Background(), "peer-1", err)
 		require.Equal(t, 0, client.failures)
@@ -76,13 +76,13 @@ func TestMarkCatchupFailureReported_TransparentToErrorCodes(t *testing.T) {
 	// ProcessingError → marker → ServiceError: the ServiceError code must still
 	// match through the foreign marker link (the top-level ErrServiceError
 	// branch routes on this).
-	err := errors.NewProcessingError("wrap: %w",
+	err := errors.NewProcessingError("wrap",
 		markCatchupFailureReported(errors.NewServiceError("http 429")))
 	require.True(t, errors.Is(err, errors.ErrServiceError))
 	require.True(t, catchupFailureAlreadyReported(err))
 
 	// Malicious classification survives the marker too.
-	malicious := errors.NewProcessingError("wrap: %w",
+	malicious := errors.NewProcessingError("wrap",
 		markCatchupFailureReported(errors.NewNetworkPeerMaliciousError("bad headers")))
 	require.True(t, errors.Is(malicious, errors.ErrNetworkPeerMalicious))
 

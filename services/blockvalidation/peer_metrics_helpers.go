@@ -122,7 +122,7 @@ func markCatchupFailureReported(err error) error {
 	if err == nil {
 		return nil
 	}
-	wrapped := errors.NewProcessingError("catchup failure reported at source: %w", err)
+	wrapped := errors.NewProcessingError("catchup failure reported at source", err)
 	wrapped.SetData(catchupFailureReportedKey, true)
 	return wrapped
 }
