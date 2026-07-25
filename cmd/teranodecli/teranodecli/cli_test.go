@@ -48,3 +48,69 @@ func TestUint32Flag(t *testing.T) {
 type nopWriter struct{}
 
 func (*nopWriter) Write(p []byte) (int, error) { return len(p), nil }
+
+// TestRewindblockchainRegistration guards the subcommand's discoverability and
+// its flag surface. It deliberately never calls cmd.Execute: that opens real
+// blockchain, UTXO and subtree stores.
+func TestRewindblockchainRegistration(t *testing.T) {
+	t.Run("listed in commandHelp so printUsage shows it", func(t *testing.T) {
+		desc, ok := commandHelp["rewindblockchain"]
+		require.True(t, ok, "rewindblockchain must be registered in commandHelp")
+		require.Contains(t, desc, "DESTRUCTIVE",
+			"the help line must warn that the command is destructive")
+	})
+
+	t.Run("not gated pre-parse as a dangerous command", func(t *testing.T) {
+		// dangerousCommands is consumed before FlagSet.Parse, so an entry here
+		// would demand typed confirmation before --help or --dry-run could run.
+		require.False(t, dangerousCommands["rewindblockchain"],
+			"rewindblockchain must not be in dangerousCommands: the prompt fires pre-parse")
+	})
+
+	t.Run("registers the documented flags with the documented defaults", func(t *testing.T) {
+		fs := flag.NewFlagSet("rewindblockchain", flag.ContinueOnError)
+		fs.SetOutput(&nopWriter{})
+
+		f := registerRewindFlags(fs)
+
+		require.NoError(t, fs.Parse(nil))
+
+		opts := f.options()
+		require.Equal(t, int64(-1), opts.TargetHeight,
+			"default must be -1 so Rewind reads state[\"BlockAssembler\"]")
+		require.False(t, opts.DryRun)
+		require.False(t, opts.AssumeYes)
+		require.False(t, opts.ForceNotIdle)
+		require.False(t, opts.ForceDeep)
+		require.False(t, opts.Verify)
+		require.Zero(t, opts.Concurrency)
+		require.NotNil(t, opts.Stdin, "the confirmation prompt needs stdin wired")
+		require.NotNil(t, opts.Stdout, "the confirmation prompt needs stdout wired")
+	})
+
+	t.Run("parses every flag into Options", func(t *testing.T) {
+		fs := flag.NewFlagSet("rewindblockchain", flag.ContinueOnError)
+		fs.SetOutput(&nopWriter{})
+
+		f := registerRewindFlags(fs)
+
+		require.NoError(t, fs.Parse([]string{
+			"--target-height", "1749330",
+			"--dry-run",
+			"--assume-yes",
+			"--force-not-idle",
+			"--force-deep",
+			"--verify",
+			"--concurrency", "8",
+		}))
+
+		opts := f.options()
+		require.Equal(t, int64(1749330), opts.TargetHeight)
+		require.True(t, opts.DryRun)
+		require.True(t, opts.AssumeYes)
+		require.True(t, opts.ForceNotIdle)
+		require.True(t, opts.ForceDeep)
+		require.True(t, opts.Verify)
+		require.Equal(t, 8, opts.Concurrency)
+	})
+}

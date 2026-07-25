@@ -21,6 +21,7 @@ import (
 	"github.com/bsv-blockchain/teranode/cmd/monitor"
 	"github.com/bsv-blockchain/teranode/cmd/reconsiderblock"
 	"github.com/bsv-blockchain/teranode/cmd/resetblockassembly"
+	"github.com/bsv-blockchain/teranode/cmd/rewindblockchain/rewindblockchain"
 	"github.com/bsv-blockchain/teranode/cmd/seeder"
 	"github.com/bsv-blockchain/teranode/cmd/setfsmstate"
 	cmdSettings "github.com/bsv-blockchain/teranode/cmd/settings"
@@ -52,6 +53,7 @@ var commandHelp = map[string]string{
 	"resetblockassembly":      "Reset block assembly state",
 	"checkblockassembly":      "Check block assembly state by validating unmined transaction inputs (read-only)",
 	"fix-chainwork":           "Fix incorrect chainwork values in blockchain database",
+	"rewindblockchain":        "Rewind blockchain DB, UTXO store and subtree blobs to Block Assembly's persisted height (DESTRUCTIVE, node must be stopped)",
 	"validate-utxo-set":       "Validate UTXO set file",
 	"subtreebench":            "Benchmark SubtreeProcessor throughput with CPU and memory profiling",
 	"loadunminedbench":        "Benchmark loadUnminedTransactions with CPU and memory profiling",
@@ -433,6 +435,14 @@ func Start(args []string, version, commit string) {
 
 			return fixChainwork(*dbURL, *dryRun, *batchSize, uint32(*startHeight), uint32(*endHeight))
 		}
+	case "rewindblockchain":
+		rewind := registerRewindFlags(cmd.FlagSet)
+
+		cmd.Execute = func(args []string) error {
+			_, err := rewindblockchain.Rewind(context.Background(), logger, tSettings, rewind.options())
+
+			return err
+		}
 	case "validate-utxo-set":
 		verbose := cmd.FlagSet.Bool("verbose", false, "verbose output showing individual UTXOs")
 
@@ -609,4 +619,50 @@ func uint32Flag(fs *flag.FlagSet, name string, value uint32, usage string) *uint
 	fs.Var((*uint32Value)(p), name, usage)
 
 	return p
+}
+
+// rewindFlags holds the parsed rewindblockchain flag values. Registration lives
+// here rather than inline in the dispatch switch so tests can exercise the flag
+// surface without executing a rewind, which opens real stores.
+type rewindFlags struct {
+	targetHeight *int64
+	dryRun       *bool
+	assumeYes    *bool
+	forceNotIdle *bool
+	forceDeep    *bool
+	verify       *bool
+	concurrency  *int
+}
+
+// registerRewindFlags registers the rewindblockchain flags on fs. Names and
+// defaults are copied verbatim from cmd/rewindblockchain/main.go and are
+// documented in docs/howto/miners/minersHowToRewindTheBlockchain.md; do not
+// rename them.
+func registerRewindFlags(fs *flag.FlagSet) *rewindFlags {
+	return &rewindFlags{
+		targetHeight: fs.Int64("target-height", -1, "Target height to rewind to (default: read state[\"BlockAssembler\"])"),
+		dryRun:       fs.Bool("dry-run", false, "Log actions but do not modify any store"),
+		assumeYes:    fs.Bool("assume-yes", false, "Skip interactive confirmation prompt"),
+		forceNotIdle: fs.Bool("force-not-idle", false, "Proceed even if FSM is not IDLE (DANGEROUS)"),
+		forceDeep:    fs.Bool("force-deep", false, "Allow rewind deeper than 100 blocks (coinbase-maturity risk)"),
+		verify:       fs.Bool("verify", false, "Run post-rewind consistency checks"),
+		concurrency:  fs.Int("concurrency", 0, "Subtree-load concurrency (0 = settings.BlockAssembly.MoveBackBlockConcurrency or 4)"),
+	}
+}
+
+// options converts the parsed flags into rewindblockchain.Options, wiring the
+// process stdin/stdout so the destructive-action confirmation prompt works
+// under `kubectl exec -it` / `docker exec -it`.
+func (f *rewindFlags) options() rewindblockchain.Options {
+	return rewindblockchain.Options{
+		TargetHeight: *f.targetHeight,
+		DryRun:       *f.dryRun,
+		AssumeYes:    *f.assumeYes,
+		ForceNotIdle: *f.forceNotIdle,
+		ForceDeep:    *f.forceDeep,
+		Verify:       *f.verify,
+		Concurrency:  *f.concurrency,
+		Stdin:        os.Stdin,
+		Stdout:       os.Stdout,
+	}
 }
