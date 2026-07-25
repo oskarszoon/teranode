@@ -23,10 +23,12 @@ re-validating re-creates it under the corrected rule.
 
 ## When not to use this
 
-- **To resync a lagging node** — see [How to Sync the Node](kubernetes/minersHowToSyncTheNode.md).
+- **To resync a lagging node** — see How to Sync the Node
+  ([Docker](docker/minersHowToSyncTheNode.md) / [Kubernetes](kubernetes/minersHowToSyncTheNode.md)).
 - **To clear a stuck block assembly** — use `teranode-cli resetblockassembly`.
 - **To clear an invalid-block marker** — use `teranode-cli reconsiderblock <blockhash>`.
-- **To wipe a node and start over** — see [How to Reset Teranode](kubernetes/minersHowToResetTeranode.md).
+- **To wipe a node and start over** — see How to Reset Teranode
+  ([Docker](docker/minersHowToResetTeranode.md) / [Kubernetes](kubernetes/minersHowToResetTeranode.md)).
 
 ## What it does
 
@@ -76,31 +78,50 @@ Keep the rewind shallow. Depth is bounded at 100 blocks for a reason.
 
 ## Speed: enable outpoint drain mode for the run
 
-Set this for the rewind, then unset it:
-
-```
-utxostore_outpointBatcherDrainMode=true
-```
-
 The tool calls `PreviousOutputsDecorate` sequentially at roughly two inputs per
 call — far below `utxostore_outpointBatcherSize` — so without drain mode the
-batcher waits out the full `utxostore_outpointBatcherDurationMillis` (10ms by
-default) on every call before flushing. Drain mode removes that wait and is
-around 90% faster at these low per-call counts.
+batcher waits out the full `utxostore_outpointBatcherDurationMillis` (the
+shipped default is 5ms, see `settings.conf`) on every call before flushing.
+Drain mode removes that wait and is around 90% faster at these low per-call
+counts.
 
-Do not leave it enabled on a running node. The batcher is store-wide and shared
-with the concurrent validation hot path, which wants predictable latency rather
-than drain mode's heavy-tailed behaviour at mid transaction counts.
+Scope `utxostore_outpointBatcherDrainMode=true` to the one-off container
+started in step 4, not `settings_local.conf`: that file is bind-mounted into
+every service via the `x-teranode-base` anchor, so a change there outlives the
+container and silently changes the running node's validation hot path too,
+which this section is warning against. Docker — pass it as an environment
+variable on the `docker compose run` command in step 4:
+
+```bash
+docker compose run --rm -e utxostore_outpointBatcherDrainMode=true --entrypoint sh blockchain
+```
+
+Kubernetes — once in the one-off pod's shell, `export
+utxostore_outpointBatcherDrainMode=true` before running `teranode-cli`.
+
+Scoped this way the setting reverts automatically when the container or pod
+exits — there is nothing to remember to unset. Do not enable it any other way
+on a running node: the batcher is store-wide and shared with the concurrent
+validation hot path, which wants predictable latency rather than drain mode's
+heavy-tailed behaviour at mid transaction counts.
 
 ## Procedure
 
 ### 1. Check the FSM state and pick a target — before stopping anything
 
-Do this first, while a pod is still running. Once the node is stopped there is
-no Teranode container left to exec into.
+Do this first, while the node is still running. Once it is stopped there is no
+live `blockchain` service left to reach.
+
+Docker:
 
 ```bash
-teranode-cli getfsmstate
+docker exec -it blockchain teranode-cli getfsmstate
+```
+
+Kubernetes:
+
+```bash
+kubectl exec -it $(kubectl get pods -n teranode-operator -l app=blockchain -o jsonpath='{.items[0].metadata.name}') -n teranode-operator -- teranode-cli getfsmstate
 ```
 
 Note the current tip and decide the target height (see
@@ -108,8 +129,16 @@ Note the current tip and decide the target height (see
 
 ### 2. Set the FSM to IDLE
 
+Docker:
+
 ```bash
-teranode-cli setfsmstate --fsmstate=idle
+docker exec -it blockchain teranode-cli setfsmstate --fsmstate=idle
+```
+
+Kubernetes:
+
+```bash
+kubectl exec -it $(kubectl get pods -n teranode-operator -l app=blockchain -o jsonpath='{.items[0].metadata.name}') -n teranode-operator -- teranode-cli setfsmstate --fsmstate=idle
 ```
 
 The rewind refuses to run unless the FSM state stored in the blockchain DB reads
@@ -117,25 +146,43 @@ The rewind refuses to run unless the FSM state stored in the blockchain DB reads
 
 ### 3. Stop the node
 
+**The infrastructure services — Aerospike, PostgreSQL, Kafka — must stay up.**
+The rewind reads and writes through them; stopping them buys no safety and
+costs real time to bring back (Aerospike alone ships a 600s `stop_grace_period`
+for its ASMT index backup, so a needless stop/start can add ten minutes plus a
+cold index rebuild).
+
 Docker — the stack runs one container per service (`blockchain`, `asset`,
-`legacy`, `subtreevalidation`, and so on), so stop them all rather than a single
-`teranode` service:
+`legacy`, `subtreevalidation`, and so on) in the *same* `docker-compose.yml` as
+the shared datastores, so a bare `docker compose stop` takes the datastores
+down too. Name the Teranode services explicitly instead:
 
 ```bash
-docker compose stop
+docker compose stop blockchain asset asset-cache rpc legacy subtreevalidation blockvalidation blockassembly pruner
 docker compose ps
 ```
 
-Kubernetes: scale the cluster down or delete the CR, as in
-[How to Stop and Start Teranode](kubernetes/minersHowToStopStartKubernetesTeranode.md).
-Confirm no pod is still writing to the stores before continuing:
+Check the `docker compose ps` output: `postgres`, `kafka-shared`, and
+`aerospike` must still show `Up`; the services named above must show `Exited`.
+
+Kubernetes — delete the CR only:
+
+```bash
+kubectl delete -f kubernetes/teranode/teranode-cr.yaml -n teranode-operator
+```
+
+[How to Stop and Start Teranode](kubernetes/minersHowToStopStartKubernetesTeranode.md#1-graceful-shutdown)
+deletes both the CR and `teranode-configmap.yaml` for a full teardown. Do
+**not** delete the configmap here — step 4 below starts a one-off pod that
+mounts the same configmap, so leave it applied. Confirm no Teranode pod is
+still writing to the stores before continuing:
 
 ```bash
 kubectl get pods -n teranode-operator
 ```
 
-The infrastructure pods (Aerospike, PostgreSQL, Kafka) must stay **up** — the
-rewind reads and writes through them.
+The Aerospike, PostgreSQL, and Kafka pods are not part of the Teranode CR and
+are unaffected by deleting it.
 
 ### 4. Get a shell that can run `teranode-cli`
 
@@ -148,10 +195,12 @@ allocates a TTY by default so the confirmation prompt works. Borrow the
 `blockchain` service definition; it shares the same `x-teranode-base` anchor as
 every other Teranode service, so its `settings_local.conf` and data mounts are
 the node's. Open a shell rather than a single command — the remaining steps run
-several commands in it:
+several commands in it. Add `-e utxostore_outpointBatcherDrainMode=true` here
+too (see [Speed](#speed-enable-outpoint-drain-mode-for-the-run)) — scoped to
+this throwaway container, it reverts automatically on exit:
 
 ```bash
-docker compose run --rm --entrypoint sh blockchain
+docker compose run --rm -e utxostore_outpointBatcherDrainMode=true --entrypoint sh blockchain
 ```
 
 `--rm` removes the throwaway container when you exit the shell. `run` does not
@@ -163,7 +212,8 @@ and volume mounts the Teranode pods used, then exec into it. The exact image
 tag, configmap name, and mounts come from your deployment's CR; check them
 against `kubernetes/teranode/teranode-cr.yaml` and
 `kubernetes/teranode/teranode-configmap.yaml` rather than copying values from
-this page.
+this page. Once in the shell, `export utxostore_outpointBatcherDrainMode=true`
+for the same effect, scoped to this pod's shell session.
 
 Confirm the tool can see the node's configuration before trusting a rewind from
 this shell:
@@ -185,6 +235,16 @@ This prints the current tip, the target, and the number of blocks that would be
 deleted across the main chain and forks. It modifies nothing. Check the numbers
 before going further — particularly that the block count matches the depth you
 expect.
+
+**`--dry-run` does not verify the subtree-pruning precondition.** It returns
+immediately after preflight, and preflight never touches the subtree store.
+Whether the subtree blobs for the deleted range are still present and unpruned
+is only discovered in Phase 2 of the real run — by which point Phase 0 has
+already rewritten the UTXO store's `blockHeight` and Phase 1 has already purged
+unmined and conflicting transactions. Confirm blob retention across the whole
+delete range yourself (see [Preconditions](#preconditions)) before running for
+real; see [If the rewind dies part-way](#if-the-rewind-dies-part-way) for why
+retrying past this particular failure does not help.
 
 ### 6. Run it
 
@@ -209,31 +269,63 @@ Proceed? [y/N]
 Without a TTY, the tool reports:
 
 ```
-no input on stdin (not a TTY?); re-run with an interactive shell (kubectl exec -it / docker exec -it) or pass --assume-yes
+no input on stdin (not a TTY?); re-run with an interactive shell (kubectl exec -it, or docker compose run for a stopped stack) or pass --assume-yes
 ```
 
-In that case either re-run with `-it`, or pass `--assume-yes` to skip the
-prompt. `--verify` checks after the rewind that the best block sits at the
-target height.
+In that case either re-run the shell from step 4 with a TTY, or pass
+`--assume-yes` to skip the prompt. `--verify` checks after the rewind that the
+best block sits at the target height.
 
 ### 7. Restart and resume
 
-Exit the one-off container, start the node again (Docker: `docker compose start`;
-Kubernetes: re-apply the CR), then take it out of `IDLE`:
+Exit the one-off container, then start the node again:
+
+Docker:
 
 ```bash
-teranode-cli setfsmstate --fsmstate=running
+docker compose start blockchain asset asset-cache rpc legacy subtreevalidation blockvalidation blockassembly pruner
+```
+
+Kubernetes — re-apply the CR:
+
+```bash
+kubectl apply -f kubernetes/teranode/teranode-cr.yaml -n teranode-operator
+```
+
+Then take it out of `IDLE`:
+
+Docker:
+
+```bash
+docker exec -it blockchain teranode-cli setfsmstate --fsmstate=running
+```
+
+Kubernetes:
+
+```bash
+kubectl exec -it $(kubectl get pods -n teranode-operator -l app=blockchain -o jsonpath='{.items[0].metadata.name}') -n teranode-operator -- teranode-cli setfsmstate --fsmstate=running
 ```
 
 Watch that it validates the block it previously rejected.
 
 ## If the rewind dies part-way
 
-The rewind is not transactional, but it is safe to re-run. Deletion tolerates
-records that are already gone, so re-running with the **same**
-`--target-height` continues from wherever it stopped.
+The rewind is not transactional, but for most failures it is safe to re-run.
+Deletion tolerates records that are already gone, so re-running with the
+**same** `--target-height` continues from wherever it stopped.
 
-The FSM state may no longer read `IDLE` after a crash. In that case add
+**Exception: a missing subtree blob.** If Phase 2 fails because a block in the
+delete range was pruned, that is not a transient failure — Phase 0 has already
+rewritten the UTXO store's `blockHeight` and Phase 1 has already purged unmined
+and conflicting transactions, but the blob is still missing. Re-running with
+the same `--target-height` will not clear it: every retry dies at the same
+missing blob. Confirm blob retention across the whole delete range first (see
+[Preconditions](#preconditions)); if the range really is pruned, the rewind
+cannot reconstruct it and needs a different recovery path.
+
+The FSM state may not read `IDLE` after a crash — either because something
+restarted the node in the meantime, or because it was already wrong before you
+started (the rewind itself never sets FSM state). In that case add
 `--force-not-idle` to the retry — this is the case that flag exists for.
 
 ## Worked example: the testnet-eu-1 divergence

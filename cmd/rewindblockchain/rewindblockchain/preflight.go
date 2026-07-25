@@ -168,7 +168,7 @@ func (e *env) confirmPrompt(r *preflightResult) error {
 	line, err := reader.ReadString('\n')
 	if err != nil && !(errors.Is(err, io.EOF) && line != "") {
 		if errors.Is(err, io.EOF) {
-			return errors.NewProcessingError("no input on stdin (not a TTY?); re-run with an interactive shell (kubectl exec -it / docker exec -it) or pass --assume-yes")
+			return errors.NewProcessingError("no input on stdin (not a TTY?); re-run with an interactive shell (kubectl exec -it, or docker compose run for a stopped stack) or pass --assume-yes")
 		}
 
 		return errors.NewProcessingError("failed to read confirmation", err)

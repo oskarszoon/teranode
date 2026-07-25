@@ -113,4 +113,29 @@ func TestRewindblockchainRegistration(t *testing.T) {
 		require.True(t, opts.Verify)
 		require.Equal(t, 8, opts.Concurrency)
 	})
+
+	t.Run("a positional argument swallows every flag after it", func(t *testing.T) {
+		// Go's flag package stops parsing at the first non-flag argument, so
+		// "--assume-yes 1749330 --force-deep" parses --assume-yes, then leaves
+		// "1749330" and "--force-deep" as positionals: TargetHeight stays at
+		// its -1 default and ForceDeep is never set, while AssumeYes (parsed
+		// before the positional) silently skips the confirmation prompt. This
+		// is exactly the swallowing behaviour cli.go's positional-argument
+		// check exists to reject before Execute ever sees these flags.
+		fs := flag.NewFlagSet("rewindblockchain", flag.ContinueOnError)
+		fs.SetOutput(&nopWriter{})
+
+		f := registerRewindFlags(fs)
+
+		require.NoError(t, fs.Parse([]string{"--assume-yes", "1749330", "--force-deep"}))
+
+		opts := f.options()
+		require.Equal(t, int64(-1), opts.TargetHeight,
+			"the positional height must NOT have been parsed into --target-height")
+		require.True(t, opts.AssumeYes)
+		require.False(t, opts.ForceDeep,
+			"--force-deep after the positional must NOT have been parsed")
+		require.NotEmpty(t, fs.Args(),
+			"the swallowed arguments must remain as positionals for cli.go to reject")
+	})
 }

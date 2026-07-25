@@ -19,7 +19,9 @@ Usage: teranode-cli <command> [options]
     aerospikereader      Aerospike Reader
     bitcointoutxoset     Bitcoin to Utxoset
     checkblock           Check block - fetches a block and validates it using the block validation service
+    checkblockassembly   Check block assembly state by validating unmined transaction inputs (read-only)
     checkblocktemplate   Check block template
+    diagnose             Diagnose node health and validate configuration
     export-blocks        Export blockchain to CSV
     filereader           File Reader
     fix-chainwork        Fix incorrect chainwork values in blockchain database
@@ -31,6 +33,7 @@ Usage: teranode-cli <command> [options]
     reconsiderblock      Reconsider a block that was previously marked as invalid
     remainderbench       Benchmark processRemainderTransactionsAndDequeue with CPU and memory profiling
     resetblockassembly   Reset block assembly state
+    rewindblockchain     Rewind blockchain DB, UTXO store and subtree blobs to Block Assembly's persisted height (DESTRUCTIVE, node must be stopped)
     seeder               Seeder
     setfsmstate          Set the FSM State
     settings             Settings

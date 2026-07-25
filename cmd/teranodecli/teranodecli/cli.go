@@ -439,6 +439,10 @@ func Start(args []string, version, commit string) {
 		rewind := registerRewindFlags(cmd.FlagSet)
 
 		cmd.Execute = func(args []string) error {
+			if len(args) > 0 {
+				return errors.NewProcessingError("rewindblockchain takes no positional arguments (got %v); use --target-height", args)
+			}
+
 			_, err := rewindblockchain.Rewind(context.Background(), logger, tSettings, rewind.options())
 
 			return err
