@@ -337,7 +337,7 @@ Options:
 - `--force-not-idle`: Proceed even when the FSM state is not `IDLE` (DANGEROUS — only to recover from a crashed partial run)
 - `--force-deep`: Allow a rewind deeper than 100 blocks, past coinbase maturity (DANGEROUS)
 - `--verify`: Run post-rewind consistency checks
-- `--concurrency`: Subtree-load concurrency (default: `0`, meaning use `blockassembly_moveBackBlockConcurrency` — 375 in the operator contexts shipped in `settings.conf`; the built-in fallback when the key is absent is 4)
+- `--concurrency`: Subtree-load concurrency (default: `0`, meaning use `blockassembly_moveBackBlockConcurrency`, which defaults to 375)
 
 ⚠️ **Warning**: This command is destructive and cannot be undone. It deletes
 blocks, transactions, and subtree blobs. It also assumes preconditions it does
@@ -345,6 +345,11 @@ not fully enforce — the node stopped, the FSM state in the blockchain DB readi
 `IDLE`, and the subtree blobs for the deleted range still unpruned. `--dry-run`
 reports the tip, target, and block count without mutating anything, but it
 returns before the subtree store is touched, so it cannot confirm that last one.
+
+Note that `IDLE` is only reachable from `RUNNING`: the FSM has no
+`CATCHINGBLOCKS` → `IDLE` transition, so on a node stuck catching blocks
+`setfsmstate --fsmstate=idle` fails and the state has to be moved via `running`
+first.
 
 A step-by-step operator runbook is not published yet. Until it is, do not run
 this against a production node without working through those preconditions

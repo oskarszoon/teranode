@@ -2,8 +2,10 @@ package teranodecli
 
 import (
 	"flag"
+	"net/url"
 	"testing"
 
+	"github.com/bsv-blockchain/teranode/settings"
 	"github.com/bsv-blockchain/teranode/ulogger"
 	"github.com/stretchr/testify/require"
 )
@@ -139,12 +141,20 @@ func TestRewindblockchainRegistration(t *testing.T) {
 			"--force-deep after the positional must NOT have been parsed")
 		require.NotEmpty(t, fs.Args(), "the swallowed arguments remain as positionals")
 
-		// Now drive the guard itself. nil settings is deliberate: the guard must
-		// return before anything reads them, so if it is ever removed this test
-		// fails rather than silently passing.
-		err := rewindExecute(ulogger.TestLogger{}, nil, f)(fs.Args())
+		// Now drive the guard itself. The settings stub carries a deliberately
+		// unsupported store scheme: if the guard is ever removed, execution falls
+		// through to resolveStores, blockchain.NewStore rejects the scheme, and
+		// this subtest fails on the assertion below rather than panicking or
+		// touching a real store. (A nil *settings.Settings would panic in
+		// NewStore on storeURL.Scheme and take the sibling subtests with it; a
+		// real one would open actual stores.)
+		stub := &settings.Settings{}
+		stub.BlockChain.StoreURL = &url.URL{Scheme: "guard-must-reject-before-this"}
+
+		err := rewindExecute(ulogger.TestLogger{}, stub, f)(fs.Args())
 		require.Error(t, err, "positional arguments must be rejected before any store is opened")
-		require.Contains(t, err.Error(), "takes no positional arguments")
+		require.Contains(t, err.Error(), "takes no positional arguments",
+			"the guard must reject the invocation; reaching the store layer means it is gone")
 		require.Contains(t, err.Error(), "--target-height",
 			"the error must point the operator at the flag they meant to use")
 	})
