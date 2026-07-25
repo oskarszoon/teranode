@@ -68,10 +68,8 @@ func (e *env) readBlockPersisterHeight(ctx context.Context) (uint32, bool, error
 		return 0, false, errors.NewStorageError("failed to read state[%s]", blockPersisterHeightKey, err)
 	}
 
-	if len(existing) == 0 {
-		return 0, false, nil
-	}
-
+	// A present-but-empty row (len 0) is as undecodable as a truncated one, and
+	// is the more anomalous of the two — both take the same warning.
 	if len(existing) < 4 {
 		e.logger.Warnf("state[%s] is %d bytes, too short to decode as LE uint32; leaving it untouched", blockPersisterHeightKey, len(existing))
 		return 0, false, nil
@@ -82,16 +80,25 @@ func (e *env) readBlockPersisterHeight(ctx context.Context) (uint32, bool, error
 
 // resetBlockPersisterHeight moves the persisted height down to the target. It
 // never moves it forward: when the block persister is behind the target —
-// normal on a recently-resynced node — the value is left alone. Raising it
-// would tell the pruner's safe-prune calculation and the p2p storage-mode check
-// that blocks were persisted when they were not. The underlying value is a LE
-// uint32 — see services/blockpersister/Server.go.
+// normal on a recently-resynced node — the value is left alone.
+//
+// Raising it is not a cosmetic misreport. The pruner reads this key once in
+// Init() (services/pruner/server.go:250) and afterwards only updates its cached
+// copy from BlockPersisted notifications (:163-176). Block persister's
+// corrective republish on startup is a bare SetState with no notification
+// (services/blockpersister/Server.go:329), so an inflated value can be latched
+// by the pruner and drive irreversible blob deletion for blocks that were never
+// persisted. The underlying value is a LE uint32 — see
+// services/blockpersister/Server.go.
 func (e *env) resetBlockPersisterHeight(ctx context.Context, pf *preflightResult) error {
 	existingHeight, known, err := e.readBlockPersisterHeight(ctx)
 	if err != nil {
 		return err
 	}
 
+	// Diagnostics, not a write guard: unknown decodes to 0, which the <= check
+	// below would also skip. Returning here keeps the log from claiming the
+	// height is 0 when it is actually unreadable.
 	if !known {
 		return nil
 	}

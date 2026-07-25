@@ -942,20 +942,40 @@ func setPersisterHeight(t *testing.T, ctx context.Context, store blockchain_stor
 	require.NoError(t, store.SetState(ctx, "BlockPersisterHeight", payload))
 }
 
+// countingSetStateStore wraps a blockchain.Store and counts SetState calls per
+// key. Needed because a value assertion cannot distinguish "skipped the write"
+// from "wrote LE(target)" when the stored height already equals the target —
+// both leave the same bytes behind. The call count can.
+type countingSetStateStore struct {
+	blockchain_store.Store
+	setStateCalls map[string]int
+}
+
+func newCountingSetStateStore(inner blockchain_store.Store) *countingSetStateStore {
+	return &countingSetStateStore{Store: inner, setStateCalls: make(map[string]int)}
+}
+
+func (c *countingSetStateStore) SetState(ctx context.Context, key string, data []byte) error {
+	c.setStateCalls[key]++
+	return c.Store.SetState(ctx, key, data)
+}
+
 // TestResetBlockPersisterHeight_NeverMovesForward covers issue #1340: the tool
 // used to write LE(target) unconditionally, which raised the recorded persister
 // height on nodes whose persister was behind the target (normal after a
-// resync). Raising it tells the pruner and the p2p storage-mode check that
-// blocks were persisted when they were not.
+// resync). Raising it makes the pruner treat unpersisted blocks as persisted.
 func TestResetBlockPersisterHeight_NeverMovesForward(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("below target is left untouched", func(t *testing.T) {
 		bcStore, _, _, _ := newTestStores(t, ctx)
 		setPersisterHeight(t, ctx, bcStore, 422492)
+		spy := newCountingSetStateStore(bcStore)
 
-		e := &env{logger: logger(), blockchainStore: bcStore}
+		e := &env{logger: logger(), blockchainStore: spy}
 		require.NoError(t, e.resetBlockPersisterHeight(ctx, &preflightResult{target: 1749334}))
+
+		require.Zero(t, spy.setStateCalls[blockPersisterHeightKey], "no write may be issued at all")
 
 		got, err := bcStore.GetState(ctx, "BlockPersisterHeight")
 		require.NoError(t, err)
@@ -967,9 +987,14 @@ func TestResetBlockPersisterHeight_NeverMovesForward(t *testing.T) {
 	t.Run("equal to target is left untouched", func(t *testing.T) {
 		bcStore, _, _, _ := newTestStores(t, ctx)
 		setPersisterHeight(t, ctx, bcStore, 7)
+		spy := newCountingSetStateStore(bcStore)
 
-		e := &env{logger: logger(), blockchainStore: bcStore}
+		e := &env{logger: logger(), blockchainStore: spy}
 		require.NoError(t, e.resetBlockPersisterHeight(ctx, &preflightResult{target: 7}))
+
+		// The call count is the only assertion that can fail here: skipping the
+		// write and rewriting LE(7) both leave 7 in the store.
+		require.Zero(t, spy.setStateCalls[blockPersisterHeightKey], "no write may be issued at the equality boundary")
 
 		got, err := bcStore.GetState(ctx, "BlockPersisterHeight")
 		require.NoError(t, err)
@@ -979,9 +1004,12 @@ func TestResetBlockPersisterHeight_NeverMovesForward(t *testing.T) {
 	t.Run("above target is rewritten down", func(t *testing.T) {
 		bcStore, _, _, _ := newTestStores(t, ctx)
 		setPersisterHeight(t, ctx, bcStore, 10)
+		spy := newCountingSetStateStore(bcStore)
 
-		e := &env{logger: logger(), blockchainStore: bcStore}
+		e := &env{logger: logger(), blockchainStore: spy}
 		require.NoError(t, e.resetBlockPersisterHeight(ctx, &preflightResult{target: 4}))
+
+		require.Equal(t, 1, spy.setStateCalls[blockPersisterHeightKey], "exactly one write down to the target")
 
 		got, err := bcStore.GetState(ctx, "BlockPersisterHeight")
 		require.NoError(t, err)
@@ -993,10 +1021,13 @@ func TestResetBlockPersisterHeight_NeverMovesForward(t *testing.T) {
 	t.Run("payload shorter than 4 bytes is left untouched", func(t *testing.T) {
 		bcStore, _, _, _ := newTestStores(t, ctx)
 		require.NoError(t, bcStore.SetState(ctx, "BlockPersisterHeight", []byte{0x01, 0x02}))
+		spy := newCountingSetStateStore(bcStore)
 
-		e := &env{logger: logger(), blockchainStore: bcStore}
+		e := &env{logger: logger(), blockchainStore: spy}
 		require.NoError(t, e.resetBlockPersisterHeight(ctx, &preflightResult{target: 4}),
 			"an undecodable payload must not fail the run")
+
+		require.Zero(t, spy.setStateCalls[blockPersisterHeightKey])
 
 		got, err := bcStore.GetState(ctx, "BlockPersisterHeight")
 		require.NoError(t, err)
@@ -1004,11 +1035,29 @@ func TestResetBlockPersisterHeight_NeverMovesForward(t *testing.T) {
 			"cannot prove a write would be downward, so leave the value alone")
 	})
 
+	t.Run("empty payload is left untouched", func(t *testing.T) {
+		bcStore, _, _, _ := newTestStores(t, ctx)
+		require.NoError(t, bcStore.SetState(ctx, "BlockPersisterHeight", []byte{}))
+		spy := newCountingSetStateStore(bcStore)
+
+		e := &env{logger: logger(), blockchainStore: spy}
+		require.NoError(t, e.resetBlockPersisterHeight(ctx, &preflightResult{target: 4}))
+
+		require.Zero(t, spy.setStateCalls[blockPersisterHeightKey])
+
+		got, err := bcStore.GetState(ctx, "BlockPersisterHeight")
+		require.NoError(t, err)
+		require.Empty(t, got, "a present-but-empty row is as undecodable as a short one")
+	})
+
 	t.Run("absent key stays absent", func(t *testing.T) {
 		bcStore, _, _, _ := newTestStores(t, ctx)
+		spy := newCountingSetStateStore(bcStore)
 
-		e := &env{logger: logger(), blockchainStore: bcStore}
+		e := &env{logger: logger(), blockchainStore: spy}
 		require.NoError(t, e.resetBlockPersisterHeight(ctx, &preflightResult{target: 4}))
+
+		require.Zero(t, spy.setStateCalls[blockPersisterHeightKey])
 
 		_, err := bcStore.GetState(ctx, "BlockPersisterHeight")
 		require.Error(t, err, "the tool must not create the key when it was never set")
