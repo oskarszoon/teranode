@@ -103,6 +103,13 @@ Usage: teranode-cli <command> [options]
 |                      |                                                | `--batch-size` - Updates per transaction (default: 1000)        |
 |                      |                                                | `--start-height` - Starting block height (default: 650286)      |
 |                      |                                                | `--end-height` - Ending block height (default: 0 for tip)       |
+| `rewindblockchain`   | Rewind blockchain DB, UTXO store and subtree   | `--target-height` - Height to rewind to (default: Block Assembly's saved height) |
+|                      | blobs to Block Assembly's persisted height     | `--dry-run` - Report the plan without modifying any store        |
+|                      | (DESTRUCTIVE - node must be stopped)           | `--assume-yes` - Skip the interactive confirmation               |
+|                      |                                                | `--force-not-idle` - Proceed when FSM is not IDLE (DANGEROUS)    |
+|                      |                                                | `--force-deep` - Allow a rewind deeper than 100 blocks           |
+|                      |                                                | `--verify` - Run post-rewind consistency checks                  |
+|                      |                                                | `--concurrency` - Subtree-load concurrency (default: 0 = auto)   |
 
 ### Interactive Tools
 
@@ -304,6 +311,35 @@ Options:
 - `--end-height`: Ending block height (0 for current tip) (default: 0)
 
 ⚠️ **Warning**: This command modifies blockchain database records. Always run with `--dry-run=true` first to preview changes before applying them to production databases.
+
+### Rewind Blockchain
+
+```bash
+teranode-cli rewindblockchain [options]
+```
+
+Rewinds the blockchain database, UTXO store, and subtree blob storage back to a
+target block height. This is a repair tool for a node whose UTXO state has
+diverged from its blockchain DB — the symptom is block validation rejecting a
+block that the rest of the network accepted.
+
+The node process must be stopped first, and the FSM state stored in the
+blockchain DB must read `IDLE`.
+
+Options:
+
+- `--target-height`: Height to rewind to (default: `-1`, meaning read Block Assembly's persisted height from `state["BlockAssembler"]`)
+- `--dry-run`: Report the current tip, target, and block count without modifying any store
+- `--assume-yes`: Skip the interactive confirmation prompt (required when there is no TTY)
+- `--force-not-idle`: Proceed even when the FSM state is not `IDLE` (DANGEROUS — only to recover from a crashed partial run)
+- `--force-deep`: Allow a rewind deeper than 100 blocks, past coinbase maturity (DANGEROUS)
+- `--verify`: Run post-rewind consistency checks
+- `--concurrency`: Subtree-load concurrency (default: `0`, meaning use `blockassembly_moveBackBlockConcurrency`, or 4)
+
+⚠️ **Warning**: This command is destructive and cannot be undone. It deletes
+blocks, transactions, and subtree blobs. Always run with `--dry-run` first, and
+read the full procedure in
+[How to Rewind the Blockchain](minersHowToRewindTheBlockchain.md) before using it.
 
 ### Logs (Interactive Log Viewer)
 
