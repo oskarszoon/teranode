@@ -2,11 +2,13 @@ package rewindblockchain
 
 import (
 	"context"
+	"strconv"
 	"time"
 
 	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/settings"
 	"github.com/bsv-blockchain/teranode/stores/blob"
+	"github.com/bsv-blockchain/teranode/stores/blob/options"
 	"github.com/bsv-blockchain/teranode/stores/blockchain"
 	"github.com/bsv-blockchain/teranode/stores/utxo"
 	utxofactory "github.com/bsv-blockchain/teranode/stores/utxo/factory"
@@ -139,9 +141,9 @@ func resolveStores(ctx context.Context, logger ulogger.Logger, s *settings.Setti
 		return nil, false, errors.NewConfigurationError("failed to open utxo store", err)
 	}
 
-	subtreeStore, err := blob.NewStore(logger, s.SubtreeValidation.SubtreeStore)
+	subtreeStore, err := newSubtreeStore(logger, s)
 	if err != nil {
-		return nil, false, errors.NewConfigurationError("failed to open subtree blob store", err)
+		return nil, false, err
 	}
 
 	return &Stores{
@@ -149,6 +151,43 @@ func resolveStores(ctx context.Context, logger ulogger.Logger, s *settings.Setti
 		UTXO:       utxoStore,
 		Subtree:    subtreeStore,
 	}, true, nil
+}
+
+// newSubtreeStore opens the subtree blob store the same way the node does.
+//
+// blob.NewStore does NOT read hashPrefix from the URL query — stores/blob/factory.go
+// parses only batch, logger, sizeInBytes and writeKeys. hashPrefix reaches the store
+// solely as an option, which the daemon supplies (daemon/daemon_stores.go:454-479).
+// Without it Options.HashPrefix stays 0, CalculatePrefix returns "", and every key
+// resolves to a flat path while the node writes hash-sharded ones — so every read
+// misses with NOT_FOUND and Phase 2 cannot rewind a file:// deployment at all.
+//
+// Only WithHashPrefix is mirrored here: the daemon's other options drive
+// DAH-managed lifecycle, and this tool wants raw Dels.
+func newSubtreeStore(logger ulogger.Logger, s *settings.Settings) (blob.Store, error) {
+	subtreeStoreURL := s.SubtreeValidation.SubtreeStore
+	if subtreeStoreURL == nil {
+		return nil, errors.NewConfigurationError("subtreestore URL is not configured")
+	}
+
+	// Same default and query override as daemon.GetSubtreeStore.
+	hashPrefix := 2
+
+	if v := subtreeStoreURL.Query().Get("hashPrefix"); v != "" {
+		parsed, err := strconv.Atoi(v)
+		if err != nil {
+			return nil, errors.NewConfigurationError("subtreestore hashPrefix config error", err)
+		}
+
+		hashPrefix = parsed
+	}
+
+	subtreeStore, err := blob.NewStore(logger, subtreeStoreURL, options.WithHashPrefix(hashPrefix))
+	if err != nil {
+		return nil, errors.NewConfigurationError("failed to open subtree blob store", err)
+	}
+
+	return subtreeStore, nil
 }
 
 // env bundles the resolved stores and counters shared across phases.
