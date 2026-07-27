@@ -1137,13 +1137,16 @@ func (sm *SyncManager) createUtxos(ctx context.Context, txMap *txmap.SyncedMap[c
 				return errors.NewProcessingError(txNotFoundInTxMapMsg, txHash.String())
 			}
 
-			createOpts := append(baseOpts[:len(baseOpts):len(baseOpts)], utxo.WithMinedBlockInfo(utxo.MinedBlockInfo{
-				BlockID:     blockID,
-				BlockHeight: blockHeightUint32,
-				SubtreeIdx:  0, // legacy path produces a single subtree at index 0
-			}))
+			createOpts := append(baseOpts[:len(baseOpts):len(baseOpts)],
+				utxo.WithMinedBlockInfo(utxo.MinedBlockInfo{
+					BlockID:     blockID,
+					BlockHeight: blockHeightUint32,
+					SubtreeIdx:  0, // legacy path produces a single subtree at index 0
+				}),
+				utxo.WithCreateOnly(),
+			)
 
-			if _, err := sm.utxoStore.Create(gCtx, txWrapper.Tx, blockHeightUint32, createOpts...); err != nil {
+			if _, _, err := sm.utxoStore.SpendAndCreate(gCtx, txWrapper.Tx, blockHeightUint32, createOpts...); err != nil {
 				if errors.Is(err, errors.ErrTxExists) {
 					existingTxsMu.Lock()
 					existingTxHashes = append(existingTxHashes, &txHash)
