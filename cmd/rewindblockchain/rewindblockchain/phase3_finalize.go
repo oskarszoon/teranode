@@ -163,10 +163,14 @@ func (e *env) resetBlockPersisterHeight(ctx context.Context, pf *preflightResult
 // fileType, so it targets <subtreestore>/lastProcessed.dat.dat — a different
 // store and a different name. The Del is best-effort, so the miss is swallowed
 // by the Debugf below. Fixing it needs the block store, which resolveStores
-// does not open; tracked separately rather than widened into the hashPrefix fix.
+// does not open; tracked in #1353 rather than widened into the hashPrefix fix.
 //
-// WithNoHashPrefix is passed so that giving the subtree store the node's
-// hashPrefix (see newSubtreeStore) leaves this path exactly as it was.
+// WithNoHashPrefix does more than keep this path byte-identical now that the
+// store carries the node's hashPrefix (see newSubtreeStore). Without it
+// CalculatePrefix would derive "la" from the filename "lastProcessed.dat", and
+// ConstructFilename MkdirAlls the prefix folder on every call including Del
+// (stores/blob/options/Options.go:397-401) — so each rewind would leave a stray
+// empty <subtreestore>/la/ behind while still deleting nothing.
 func (e *env) deleteUTXOPersisterLastProcessed(ctx context.Context) error {
 	key := []byte(utxoPersisterLastHeightFn)
 	if err := e.subtreeStore.Del(ctx, key, fileformat.FileTypeDat,
