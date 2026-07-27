@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 
 	"github.com/bsv-blockchain/teranode/cmd/aerospikekafkaconnector"
 	"github.com/bsv-blockchain/teranode/cmd/aerospikereader"
@@ -20,6 +21,7 @@ import (
 	"github.com/bsv-blockchain/teranode/cmd/monitor"
 	"github.com/bsv-blockchain/teranode/cmd/reconsiderblock"
 	"github.com/bsv-blockchain/teranode/cmd/resetblockassembly"
+	"github.com/bsv-blockchain/teranode/cmd/rewindblockchain/rewindblockchain"
 	"github.com/bsv-blockchain/teranode/cmd/seeder"
 	"github.com/bsv-blockchain/teranode/cmd/setfsmstate"
 	cmdSettings "github.com/bsv-blockchain/teranode/cmd/settings"
@@ -51,6 +53,7 @@ var commandHelp = map[string]string{
 	"resetblockassembly":      "Reset block assembly state",
 	"checkblockassembly":      "Check block assembly state by validating unmined transaction inputs (read-only)",
 	"fix-chainwork":           "Fix incorrect chainwork values in blockchain database",
+	"rewindblockchain":        "Rewind blockchain DB, UTXO store and subtree blobs to Block Assembly's persisted height (DESTRUCTIVE, node must be stopped)",
 	"validate-utxo-set":       "Validate UTXO set file",
 	"subtreebench":            "Benchmark SubtreeProcessor throughput with CPU and memory profiling",
 	"loadunminedbench":        "Benchmark loadUnminedTransactions with CPU and memory profiling",
@@ -413,6 +416,8 @@ func Start(args []string, version, commit string) {
 
 			return fixChainwork(*dbURL, *dryRun, *batchSize, uint32(*startHeight), uint32(*endHeight))
 		}
+	case "rewindblockchain":
+		cmd.Execute = rewindExecute(logger, tSettings, registerRewindFlags(cmd.FlagSet))
 	case "validate-utxo-set":
 		verbose := cmd.FlagSet.Bool("verbose", false, "verbose output showing individual UTXOs")
 
@@ -561,4 +566,100 @@ func formatSatoshis(satoshis uint64) string {
 	}
 
 	return string(result)
+}
+
+// uint32Value is a flag.Value that parses into a uint32, rejecting values
+// outside the uint32 range at parse time rather than silently truncating.
+type uint32Value uint32
+
+func (u *uint32Value) Set(s string) error {
+	n, err := strconv.ParseUint(s, 10, 32)
+	if err != nil {
+		return err
+	}
+
+	*u = uint32Value(n)
+
+	return nil
+}
+
+func (u *uint32Value) String() string {
+	return strconv.FormatUint(uint64(*u), 10)
+}
+
+// uint32Flag registers a uint32-typed flag on fs and returns a pointer to its value.
+func uint32Flag(fs *flag.FlagSet, name string, value uint32, usage string) *uint32 {
+	p := new(uint32)
+	*p = value
+	fs.Var((*uint32Value)(p), name, usage)
+
+	return p
+}
+
+// rewindFlags holds the parsed rewindblockchain flag values. Registration lives
+// here rather than inline in the dispatch switch so tests can exercise the flag
+// surface without executing a rewind, which opens real stores.
+type rewindFlags struct {
+	targetHeight *int64
+	dryRun       *bool
+	assumeYes    *bool
+	forceNotIdle *bool
+	forceDeep    *bool
+	verify       *bool
+	concurrency  *int
+}
+
+// registerRewindFlags registers the rewindblockchain flags on fs. Names and
+// defaults are copied verbatim from cmd/rewindblockchain/main.go and are
+// documented in docs/howto/miners/minersHowToTeranodeCLI.md; do not rename them.
+func registerRewindFlags(fs *flag.FlagSet) *rewindFlags {
+	return &rewindFlags{
+		targetHeight: fs.Int64("target-height", -1, "Target height to rewind to (default: read state[\"BlockAssembler\"])"),
+		dryRun:       fs.Bool("dry-run", false, "Log actions but do not modify any store"),
+		assumeYes:    fs.Bool("assume-yes", false, "Skip interactive confirmation prompt"),
+		forceNotIdle: fs.Bool("force-not-idle", false, "Proceed even if FSM is not IDLE (DANGEROUS)"),
+		forceDeep:    fs.Bool("force-deep", false, "Allow rewind deeper than 100 blocks (coinbase-maturity risk)"),
+		verify:       fs.Bool("verify", false, "Run post-rewind consistency checks"),
+		concurrency:  fs.Int("concurrency", 0, "Subtree-load concurrency (0 = settings.BlockAssembly.MoveBackBlockConcurrency or 4)"),
+	}
+}
+
+// rewindExecute builds the Execute closure for the rewindblockchain command.
+// Split out of the dispatch switch so the positional-argument guard below is
+// reachable from a test: the guard returns before Rewind is called, so a test
+// can drive it without opening any store.
+//
+// The guard matters because Go's flag package stops parsing at the first
+// non-flag argument. Without it, `rewindblockchain --assume-yes 1749330
+// --force-deep` parses only --assume-yes and discards the rest, leaving
+// TargetHeight at -1 so resolveTarget silently falls back to
+// state["BlockAssembler"] — an irreversible rewind to an unasked-for height,
+// with the confirmation prompt skipped.
+func rewindExecute(logger ulogger.Logger, tSettings *settings.Settings, rewind *rewindFlags) func(args []string) error {
+	return func(args []string) error {
+		if len(args) > 0 {
+			return errors.NewProcessingError("rewindblockchain takes no positional arguments (got %v); use --target-height", args)
+		}
+
+		_, err := rewindblockchain.Rewind(context.Background(), logger, tSettings, rewind.options())
+
+		return err
+	}
+}
+
+// options converts the parsed flags into rewindblockchain.Options, wiring the
+// process stdin/stdout so the destructive-action confirmation prompt works
+// under `kubectl exec -it` / `docker compose run`.
+func (f *rewindFlags) options() rewindblockchain.Options {
+	return rewindblockchain.Options{
+		TargetHeight: *f.targetHeight,
+		DryRun:       *f.dryRun,
+		AssumeYes:    *f.assumeYes,
+		ForceNotIdle: *f.forceNotIdle,
+		ForceDeep:    *f.forceDeep,
+		Verify:       *f.verify,
+		Concurrency:  *f.concurrency,
+		Stdin:        os.Stdin,
+		Stdout:       os.Stdout,
+	}
 }
