@@ -493,17 +493,40 @@ func (u *Server) releaseCatchupLock(ctx *CatchupContext, err *error) {
 		// reporting failures against alternative peers elsewhere in this package.
 		// The tradeoff: the displayed attempts/failures ratio for a fallback-only
 		// peer is not a rate.
+		//
+		// This loop is authoritative for every peer in failedPeers, including the
+		// primary — deliberately, even though that means a peer which both failed
+		// a subtree fetch mid-cycle AND caused the cycle's terminal error gets
+		// charged twice for one attempt. An earlier version tried to skip the
+		// primary here whenever the terminal error was a generic peer error, on
+		// the assumption that Server.go's processCatchupChItem would charge it
+		// once instead, using the terminal error. That assumption does not hold
+		// for every terminal error shape: a genuinely local failure produced by
+		// fetchAndStoreSubtreeAndSubtreeData (e.g. its "Local error fetching
+		// subtree ... not retrying with other peers" wrap) is coded
+		// ErrServiceError, which this switch has no specific case for (it falls
+		// to the unknown_error default with isPeerError left true), and
+		// Server.go's ErrServiceError branch returns early WITHOUT ever calling
+		// reportCatchupFailureForError. Skipping the primary here in that case
+		// charged it zero times for a real subtree failure it caused — an
+		// under-charge that hides a genuine failure entirely, which is worse
+		// than an over-charge that is at least directionally accurate. Both
+		// increments feed InteractionAttempts/InteractionFailures consistently
+		// (see the peer registry), so the occasional double-charge is a
+		// telemetry precision cost, not a reputation-math break. The one
+		// exception is reportIncompleteBlock, guarded below, where both charges
+		// live in this same function and the skip carries no such cross-file risk.
 		for failedPeerID, failedMsg := range failedPeers {
-			if reportPeerErr && failedPeerID == peerID {
-				// reportPeerErr=true (isPeerError, e.g. validation_failure or a
-				// generic/network error — never set alongside ErrExternal, whose
-				// case above always sets isPeerError=false) means the caller in
-				// Server.go's processCatchupChItem will report this catchup
-				// failure itself, once, using the terminal error for the whole
-				// cycle (reportCatchupFailureForError, called after catchup()
-				// returns). Also charging the primary here, from an earlier
-				// subtree-level failure recorded mid-cycle, would double the
-				// CatchupFailures increment for a single catchup attempt.
+			if reportIncompleteBlock && failedPeerID == peerID {
+				// reportIncompleteBlock already charges the primary below via
+				// reportCatchupFailureWithKind, with the more specific
+				// catchupFailureKindBlockIncomplete (which drives a documented
+				// incomplete-block penalty window a generic charge would not).
+				// Both calls are local to this function, so — unlike the
+				// cross-file assumption described above — this skip is safe.
+				// Still store the subtree-level error text so it isn't lost;
+				// only the generic failure counter is skipped.
+				u.reportCatchupError(rpcCtx, failedPeerID, failedMsg)
 				continue
 			}
 
