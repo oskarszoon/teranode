@@ -1,8 +1,8 @@
 package blockvalidation
 
 import (
-	stderrors "errors"
 	"fmt"
+	"io"
 	"testing"
 
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
@@ -63,12 +63,16 @@ func TestMarkCacheBypassRetryable(t *testing.T) {
 
 // TestMarkCacheBypassRetryableForeignError pins the guarantee that the marker
 // survives even when err has no native *errors.Error anywhere in its chain
-// (e.g. a raw stdlib error returned by an HTTP client). markCacheBypassRetryable
-// must wrap such an error rather than silently drop the marker.
+// (e.g. a raw error returned by an HTTP client). markCacheBypassRetryable must
+// wrap such an error rather than silently drop the marker. io.EOF stands in
+// for that foreign error: a plain stdlib sentinel reached through the io
+// package rather than importing "errors" directly (forbidden by depguard) or
+// using fmt.Errorf (forbidden by forbidigo in this package).
 func TestMarkCacheBypassRetryableForeignError(t *testing.T) {
-	foreign := stderrors.New("raw stdlib error")
+	foreign := io.EOF
 
 	marked := markCacheBypassRetryable(foreign)
 	require.True(t, isCacheBypassRetryable(marked), "the marker must survive a foreign error type")
 	require.True(t, errors.Is(marked, foreign), "the original error must still be reachable")
+	require.Contains(t, marked.Error(), "EOF", "the original error's message must still be reachable")
 }
