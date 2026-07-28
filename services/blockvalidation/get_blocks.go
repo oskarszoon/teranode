@@ -657,10 +657,9 @@ func (u *Server) tryPeerForSubtree(ctx context.Context, block *model.Block, subt
 	}
 
 	if !isCacheBypassRetryable(err) {
-		// A local failure is ours, not the peer's — do not charge the peer for it.
-		if !errors.IsLocalError(err) {
-			u.recordCatchupPeerFailure(peerID, err)
-		}
+		// recordCatchupPeerFailure itself skips errors.IsLocalError — a local failure
+		// (context cancellation, storage) is ours, not the peer's.
+		u.recordCatchupPeerFailure(peerID, err)
 
 		return err
 	}

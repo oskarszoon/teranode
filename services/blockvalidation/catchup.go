@@ -482,7 +482,31 @@ func (u *Server) releaseCatchupLock(ctx *CatchupContext, err *error) {
 
 		// Charge each peer that actually failed to serve data, once, with its own
 		// error text (issue 1368: a healthy peer used to carry another peer's 404).
+		//
+		// Accounting note: this charges a CatchupFailure without a paired
+		// CatchupAttempt for the failing peer (only the primary gets a
+		// reportCatchupAttempt call, at the start of catchup — see catchup.go's
+		// call site). CatchupAttempts/CatchupFailures are display/telemetry
+		// counters, not reputation inputs (reputation is computed from the
+		// separate Interaction* counters, which RecordCatchupFailureWithKind keeps
+		// internally consistent), and this matches existing precedent for
+		// reporting failures against alternative peers elsewhere in this package.
+		// The tradeoff: the displayed attempts/failures ratio for a fallback-only
+		// peer is not a rate.
 		for failedPeerID, failedMsg := range failedPeers {
+			if reportPeerErr && failedPeerID == peerID {
+				// reportPeerErr=true (isPeerError, e.g. validation_failure or a
+				// generic/network error — never set alongside ErrExternal, whose
+				// case above always sets isPeerError=false) means the caller in
+				// Server.go's processCatchupChItem will report this catchup
+				// failure itself, once, using the terminal error for the whole
+				// cycle (reportCatchupFailureForError, called after catchup()
+				// returns). Also charging the primary here, from an earlier
+				// subtree-level failure recorded mid-cycle, would double the
+				// CatchupFailures increment for a single catchup attempt.
+				continue
+			}
+
 			u.reportCatchupFailure(rpcCtx, failedPeerID)
 			u.reportCatchupError(rpcCtx, failedPeerID, failedMsg)
 		}
@@ -522,8 +546,13 @@ func (u *Server) releaseCatchupLock(ctx *CatchupContext, err *error) {
 // recordCatchupPeerFailure attributes a data-serving failure to the peer that caused
 // it, for the current catchup cycle. Best-effort: with no active catchup context
 // (e.g. a direct block fetch outside catchup) the call is a no-op.
+//
+// errors.IsLocalError is checked here — not at each call site — so every caller
+// gets the guard for free: a context cancellation (catchup abort / peer switch /
+// shutdown landing mid-retry) or a local storage failure (subtreeStore.Set) is ours,
+// not the peer's, and must never land an innocent peer in failedPeers.
 func (u *Server) recordCatchupPeerFailure(peerID string, err error) {
-	if peerID == "" || err == nil {
+	if peerID == "" || err == nil || errors.IsLocalError(err) {
 		return
 	}
 

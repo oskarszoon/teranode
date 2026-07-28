@@ -327,3 +327,91 @@ func TestReleaseCatchupLock_ExternalErrorChargesOnlyTheFailingPeers(t *testing.T
 	require.Equal(t, "peer_data_unavailable", status.PreviousAttempt.ErrorType)
 	require.Contains(t, status.PreviousAttempt.ErrorMessage, "broken-peer", "the dashboard keeps the full per-peer summary")
 }
+
+// TestReleaseCatchupLock_PrimaryNotDoubleChargedOnMixedCycle covers issue-1368
+// review finding 2a: the primary itself failed one subtree fetch earlier in the
+// cycle (recorded via recordCatchupPeerFailure), but the cycle's overall terminal
+// error is a different, generic peer error (isPeerError=true, reportPeerErr=true —
+// never true together with the ErrExternal case, which always sets
+// isPeerError=false). In that mixed cycle, Server.go's processCatchupChItem
+// reports this catchup failure itself, once, using the terminal error — so the
+// failedPeers drain loop inside releaseCatchupLock must not also charge the
+// primary for the earlier, now-stale subtree failure.
+func TestReleaseCatchupLock_PrimaryNotDoubleChargedOnMixedCycle(t *testing.T) {
+	server, _, _, cleanup := setupTestCatchupServer(t)
+	defer cleanup()
+
+	recorder := newPeerFailureRecordingP2PClient()
+	server.p2pClient = recorder
+
+	header := testhelpers.CreateTestHeaders(t, 1)[0]
+	ctx := &CatchupContext{
+		blockUpTo: &model.Block{Header: header, Height: 1000},
+		baseURL:   "http://primary:8000",
+		peerID:    "primary-peer",
+		startTime: time.Now(),
+	}
+	require.NoError(t, server.acquireCatchupLock(ctx))
+
+	// The primary itself failed one subtree fetch earlier in this cycle...
+	server.recordCatchupPeerFailure("primary-peer", errors.NewNotFoundError("status code [404] subtree not found"))
+
+	// ...but the cycle's terminal error is unrelated: a generic peer error, not
+	// ErrExternal/ErrBlockInvalid/ErrBlockIncomplete/local.
+	relErr := error(errors.NewProcessingError("terminal generic peer error"))
+	server.releaseCatchupLock(ctx, &relErr)
+
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+
+	require.Equal(t, 0, recorder.failuresByPeer["primary-peer"],
+		"the primary must not be charged from the failedPeers drain when the generic peer-error path charges it separately")
+	require.Contains(t, recorder.errorMsgsByPeer["primary-peer"], "terminal generic peer error",
+		"the stored error text must be the terminal error, not the stale subtree-failure message")
+}
+
+// TestRecordCatchupPeerFailure_SkipsLocalErrors covers review finding 1 on
+// issue-1368 Defect B: a local failure — a context cancellation (catchup abort /
+// peer switch / shutdown landing mid-retry) or a local storage error — is ours, not
+// the peer's, and must never land an innocent peer in failedPeers. The guard lives
+// in recordCatchupPeerFailure itself so both call sites in tryPeerForSubtree
+// (the non-retryable branch and the cache-bypass-retry tail) get it for free.
+func TestRecordCatchupPeerFailure_SkipsLocalErrors(t *testing.T) {
+	server, _, _, cleanup := setupTestCatchupServer(t)
+	defer cleanup()
+
+	header := testhelpers.CreateTestHeaders(t, 1)[0]
+	ctx := &CatchupContext{
+		blockUpTo: &model.Block{Header: header, Height: 1000},
+		baseURL:   "http://peer1",
+		peerID:    "peer-123",
+		startTime: time.Now(),
+	}
+	require.NoError(t, server.acquireCatchupLock(ctx))
+	defer func() {
+		var relErr error
+		server.releaseCatchupLock(ctx, &relErr)
+	}()
+
+	recorded := func(peerID string) bool {
+		ctx.failedPeersMu.Lock()
+		defer ctx.failedPeersMu.Unlock()
+		_, ok := ctx.failedPeers[peerID]
+		return ok
+	}
+
+	t.Run("context-cancelled error is not recorded", func(t *testing.T) {
+		server.recordCatchupPeerFailure("innocent-peer-ctx", context.Canceled)
+		require.False(t, recorded("innocent-peer-ctx"), "a context cancellation is our failure, not the peer's")
+	})
+
+	t.Run("storage error is not recorded", func(t *testing.T) {
+		server.recordCatchupPeerFailure("innocent-peer-storage", errors.NewStorageError("disk full"))
+		require.False(t, recorded("innocent-peer-storage"), "a local storage failure is ours, not the peer's")
+	})
+
+	t.Run("genuine peer error is still recorded", func(t *testing.T) {
+		server.recordCatchupPeerFailure("broken-peer-genuine", errors.NewNotFoundError("status code [404]"))
+		require.True(t, recorded("broken-peer-genuine"), "a genuine peer failure must still be recorded")
+	})
+}
