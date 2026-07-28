@@ -1815,13 +1815,40 @@ func (u *Server) processCatchupChItem(ctx context.Context, c processBlockCatchup
 			// Peers that actually failed were charged individually at the point of
 			// failure (recordCatchupPeerFailure / markCatchupFailureReported). Charging
 			// c.peerID here would blame the catchup primary for another peer's failure,
-			// which is what drove healthy peers to 0% success in issue 1368.
+			// which is what drove healthy peers to 0% success in issue 1368. The
+			// already-reported marker check inside reportCatchupFailureForError
+			// suppresses exactly that duplicate *reputation* charge.
 			u.reportCatchupFailureForError(ctx, c.peerID, err)
 
-			if !catchupFailureAlreadyReported(err) {
-				if reportErr := u.blockchainClient.ReportPeerFailure(ctx, c.block.Hash(), c.peerID, "catchup", err.Error()); reportErr != nil {
-					u.logger.Errorf("[catchup] failed to report peer failure for block %s peer %s: %v", c.block.Hash().String(), c.peerID, reportErr)
-				}
+			// ReportPeerFailure is deliberately NOT gated on catchupFailureAlreadyReported.
+			// It is not a reputation call — it is the sync-peer ROTATION signal, and it has
+			// to fire on every all-peers-failed cycle:
+			//
+			//   blockchain.Server.ReportPeerFailure broadcasts NotificationType_PeerFailure
+			//   -> p2p.Server routes failure_type "catchup" to
+			//      syncCoordinator.HandleCatchupFailure (and its subscription listener
+			//      deliberately bypasses the "skip notifications while syncing" filter for
+			//      this type — "needed to switch peers on catchup failure")
+			//   -> SyncCoordinator clears currentSyncPeer and calls triggerSyncLocked, i.e.
+			//      immediate re-selection of a different sync peer.
+			//
+			// A marker gate here is dead code in production: fetchAndStoreSubtreeAndSubtreeData
+			// applies markCatchupFailureReported unconditionally to every all-peers-failed
+			// error and is the only producer of this ErrExternal in the package, so the gate
+			// is always false and rotation never happens. A stuck node would then depend on
+			// the sync coordinator's 30s periodicEvaluation, which only rotates on reputation
+			// below 20 or the 5-minute SyncPeerNoProgressTimeout — a peer with history (say
+			// 100 successes and 1 failure) trips neither, so recovery costs the full five
+			// minutes per stuck cycle.
+			//
+			// The price is one extra interaction-failure charge against the primary. That is
+			// accepted, and consistent with the round-2 adjudication documented in
+			// catchup.go's failedPeers drain: an over-charge is directionally accurate while
+			// an under-charge hides a real failure, and the duplicate increment is a
+			// telemetry-precision cost rather than a reputation-math break. Losing peer
+			// rotation to save one charge is the worse trade — do not re-add the gate.
+			if reportErr := u.blockchainClient.ReportPeerFailure(ctx, c.block.Hash(), c.peerID, "catchup", err.Error()); reportErr != nil {
+				u.logger.Errorf("[catchup] failed to report peer failure for block %s peer %s: %v", c.block.Hash().String(), c.peerID, reportErr)
 			}
 
 			return
