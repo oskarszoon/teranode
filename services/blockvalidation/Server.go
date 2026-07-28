@@ -251,6 +251,10 @@ type Server struct {
 	blocksFetched   atomic.Int64
 	blocksValidated atomic.Int64
 
+	// cacheBustCounter produces the unique token appended to a peer request URL when
+	// a previous response from that peer looked poisoned. See peer_cache_bypass.go.
+	cacheBustCounter atomic.Uint64
+
 	// previousCatchupAttempt stores details about the last failed catchup attempt.
 	// This is used to display in the dashboard why we switched from one peer to another.
 	// Protected by activeCatchupCtxMu for thread-safe access.
