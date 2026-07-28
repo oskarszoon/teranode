@@ -486,13 +486,15 @@ func (u *Server) releaseCatchupLock(ctx *CatchupContext, err *error) {
 		// Accounting note: this charges a CatchupFailure without a paired
 		// CatchupAttempt for the failing peer (only the primary gets a
 		// reportCatchupAttempt call, at the start of catchup — see catchup.go's
-		// call site). CatchupAttempts/CatchupFailures are display/telemetry
-		// counters, not reputation inputs (reputation is computed from the
-		// separate Interaction* counters, which RecordCatchupFailureWithKind keeps
-		// internally consistent), and this matches existing precedent for
-		// reporting failures against alternative peers elsewhere in this package.
-		// The tradeoff: the displayed attempts/failures ratio for a fallback-only
-		// peer is not a rate.
+		// call site). That is new to this change, and there is no precedent for it
+		// in this package: the other sites that charge non-primary peers reach them
+		// through catchup()/catchupFunc(), which calls reportCatchupAttempt
+		// unconditionally, so those charges do have a paired attempt. Accepted
+		// regardless, because CatchupAttempts/CatchupFailures are display/telemetry
+		// counters, not reputation inputs (reputation is computed from the separate
+		// Interaction* counters, which RecordCatchupFailureWithKind keeps internally
+		// consistent). The tradeoff: the displayed attempts/failures ratio for a
+		// fallback-only peer is not a rate.
 		//
 		// This loop is authoritative for every peer in failedPeers, including the
 		// primary — deliberately, even though that means a peer which both failed

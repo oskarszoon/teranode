@@ -664,13 +664,18 @@ func (u *Server) fetchSubtreeAndDataFromPeer(ctx context.Context, block *model.B
 }
 
 // tryPeerForSubtree fetches subtree + subtreeData from one peer, retrying that same
-// peer exactly once with a cache-busting URL when its response looked poisoned (a
-// 200 with an empty or short body). A peer whose proxy cache is replaying a failed
-// generation is the issue-1368 stall: without the bypass no peer behind that cache
-// can serve the subtree for the whole TTL, and the node cannot pass the checkpoint.
-// The bypass only fires after a detected poisoning, so a healthy fleet never pays
-// for it. The already-stored subtree file makes the retry's /subtree fetch a local
-// load, so only subtree_data is re-requested.
+// peer exactly once with a cache-busting URL when its response looked poisoned.
+// "Poisoned" is what carries the cache-bypass marker, and that is narrower than "any
+// 200 with a short body": a subtree_data body that is empty or cannot satisfy the
+// subtree, or a strictly empty /subtree body. A truncated-but-nonzero /subtree body
+// is not covered — it fails in the subtree parser on a different, unmarked path.
+//
+// A peer whose proxy cache is replaying a failed generation is the issue-1368 stall:
+// without the bypass no peer behind that cache can serve the subtree for the whole
+// TTL, and the node cannot pass the checkpoint. The bypass only fires after a
+// detected poisoning, so a healthy fleet never pays for it. The already-stored
+// subtree file makes the retry's /subtree fetch a local load, so only subtree_data
+// is re-requested.
 func (u *Server) tryPeerForSubtree(ctx context.Context, block *model.Block, subtreeHash *chainhash.Hash,
 	peerID, baseURL string) error {
 	err := u.fetchSubtreeAndDataFromPeer(ctx, block, subtreeHash, peerID, baseURL, false)
@@ -779,9 +784,10 @@ func (u *Server) fetchAndStoreSubtreeAndSubtreeData(ctx context.Context, block *
 	//
 	// The wrapped cause is the PRIMARY's error: it is the peer catchup selected and
 	// the most relevant single reason. The full per-peer summary rides in the message
-	// so no attempt is lost (issue 1368, Defect A — a single lastErr variable used to
-	// be overwritten by each alternative, so the reported cause was whichever
-	// alternative failed last, unrelated to the primary).
+	// so no attempt is lost (issue 1368, Defect A — this function used to keep a single
+	// error variable that each alternative overwrote, so the reported cause was
+	// whichever alternative failed last, unrelated to the primary; primaryErr replaced
+	// it precisely so the primary's error survives).
 	return "", markCatchupFailureReported(errors.NewExternalError("[catchup:fetchAndStoreSubtreeAndSubtreeData] all %d peer attempts failed to fetch subtree %s [%s]", len(attempts), subtreeHash.String(), formatSubtreeFetchAttempts(attempts), primaryErr))
 }
 
@@ -859,8 +865,8 @@ func (u *Server) fetchSubtreeDataFromPeer(ctx context.Context, subtreeHash *chai
 	)
 	defer deferFn()
 
-	// Construct URL for subtree data endpoint
-	// Based on user clarification, subtree data is fetched from /subtree_data/:hash
+	// peerResourceURL builds <baseURL>/subtree_data/<hash>, appending the cachebust
+	// query parameter when bypassCache is set.
 	url := u.peerResourceURL(baseURL, "subtree_data", subtreeHash, bypassCache)
 
 	u.logger.Debugf("[catchup:fetchSubtreeDataFromPeer] fetching subtree data from %s", url)
