@@ -19,10 +19,17 @@ import (
 // cache-busting URL is worth attempting before moving on to another peer.
 const cacheBypassRetryableKey = "cache_bypass_retryable"
 
-// markCacheBypassRetryable tags err with the cache-bypass marker in place and
-// returns it. The error code and wrapped chain are unchanged, so callers matching
-// on the code still behave identically. Nil-safe. A non-native error is returned
-// untouched (nothing downstream can carry the marker for it).
+// markCacheBypassRetryable tags err with the cache-bypass marker and returns
+// the result. Nil-safe.
+//
+// If err's chain already contains a native *errors.Error, the marker is set
+// in place via SetData: the error's code and wrapped chain are left exactly
+// as they were, so callers matching on the code still behave identically.
+// Otherwise err is a foreign error type (e.g. a bare stdlib error or an HTTP
+// client error) with nothing to call SetData on, so it is wrapped in a new
+// native *errors.Error the way markCatchupFailureReported does
+// (peer_metrics_helpers.go:121) — guaranteeing the marker survives regardless
+// of err's type, at the cost of an extra link in the chain.
 func markCacheBypassRetryable(err error) error {
 	if err == nil {
 		return nil
@@ -31,9 +38,13 @@ func markCacheBypassRetryable(err error) error {
 	var e *errors.Error
 	if errors.As(err, &e) {
 		e.SetData(cacheBypassRetryableKey, true)
+		return err
 	}
 
-	return err
+	wrapped := errors.NewProcessingError("cache bypass retryable", err)
+	wrapped.SetData(cacheBypassRetryableKey, true)
+
+	return wrapped
 }
 
 // isCacheBypassRetryable reports whether any link in err's chain carries the

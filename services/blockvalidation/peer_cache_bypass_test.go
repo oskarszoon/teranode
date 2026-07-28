@@ -1,6 +1,7 @@
 package blockvalidation
 
 import (
+	stderrors "errors"
 	"fmt"
 	"testing"
 
@@ -58,4 +59,16 @@ func TestMarkCacheBypassRetryable(t *testing.T) {
 	require.True(t, isCacheBypassRetryable(marked))
 	require.True(t, errors.Is(marked, errors.ErrNotFound), "marking must not change the error code")
 	require.Nil(t, markCacheBypassRetryable(nil))
+}
+
+// TestMarkCacheBypassRetryableForeignError pins the guarantee that the marker
+// survives even when err has no native *errors.Error anywhere in its chain
+// (e.g. a raw stdlib error returned by an HTTP client). markCacheBypassRetryable
+// must wrap such an error rather than silently drop the marker.
+func TestMarkCacheBypassRetryableForeignError(t *testing.T) {
+	foreign := stderrors.New("raw stdlib error")
+
+	marked := markCacheBypassRetryable(foreign)
+	require.True(t, isCacheBypassRetryable(marked), "the marker must survive a foreign error type")
+	require.True(t, errors.Is(marked, foreign), "the original error must still be reachable")
 }
