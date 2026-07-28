@@ -251,3 +251,79 @@ func TestReleaseCatchupLock_IncompleteBlockPenaltyAttribution(t *testing.T) {
 		require.Equal(t, "block_incomplete", server.previousCatchupAttempt.ErrorType)
 	})
 }
+
+// peerFailureRecordingP2PClient records the reputation calls releaseCatchupLock makes, so a
+// test can assert WHICH peer was charged for a failure.
+type peerFailureRecordingP2PClient struct {
+	P2PClientI
+
+	mu              sync.Mutex
+	failuresByPeer  map[string]int
+	errorMsgsByPeer map[string]string
+}
+
+func newPeerFailureRecordingP2PClient() *peerFailureRecordingP2PClient {
+	return &peerFailureRecordingP2PClient{
+		failuresByPeer:  make(map[string]int),
+		errorMsgsByPeer: make(map[string]string),
+	}
+}
+
+func (r *peerFailureRecordingP2PClient) RecordCatchupFailureWithKind(_ context.Context, peerID, _, _ string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.failuresByPeer[peerID]++
+
+	return nil
+}
+
+func (r *peerFailureRecordingP2PClient) UpdateCatchupError(_ context.Context, peerID string, errorMsg string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.errorMsgsByPeer[peerID] = errorMsg
+
+	return nil
+}
+
+// TestReleaseCatchupLock_ExternalErrorChargesOnlyTheFailingPeers covers issue-1368
+// Defect B: an all-peers-failed subtree error used to fall through to
+// "unknown_error" with isPeerError=true, charging the catchup primary for another
+// peer's failure. The primary must be charged only if it actually failed, each
+// failing peer must get its own error text, and the classification must be explicit.
+func TestReleaseCatchupLock_ExternalErrorChargesOnlyTheFailingPeers(t *testing.T) {
+	server, _, _, cleanup := setupTestCatchupServer(t)
+	defer cleanup()
+
+	recorder := newPeerFailureRecordingP2PClient()
+	server.p2pClient = recorder
+
+	header := testhelpers.CreateTestHeaders(t, 1)[0]
+	ctx := &CatchupContext{
+		blockUpTo: &model.Block{Header: header, Height: 1000},
+		baseURL:   "http://healthy-primary:8000",
+		peerID:    "healthy-primary",
+		startTime: time.Now(),
+	}
+
+	require.NoError(t, server.acquireCatchupLock(ctx))
+
+	// Only this peer actually failed — twice, from two concurrent subtree fetches.
+	server.recordCatchupPeerFailure("broken-peer", errors.NewNotFoundError("status code [404] subtree not found"))
+	server.recordCatchupPeerFailure("broken-peer", errors.NewNotFoundError("status code [404] subtree not found"))
+
+	relErr := error(errors.NewExternalError("all 2 peer attempts failed to fetch subtree abc [primary healthy-primary (http://healthy-primary:8000)=empty body; alternative broken-peer (http://broken:8000)=404]"))
+	server.releaseCatchupLock(ctx, &relErr)
+
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+
+	require.Equal(t, 0, recorder.failuresByPeer["healthy-primary"], "the primary must not be charged for another peer's failure")
+	require.Equal(t, 1, recorder.failuresByPeer["broken-peer"], "each failing peer is charged exactly once per cycle")
+	require.Contains(t, recorder.errorMsgsByPeer["broken-peer"], "404", "each peer stores its own error, not another peer's")
+	require.Empty(t, recorder.errorMsgsByPeer["healthy-primary"])
+
+	status := server.getCatchupStatusInternal()
+	require.NotNil(t, status.PreviousAttempt)
+	require.Equal(t, "peer_data_unavailable", status.PreviousAttempt.ErrorType)
+	require.Contains(t, status.PreviousAttempt.ErrorMessage, "broken-peer", "the dashboard keeps the full per-peer summary")
+}

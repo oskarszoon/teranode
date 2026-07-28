@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -55,6 +56,15 @@ type CatchupContext struct {
 	highestCheckpointHeight uint32 // Highest checkpoint height for validation checks
 	catchupError            error  // Any error encountered during catchup
 	incompleteBlockHash     string // Block hash reported when a peer serves an incomplete block
+
+	// failedPeers records the peers that actually failed to serve data during this
+	// catchup cycle, deduplicated by peer ID (last error message wins). Written from
+	// concurrent per-subtree fetch goroutines via recordCatchupPeerFailure and drained
+	// by releaseCatchupLock, which charges each of them once. Deduplication keeps
+	// CatchupFailures from exceeding CatchupAttempts when several concurrent subtree
+	// fetches fail against the same peer.
+	failedPeersMu sync.Mutex
+	failedPeers   map[string]string
 
 	// Performance monitoring and dynamic peer switching
 	performanceMonitor   *CatchupPerformanceMonitor
@@ -366,6 +376,7 @@ func (u *Server) releaseCatchupLock(ctx *CatchupContext, err *error) {
 		peerID                string
 		errorMsg              string
 		incompleteBlockHash   string
+		failedPeers           map[string]string
 	)
 
 	// Capture failure details for dashboard before clearing context
@@ -383,6 +394,16 @@ func (u *Server) releaseCatchupLock(ctx *CatchupContext, err *error) {
 			errorType = "validation_failure"
 			// Mark peer as malicious for validation failure (reported after unlock)
 			reportMalicious = true
+		case errors.Is(*err, errors.ErrExternal):
+			// Every peer attempt failed to fetch subtree data. The individual failures
+			// were already attributed to the peers that produced them
+			// (recordCatchupPeerFailure), so charging the catchup primary here as well
+			// would penalize a healthy peer for another peer's failure — the 0%-success
+			// symptom in issue 1368. Must precede the IsNetworkError case: one peer's
+			// connection error inside the chain would otherwise classify the whole
+			// all-peers-failed error as a network error against the primary.
+			errorType = "peer_data_unavailable"
+			isPeerError = false
 		case errors.IsNetworkError(*err):
 			errorType = "network_error"
 		case strings.Contains(errorMsg, "secret mining") || strings.Contains(errorMsg, "secretly mined"):
@@ -418,6 +439,15 @@ func (u *Server) releaseCatchupLock(ctx *CatchupContext, err *error) {
 			incompleteBlockHash = ctx.incompleteBlockHash
 		}
 
+		ctx.failedPeersMu.Lock()
+		if len(ctx.failedPeers) > 0 {
+			failedPeers = make(map[string]string, len(ctx.failedPeers))
+			for id, msg := range ctx.failedPeers {
+				failedPeers[id] = msg
+			}
+		}
+		ctx.failedPeersMu.Unlock()
+
 		u.previousCatchupAttempt = &PreviousAttempt{
 			PeerID:            ctx.peerID,
 			PeerURL:           ctx.baseURL,
@@ -446,9 +476,16 @@ func (u *Server) releaseCatchupLock(ctx *CatchupContext, err *error) {
 	// Make the fire-and-forget reputation gRPC calls outside the lock with a bounded
 	// context, so a stalled P2P service can neither hold activeCatchupCtxMu nor outlive
 	// shutdown. These are best-effort; failures are logged inside the helpers.
-	if reportMalicious || reportPeerErr || reportIncompleteBlock {
+	if reportMalicious || reportPeerErr || reportIncompleteBlock || len(failedPeers) > 0 {
 		rpcCtx, cancel := context.WithTimeout(context.Background(), catchupReputationReportTimeout)
 		defer cancel()
+
+		// Charge each peer that actually failed to serve data, once, with its own
+		// error text (issue 1368: a healthy peer used to carry another peer's 404).
+		for failedPeerID, failedMsg := range failedPeers {
+			u.reportCatchupFailure(rpcCtx, failedPeerID)
+			u.reportCatchupError(rpcCtx, failedPeerID, failedMsg)
+		}
 
 		if reportMalicious {
 			u.reportCatchupMalicious(rpcCtx, peerID, "validation_failure")
@@ -480,6 +517,32 @@ func (u *Server) releaseCatchupLock(ctx *CatchupContext, err *error) {
 	if prometheusCatchupDuration != nil {
 		prometheusCatchupDuration.WithLabelValues(ctx.baseURL, success).Observe(time.Since(ctx.startTime).Seconds())
 	}
+}
+
+// recordCatchupPeerFailure attributes a data-serving failure to the peer that caused
+// it, for the current catchup cycle. Best-effort: with no active catchup context
+// (e.g. a direct block fetch outside catchup) the call is a no-op.
+func (u *Server) recordCatchupPeerFailure(peerID string, err error) {
+	if peerID == "" || err == nil {
+		return
+	}
+
+	u.activeCatchupCtxMu.RLock()
+	catchupCtx := u.activeCatchupCtx
+	u.activeCatchupCtxMu.RUnlock()
+
+	if catchupCtx == nil {
+		return
+	}
+
+	catchupCtx.failedPeersMu.Lock()
+	defer catchupCtx.failedPeersMu.Unlock()
+
+	if catchupCtx.failedPeers == nil {
+		catchupCtx.failedPeers = make(map[string]string)
+	}
+
+	catchupCtx.failedPeers[peerID] = err.Error()
 }
 
 // fetchHeaders retrieves block headers from the peer using block locator pattern.

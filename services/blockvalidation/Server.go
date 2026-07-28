@@ -1811,10 +1811,17 @@ func (u *Server) processCatchupChItem(ctx context.Context, c processBlockCatchup
 			u.logger.Warnf("[catchup] All peers failed for block %s (attempt %d/%d), clearing markers and reporting peer failure to allow retry from a different peer: %v", c.block.Hash().String(), attempts, u.settings.BlockValidation.CatchupMaxAttemptsPerBlock, err)
 			u.processBlockNotify.Delete(*c.block.Hash())
 			u.catchupAlternatives.Delete(*c.block.Hash())
-			u.reportCatchupFailure(ctx, c.peerID)
 
-			if reportErr := u.blockchainClient.ReportPeerFailure(ctx, c.block.Hash(), c.peerID, "catchup", err.Error()); reportErr != nil {
-				u.logger.Errorf("[catchup] failed to report peer failure for block %s peer %s: %v", c.block.Hash().String(), c.peerID, reportErr)
+			// Peers that actually failed were charged individually at the point of
+			// failure (recordCatchupPeerFailure / markCatchupFailureReported). Charging
+			// c.peerID here would blame the catchup primary for another peer's failure,
+			// which is what drove healthy peers to 0% success in issue 1368.
+			u.reportCatchupFailureForError(ctx, c.peerID, err)
+
+			if !catchupFailureAlreadyReported(err) {
+				if reportErr := u.blockchainClient.ReportPeerFailure(ctx, c.block.Hash(), c.peerID, "catchup", err.Error()); reportErr != nil {
+					u.logger.Errorf("[catchup] failed to report peer failure for block %s peer %s: %v", c.block.Hash().String(), c.peerID, reportErr)
+				}
 			}
 
 			return

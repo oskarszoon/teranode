@@ -652,13 +652,27 @@ func (u *Server) fetchSubtreeAndDataFromPeer(ctx context.Context, block *model.B
 func (u *Server) tryPeerForSubtree(ctx context.Context, block *model.Block, subtreeHash *chainhash.Hash,
 	peerID, baseURL string) error {
 	err := u.fetchSubtreeAndDataFromPeer(ctx, block, subtreeHash, peerID, baseURL, false)
-	if err == nil || !isCacheBypassRetryable(err) {
+	if err == nil {
+		return nil
+	}
+
+	if !isCacheBypassRetryable(err) {
+		// A local failure is ours, not the peer's — do not charge the peer for it.
+		if !errors.IsLocalError(err) {
+			u.recordCatchupPeerFailure(peerID, err)
+		}
+
 		return err
 	}
 
 	u.logger.Warnf("[catchup:fetchAndStoreSubtreeAndSubtreeData] Peer %s served an unusable response for subtree %s, retrying with cache bypass: %v", peerID, subtreeHash.String(), err)
 
-	return u.fetchSubtreeAndDataFromPeer(ctx, block, subtreeHash, peerID, baseURL, true)
+	bypassErr := u.fetchSubtreeAndDataFromPeer(ctx, block, subtreeHash, peerID, baseURL, true)
+	if bypassErr != nil {
+		u.recordCatchupPeerFailure(peerID, bypassErr)
+	}
+
+	return bypassErr
 }
 
 // fetchAndStoreSubtreeAndSubtreeData fetches both subtree and subtreeData for a single subtree hash
@@ -747,7 +761,7 @@ func (u *Server) fetchAndStoreSubtreeAndSubtreeData(ctx context.Context, block *
 	// so no attempt is lost (issue 1368, Defect A — a single lastErr variable used to
 	// be overwritten by each alternative, so the reported cause was whichever
 	// alternative failed last, unrelated to the primary).
-	return "", errors.NewExternalError("[catchup:fetchAndStoreSubtreeAndSubtreeData] all %d peer attempts failed to fetch subtree %s [%s]", len(attempts), subtreeHash.String(), formatSubtreeFetchAttempts(attempts), primaryErr)
+	return "", markCatchupFailureReported(errors.NewExternalError("[catchup:fetchAndStoreSubtreeAndSubtreeData] all %d peer attempts failed to fetch subtree %s [%s]", len(attempts), subtreeHash.String(), formatSubtreeFetchAttempts(attempts), primaryErr))
 }
 
 // fetchSubtreeFromPeer fetches subtree (for subtreeToCheck) from a peer via HTTP
