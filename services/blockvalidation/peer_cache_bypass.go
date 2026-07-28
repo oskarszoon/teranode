@@ -2,6 +2,7 @@ package blockvalidation
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	"github.com/bsv-blockchain/teranode/errors"
@@ -112,4 +113,30 @@ func newPoisonedSubtreeDataError(peerID, baseURL string, subtreeHash *chainhash.
 	e.SetData(cacheBypassRetryableKey, true)
 
 	return e
+}
+
+// subtreeFetchAttempt records one peer's attempt at serving a subtree, so an
+// all-peers-failed error can name every peer and its own failure instead of only the
+// last one tried.
+type subtreeFetchAttempt struct {
+	peerID  string
+	baseURL string
+	role    string // "primary" or "alternative"
+	err     error
+}
+
+// formatSubtreeFetchAttempts renders attempts as a single-line, semicolon-separated
+// summary for inclusion in an error message and the dashboard's catchup details.
+func formatSubtreeFetchAttempts(attempts []subtreeFetchAttempt) string {
+	if len(attempts) == 0 {
+		return ""
+	}
+
+	parts := make([]string, 0, len(attempts))
+
+	for _, attempt := range attempts {
+		parts = append(parts, fmt.Sprintf("%s %s (%s)=%v", attempt.role, attempt.peerID, attempt.baseURL, attempt.err))
+	}
+
+	return strings.Join(parts, "; ")
 }

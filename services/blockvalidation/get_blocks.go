@@ -689,6 +689,9 @@ func (u *Server) fetchAndStoreSubtreeAndSubtreeData(ctx context.Context, block *
 
 	primaryErr := err
 
+	attempts := make([]subtreeFetchAttempt, 0, 4)
+	attempts = append(attempts, subtreeFetchAttempt{peerID: peerID, baseURL: baseURL, role: "primary", err: err})
+
 	if u.p2pClient != nil {
 		alternativePeers, getPeersErr := GetPeersAtMaxHeight(ctx, u.logger, u.p2pClient, peerID)
 		if getPeersErr != nil {
@@ -712,6 +715,8 @@ func (u *Server) fetchAndStoreSubtreeAndSubtreeData(ctx context.Context, block *
 
 				u.logger.Warnf("[catchup:fetchAndStoreSubtreeAndSubtreeData] Alternative peer %s failed for subtree %s: %v", altPeerID, subtreeHash.String(), altErr)
 
+				attempts = append(attempts, subtreeFetchAttempt{peerID: altPeerID, baseURL: altBaseURL, role: "alternative", err: altErr})
+
 				if errors.IsLocalError(altErr) {
 					return "", errors.NewServiceError("[catchup:fetchAndStoreSubtreeAndSubtreeData] Local error fetching subtree %s (aborting peer retry)", subtreeHash.String(), altErr)
 				}
@@ -726,7 +731,7 @@ func (u *Server) fetchAndStoreSubtreeAndSubtreeData(ctx context.Context, block *
 	// into a silent "clear markers, retry" loop that hides peer-data-quality issues.
 	// With ErrExternal the handler reports peer failure and lets P2P switch peers instead.
 	//
-	// Note on detection: lastErr usually carries ERR_SERVICE_ERROR (the per-peer HTTP
+	// Note on detection: primaryErr usually carries ERR_SERVICE_ERROR (the per-peer HTTP
 	// fetch wrappers), and callers wrap this error further (fetchSubtreeDataForBlock
 	// adds a ServiceError, orderedDelivery a ProcessingError), so by the time it
 	// reaches processCatchupChItem the ERR_EXTERNAL code sits mid-chain and
@@ -734,9 +739,15 @@ func (u *Server) fetchAndStoreSubtreeAndSubtreeData(ctx context.Context, block *
 	// ErrExternal before ErrServiceError — see processCatchupChItem.
 	//
 	// errors.NewExternalError extracts the trailing error param as the wrapped error,
-	// so a "%v" placeholder for lastErr would render as %!v(MISSING). The wrapped error
-	// is preserved in the chain.
-	return "", errors.NewExternalError("[catchup:fetchAndStoreSubtreeAndSubtreeData] All peers failed to fetch subtree %s", subtreeHash.String(), primaryErr)
+	// so a "%v" placeholder for primaryErr would render as %!v(MISSING). The wrapped
+	// error is preserved in the chain.
+	//
+	// The wrapped cause is the PRIMARY's error: it is the peer catchup selected and
+	// the most relevant single reason. The full per-peer summary rides in the message
+	// so no attempt is lost (issue 1368, Defect A — a single lastErr variable used to
+	// be overwritten by each alternative, so the reported cause was whichever
+	// alternative failed last, unrelated to the primary).
+	return "", errors.NewExternalError("[catchup:fetchAndStoreSubtreeAndSubtreeData] all %d peer attempts failed to fetch subtree %s [%s]", len(attempts), subtreeHash.String(), formatSubtreeFetchAttempts(attempts), primaryErr)
 }
 
 // fetchSubtreeFromPeer fetches subtree (for subtreeToCheck) from a peer via HTTP

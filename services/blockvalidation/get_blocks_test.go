@@ -3716,3 +3716,51 @@ func TestFetchAndStoreSubtreeAndSubtreeData_CacheBypassRetry(t *testing.T) {
 	require.Equal(t, 1, counts["GET "+poisonedURL], "the poisoned URL must be requested exactly once")
 	require.Equal(t, 1, counts["GET "+bustedURL], "the bypass retry must fire exactly once")
 }
+
+// TestFetchAndStoreSubtreeAndSubtreeData_AllPeersFailedErrorNamesEveryPeer covers
+// issue-1368 Defect A: the reported cause used to be whichever alternative failed
+// last, so an operator saw an unrelated peer's error. Every attempt must appear, and
+// the wrapped cause must be the primary's error.
+func TestFetchAndStoreSubtreeAndSubtreeData_AllPeersFailedErrorNamesEveryPeer(t *testing.T) {
+	baseURL := "http://primary-peer:8000"
+	peerID := "12D3KooWL1NF6fdTJ9cucEuwvuX8V8KtpJZZnUE4umdLBuK15eUZ"
+	ctx := context.Background()
+
+	subtreeHash := chainhash.HashH([]byte("subtree-1368-defect-a"))
+
+	server := &Server{
+		logger:       ulogger.TestLogger{},
+		subtreeStore: memory.New(),
+		settings:     test.CreateBaseTestSettings(t),
+	}
+
+	httpmock.ActivateNonDefault(util.HTTPClient())
+	defer httpmock.DeactivateAndReset()
+
+	// No p2pClient, so there are no alternatives: the primary's error must survive.
+	httpmock.RegisterResponder("GET",
+		fmt.Sprintf("%s/subtree/%s", baseURL, subtreeHash.String()),
+		httpmock.NewStringResponder(404, `{"message":"NOT_FOUND (3): subtree not found"}`))
+
+	_, err := server.fetchAndStoreSubtreeAndSubtreeData(ctx, &model.Block{Height: 100}, &subtreeHash, peerID, baseURL)
+	require.Error(t, err)
+	require.True(t, errors.Is(err, errors.ErrExternal))
+	require.Contains(t, err.Error(), "primary "+peerID, "the primary attempt must be named in the summary")
+	require.Contains(t, err.Error(), baseURL)
+	require.Contains(t, err.Error(), "404")
+}
+
+func TestFormatSubtreeFetchAttempts(t *testing.T) {
+	attempts := []subtreeFetchAttempt{
+		{peerID: "peer-a", baseURL: "http://a:8000", role: "primary", err: errors.NewNotFoundError("404 from a")},
+		{peerID: "peer-b", baseURL: "http://b:8000", role: "alternative", err: errors.NewExternalError("empty body from b")},
+	}
+
+	got := formatSubtreeFetchAttempts(attempts)
+	require.Contains(t, got, "primary peer-a (http://a:8000)=")
+	require.Contains(t, got, "404 from a")
+	require.Contains(t, got, "alternative peer-b (http://b:8000)=")
+	require.Contains(t, got, "empty body from b")
+	require.Contains(t, got, "; ", "attempts must be separated so each is readable in one log line")
+	require.Empty(t, formatSubtreeFetchAttempts(nil))
+}
