@@ -1523,7 +1523,7 @@ func TestSubtreeFunctions(t *testing.T) {
 			fmt.Sprintf("http://test-peer/subtree_data/%s", subtreeHash.String()),
 			httpmock.NewBytesResponder(200, expectedData))
 
-		reader, err := suite.Server.fetchSubtreeDataFromPeer(suite.Ctx, subtreeHash, "test-peer-id", "http://test-peer")
+		reader, err := suite.Server.fetchSubtreeDataFromPeer(suite.Ctx, subtreeHash, "test-peer-id", "http://test-peer", false)
 		assert.NoError(t, err)
 		assert.NotNil(t, reader)
 		defer reader.Close()
@@ -1547,7 +1547,7 @@ func TestSubtreeFunctions(t *testing.T) {
 			fmt.Sprintf("http://test-peer/subtree_data/%s", subtreeHash.String()),
 			httpmock.NewStringResponder(404, "Not Found"))
 
-		result, err := suite.Server.fetchSubtreeDataFromPeer(suite.Ctx, subtreeHash, "test-peer-id", "http://test-peer")
+		result, err := suite.Server.fetchSubtreeDataFromPeer(suite.Ctx, subtreeHash, "test-peer-id", "http://test-peer", false)
 		assert.Error(t, err)
 		assert.Nil(t, result)
 		assert.Contains(t, err.Error(), "failed to fetch subtree data from")
@@ -1566,7 +1566,7 @@ func TestSubtreeFunctions(t *testing.T) {
 			fmt.Sprintf("http://test-peer/subtree_data/%s", subtreeHash.String()),
 			httpmock.NewBytesResponder(200, []byte{}))
 
-		reader, err := suite.Server.fetchSubtreeDataFromPeer(suite.Ctx, subtreeHash, "test-peer-id", "http://test-peer")
+		reader, err := suite.Server.fetchSubtreeDataFromPeer(suite.Ctx, subtreeHash, "test-peer-id", "http://test-peer", false)
 		// Empty response is not an error for the fetcher - it just returns an empty reader
 		assert.NoError(t, err)
 		assert.NotNil(t, reader)
@@ -2614,7 +2614,7 @@ func TestFetchSubtreeDataFromPeer(t *testing.T) {
 		httpmock.RegisterResponder("GET", subtreeDataURL,
 			httpmock.NewBytesResponder(200, expectedData))
 
-		reader, err := server.fetchSubtreeDataFromPeer(ctx, subtreeHash, "test-peer-id", baseURL)
+		reader, err := server.fetchSubtreeDataFromPeer(ctx, subtreeHash, "test-peer-id", baseURL, false)
 		assert.NoError(t, err)
 		assert.NotNil(t, reader)
 		defer reader.Close()
@@ -2632,7 +2632,7 @@ func TestFetchSubtreeDataFromPeer(t *testing.T) {
 		httpmock.RegisterResponder("GET", subtreeDataURL,
 			httpmock.NewErrorResponder(errors.NewNetworkError("HTTP request failed")))
 
-		data, err := server.fetchSubtreeDataFromPeer(ctx, subtreeHash, "test-peer-id", baseURL)
+		data, err := server.fetchSubtreeDataFromPeer(ctx, subtreeHash, "test-peer-id", baseURL, false)
 		assert.Error(t, err)
 		assert.Nil(t, data)
 		assert.Contains(t, err.Error(), "failed to fetch subtree data from")
@@ -2645,7 +2645,7 @@ func TestFetchSubtreeDataFromPeer(t *testing.T) {
 		httpmock.RegisterResponder("GET", subtreeDataURL,
 			httpmock.NewBytesResponder(200, []byte{})) // Empty response
 
-		reader, err := server.fetchSubtreeDataFromPeer(ctx, subtreeHash, "test-peer-id", baseURL)
+		reader, err := server.fetchSubtreeDataFromPeer(ctx, subtreeHash, "test-peer-id", baseURL, false)
 		// Empty response is not an error for the fetcher - it just returns an empty reader
 		assert.NoError(t, err)
 		assert.NotNil(t, reader)
@@ -2677,7 +2677,7 @@ func TestFetchSubtreeDataFromPeer(t *testing.T) {
 		cancelCtx, cancel := context.WithCancel(ctx)
 		cancel() // Cancel immediately
 
-		data, err := server.fetchSubtreeDataFromPeer(cancelCtx, subtreeHash, "test-peer-id", baseURL)
+		data, err := server.fetchSubtreeDataFromPeer(cancelCtx, subtreeHash, "test-peer-id", baseURL, false)
 		assert.Error(t, err)
 		assert.Nil(t, data)
 		// Check for either context canceled or the wrapped error containing context cancellation
@@ -3392,7 +3392,7 @@ func TestFetchAndStoreSubtreeDataEdgeCases(t *testing.T) {
 		}
 
 		// This should skip fetching since data already exists
-		err = suite.Server.fetchAndStoreSubtreeData(suite.Ctx, testBlock, &subtreeHash, subtree, "12D3KooWL1NF6fdTJ9cucEuwvuX8V8KtpJZZnUE4umdLBuK15eUZ", "http://test-peer")
+		err = suite.Server.fetchAndStoreSubtreeData(suite.Ctx, testBlock, &subtreeHash, subtree, "12D3KooWL1NF6fdTJ9cucEuwvuX8V8KtpJZZnUE4umdLBuK15eUZ", "http://test-peer", false)
 		assert.NoError(t, err)
 	})
 }
@@ -3567,4 +3567,90 @@ func TestBlockvalidation_AdaptiveFetch_PessToOptToPess(t *testing.T) {
 	})
 	require.Equal(t, adaptivefetch.ModePessimistic, af.Mode(),
 		"single 500-miss optimistic block must trip back to pessimistic")
+}
+
+// TestFetchAndStoreSubtreeData_PoisonedResponses covers issue 1368: a peer that
+// answers subtree_data with 200 and an empty (or truncated) body must produce a
+// distinct, peer-attributed error rather than a generic parse failure.
+func TestFetchAndStoreSubtreeData_PoisonedResponses(t *testing.T) {
+	baseURL := "http://poisoned-peer:8000"
+	peerID := "12D3KooWL1NF6fdTJ9cucEuwvuX8V8KtpJZZnUE4umdLBuK15eUZ"
+	ctx := context.Background()
+
+	txs := transactions.CreateTestTransactionChainWithCount(t, 5)
+
+	subtree, err := subtreepkg.NewIncompleteTreeByLeafCount(4)
+	require.NoError(t, err)
+	require.NoError(t, subtree.AddCoinbaseNode())
+	require.NoError(t, subtree.AddNode(*txs[1].TxIDChainHash(), 1, 11))
+	require.NoError(t, subtree.AddNode(*txs[2].TxIDChainHash(), 2, 12))
+	require.NoError(t, subtree.AddNode(*txs[3].TxIDChainHash(), 3, 13))
+
+	subtreeHash := subtree.RootHash()
+	subtreeDataURL := fmt.Sprintf("%s/subtree_data/%s", baseURL, subtreeHash.String())
+	testBlock := &model.Block{Height: 100}
+
+	newServer := func() *Server {
+		return &Server{
+			logger:       ulogger.TestLogger{},
+			subtreeStore: memory.New(),
+			settings:     test.CreateBaseTestSettings(t),
+		}
+	}
+
+	t.Run("EmptyBodyIsAPeerFailure", func(t *testing.T) {
+		server := newServer()
+		httpmock.ActivateNonDefault(util.HTTPClient())
+		defer httpmock.DeactivateAndReset()
+
+		httpmock.RegisterResponder("GET", subtreeDataURL, httpmock.NewBytesResponder(200, []byte{}))
+
+		err := server.fetchAndStoreSubtreeData(ctx, testBlock, subtreeHash, subtree, peerID, baseURL, false)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "served empty subtree_data")
+		require.Contains(t, err.Error(), peerID)
+		require.Contains(t, err.Error(), baseURL)
+		require.True(t, errors.Is(err, errors.ErrExternal))
+		require.False(t, errors.IsLocalError(err), "must not short-circuit the alternative-peer loop")
+		require.True(t, isCacheBypassRetryable(err))
+	})
+
+	t.Run("TruncatedBodyIsAPeerFailure", func(t *testing.T) {
+		server := newServer()
+		httpmock.ActivateNonDefault(util.HTTPClient())
+		defer httpmock.DeactivateAndReset()
+
+		// Only the coinbase and the first tx — the subtree needs four. txs[0] is the
+		// coinbase (the pre-existing TestFetchAndStoreSubtreeData relies on that, since
+		// AddTx(txs[0], 0) only succeeds for a coinbase at the placeholder node).
+		truncated := append(txs[0].SerializeBytes(), txs[1].SerializeBytes()...)
+
+		httpmock.RegisterResponder("GET", subtreeDataURL, httpmock.NewBytesResponder(200, truncated))
+
+		err := server.fetchAndStoreSubtreeData(ctx, testBlock, subtreeHash, subtree, peerID, baseURL, false)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "served incomplete subtree_data")
+		require.True(t, isCacheBypassRetryable(err))
+	})
+
+	t.Run("CoinbaseOnlySubtreeWithNoDataIsNotFlagged", func(t *testing.T) {
+		// A subtree whose only node is the coinbase placeholder has no required tx
+		// data (go-subtree's Serialize exempts index 0), so an empty body here must
+		// NOT be treated as poisoned.
+		server := newServer()
+		httpmock.ActivateNonDefault(util.HTTPClient())
+		defer httpmock.DeactivateAndReset()
+
+		coinbaseOnly, err := subtreepkg.NewIncompleteTreeByLeafCount(1)
+		require.NoError(t, err)
+		require.NoError(t, coinbaseOnly.AddCoinbaseNode())
+
+		coinbaseHash := coinbaseOnly.RootHash()
+		httpmock.RegisterResponder("GET",
+			fmt.Sprintf("%s/subtree_data/%s", baseURL, coinbaseHash.String()),
+			httpmock.NewBytesResponder(200, []byte{}))
+
+		err = server.fetchAndStoreSubtreeData(ctx, testBlock, coinbaseHash, coinbaseOnly, peerID, baseURL, false)
+		require.NoError(t, err)
+	})
 }
