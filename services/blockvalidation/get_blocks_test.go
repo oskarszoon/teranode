@@ -3653,6 +3653,40 @@ func TestFetchAndStoreSubtreeData_PoisonedResponses(t *testing.T) {
 		err = server.fetchAndStoreSubtreeData(ctx, testBlock, coinbaseHash, coinbaseOnly, peerID, baseURL, false)
 		require.NoError(t, err)
 	})
+
+	// The mirror image of the case above, and the reason index 0 cannot be exempted
+	// unconditionally. A non-first subtree of a block has no coinbase placeholder, so a
+	// subtree with exactly one node (any block whose tx count is congruent to 1 modulo
+	// the subtree size) has a real tx hash at index 0. go-subtree's Data.Serialize sets
+	// txStartIndex = 0 in that case and guards its own nil check with i != 0, so it
+	// dereferences a nil Txs[0] -- a remotely triggerable panic inside the per-subtree
+	// errgroup goroutine, which no recover() in this package covers. The predicate must
+	// therefore count a nil index 0 as missing unless the node really is the coinbase
+	// placeholder.
+	t.Run("SingleNonCoinbaseNodeWithEmptyBodyIsRejectedNotPanicking", func(t *testing.T) {
+		server := newServer()
+		httpmock.ActivateNonDefault(util.HTTPClient())
+		defer httpmock.DeactivateAndReset()
+
+		oneNode, err := subtreepkg.NewIncompleteTreeByLeafCount(1)
+		require.NoError(t, err)
+		require.NoError(t, oneNode.AddNode(*txs[1].TxIDChainHash(), 1, 11))
+		require.NotEqual(t, subtreepkg.CoinbasePlaceholderHashValue, oneNode.Nodes[0].Hash,
+			"precondition: index 0 must NOT be the coinbase placeholder")
+
+		oneNodeHash := oneNode.RootHash()
+		httpmock.RegisterResponder("GET",
+			fmt.Sprintf("%s/subtree_data/%s", baseURL, oneNodeHash.String()),
+			httpmock.NewBytesResponder(200, []byte{}))
+
+		require.NotPanics(t, func() {
+			err = server.fetchAndStoreSubtreeData(ctx, testBlock, oneNodeHash, oneNode, peerID, baseURL, false)
+		})
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "served empty subtree_data")
+		require.True(t, errors.Is(err, errors.ErrExternal))
+		require.True(t, isCacheBypassRetryable(err))
+	})
 }
 
 // TestFetchAndStoreSubtreeAndSubtreeData_CacheBypassRetry covers the issue-1368
