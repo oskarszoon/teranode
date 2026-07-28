@@ -168,3 +168,44 @@ func TestStreamOrAbort_FailureConnIsActuallyClosed(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "still alive", string(body2))
 }
+
+// TestStreamOrAbort_EmptyBodyIsNotACommitted200 covers issue 1368: a source that
+// yields zero bytes must not be sent as "200 + empty body". A caching reverse proxy
+// stores that as a valid response and replays it for the whole TTL, which is what
+// stalled catchup on teratestnet.
+func TestStreamOrAbort_EmptyBodyIsNotACommitted200(t *testing.T) {
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	err := streamOrAbort(c, http.StatusOK, echo.MIMEOctetStream, bytes.NewReader(nil))
+
+	echoErr := &echo.HTTPError{}
+	require.True(t, errors.As(err, &echoErr), "an empty body must surface as an HTTP error, not a 200")
+	require.Equal(t, http.StatusInternalServerError, echoErr.Code)
+	require.False(t, c.Response().Committed, "the status line must not be committed for an empty body")
+	require.Empty(t, rec.Body.String())
+}
+
+// TestStreamOrAbort_SingleByteBodyStillSucceeds guards the boundary: the peeked byte
+// must be written, not swallowed.
+func TestStreamOrAbort_SingleByteBodyStillSucceeds(t *testing.T) {
+	e := echo.New()
+	e.GET("/x", func(c echo.Context) error {
+		return streamOrAbort(c, http.StatusOK, echo.MIMEOctetStream, strings.NewReader("A"))
+	})
+
+	srv := httptest.NewServer(e)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/x")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	got, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Equal(t, "A", string(got))
+}

@@ -2,7 +2,9 @@ package httpimpl
 
 import (
 	"io"
+	"net/http"
 
+	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/labstack/echo/v4"
 )
 
@@ -45,7 +47,10 @@ import (
 // echo signals "response already finalised, don't touch it." The error
 // from io.Copy is consumed inside this helper (an abrupt hijack + close
 // is sufficient signalling to the client, which will surface the
-// truncation as io.ErrUnexpectedEOF in its body parse).
+// truncation as io.ErrUnexpectedEOF in its body parse). A source that
+// yields zero bytes now returns an *echo.HTTPError with status 500 and
+// never commits a status line, so callers must not have written headers
+// before calling.
 //
 // # HTTP/2 limitation
 //
@@ -59,11 +64,31 @@ import (
 // hijack path is the one that runs; only a client (or caching proxy)
 // speaking h2 directly to the asset service hits the fallback.
 func streamOrAbort(c echo.Context, code int, contentType string, r io.Reader) error {
+	// Peek one byte BEFORE committing the status line. A source that yields zero bytes
+	// — an empty subtreeData file, or an on-demand generation that failed before its
+	// first write — would otherwise be sent as "200 OK + empty body", which a caching
+	// reverse proxy stores as a valid response and replays for the whole TTL. That is
+	// the poisoning in issue 1368: a 32768-byte subtree (1024 tx hashes) whose
+	// subtree_data came back 200 with content-length 0, cached, stalling every
+	// requester's catchup. None of the endpoints using this helper can legitimately
+	// return an empty body, so an empty source is a server-side fault: report it as
+	// 500, which the cache configuration (proxy_cache_valid 200 5m) never stores.
+	var first [1]byte
+
+	n, readErr := io.ReadFull(r, first[:])
+	if n == 0 {
+		if readErr == nil || errors.Is(readErr, io.EOF) || errors.Is(readErr, io.ErrUnexpectedEOF) {
+			return echo.NewHTTPError(http.StatusInternalServerError, "empty response body")
+		}
+
+		return echo.NewHTTPError(http.StatusInternalServerError, readErr.Error())
+	}
+
 	h := c.Response().Header()
 	h.Set(echo.HeaderContentType, contentType)
 	c.Response().WriteHeader(code)
 
-	_, copyErr := io.Copy(c.Response(), r)
+	copyErr := writeStreamRemainder(c, first[:n], r)
 	if copyErr == nil {
 		// Happy path — let echo / Go finalise the chunked stream normally.
 		return nil
@@ -78,8 +103,20 @@ func streamOrAbort(c echo.Context, code int, contentType string, r io.Reader) er
 	}
 
 	// Hijack unsupported (HTTP/2 — see the doc comment) — fall back to
-	// surfacing the io.Copy error so echo logs it. The response is already
+	// surfacing the copy error so echo logs it. The response is already
 	// committed, so echo's error handler won't write to it; the cache-bypass
 	// guarantee does not hold on this path.
 	return copyErr
+}
+
+// writeStreamRemainder writes the peeked prefix and then copies the rest of the
+// source to the response.
+func writeStreamRemainder(c echo.Context, prefix []byte, r io.Reader) error {
+	if _, err := c.Response().Write(prefix); err != nil {
+		return err
+	}
+
+	_, err := io.Copy(c.Response(), r)
+
+	return err
 }
