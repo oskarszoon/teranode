@@ -76,6 +76,16 @@ func streamOrAbort(c echo.Context, code int, contentType string, r io.Reader) er
 	// requester's catchup. None of the endpoints using this helper can legitimately
 	// return an empty body, so an empty source is a server-side fault: report it as
 	// 500, which the cache configuration (proxy_cache_valid 200 5m) never stores.
+	//
+	// Scope: the routes going through here are subtree_data, subtree in BINARY_STREAM
+	// mode, block_legacy (both URL shapes) and the mining-candidate legacy block. The
+	// subtree HEX route does NOT — it commits 200 and then copies into a hex encoder, so
+	// a zero-byte source there is still a committed empty 200. It is out of the cache's
+	// reach: asset-cache-nginx.conf's cached location regex is $-anchored on the hash, so
+	// /api/v1/subtree/<hash>/hex never matches it and is never stored. The endpoint
+	// families that regex does match besides these (header, headers, block, blocks,
+	// headers_{to,from}_common_ancestor) answer with c.Blob on a fully materialised
+	// slice, so they always carry a Content-Length and none of this applies to them.
 	var first [1]byte
 
 	// With a one-byte buffer io.ReadFull returns a nil error only when n == 1, and
