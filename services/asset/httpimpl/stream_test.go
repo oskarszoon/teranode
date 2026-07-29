@@ -16,19 +16,24 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// errReader returns the supplied prefix bytes once, then fails with the
-// supplied error on the next Read. Used to drive streamOrAbort's
+// errReader serves the supplied prefix bytes, across as many Reads as the caller's
+// buffers take, then fails with the supplied error. Used to drive streamOrAbort's
 // failure path with a deterministic mid-stream error.
+//
+// The prefix must survive a short read: streamOrAbort peeks with a one-byte buffer
+// before io.Copy takes over, so a reader that dropped its tail on the first short read
+// would silently degrade these tests to a one-byte body — a degenerate single-chunk
+// stream, leaving the multi-chunk truncation case they exist for uncovered.
 type errReader struct {
-	prefix   []byte
-	err      error
-	consumed bool
+	prefix []byte
+	err    error
 }
 
 func (e *errReader) Read(p []byte) (int, error) {
-	if !e.consumed {
+	if len(e.prefix) > 0 {
 		n := copy(p, e.prefix)
-		e.consumed = true
+		e.prefix = e.prefix[n:]
+
 		return n, nil
 	}
 
@@ -101,6 +106,34 @@ func TestStreamOrAbort_MidStreamFailure_ClientSeesUnexpectedEOF(t *testing.T) {
 	require.Error(t, readErr, "client must see a non-clean termination so caches refuse to store the truncated body")
 	assert.NotErrorIs(t, readErr, io.EOF,
 		"clean io.EOF would imply Go wrote the chunked terminator — this would let caching proxies store the truncated body")
+}
+
+// TestStreamOrAbort_MidStreamFailureWritesWholePrefix pins the multi-chunk shape of
+// the failure path where it can be asserted deterministically: server-side. How much
+// of the body reaches the client before the hijack-and-close is up to the kernel — an
+// abrupt close can discard the socket buffer — so the sibling test above cannot make
+// this claim without flaking. Here the response recorder keeps everything the helper
+// wrote, which catches both a peek that swallows its byte and a source reader that
+// drops its tail on the one-byte peek (which would degrade the mid-stream tests to a
+// degenerate single-chunk body).
+func TestStreamOrAbort_MidStreamFailureWritesWholePrefix(t *testing.T) {
+	prefix := bytes.Repeat([]byte{0xAB}, 256)
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	err := streamOrAbort(c, http.StatusOK, echo.MIMEOctetStream, &errReader{
+		prefix: prefix,
+		err:    errors.NewProcessingError("simulated mid-stream failure"),
+	})
+
+	// httptest.ResponseRecorder is not an http.Hijacker, so the helper takes the
+	// documented h2 fallback and surfaces the copy error instead of hijacking.
+	require.Error(t, err)
+	require.True(t, c.Response().Committed, "the status line is committed once a byte has been read")
+	require.Equal(t, prefix, rec.Body.Bytes(), "the peeked byte and the rest of the source must both be written")
 }
 
 // TestStreamOrAbort_NoHeaderOverwriteAfterCommit guards against a regression
