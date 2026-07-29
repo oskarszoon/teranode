@@ -92,9 +92,17 @@ func (h *HTTP) GetLegacyBlock() func(c echo.Context) error {
 		// ever closes the read end.
 		defer r.Close()
 
+		// Outcome counted after streaming — see the note in GetSubtreeData for why, and
+		// for which cases this still labels as OK.
+		if err := streamOrAbort(c, http.StatusOK, echo.MIMEOctetStream, r); err != nil {
+			prometheusAssetHTTPGetBlockLegacy.WithLabelValues("ERROR", http.StatusText(http.StatusInternalServerError)).Inc()
+
+			return err
+		}
+
 		prometheusAssetHTTPGetBlockLegacy.WithLabelValues("OK", "200").Inc()
 
-		return streamOrAbort(c, http.StatusOK, echo.MIMEOctetStream, r)
+		return nil
 	}
 }
 
@@ -152,8 +160,15 @@ func (h *HTTP) GetRestLegacyBlock() func(c echo.Context) error {
 		// goroutine when the response write failed and streamOrAbort hijacked.
 		defer r.Close()
 
+		// Outcome counted after streaming — see the note in GetSubtreeData.
+		if err := streamOrAbort(c, http.StatusOK, echo.MIMEOctetStream, r); err != nil {
+			prometheusAssetHTTPGetBlockLegacy.WithLabelValues("ERROR", http.StatusText(http.StatusInternalServerError)).Inc()
+
+			return err
+		}
+
 		prometheusAssetHTTPGetBlockLegacy.WithLabelValues("OK", "200").Inc()
 
-		return streamOrAbort(c, http.StatusOK, echo.MIMEOctetStream, r)
+		return nil
 	}
 }
