@@ -136,6 +136,50 @@ func TestStreamOrAbort_MidStreamFailureWritesWholePrefix(t *testing.T) {
 	require.Equal(t, prefix, rec.Body.Bytes(), "the peeked byte and the rest of the source must both be written")
 }
 
+// TestStreamOrAbort_CompleteStreamDependsOnHowTheProducerCloses documents the coupling
+// that made every successful block_legacy response take the abort path: the helper's
+// happy/failure decision is exactly how the producer closed its pipe, and a producer that
+// signals completion with CloseWithError(io.ErrClosedPipe) is indistinguishable from one
+// that failed mid-stream. That is why GetLegacyBlockReader's success paths must use
+// w.Close() — see TestGetLegacyBlockReader_SuccessEndsWithCleanEOF in the repository
+// package. A complete body plus an abort meant nginx saw "upstream prematurely closed
+// connection", never cached the block, and could turn a buffered 200 into a 502.
+func TestStreamOrAbort_CompleteStreamDependsOnHowTheProducerCloses(t *testing.T) {
+	body := bytes.Repeat([]byte{0xEE}, 512)
+
+	run := func(closeWriter func(w *io.PipeWriter)) (error, *httptest.ResponseRecorder) {
+		r, w := io.Pipe()
+
+		go func() {
+			_, _ = w.Write(body)
+			closeWriter(w)
+		}()
+
+		e := echo.New()
+		req := httptest.NewRequest(http.MethodGet, "/x", nil)
+		rec := httptest.NewRecorder()
+
+		return streamOrAbort(e.NewContext(req, rec), http.StatusOK, echo.MIMEOctetStream, r), rec
+	}
+
+	t.Run("clean close takes the happy path", func(t *testing.T) {
+		err, rec := run(func(w *io.PipeWriter) { _ = w.Close() })
+
+		require.NoError(t, err, "a completed stream must not be treated as a failure")
+		require.Equal(t, body, rec.Body.Bytes())
+	})
+
+	t.Run("success signalled as ErrClosedPipe is taken for a failure", func(t *testing.T) {
+		err, rec := run(func(w *io.PipeWriter) { _ = w.CloseWithError(io.ErrClosedPipe) })
+
+		// The whole body still arrives, which is what kept this invisible — but the helper
+		// aborts, and on a real connection that drops the chunked terminator.
+		// httptest.ResponseRecorder cannot hijack, so the error surfaces here instead.
+		require.Error(t, err)
+		require.Equal(t, body, rec.Body.Bytes())
+	})
+}
+
 // TestStreamOrAbort_NoHeaderOverwriteAfterCommit guards against a regression
 // where the helper might try to mutate headers after WriteHeader was
 // called — which Go silently drops and would mask other bugs. We assert
