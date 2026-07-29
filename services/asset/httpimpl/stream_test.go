@@ -2,6 +2,7 @@ package httpimpl
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -186,6 +187,80 @@ func TestStreamOrAbort_EmptyBodyIsNotACommitted200(t *testing.T) {
 	require.Equal(t, http.StatusInternalServerError, echoErr.Code)
 	require.False(t, c.Response().Committed, "the status line must not be committed for an empty body")
 	require.Empty(t, rec.Body.String())
+}
+
+// failFirstReader fails on the very first Read with the supplied error, emulating a
+// source whose producer aborted before writing a single byte — what a *io.PipeReader
+// returns once dualStreamWithFileCreation has called CloseWithError on the write end.
+type failFirstReader struct {
+	err error
+}
+
+func (f failFirstReader) Read([]byte) (int, error) {
+	return 0, f.err
+}
+
+// TestStreamOrAbort_ClientGoneBeforeFirstByte covers the peek's blast radius: a client
+// that disconnects before the source produced anything must not be reported as a server
+// fault. On the on-demand subtree_data path the cancelled request context surfaces as a
+// context error (or io.ErrClosedPipe) out of the peek, and returning a 500 there makes
+// customHTTPErrorHandler log an ERROR and then fail to write JSON to a peer that is
+// already gone — a second ERROR. Catchup cancels in batches, so that is two log lines
+// per cancelled in-flight stream on exactly the nodes an operator is diagnosing. The
+// repository does the opposite deliberately (dualStreamWithFileCreation classifies this
+// as "client gone" at debug level), so mirror it: hijack and close, no error surfaced,
+// and crucially no committed status line — an uncommitted response would otherwise be
+// finalised as the empty 200 this PR exists to prevent.
+func TestStreamOrAbort_ClientGoneBeforeFirstByte(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "closed pipe", err: io.ErrClosedPipe},
+		{name: "bare context cancellation", err: context.Canceled},
+		{name: "wrapped context cancellation", err: errors.NewProcessingError("write chunk", context.Canceled)},
+		{name: "deadline exceeded", err: context.DeadlineExceeded},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var (
+				handlerErr error
+				committed  bool
+				done       = make(chan struct{})
+			)
+
+			e := echo.New()
+			e.GET("/x", func(c echo.Context) error {
+				defer close(done)
+
+				handlerErr = streamOrAbort(c, http.StatusOK, echo.MIMEOctetStream, failFirstReader{err: tc.err})
+				committed = c.Response().Committed
+
+				return handlerErr
+			})
+
+			srv := httptest.NewServer(e)
+			defer srv.Close()
+
+			resp, err := http.Get(srv.URL + "/x") //nolint:bodyclose // closed below when non-nil
+			if err == nil {
+				defer resp.Body.Close()
+
+				require.NotEqual(t, http.StatusInternalServerError, resp.StatusCode,
+					"a client disconnect must not be answered with a server-fault status")
+				require.NotEqual(t, http.StatusOK, resp.StatusCode,
+					"an uncommitted response finalised as 200 with Content-Length: 0 is the bug being fixed")
+			}
+
+			<-done
+
+			require.NoError(t, handlerErr,
+				"a client disconnect must not reach echo's error handler, which logs it at ERROR twice")
+			require.False(t, committed,
+				"the status line must stay uncommitted so no cacheable empty 200 can be finalised")
+		})
+	}
 }
 
 // TestStreamOrAbort_SingleByteBodyStillSucceeds guards the boundary: the peeked byte

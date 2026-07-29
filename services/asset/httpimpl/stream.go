@@ -50,7 +50,10 @@ import (
 // truncation as io.ErrUnexpectedEOF in its body parse). A source that
 // yields zero bytes now returns an *echo.HTTPError with status 500 and
 // never commits a status line, so callers must not have written headers
-// before calling.
+// before calling. A client that disconnects before the first byte returns
+// nil through the same hijack-and-close, again without committing a status
+// line — that is a client fault, not a server one, and surfacing it as a
+// 500 would only log an error twice for a peer that is already gone.
 //
 // # HTTP/2 limitation
 //
@@ -75,9 +78,29 @@ func streamOrAbort(c echo.Context, code int, contentType string, r io.Reader) er
 	// 500, which the cache configuration (proxy_cache_valid 200 5m) never stores.
 	var first [1]byte
 
+	// With a one-byte buffer io.ReadFull returns a nil error only when n == 1, and
+	// io.ErrUnexpectedEOF only for 0 < n < 1 — impossible. So inside n == 0, readErr is
+	// always non-nil and the condition is simply "which failure": a client that went
+	// away, or an exhausted source. Grow the buffer and both assumptions break.
 	n, readErr := io.ReadFull(r, first[:])
 	if n == 0 {
-		if readErr == nil || errors.Is(readErr, io.EOF) || errors.Is(readErr, io.ErrUnexpectedEOF) {
+		// Client (or proxy) went away before the source produced anything. Not a server
+		// fault: the request context is cancelled, the producer returns ctx.Err() or the
+		// pipe is closed, and the blocked read above surfaces that. Answering 500 would
+		// make customHTTPErrorHandler log an ERROR and then fail to write JSON to a peer
+		// that is already gone — a second ERROR — for every cancelled in-flight stream,
+		// and catchup cancels in batches. Mirror the debug-level "client gone"
+		// segregation in dualStreamWithFileCreation instead: hijack and close, which
+		// leaves the response uncommitted so nothing cacheable is finalised.
+		if errors.IsContextError(readErr) || errors.Is(readErr, io.ErrClosedPipe) {
+			if conn, _, hjErr := c.Response().Hijack(); hjErr == nil {
+				_ = conn.Close()
+				return nil
+			}
+			// h2: no hijack available, fall through to the 500.
+		}
+
+		if errors.Is(readErr, io.EOF) {
 			return echo.NewHTTPError(http.StatusInternalServerError, "empty response body")
 		}
 
