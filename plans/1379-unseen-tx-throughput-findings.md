@@ -294,16 +294,16 @@ with `DATADIR` on the NVMe RAID0.
   **Jul 30 02:02** — well after the Jul 29 14:29 incident.
 - The node now runs **v0.16.0-beta-9**; the incident was on beta-1.
 
-### The monitoring stack is not actually running
+### The monitoring stack was not actually running (since fixed)
 
-Both containers exited ~2 minutes after being started:
+Resolved — see follow-up 3. Recorded here as found. Both containers had exited ~2 minutes after being started:
 
 ```
 prometheus  Exited (2)   open /etc/prometheus/prometheus.yml: permission denied
 grafana     Exited (1)   open /etc/grafana/provisioning/dashboards/main.yaml: permission denied
 ```
 
-Cause is bind-mount permissions, not config content. `config/` and
+Cause was bind-mount permissions, not config content. `config/` and
 `config/grafana_dashboards/` are `drwxrwx--- ubuntu:ubuntu` and the mounted files
 are `-rw-rw---- ubuntu:ubuntu`, while `prom/prometheus:v2.44.0` runs as uid 65534
 and `grafana:12.2.0` as uid 472 — neither can traverse the directory or read the
