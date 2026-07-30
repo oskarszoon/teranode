@@ -37,7 +37,7 @@ Reduced scale: 1,587 txs, same 25-level depth and wide-head/thin-tail character.
 | **single flat level (same tx count)** | **16,404** | **+891%** |
 | batcher timers 10 ms → 1 ms | 2,118 | +28% |
 | block assembly disabled (no insert, no 2PC) | 1,912 | +16% |
-| external parents (40 KB, above the 32 KB threshold) | 1,621 | −2% |
+| external parents (40 KB) — **INVALID, see follow-up** | 1,621 | −2% |
 | `inputsPerTx` = 4 | 1,370 | −17% |
 | `inputsPerTx` = 16 | 1,303 | −21% |
 
@@ -101,17 +101,7 @@ repo and the issue:
 Issue ask 2 (ship node metrics) moves from "would be nice" to the thing that
 would have answered this outright.
 
-### Two suspicions from code reading, killed
-
-**External-store parents are not the local bottleneck.** `BatchDecorate`
-(`stores/utxo/aerospike/get.go:697-742`) does walk batch results serially and
-call `GetTxFromExternalStore` inline, so N external parents in a level cost N
-sequential blob reads. With a local-file external store that measured −2%, i.e.
-free. It stays a latent risk for any node whose external store is S3-backed —
-where each of those reads is a network round trip, and
-`getExternalTransaction` (`get.go:1628-1637`) tries `FileTypeTx` first and only
-falls back to `FileTypeOutputs`, so outputs-only parents pay a wasted lookup
-first — but it is not what happened here.
+### One suspicion from code reading, killed
 
 **Parent fan-out is not the driver.** Raising inputs per transaction from 1 to 4
 cost 17%, and 4 to 16 only a further 4%. Sublinear, so distinct-parent resolution
@@ -141,8 +131,8 @@ Ordered by the evidence, not by ease:
    be available in production logs.
 4. **Dedupe concurrent legacy block deliveries** (issue ask 3) — unchanged by
    these findings, still a ~3x waste reduction independent of the per-level cost.
-5. Parallelise the external fetch loop in `BatchDecorate` — not this incident,
-   but a real cliff for any S3-backed deployment.
+5. Parallelise the external fetch loop in `BatchDecorate`. **Superseded — see the
+   follow-up section, which promotes this to a primary candidate.**
 
 ## Harness caveats
 
