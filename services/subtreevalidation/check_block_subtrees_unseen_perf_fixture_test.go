@@ -76,6 +76,25 @@ type unseenFixtureConfig struct {
 	// silently measures the cheap path.
 	extendedInSubtreeData bool
 
+	// conflictingTxs is how many level-0 block transactions are genuine
+	// double-spends: before the block tx is built, a different "squatter" tx is
+	// created in the store and already spends the same outpoint. The block tx's
+	// spend then fails with ErrSpent, and because processTransactionsInLevels sets
+	// WithCreateConflicting(true) the validator takes the conflicting-create path
+	// and blessMissingTransaction follows up with
+	// checkCounterConflictingOnCurrentChain (SubtreeValidation.go:447-451).
+	//
+	// This is the only block-content marker that separated the slow mainnet blocks
+	// from fast ones (189 and 13 conflicting warnings vs 0), and it was entirely
+	// absent from the fixture.
+	conflictingTxs int
+
+	// conflictChainDepth is how many unconfirmed descendants each squatter has.
+	// The squatter's chain is what GetConflictingChildren walks and what
+	// MarkConflictingRecursively would BFS over, so this is the cost knob that
+	// scales with descendant depth rather than with block size.
+	conflictChainDepth int
+
 	// txsPerSubtree splits the block across subtrees. The default TxBatchSize is
 	// 1048576 (settings/settings.go:616), so for fixtures of this size all
 	// subtrees land in a single batch — same as mainnet.
@@ -235,6 +254,15 @@ func generateUnseenFixture(t *testing.T, h *perfHarness, cfg unseenFixtureConfig
 				return err
 			}
 
+			// Make this tx a double-spend: plant a different tx that already spends
+			// the same outpoint, plus its unconfirmed descendant chain.
+			if i < cfg.conflictingTxs {
+				if err = seedConflictingSquatter(seedCtx, h, primary, lockingScript,
+					unlockerGetter, cfg.conflictChainDepth); err != nil {
+					return err
+				}
+			}
+
 			extras, err := seedExtraParents(seedCtx, seedParent, inputsPerTx-1)
 			if err != nil {
 				return err
@@ -353,6 +381,81 @@ func buildSeededParent(idx int, lockingScript *bscript.Script, ug *unlocker.Gett
 	}
 
 	return tx, nil
+}
+
+// seedConflictingSquatter creates a transaction that already spends parent's
+// output 0 and records that spend in the store, so a later block transaction
+// spending the same outpoint conflicts.
+//
+// The squatter is given TWO outputs while the block transaction has one, so the two
+// differ and therefore have different txids while spending the identical outpoint —
+// without that they would be the same transaction and there would be no conflict at
+// all.
+//
+// The squatter and its descendants are created WITHOUT mined info, i.e. unconfirmed.
+// That matters: checkCounterConflictingOnCurrentChain only rejects the block
+// transaction when a counter-conflicting tx is mined on the current chain
+// (process_conflicting.go, BlockIDs check), so leaving them unconfirmed keeps the
+// block valid and exercises the conflict-handling cost rather than a rejection.
+func seedConflictingSquatter(ctx context.Context, h *perfHarness, parent *bt.Tx,
+	lockingScript *bscript.Script, ug *unlocker.Getter, chainDepth int) error {
+	half := parent.Outputs[0].Satoshis / 2
+
+	squatter := bt.NewTx()
+
+	if err := squatter.FromUTXOs(&bt.UTXO{
+		TxIDHash:      parent.TxIDChainHash(),
+		Vout:          0,
+		LockingScript: parent.Outputs[0].LockingScript,
+		Satoshis:      parent.Outputs[0].Satoshis,
+	}); err != nil {
+		return err
+	}
+
+	// Two outputs — this is what makes the squatter a different tx from the block's
+	// spend of the same outpoint.
+	if err := squatter.AddP2PKHOutputFromScript(lockingScript, half); err != nil {
+		return err
+	}
+
+	if err := squatter.AddP2PKHOutputFromScript(lockingScript, parent.Outputs[0].Satoshis-half); err != nil {
+		return err
+	}
+
+	if err := squatter.FillAllInputs(context.Background(), ug); err != nil {
+		return err
+	}
+
+	// Unconfirmed in the store, and holding the spend on parent:0.
+	if _, err := h.utxoStore.Create(ctx, squatter, h.blockHeight-1); err != nil {
+		return err
+	}
+
+	if _, err := h.utxoStore.Spend(ctx, squatter, h.blockHeight-1); err != nil {
+		return err
+	}
+
+	// Unconfirmed descendant chain, so the conflict has children to walk.
+	current := squatter
+
+	for d := 0; d < chainDepth; d++ {
+		child, err := spendOutputs([]*bt.Tx{current}, lockingScript, ug)
+		if err != nil {
+			return err
+		}
+
+		if _, err = h.utxoStore.Create(ctx, child, h.blockHeight-1); err != nil {
+			return err
+		}
+
+		if _, err = h.utxoStore.Spend(ctx, child, h.blockHeight-1); err != nil {
+			return err
+		}
+
+		current = child
+	}
+
+	return nil
 }
 
 // seedExtraParents seeds n additional mined parents for a tx's non-primary

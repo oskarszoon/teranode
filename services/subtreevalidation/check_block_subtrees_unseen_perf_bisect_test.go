@@ -183,3 +183,51 @@ func TestUnseenTxBisect_ConnectionPool(t *testing.T) {
 
 	t.Logf("RATIO default/capped = %.2fx", unlimited/capped)
 }
+
+// TestUnseenTxBisect_ConflictingTxs is the conflicting-transaction axis: the only
+// block-content marker that separated the slow mainnet blocks from fast ones (189
+// and 13 conflicting warnings in the two Class B windows, 0 in a fast window the
+// same day), and wholly unmodelled by the fixture until now.
+//
+// Each conflicting block tx double-spends an outpoint already spent by a squatter
+// that carries an unconfirmed descendant chain, so the run exercises the
+// conflicting-create path plus checkCounterConflictingOnCurrentChain and the
+// children walk.
+//
+// The subtests assert conflictingTxsSeen > 0. Without that assertion this axis could
+// silently measure nothing and report "no effect", which is precisely the false
+// negative the external-parents axis produced.
+func TestUnseenTxBisect_ConflictingTxs(t *testing.T) {
+	baseline := runBisectAxis(t, "bisect-conflict-none", defaultPerfOptions(), baseBisectConfig())
+	t.Logf("AXIS conflicts=0: %.1f tx/s", baseline)
+
+	for _, c := range []struct {
+		n, depth int
+	}{
+		{50, 0},
+		{50, 5},
+		{200, 5},
+	} {
+		c := c
+
+		t.Run(fmt.Sprintf("n%d_depth%d", c.n, c.depth), func(t *testing.T) {
+			h, capture := newCapturingPerfHarness(t, defaultPerfOptions())
+
+			cfg := baseBisectConfig()
+			cfg.conflictingTxs = c.n
+			cfg.conflictChainDepth = c.depth
+
+			fx := generateUnseenFixture(t, h, cfg)
+			assertUnseenPrecondition(t, h, fx)
+
+			elapsed := runUnseenBlock(t, h, capture, fx, fmt.Sprintf("bisect-conflict-n%d-d%d", c.n, c.depth))
+			rate := float64(fx.txCount) / elapsed.Seconds()
+
+			require.Positive(t, capture.conflictingSeen.Load(),
+				"no conflicting-tx warnings observed — the conflict path was never entered, so this axis measured nothing")
+
+			t.Logf("AXIS conflicts=%d depth=%d: %.1f tx/s (%.2fx vs baseline %.1f)",
+				c.n, c.depth, rate, rate/baseline, baseline)
+		})
+	}
+}

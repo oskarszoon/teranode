@@ -59,6 +59,20 @@ type levelCaptureLogger struct {
 	batchDecorateItems atomic.Uint64
 	externalFetched    atomic.Uint64
 	externalSkipped    atomic.Uint64
+
+	// conflictingSeen counts the blessMissingTransaction conflicting warnings
+	// (SubtreeValidation.go:430). Without this the conflict axis could measure
+	// nothing and report it as "no effect" — exactly how the external-parents axis
+	// produced a false negative.
+	conflictingSeen atomic.Uint64
+}
+
+// Warnf captures the conflicting-transaction warning so a run can prove the
+// conflict path was actually entered.
+func (l *levelCaptureLogger) Warnf(format string, _ ...interface{}) {
+	if strings.Contains(format, "transaction is conflicting") {
+		l.conflictingSeen.Add(1)
+	}
 }
 
 // Infof captures the BatchDecorate external-fetch counters. The counts arrive as
@@ -263,6 +277,7 @@ func runUnseenBlock(t *testing.T, h *perfHarness, capture *levelCaptureLogger, f
 	t.Logf("batchDecorate: calls=%d items=%d externalFetched=%d externalSkipped=%d",
 		capture.batchDecorateCalls.Load(), capture.batchDecorateItems.Load(),
 		capture.externalFetched.Load(), capture.externalSkipped.Load())
+	t.Logf("conflictingTxsSeen=%d", capture.conflictingSeen.Load())
 	t.Logf("profiles written to %s", dir)
 
 	for _, line := range capture.preCheck {

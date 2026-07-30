@@ -534,3 +534,80 @@ only shows up on blocks carrying many unseen transactions.
 
 Root cause still not identified. Next untested candidate is the conflicting-tx path,
 being the only positive content correlation and wholly unmodelled by the fixture.
+
+## Follow-up 6: REPRODUCED — conflicting transactions abandon the fast path
+
+Modelling conflicting transactions in the fixture reproduces the collapse.
+
+| axis | tx/s | vs baseline | conflict warnings |
+|---|---|---|---|
+| 0 conflicts | 1,557 | — | 0 |
+| **50 conflicts (3.2% of 1,561 txs), descendant depth 0** | **18.8** | **0.012x** | 807 |
+| 50 conflicts, depth 5 | 18.6 | 0.012x | 807 |
+| 200 conflicts, depth 5 | 11.5 | 0.007x | 1,027 |
+
+Mainnet observed 27–50 tx/s. The harness now produces 11.5–18.8 tx/s. Same regime.
+
+### The mechanism
+
+`processTransactionsInLevels` treats a conflicting transaction as fatal to the whole
+batch. `errorsFound` (check_block_subtrees.go:1189) counts conflicting-tx errors
+alongside everything else, and only the *all*-missing-parent case is tolerated
+(:1244). Any conflicting transaction therefore makes the fast parallel level pass
+return an error at :1248, which throws away all the work it just completed and forces
+`CheckBlockSubtrees` into `validateMissingSubtreesWithOrderedRetry` — whose **phase 3
+is explicitly sequential, one subtree at a time**.
+
+Three measurements pin this down:
+
+- **The level pass itself is fine.** 25 levels, slowest 70 ms, ~1 s total — but the
+  run took 83 s. The time is entirely outside the level loop.
+- **Descendant depth is irrelevant** (18.8 vs 18.6 tx/s at depth 0 vs 5), so it is
+  not `MarkConflictingRecursively` or the children walk.
+- **807 conflict warnings for 50 conflicting txs** — roughly 16 revalidations each,
+  which is the fallback re-walking the same transactions.
+
+### Why conflicting transactions are not an error case
+
+Double-spend attempts are routine on mainnet. The code explicitly supports them:
+`processTransactionsInLevels` sets `WithCreateConflicting(true)` (:1075), the
+validator stores them flagged conflicting, and `blessMissingTransaction` blesses them
+after `checkCounterConflictingOnCurrentChain` confirms no counter-conflict is mined on
+our chain. The block is valid and the transactions are handled correctly.
+
+They are nonetheless counted as `errorsFound`, so their mere presence costs an ~83x
+throughput collapse for the entire block.
+
+### This resolves the puzzle that 13 conflicts cost more than 189
+
+The fallback's cost scales with the **block's transaction count**, not with the
+conflict count — because the whole block is revalidated, not just the conflicts.
+
+| block | txs | conflicts | duration | rate |
+|---|---|---|---|---|
+| 959979 | 6,258 | 189 | 218 s | 28.7 tx/s |
+| 959984 | 27,131 | 13 | 716 s | 37.9 tx/s |
+
+The *rate* is near-constant and the *duration* tracks tx count, which is exactly what
+a serial revalidation predicts and is why 13 conflicts in a 27k-tx block cost more
+than 189 in a 6k-tx block. Earlier sections treated that inversion as evidence
+against the conflict hypothesis; it is in fact a prediction of it.
+
+### Consistency with the production logs
+
+The `'sequential revalidation'` INFO line showed 0 occurrences in both Class B
+windows, which earlier looked like it ruled the fallback out. It does not: that log
+(:1245) fires only when `errorsFound == missingParentErrors`. With conflicts the
+counts differ, so :1248 returns a processing error and no such line is emitted. The
+absence of that log is what this mechanism predicts.
+
+### Fix direction
+
+Conflicting transactions should not fail the batch. The same deferral already applied
+to all-missing-parent errors should extend to conflicting-tx outcomes: they are a
+successful, expected result, not a validation failure. That keeps the block on the
+parallel level path and removes the ~83x penalty.
+
+Worth checking as part of that change: whether any conflicting tx needs the fallback
+at all, or whether the conflicting-create plus counter-conflict check already leaves
+the store in its final correct state — in which case the error return is pure waste.
