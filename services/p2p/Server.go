@@ -243,6 +243,15 @@ func NewServer(
 		return nil, errors.NewConfigurationError("listen_mode must be one of '%s', '%s', or '%s' (got '%s')", settings.ListenModeFull, settings.ListenModeListenOnly, settings.ListenModeSilent, listenMode)
 	}
 
+	// Surface blacklist entries with no parseable host: they can only ever
+	// match an announcement byte-for-byte, so the operator almost certainly
+	// misconfigured them. Warn loudly instead of leaving the entry silently inert.
+	for blocked := range tSettings.SubtreeValidation.BlacklistedBaseURLs {
+		if blacklistEntryHost(blocked) == "" {
+			logger.Warnf("[P2P] blacklisted base URL %q has no parseable host and will only match announcements exactly equal to it", blocked)
+		}
+	}
+
 	banlist, banChan, err := GetBanList(ctx, logger, tSettings)
 	if err != nil {
 		return nil, errors.NewServiceError("error getting banlist", err)
@@ -974,12 +983,23 @@ func (s *Server) handleNodeStatusTopic(_ context.Context, m []byte, peerID strin
 		return
 	}
 
-	// Validate BaseURL to prevent SSRF attacks
 	if nodeStatusMessage.BaseURL != "" {
+		// Validate BaseURL to prevent SSRF attacks
 		if err := s.validateDataHubURL(nodeStatusMessage.BaseURL); err != nil {
 			s.logger.Errorf("[handleNodeStatusTopic] invalid BaseURL from peer %s: %v", peerID, err)
 			s.applyBanScore(peerID, ReasonProtocolViolation)
 			return
+		}
+
+		// A blacklisted BaseURL must not reach the peer registry, but
+		// node_status is telemetry: keep the message with the URL removed
+		// instead of hiding the peer from monitoring. This only stops fresh
+		// registrations; a URL stored before its host was blacklisted stays in
+		// the registry and is filtered at the point of use instead
+		// (GetPeersForCatchup and PeerSelector.isEligible).
+		if s.isBlacklistedBaseURL(nodeStatusMessage.BaseURL) {
+			s.logger.Warnf("[handleNodeStatusTopic] removed blacklisted BaseURL %s from node_status of peer %s", nodeStatusMessage.BaseURL, peerID)
+			nodeStatusMessage.BaseURL = ""
 		}
 	}
 
@@ -1765,27 +1785,30 @@ func (s *Server) GetPeers(ctx context.Context, _ *emptypb.Empty) (*p2p_api.GetPe
 			return nil, errors.WrapGRPCPublic(errors.NewServiceError("list peers", err))
 		}
 
+		// Look up libp2p addresses once, not per registry peer.
+		addrByPeerID := make(map[string]string)
+		if s.P2PClient != nil {
+			for _, sp := range s.P2PClient.GetPeers() {
+				if len(sp.Addrs) > 0 {
+					addrByPeerID[sp.ID] = sp.Addrs[0]
+				}
+			}
+		}
+
 		resp := &p2p_api.GetPeersResponse{}
 		for _, p := range allPeers {
 			if !p.IsConnected {
 				continue
 			}
-			// Get address from libp2p if available.
-			addr := ""
-			if s.P2PClient != nil {
-				libp2pPeers := s.P2PClient.GetPeers()
-				for _, sp := range libp2pPeers {
-					if sp.ID == p.ID && len(sp.Addrs) > 0 {
-						addr = sp.Addrs[0]
-						break
-					}
-				}
-			}
+
+			addr := addrByPeerID[p.ID]
 
 			resp.Peers = append(resp.Peers, &p2p_api.Peer{
-				Id:       p.ID,
-				Addr:     addr,
-				Banscore: p.BanScore,
+				Id:            p.ID,
+				Addr:          addr,
+				Banscore:      p.BanScore,
+				CurrentHeight: p.Height,
+				BytesReceived: p.BytesReceived,
 			})
 		}
 
