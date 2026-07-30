@@ -611,3 +611,68 @@ parallel level path and removes the ~83x penalty.
 Worth checking as part of that change: whether any conflicting tx needs the fallback
 at all, or whether the conflicting-create plus counter-conflict check already leaves
 the store in its final correct state — in which case the error return is pure waste.
+
+## Follow-up 7: follow-up 6's mechanism was wrong, and the first fix attempt failed
+
+### Correction: the level pass never fails
+
+Follow-up 6 claimed conflicting transactions make `processTransactionsInLevels`
+return an error, forcing the phase-2/phase-3 fallback. **That is wrong.** Checked
+against the run output: there is no `Failed to process level`, no
+`Completed processing with N errors`, and only one pre-check line per run. The level
+pass completes successfully.
+
+Reading the code confirms why. For a conflicting tx whose counter-conflict is not
+mined on our chain, `blessMissingTransaction` returns `(txMeta, nil)` — the
+`ErrTxConflicting` from the validator is deliberately not propagated
+(SubtreeValidation.go:426-431), and `checkCounterConflictingOnCurrentChain` reassigns
+`err` to nil on success. So `errorsFound` is never incremented and nothing is
+deferred.
+
+Also corrected: `validateMissingSubtreesWithOrderedRetry` runs **unconditionally**
+after the level pipeline (check_block_subtrees.go:681), not as a fallback. The level
+pass is a pre-warm; the per-subtree pass is authoritative.
+
+### What is actually established
+
+The reproduction stands — it is the mechanism explanation that was wrong:
+
+- 3% conflicting transactions collapse throughput 83x (1,557 → 18.8 tx/s), which
+  brackets mainnet's observed 27–50 tx/s.
+- Descendant depth is irrelevant, so it is not `MarkConflictingRecursively`.
+- The level loop accounts for ~1 s of an 80 s run, so the cost is outside it.
+- The block profile puts **79.7% of all blocking delay on
+  `go-batcher SetMaxConcurrent.func1`** via `chanrecv2` — 5,058 s over an 80 s run,
+  i.e. ~63 batch-dispatch goroutines permanently waiting for a slot against a
+  64-slot limit. The batchers are saturated for the entire run.
+- `utxostore_batcherMaxConcurrent.docker.m = 24` (settings.conf:1338) caps mainnet at
+  24 slots; the base default is 64, which is what the harness gets. So production has
+  2.7x less headroom than the harness that already collapses.
+
+### Fix attempt 1: batch the counter-conflict reads — DID NOT WORK
+
+`checkCounterConflictingOnCurrentChain` fanned out one `GetMeta` per
+counter-conflicting hash across a 128-wide errgroup, nested inside the 2048-wide
+per-level fan-out, and fetched whole records when only `BlockIDs` is read. Replaced
+with a single `BatchDecorate` requesting just `fields.BlockIDs`.
+
+Measured: **18.8 → 20.5 tx/s. Noise.** Not the bottleneck.
+
+Kept in `git stash` — it is a genuine improvement (N round trips to 1, one field
+instead of a whole record, removes a nested fan-out) but it does not fix #1379 and
+should not be presented as doing so.
+
+### What is still unknown
+
+Which operation in the conflict path saturates the batchers. The numbers say the cost
+is roughly fixed per conflicting transaction and large: 50 conflicts → 80 s (~1.6 s
+each), 200 conflicts → 132 s (~0.66 s each). Sub-linear, so there is a shared
+component.
+
+Also unexplained: conflict warnings do not scale with conflict count — 807 for 50
+conflicts, 1,027 for 200. Roughly constant total, which suggests a fixed quantity of
+repeated work rather than per-conflict work.
+
+Next step is a CPU profile alongside the block profile for a conflict run, to
+separate "waiting on saturated batchers" from whatever is generating the batch
+volume. The block profile alone shows the queue, not its source.
