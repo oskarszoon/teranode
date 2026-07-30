@@ -401,3 +401,64 @@ nodes at all". That was true when written and is no longer: the metrics existed 
 the code and were exposed on `:9091` all along, but nothing scraped them. Issue
 ask 2 is therefore narrower than originally filed — it is a scrape/permissions
 problem, not missing instrumentation.
+
+## Follow-up 4: the slow events are TWO distinct classes
+
+Grouping every minute-scale `processTransactionsInLevels` event in July by how many
+nodes logged it for the same block height splits the data cleanly, and the split
+matters: two of the conclusions above were drawn from the wrong class.
+
+| height | txs | nodes hit | hosts |
+|---|---|---|---|
+| 1730302 | 1 | 1 | `ip-10-11-164-241` |
+| 1734144 | 17,808 | 1 | `ip-10-11-164-241` |
+| 1735305 | 20,001 | 1 | `ip-10-11-164-241` |
+| 956467 | 149,738 | 1 | `ip-10-11-164-241` |
+| 956694 | 226,914 | 1 | `ip-10-11-164-241` |
+| 957561 | 506 | 1 | `ip-10-11-164-241` |
+| **959979** | 6,258 | **2** | `ip-10-11-181-104`, `ovh-eu-2` |
+| **959984** | 27,131 | **3** | `ip-10-11-181-104`, `ovh-eu-1`, `ovh-eu-2` |
+
+### Class A — one bad host, not a Teranode bug
+
+All six single-node events are on the **same** EKS worker, `ip-10-11-164-241`. It
+spans both mainnet (~956k) and teratestnet (~1.73M) heights because multiple
+namespaces schedule pods onto that one machine. Durations bear no relation to
+transaction count (1 tx → 64 s; 149,738 tx → 78 s), which is the signature of a
+host-level stall — disk, noisy neighbour, CPU throttling.
+
+Out of scope for #1379. Worth raising separately with whoever owns that node.
+
+### Class B — the actual issue
+
+Two events, and they hit a *different* EKS host plus both OVH bare-metal boxes:
+independent machines, two hardware providers, simultaneously slow on the same
+block. That cannot be node-local. It is block-content-driven.
+
+| height | txs | duration range | rate |
+|---|---|---|---|
+| 959979 | 6,258 | 3m38s – 3m53s | **~28 tx/s** |
+| 959984 | 27,131 | 2m42s – 12m17s | **~37 tx/s** |
+
+~28–40 tx/s, consistently, across unrelated hardware.
+
+### Two corrections to earlier sections
+
+**Follow-up 3's "duration is independent of tx count" is withdrawn.** That was
+derived from the 1-tx/64 s event, which is Class A. It says nothing about #1379.
+Restricted to Class B, the rate is roughly constant per transaction (~30 tx/s),
+which is the original issue framing.
+
+**The level-depth finding is therefore back in play**, not sidelined. Follow-up 3
+demoted it on the strength of a Class A datapoint; that demotion was wrong.
+
+### Why this reframes the investigation favourably
+
+Whatever the mechanism is, it is deterministic enough to produce the same ~30 tx/s
+on three different machines across two providers. That rules out intermittent
+node-local Aerospike stalls, and it means a local reproduction *should* be
+achievable.
+
+Which makes the harness's 5,107 tx/s the most valuable remaining clue rather than a
+dead end: the ~170x gap is not environmental, so it is something the fixture does
+not model about these specific blocks.
