@@ -158,3 +158,28 @@ func TestUnseenTxBisect_BlockAssemblyDisabled(t *testing.T) {
 
 	t.Logf("AXIS blockAssemblyDisabled: %.1f tx/s", float64(fx.txCount)/elapsed.Seconds())
 }
+
+// TestUnseenTxBisect_ConnectionPool A/Bs mainnet's Aerospike connection cap
+// against an unbounded pool at the same fan-out.
+//
+// Production runs ConnectionQueueSize=128 with LimitConnectionsToQueueSize=true
+// (settings.conf:1271) — a hard ceiling where the client refuses to open a 129th
+// connection and callers block waiting for one. processTransactionsInLevels
+// independently fans out to SpendBatcherSize*2 = 2048 concurrent validations
+// (check_block_subtrees.go:1156), each issuing several store operations. The two
+// numbers come from unrelated settings and nothing reconciles them, so the fan-out
+// oversubscribes the pool ~16x.
+//
+// Every earlier harness run used InitAerospikeContainer's bare URL, which carries
+// no connection tuning at all — so the whole bisect matrix ran on the client
+// default and never modelled this. That makes it the leading unmodelled difference
+// between the harness (~4,700 tx/s) and production (~30 tx/s) for a Class B block.
+func TestUnseenTxBisect_ConnectionPool(t *testing.T) {
+	capped := runBisectAxis(t, "bisect-pool-capped", defaultPerfOptions(), baseBisectConfig())
+	t.Logf("AXIS pool=128 (production): %.1f tx/s", capped)
+
+	unlimited := runBisectAxis(t, "bisect-pool-default", unlimitedPoolPerfOptions(), baseBisectConfig())
+	t.Logf("AXIS pool=client-default: %.1f tx/s", unlimited)
+
+	t.Logf("RATIO default/capped = %.2fx", unlimited/capped)
+}

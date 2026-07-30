@@ -31,6 +31,7 @@ package subtreevalidation
 import (
 	"context"
 	"net/url"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -78,11 +79,37 @@ type perfHarnessOptions struct {
 	chainParams *chaincfg.Params
 	blockHeight uint32
 	tune        func(*settings.Settings)
+
+	// aerospikeURLParams are appended to the testcontainer's Aerospike URL. The
+	// InitAerospikeContainer helper builds a bare URL with no connection tuning, so
+	// without this the harness silently runs on the client's default pool while
+	// production runs a hard cap — see productionAerospikeParams.
+	aerospikeURLParams string
 }
 
+// productionAerospikeParams are the connection settings mainnet actually runs
+// (utxostore.docker.m, settings.conf:1271).
+//
+// ConnectionQueueSize=128 with LimitConnectionsToQueueSize=true is a HARD ceiling:
+// the client will not open a 129th connection, and callers block waiting for one to
+// free. Meanwhile processTransactionsInLevels fans out to SpendBatcherSize*2 = 2048
+// concurrent validations (check_block_subtrees.go:1156), each of which issues
+// several store operations. That is a ~16x oversubscription of a blocking,
+// hard-capped pool, and the fan-out width is derived from a batcher setting with no
+// relationship to the pool size.
+const productionAerospikeParams = "WarmUp=0&ConnectionQueueSize=128&LimitConnectionsToQueueSize=true&MinConnectionsPerNode=16&IdleTimeout=60s"
+
 // defaultPerfOptions is the context for generated fixtures: regtest at height
-// 100, post-UAHF and pre-CSV.
+// 100, post-UAHF and pre-CSV, with mainnet's Aerospike connection caps applied so
+// the harness does not flatter itself with an unbounded pool.
+
 func defaultPerfOptions() perfHarnessOptions {
+	return perfHarnessOptions{blockHeight: 100, aerospikeURLParams: productionAerospikeParams}
+}
+
+// unlimitedPoolPerfOptions is defaultPerfOptions with no connection cap, for A/B
+// against the production caps.
+func unlimitedPoolPerfOptions() perfHarnessOptions {
 	return perfHarnessOptions{blockHeight: 100}
 }
 
@@ -221,8 +248,18 @@ func newPerfHarnessWithLogger(t *testing.T, logger ulogger.Logger, opts perfHarn
 		opts.tune(tSettings)
 	}
 
+	if opts.aerospikeURLParams != "" {
+		sep := "&"
+		if !strings.Contains(aeroURL, "?") {
+			sep = "?"
+		}
+
+		aeroURL += sep + opts.aerospikeURLParams
+	}
+
 	parsedURL, err := url.Parse(aeroURL)
 	require.NoError(t, err)
+	t.Logf("aerospike URL: %s", parsedURL.String())
 
 	utxoStore, err := aerospikestore.New(ctx, logger, tSettings, parsedURL)
 	require.NoError(t, err, "aerospike store must construct — this also proves Lua UDF registration succeeded")

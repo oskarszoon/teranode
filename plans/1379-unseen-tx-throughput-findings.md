@@ -462,3 +462,75 @@ achievable.
 Which makes the harness's 5,107 tx/s the most valuable remaining clue rather than a
 dead end: the ~170x gap is not environmental, so it is something the fixture does
 not model about these specific blocks.
+
+## Follow-up 5: Class B hypothesis eliminations
+
+Focused hunt for the Class B mechanism. Each row was tested against production logs
+or measured in the harness, not reasoned about.
+
+| hypothesis | test | result |
+|---|---|---|
+| Phase-3 sequential revalidation fallback | `'sequential revalidation'` in both windows | **0** (116 in July overall) |
+| Missing / cross-subtree parents | deferral log fires whenever `errorsFound > 0` | never fired → `errorsFound == 0` |
+| `DEVICE_OVERLOAD` overload-retry | `'aerospike overloaded'` in both windows | **0** (954 in July overall) |
+| Batcher leak guard (160 s) | `'did not complete within'` in both windows | **0** (6 in July overall) |
+| `mtpMu` serialising the fan-out | code: `sync.RWMutex`, read path uses `RLock` | shared, no serialisation |
+| Pathological level count | both variants set `level = maxParentLevel+1` | tracks longest chain, ~25 |
+| External-store read latency | measured on the node | 0.33 ms p50 → 203 serial = 0.11 s |
+| **Aerospike connection pool cap** | **harness A/B** | **0.89x — no effect** |
+
+### The connection-pool result is worth keeping
+
+Production caps the client at `ConnectionQueueSize=128` with
+`LimitConnectionsToQueueSize=true` (settings.conf:1271) — a hard ceiling where
+callers block. `processTransactionsInLevels` independently fans out to
+`SpendBatcherSize*2 = 2048` (check_block_subtrees.go:1156). Those two numbers come
+from unrelated settings and nothing reconciles them, so on paper the fan-out
+oversubscribes a blocking pool ~16x. Every earlier harness run had used
+`InitAerospikeContainer`'s bare URL with no connection tuning at all, so the entire
+bisect matrix had never modelled it.
+
+Measured: 1,656 tx/s capped vs 1,467 tx/s uncapped. No effect.
+
+The reason is that the fan-out's store operations go through batchers, which
+coalesce thousands of validations into a handful of batch calls — so 2048 goroutines
+never become 2048 connections. Consistent with `connections_pool_empty = 0` in
+production and with the block profile showing all waiting on batcher completion
+rather than on connection acquisition.
+
+The harness now applies the production connection params by default anyway, so it
+stops flattering itself with an unbounded pool.
+
+### The one positive correlation found
+
+Conflicting-transaction warnings (`[blessMissingTransaction] ... is conflicting`,
+logged at Warn so present in Coralogix):
+
+| window | conflicting warnings |
+|---|---|
+| 959979 (slow) | **189** |
+| 959984 (slow) | **13** |
+| 12:00–12:17 same day (fast) | **0** |
+
+Present in both slow windows, absent from the fast one. The count does not track
+duration (13 conflicts → 12 min; 189 → 3.6 min), so it is not the conflict count
+itself — but it is the only block-content marker found so far that separates slow
+blocks from fast ones.
+
+The conflict path is expensive and entirely absent from the fixture:
+`checkCounterConflictingOnCurrentChain` (counter-conflict hash lookups plus a
+`GetMeta` per hash), `MarkConflictingRecursively` (a batched BFS over unconfirmed
+descendants — cost scales with descendant depth, not block size), and the
+`CreateConflicting` create path. A single slow conflicting tx also stalls its entire
+level, because the level's `g.Wait()` cannot return until every tx in it finishes.
+
+### Where the arithmetic points
+
+At 2048-wide fan-out over ~25 levels, 959979 is ~26 waves. 218 s / 26 ≈ **8.4 s per
+`blessMissingTransaction`**, against 15 ms mean / 64 ms p99 in production steady
+state. So per-call latency degraded ~560x under the fan-out. Steady state validates
+~12 tx/s with no concurrency, which is why it looks healthy and why the incident
+only shows up on blocks carrying many unseen transactions.
+
+Root cause still not identified. Next untested candidate is the conflicting-tx path,
+being the only positive content correlation and wholly unmodelled by the fixture.
