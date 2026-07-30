@@ -324,3 +324,80 @@ it is now unmeasurable retroactively on this node.
 Closing this out therefore depends on instrumentation being live *before* the next
 occurrence — which makes fixing the monitoring stack the highest-value next action,
 ahead of any code change.
+
+## Follow-up 3: live production metrics from bsva-ovh-teranode-eu-2
+
+The monitoring stack on that node was not actually running (see follow-up 2:
+Prometheus and Grafana both exited on bind-mount permission errors, filed upstream
+as bsv-blockchain/teranode-quickstart#9). With permissions fixed, all 9 scrape
+targets are up and these are the first real numbers from the #1379 hot path.
+
+The path is genuinely active: `bless_missing_transaction` accumulated 3,784
+samples, so unseen transactions are being blessed continuously in steady state.
+
+### Steady-state latency, subtreevalidation service
+
+| metric | n | p50 | p90 | p99 | mean |
+|---|---|---|---|---|---|
+| `subtreevalidation_bless_missing_transaction` | 3,784 | 16 ms | 16 ms | **64 ms** | 15.2 ms |
+| `validator_transactions_input_block_heights` | 3,784 | 16 ms | 16 ms | 16 ms | 11.4 ms |
+| `validator_transactions_spend_utxos` | 376 | 33 ms | 33 ms | 131 ms | 25.3 ms |
+| `validator_transactions_2phase_commit` | 351 | 8 ms | 8 ms | 8 ms | 6.4 ms |
+| `validator_transactions_validate` (GoBDK script) | 376 | <1 ms | <1 ms | 66 ms | 0.56 ms |
+
+Histogram buckets are coarse (16/33/64/131/262 ms), so quantiles are
+bucket-granular. Roughly 5 minutes of steady state on **v0.16.0-beta-9**, not
+incident conditions.
+
+### The incident was a transient, not the steady state
+
+`blessMissingTransaction` p99 is 64 ms here. The incident's 8.7 s per level needs
+per-operation costs in the seconds — 30–100x above what this node does normally.
+That closes off any reading of #1379 in which this code path is simply slow by
+nature. Whatever happened on 2026-07-29 was a departure from this baseline, and the
+baseline is healthy.
+
+### Production confirms the batcher-wait finding
+
+This is the most useful result. Compare the validator-level wrapper against the
+underlying Aerospike operation it drives:
+
+| layer | mean |
+|---|---|
+| `validator_transactions_spend_utxos` | 25.3 ms (p50 33 ms) |
+| `aerospike_utxo_spend_batch` | **0.54 ms** |
+| `aerospike_utxo_create_batch` | 4.07 ms |
+
+A ~60x gap between the wrapper and the store operation. That gap is batcher
+queueing plus the flush timer, which is precisely the local block-profile result
+(97.5% of blocking delay in `go-batcher completion.(*Group).Wait`, spread across
+Spend 38.7% / Create 39.1% / SetLocked 19.8%) — now reproduced on production
+hardware under real load rather than in a testcontainer.
+
+**The store itself is fast. The batching wrapper is where the time goes.** This is
+the strongest evidence so far for fix candidate 1 (collapse the per-level round
+trips), and it means that fix is justified on steady-state grounds alone,
+independent of whatever caused the incident.
+
+### Parent resolution dominates, not script verification
+
+`input_block_heights` is 11.4 ms of the 15.2 ms bless cost, about 75%. GoBDK script
+verification is 0.56 ms. So per-tx cost is dominated by parent lookups — which is
+the component that scales with parent count and with external-store behaviour, and
+the right place to aim any per-tx optimisation.
+
+### External reads are bursty, not continuous
+
+`teranode_aerospike_get_external` has **no samples at all** in this window, despite
+~4 million external transactions on disk. So the 203-fetches-in-one-call bursts
+seen in the incident logs are event-driven per block, not a standing load. This is
+consistent with follow-up 2: external reads are irrelevant in steady state and
+appear only on particular blocks.
+
+### Correction to an earlier claim
+
+The section above states "there are no `*aerospike*` metrics shipped from these
+nodes at all". That was true when written and is no longer: the metrics existed in
+the code and were exposed on `:9091` all along, but nothing scraped them. Issue
+ask 2 is therefore narrower than originally filed — it is a scrape/permissions
+problem, not missing instrumentation.
