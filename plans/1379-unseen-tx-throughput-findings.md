@@ -247,3 +247,80 @@ worth fixing in the same pass.
 
 Still needed to close this out: external-read latency from the nodes themselves,
 which is issue ask 2.
+
+## Follow-up 2: measured on bsva-ovh-teranode-eu-2 directly
+
+SSH access to the node settled the external-read question with measurement
+instead of inference. **The external-store latency hypothesis is dead.**
+
+### The store is huge but fast
+
+| fact | value |
+|---|---|
+| external store size | **2.2 TB** (of 2.3 TB total used on /mnt/data) |
+| shard dirs (`hashPrefix=2`) | 256 |
+| entries per shard | ~31,200 (`.tx` + `.tx.sha256`) |
+| **estimated external transactions** | **~4 million** |
+| mean external tx size | ~575 KB |
+| backing store | ext4 on `md10`, RAID0 over local NVMe (`ROTA=0`), 21 TB |
+| RAM | 251 GB total, 147 GB page cache |
+
+So yes — externalized transactions are numerous, and they dominate this node's
+storage. But reading them is cheap. 160 random `.tx` reads sampled across 40
+shards (92 MB total, mostly cold given 2.2 TB against 147 GB of cache):
+
+```
+latency ms: min=0.15 p50=0.33 p90=0.82 p99=3.93 max=5.32 mean=0.55
+```
+
+203 serial reads — the worst single production `BatchDecorate` call — therefore
+costs **0.11 s at p50, 0.8 s even at p99**. Not 8.7 s. The serial fetch loop in
+`BatchDecorate` remains a genuine design wart (concurrency 1, and it would bite
+hard on an S3-backed external store), but on this hardware it cannot account for
+the collapse.
+
+`utxostore.docker.m` is confirmed in use: the container has
+`SETTINGS_CONTEXT=docker.m`, so `externalStore=file://${DATADIR}/external?hashPrefix=2`
+with `DATADIR` on the NVMe RAID0.
+
+### Why the incident itself can no longer be diagnosed from this node
+
+- Teranode's own metrics endpoints work and expose the right histograms
+  (`teranode_aerospike_get_external`, `set_external`) on `:9091` per service — but
+  every counter is 0 because all teranode containers were restarted minutes
+  before, so there is no incident-era data.
+- Aerospike was NOT restarted (up 4 weeks), but its log driver is `json-file` with
+  `max-size:100m` and console-only logging, so retained history starts at
+  **Jul 30 02:02** — well after the Jul 29 14:29 incident.
+- The node now runs **v0.16.0-beta-9**; the incident was on beta-1.
+
+### The monitoring stack is not actually running
+
+Both containers exited ~2 minutes after being started:
+
+```
+prometheus  Exited (2)   open /etc/prometheus/prometheus.yml: permission denied
+grafana     Exited (1)   open /etc/grafana/provisioning/dashboards/main.yaml: permission denied
+```
+
+Cause is bind-mount permissions, not config content. `config/` and
+`config/grafana_dashboards/` are `drwxrwx--- ubuntu:ubuntu` and the mounted files
+are `-rw-rw---- ubuntu:ubuntu`, while `prom/prometheus:v2.44.0` runs as uid 65534
+and `grafana:12.2.0` as uid 472 — neither can traverse the directory or read the
+files. Only `aerospike-exporter` (which needs no host config) came up, which is
+why the stack looked partially alive.
+
+No secrets are involved: `prometheus.yml` is scrape targets only and
+`grafana_datasource.yaml` contains no password/token, so a group/other read bit is
+not an exposure.
+
+### Where this leaves the root cause
+
+External reads: ruled out by measurement. Level depth: confirmed 10x, but a 10x on
+a ~45 ms/level floor is ~1 s for a 25-level block, not 12 minutes. The remaining
+unexplained factor is still Aerospike operation latency during the incident, and
+it is now unmeasurable retroactively on this node.
+
+Closing this out therefore depends on instrumentation being live *before* the next
+occurrence — which makes fixing the monitoring stack the highest-value next action,
+ahead of any code change.
