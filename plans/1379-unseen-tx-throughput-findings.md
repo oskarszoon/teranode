@@ -751,3 +751,59 @@ first:
 
 The harness now dumps these op counts on every run, so either change can be checked
 against `aerospike_txmeta_get` returning to zero rather than only against tx/s.
+
+## Follow-up 9: pass attribution refutes follow-up 8's inference
+
+Snapshotting the counters at the `[CheckBlockSubtrees] Completed processing ...` Infof
+(check_block_subtrees.go:608), which sits between the level pipeline and
+`validateMissingSubtreesWithOrderedRetry`, attributes every store op to one pass.
+
+| pass | baseline (0.9 s) | conflicts=50 (78 s) |
+|---|---|---|
+| level pipeline | `txmeta_get=1` `bless=1,561` `get_multi_n=4,684` | `txmeta_get=3,380` **`bless=3,122`** `get_multi_n=14,307` |
+| per-subtree pass | `txmeta_get=0` `bless=0` `get_multi_n=1,561` | **`txmeta_get=11,745`** **`bless=0`** `get_multi_n=13,306` |
+
+Follow-up 8 inferred that the per-subtree pass re-validates every transaction when
+conflicts are present, and that its missing parent-prefetch turns those into single
+Gets. **Both halves are wrong.**
+
+### The blessing doubling is inside the level pipeline
+
+`bless_missing_transaction` goes 1,561 → 3,122 **entirely within the level pipeline**;
+the per-subtree pass records **zero** blessings in both runs. So the second pass is not
+re-validating anything. Something makes the level pipeline bless every transaction
+twice when conflicts are present — the pipeline is repeating its own work, and that is
+where the extra 3,380 single Gets on that side come from too.
+
+The baseline shows the level pipeline blessing each transaction exactly once
+(1,561 = tx count), so the doubling is conflict-induced, not structural.
+
+### The Gets are in the per-subtree pass, but it blesses nothing
+
+11,745 of the 15,125 single Gets (78%) occur in the per-subtree pass, which performs
+**zero** blessings. So that pass is not validating transactions; it is reading records
+individually for some other reason. `blessMissingTransaction` is not on that path, so
+the earlier guess that the absence of `prefetchLevelParents` degrades parent resolution
+there cannot be the explanation either — no parent resolution for validation is
+happening.
+
+Its batched reads also roughly match the level pipeline's (13,306 vs 14,307), so the
+pass is doing a full pre-check either way; the single Gets are additional to that.
+
+### Where this leaves it
+
+Two separate unexplained behaviours, both conflict-induced:
+
+1. The level pipeline blesses every transaction twice (3,122 vs 1,561) and issues
+   3,380 single Gets against the baseline's 1.
+2. The per-subtree pass issues 11,745 single Gets while blessing nothing.
+
+Between them these account for the runtime, since 15,125 Gets at the ~5.7 ms cost of a
+partially filled 10 ms get-batcher window is ~86 s.
+
+Neither is explained yet. What is now firmly established, and useful regardless: the
+harness reproduces the collapse deterministically, attributes cost per pass, and has
+refuted three successive mechanism hypotheses — the phase-3 fallback (follow-up 6),
+batcher saturation (follow-up 7), and per-subtree revalidation (follow-up 8). The
+remaining question is narrow and instrumented: what issues single-record Gets on each
+of these two paths.

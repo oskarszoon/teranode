@@ -67,6 +67,43 @@ type levelCaptureLogger struct {
 	// nothing and report it as "no effect" — exactly how the external-parents axis
 	// produced a false negative.
 	conflictingSeen atomic.Uint64
+
+	// Counter snapshots taken at the boundary between the two passes.
+	// CheckBlockSubtrees logs "Completed processing N transactions across M subtree
+	// batches" at Infof (check_block_subtrees.go:608) after the level pipeline and
+	// immediately before validateMissingSubtreesWithOrderedRetry, so capturing there
+	// attributes every store op to one pass or the other.
+	splitSeen     atomic.Bool
+	getsAtSplit   atomic.Uint64
+	blessAtSplit  atomic.Uint64
+	multiNAtSplit atomic.Uint64
+}
+
+// readCounterSum sums a metric family from the in-process registry. Histograms
+// contribute their sample count, counters their value.
+func readCounterSum(name string) uint64 {
+	families, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		return 0
+	}
+
+	var total uint64
+
+	for _, fam := range families {
+		if fam.GetName() != name {
+			continue
+		}
+
+		for _, m := range fam.GetMetric() {
+			if h := m.GetHistogram(); h != nil {
+				total += h.GetSampleCount()
+			} else if c := m.GetCounter(); c != nil {
+				total += uint64(c.GetValue())
+			}
+		}
+	}
+
+	return total
 }
 
 // Warnf captures the conflicting-transaction warning so a run can prove the
@@ -80,6 +117,17 @@ func (l *levelCaptureLogger) Warnf(format string, _ ...interface{}) {
 // Infof captures the BatchDecorate external-fetch counters. The counts arrive as
 // int args, so no string parsing is needed.
 func (l *levelCaptureLogger) Infof(format string, args ...interface{}) {
+	// The boundary between the level pipeline and the per-subtree pass.
+	if strings.HasPrefix(format, "[CheckBlockSubtrees] Completed processing") {
+		if l.splitSeen.CompareAndSwap(false, true) {
+			l.getsAtSplit.Store(readCounterSum("teranode_aerospike_txmeta_get"))
+			l.blessAtSplit.Store(readCounterSum("teranode_subtreevalidation_bless_missing_transaction"))
+			l.multiNAtSplit.Store(readCounterSum("teranode_aerospike_txmeta_get_multi_n"))
+		}
+
+		return
+	}
+
 	if !strings.HasPrefix(format, "[BatchDecorate] Processed") || len(args) < 3 {
 		return
 	}
@@ -336,6 +384,22 @@ func runUnseenBlock(t *testing.T, h *perfHarness, capture *levelCaptureLogger, f
 		require.NoError(t, ferr)
 		require.NoError(t, pprof.Lookup(name).WriteTo(f, 0))
 		require.NoError(t, f.Close())
+	}
+
+	// Attribute store ops to the level pipeline vs the per-subtree pass.
+	if capture.splitSeen.Load() {
+		getsEnd := readCounterSum("teranode_aerospike_txmeta_get")
+		blessEnd := readCounterSum("teranode_subtreevalidation_bless_missing_transaction")
+		multiEnd := readCounterSum("teranode_aerospike_txmeta_get_multi_n")
+
+		t.Logf("--- pass attribution [%s] ---", label)
+		t.Logf("  level pipeline:   txmeta_get=%d bless=%d get_multi_n=%d",
+			capture.getsAtSplit.Load(), capture.blessAtSplit.Load(), capture.multiNAtSplit.Load())
+		t.Logf("  per-subtree pass: txmeta_get=%d bless=%d get_multi_n=%d",
+			getsEnd-capture.getsAtSplit.Load(), blessEnd-capture.blessAtSplit.Load(),
+			multiEnd-capture.multiNAtSplit.Load())
+	} else {
+		t.Logf("WARNING: never saw the CheckBlockSubtrees split log — attribution unavailable")
 	}
 
 	dumpStoreOpCounts(t, label)
