@@ -336,7 +336,7 @@ func TestUnseenTxThroughput_Smoke(t *testing.T) {
 	_, err = h.utxoStore.Create(ctx, parentTx, h.blockHeight-1)
 	require.NoError(t, err)
 
-	blockBytes, _ := buildUnseenBlockFromTxs(t, h, []*bt.Tx{childTx}, 1)
+	blockBytes, _ := buildUnseenBlockFromTxs(t, h, []*bt.Tx{childTx}, 1, false)
 
 	response, err := h.server.CheckBlockSubtrees(ctx, &subtreevalidation_api.CheckBlockSubtreesRequest{
 		Block:   blockBytes,

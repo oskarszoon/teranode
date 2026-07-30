@@ -13,6 +13,7 @@ import (
 	"runtime/pprof"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -49,6 +50,36 @@ type levelCaptureLogger struct {
 	mu       sync.Mutex
 	events   []levelEvent
 	preCheck []string
+
+	// External-store fetch accounting, lifted from the BatchDecorate Infof at
+	// stores/utxo/aerospike/get.go:949. ulogger.TestLogger.Infof is a no-op, so
+	// without this override that log is silently discarded and an absence of
+	// external fetches is indistinguishable from an absence of logging.
+	batchDecorateCalls atomic.Uint64
+	batchDecorateItems atomic.Uint64
+	externalFetched    atomic.Uint64
+	externalSkipped    atomic.Uint64
+}
+
+// Infof captures the BatchDecorate external-fetch counters. The counts arrive as
+// int args, so no string parsing is needed.
+func (l *levelCaptureLogger) Infof(format string, args ...interface{}) {
+	if !strings.HasPrefix(format, "[BatchDecorate] Processed") || len(args) < 3 {
+		return
+	}
+
+	items, ok1 := args[0].(int)
+	fetched, ok2 := args[1].(int)
+	skipped, ok3 := args[2].(int)
+
+	if !ok1 || !ok2 || !ok3 {
+		return
+	}
+
+	l.batchDecorateCalls.Add(1)
+	l.batchDecorateItems.Add(uint64(items))
+	l.externalFetched.Add(uint64(fetched))
+	l.externalSkipped.Add(uint64(skipped))
 }
 
 func (l *levelCaptureLogger) Debugf(format string, args ...interface{}) {
@@ -229,6 +260,9 @@ func runUnseenBlock(t *testing.T, h *perfHarness, capture *levelCaptureLogger, f
 	t.Logf("txs=%d seededParents=%d subtrees=%d", fx.txCount, fx.seededParents, len(fx.subtreeHashes))
 	t.Logf("elapsed=%s throughput=%.1f tx/s", elapsed.Round(time.Millisecond), txPerSec)
 	t.Logf("blockAssemblyStores=%d txMetaPublished=%d", h.blockAssembly.stores.Load(), h.txMetaPublished.Load())
+	t.Logf("batchDecorate: calls=%d items=%d externalFetched=%d externalSkipped=%d",
+		capture.batchDecorateCalls.Load(), capture.batchDecorateItems.Load(),
+		capture.externalFetched.Load(), capture.externalSkipped.Load())
 	t.Logf("profiles written to %s", dir)
 
 	for _, line := range capture.preCheck {

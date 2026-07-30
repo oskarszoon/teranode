@@ -171,3 +171,89 @@ TERANODE_PERF_PROFILE_DIR=/tmp/1379 \
 go test -tags aerospike -run TestUnseenTxBisect -v -timeout 60m \
   ./services/subtreevalidation/
 ```
+
+## Follow-up: externalized transactions (production evidence)
+
+Prompted by "is it a lot of externalized transactions?". Answer: **yes, and they
+are fetched serially.**
+
+`BatchDecorate` logs its external-fetch counts at INFO
+(`stores/utxo/aerospike/get.go:949`), so this is answerable from production logs
+directly. Coralogix, `bsva-infra`, archive tier, all three mainnet nodes:
+
+| window | calls | items | external fetched | max in one call |
+|---|---|---|---|---|
+| 14:29–14:46 (slow block 959984) | 383 | 31,264 | **1,600** | **203** |
+| 12:00–12:17 (quiet, sub-11s blocks) | 176 | 33,881 | 519 | 24 |
+
+Same item volume, **3x the external fetches and 8.5x the worst single call**. The
+heaviest calls were nearly all-external and clustered at 14:44:24, seconds before
+block 959984 finally completed at 14:44:37:
+
+```
+Processed 210 items - External txs: 203 fetched, 0 skipped
+Processed 165 items - External txs: 160 fetched, 0 skipped
+Processed  87 items - External txs:  84 fetched, 0 skipped
+```
+
+203 of 210 records external, and `BatchDecorate` walks its results in a single
+serial loop calling `GetTxFromExternalStore` inline (`get.go:697-742`). That is
+203 sequential blob reads inside one call, with no concurrency at all.
+
+### A harness bug this exposed, and the corrected measurement
+
+The original external-parents axis reported −2%, i.e. no effect. That row was
+**wrong** — it fetched zero externals. Two compounding causes:
+
+1. The generated txs were *extended*. `prefetchLevelParents` only requests
+   `fields.Tx` when some tx in the level is NOT extended
+   (`check_block_subtrees.go:1293`), and without `fields.Tx` `needsFullExternalTx`
+   stays false so the external fetch is skipped entirely. The validator likewise
+   skips its parent read (`Validator.go:765`). Legacy blocks from an SV node carry
+   raw, non-extended txs — the fixture now writes non-extended subtree data.
+2. `ulogger.TestLogger.Infof` is a no-op, so the `BatchDecorate` log was silently
+   discarded and "no external log lines" was indistinguishable from "no external
+   fetches". The capturing logger now counts them.
+
+With both fixed, the axis actually exercises the path:
+
+| axis | tx/s | external fetched |
+|---|---|---|
+| baseline (small parents) | 1,646 | 0 |
+| external parents (40 KB) | 1,194 | **734 in a single serial call** |
+
+734 sequential external reads cost ~360 ms of a 1.31 s run — about **0.49 ms per
+read** against a local-file blob store on SSD.
+
+### What that implies for the mainnet nodes
+
+`utxostore.docker.m` (`settings.conf:1271`) uses
+`externalStore=file://${DATADIR}/external?hashPrefix=2` — a file store, not S3.
+So the per-read cost there is whatever `DATADIR` is backed by.
+
+For 203 serial reads to account for a level taking 8.7 s, each read has to cost
+~43 ms rather than 0.49 ms. That is entirely plausible on network-attached
+storage, and this codebase already treats NFS-backed blob stores as a real
+deployment shape — `check_block_subtrees.go:405` notes "on NFS-backed blob stores
+each `Exists` call is a network round-trip". It is not confirmed, because external
+read latency is exactly one of the quantities no metric ships from these nodes.
+
+Two related settings checked and ruled out as the constraint:
+
+- `utxostore_externalStoreConcurrency.docker.m = 4` applies only to the **write**
+  path (`create.go:1062`), so it does not throttle these reads.
+- `utxostore_useExternalTxCache = true` gives a 10-minute cache, but it is keyed by
+  hash and a block's parents are mostly distinct, so it cannot absorb 203 misses.
+
+### Revised fix ranking
+
+Parallelising the external fetch loop in `BatchDecorate` moves from "not this
+incident, but a real cliff" to a **primary** candidate. It is currently
+concurrency 1; even 8-way would cut a 203-read call by ~25x, and it composes with
+the per-level round-trip batching above. `getExternalTransaction`
+(`get.go:1628-1637`) additionally tries `FileTypeTx` first and only falls back to
+`FileTypeOutputs`, so every outputs-only parent pays a wasted lookup first —
+worth fixing in the same pass.
+
+Still needed to close this out: external-read latency from the nodes themselves,
+which is issue ask 2.

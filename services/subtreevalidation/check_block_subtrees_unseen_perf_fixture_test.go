@@ -62,6 +62,20 @@ type unseenFixtureConfig struct {
 	// makes — without perturbing the level shape. Defaults to 1.
 	inputsPerTx int
 
+	// extendedInSubtreeData controls the serialization form of the txs written
+	// into FileTypeSubtreeData. Default (false) writes NON-extended txs, which is
+	// what the legacy path actually carries: a block from an SV node contains raw
+	// transactions with no parent satoshis or scripts.
+	//
+	// This is not cosmetic, it selects an entirely different code path. An extended
+	// tx makes prefetchLevelParents skip fields.Tx (check_block_subtrees.go:1293
+	// only sets needTx when some tx is NOT extended), which makes
+	// needsFullExternalTx false in BatchDecorate (get.go:722-742), which means
+	// externally-stored parents are never fetched at all — and the validator
+	// likewise skips its parent read (Validator.go:765). Writing extended txs here
+	// silently measures the cheap path.
+	extendedInSubtreeData bool
+
 	// txsPerSubtree splits the block across subtrees. The default TxBatchSize is
 	// 1048576 (settings/settings.go:616), so for fixtures of this size all
 	// subtrees land in a single batch — same as mainnet.
@@ -283,7 +297,7 @@ func generateUnseenFixture(t *testing.T, h *perfHarness, cfg unseenFixtureConfig
 
 	// allTxs is in level order, which is a topological order — the same order a
 	// miner would have to place them in for the block to be valid.
-	blockBytes, subtreeHashes := buildUnseenBlockFromTxs(t, h, allTxs, cfg.txsPerSubtree)
+	blockBytes, subtreeHashes := buildUnseenBlockFromTxs(t, h, allTxs, cfg.txsPerSubtree, cfg.extendedInSubtreeData)
 
 	return &unseenFixture{
 		blockBytes:    blockBytes,
@@ -404,7 +418,7 @@ func spendOutputs(parents []*bt.Tx, lockingScript *bscript.Script, ug *unlocker.
 // deliberately NOT as FileTypeSubtree: CheckBlockSubtrees early-returns Blessed
 // for subtrees that already exist under that type
 // (check_block_subtrees.go:438-465), which would skip everything being measured.
-func buildUnseenBlockFromTxs(t *testing.T, h *perfHarness, txs []*bt.Tx, txsPerSubtree int) ([]byte, []*chainhash.Hash) {
+func buildUnseenBlockFromTxs(t *testing.T, h *perfHarness, txs []*bt.Tx, txsPerSubtree int, extendedInSubtreeData bool) ([]byte, []*chainhash.Hash) {
 	t.Helper()
 
 	require.Positive(t, txsPerSubtree, "txsPerSubtree must be positive")
@@ -423,7 +437,22 @@ func buildUnseenBlockFromTxs(t *testing.T, h *perfHarness, txs []*bt.Tx, txsPerS
 
 		for idx, tx := range chunk {
 			require.NoError(t, subtree.AddNode(*tx.TxIDChainHash(), 1, 0))
-			require.NoError(t, subtreeData.AddTx(tx, idx))
+
+			stored := tx
+
+			if !extendedInSubtreeData {
+				// Round-trip through standard serialization to drop the extended
+				// fields. SerializeBytes emits extended form whenever IsExtended is
+				// true, and the re-parsed tx carries no PreviousTxScript so it cannot
+				// be. The txid is unchanged, so AddTx's hash check still passes.
+				plain, err := bt.NewTxFromBytes(tx.Bytes())
+				require.NoError(t, err)
+				require.False(t, plain.IsExtended(), "tx written to subtree data must not be extended")
+
+				stored = plain
+			}
+
+			require.NoError(t, subtreeData.AddTx(stored, idx))
 		}
 
 		subtreeBytes, err := subtree.Serialize()
