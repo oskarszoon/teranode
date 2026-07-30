@@ -39,7 +39,6 @@ import (
 	"github.com/bsv-blockchain/go-chaincfg"
 	subtreepkg "github.com/bsv-blockchain/go-subtree"
 	"github.com/bsv-blockchain/teranode/model"
-	"github.com/bsv-blockchain/teranode/pkg/fileformat"
 	"github.com/bsv-blockchain/teranode/services/blockassembly"
 	"github.com/bsv-blockchain/teranode/services/blockchain"
 	"github.com/bsv-blockchain/teranode/services/blockchain/blockchain_api"
@@ -56,12 +55,36 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// perfFixtureHeight sits below mainnet CSVHeight (419328) so the post-CSV
-// candidate-parent MTP fetch and the validator's EnsureMTPLoaded both no-op
-// (Validator.go:1654 returns nil below csvHeight) and the harness needs no real
-// headers. Both are one call per block, not per tx, so excluding them cannot
-// affect the throughput being measured.
-const perfFixtureHeight = uint32(257727)
+// perfHarnessOptions selects the consensus context a run executes in. It exists
+// because the two kinds of fixture need different eras.
+//
+// Generated fixtures (the throughput runs) sign through go-bt's unlocker, which
+// uses SIGHASH_FORKID. That is only valid at or above the UAHF fork, so they
+// cannot run at a pre-2018 mainnet height — GoBDK computes the pre-fork sighash
+// and the signature fails with "false/empty top stack element". Regtest has
+// UahfForkHeight: 0 ("UAHF is always enabled on regtest") and CSVHeight 576, so
+// regtest at height 100 gives valid FORKID signatures AND stays below CSV, which
+// keeps the candidate-parent MTP fetch and the validator's EnsureMTPLoaded
+// no-ops (Validator.go:1654) so the harness needs no real headers. This is the
+// same height/params pairing the other tests in this package use.
+//
+// The smoke test instead replays real 2013-era mainnet transactions, whose
+// signatures are pre-fork, so it needs mainnet params at a pre-fork height.
+//
+// Chain params change which consensus rules apply, not how many store round
+// trips a tx costs, so this choice does not affect the throughput being
+// measured.
+type perfHarnessOptions struct {
+	chainParams *chaincfg.Params
+	blockHeight uint32
+	tune        func(*settings.Settings)
+}
+
+// defaultPerfOptions is the context for generated fixtures: regtest at height
+// 100, post-UAHF and pre-CSV.
+func defaultPerfOptions() perfHarnessOptions {
+	return perfHarnessOptions{blockHeight: 100}
+}
 
 // blockAssemblyStub implements the blockassembly client surface the validator
 // uses, with an atomic counter instead of a testify mock. A testify mock takes a
@@ -86,6 +109,7 @@ type perfBlockchainClient struct {
 	blockchain.ClientI
 	state          blockchain.FSMStateType
 	blockHeaderIDs []uint32
+	height         uint32
 	fsmCalls       atomic.Uint64
 	headerIDsCalls atomic.Uint64
 }
@@ -111,7 +135,7 @@ func (c *perfBlockchainClient) Subscribe(_ context.Context, _ string) (chan *blo
 
 // GetBestBlockHeader is called once from Server.updateBestBlock during New
 // (Server.go:387), not per tx, so a static header costs the measurement nothing.
-// The reported height must match perfFixtureHeight: updateBestBlock pushes it
+// The reported height must match the fixture height: updateBestBlock pushes it
 // into subtreeStore.SetCurrentBlockHeight, and a mismatch would put the DAH
 // arithmetic in CheckBlockSubtrees on a different height than the fixture.
 func (c *perfBlockchainClient) GetBestBlockHeader(_ context.Context) (*model.BlockHeader, *model.BlockHeaderMeta, error) {
@@ -122,31 +146,42 @@ func (c *perfBlockchainClient) GetBestBlockHeader(_ context.Context) (*model.Blo
 		Timestamp:      1,
 		Bits:           model.NBit{},
 		Nonce:          0,
-	}, &model.BlockHeaderMeta{ID: 1, Height: perfFixtureHeight}, nil
+	}, &model.BlockHeaderMeta{ID: 1, Height: c.height}, nil
 }
 
 // perfHarness bundles the wired-up server and the collaborators a test needs to
 // seed state and read counters back.
 type perfHarness struct {
-	server        *Server
-	utxoStore     *aerospikestore.Store
-	subtreeStore  *blobmemory.Memory
-	blockAssembly *blockAssemblyStub
-	blockchain    *perfBlockchainClient
-	settings      *settings.Settings
-	logger        ulogger.Logger
+	server          *Server
+	utxoStore       *aerospikestore.Store
+	subtreeStore    *blobmemory.Memory
+	blockAssembly   *blockAssemblyStub
+	blockchain      *perfBlockchainClient
+	settings        *settings.Settings
+	logger          ulogger.Logger
+	txMetaPublished *atomic.Uint64
+	blockHeight     uint32
 }
 
-// newPerfHarness stands up real Aerospike + real validator + subtreevalidation
-// server. tune runs after the base settings are built so a test can flip a
-// single bisect axis without forking the whole setup.
-func newPerfHarness(t *testing.T, tune func(*settings.Settings)) *perfHarness {
+// newPerfHarness stands up the harness with a quiet logger. Tests that need the
+// per-level breakdown use newPerfHarnessWithLogger instead.
+func newPerfHarness(t *testing.T, opts perfHarnessOptions) *perfHarness {
 	t.Helper()
+
+	return newPerfHarnessWithLogger(t, ulogger.TestLogger{}, opts)
+}
+
+// newPerfHarnessWithLogger stands up real Aerospike + real validator +
+// subtreevalidation server. opts.tune runs after the base settings are built so a
+// test can flip a single bisect axis without forking the whole setup.
+func newPerfHarnessWithLogger(t *testing.T, logger ulogger.Logger, opts perfHarnessOptions) *perfHarness {
+	t.Helper()
+
+	require.Positive(t, opts.blockHeight, "blockHeight must be set")
 
 	InitPrometheusMetrics()
 
 	ctx := context.Background()
-	logger := ulogger.TestLogger{}
 
 	aeroURL, cleanup, err := aerospiketest.InitAerospikeContainer()
 	require.NoError(t, err, "aerospike testcontainer must start — this harness has no in-memory fallback by design")
@@ -158,10 +193,22 @@ func newPerfHarness(t *testing.T, tune func(*settings.Settings)) *perfHarness {
 
 	tSettings := test.CreateBaseTestSettings(t)
 
-	// Mainnet params to match the environment the issue was observed in;
-	// perfFixtureHeight stays below mainnet CSVHeight so the MTP paths no-op.
-	mainnetParams := chaincfg.MainNetParams
-	tSettings.ChainCfgParams = &mainnetParams
+	// CreateBaseTestSettings defaults to regtest, which is what generated fixtures
+	// need (see perfHarnessOptions). Only the smoke test overrides it.
+	if opts.chainParams != nil {
+		tSettings.ChainCfgParams = opts.chainParams
+	}
+
+	// CreateBaseTestSettings installs a test-only Aerospike write policy
+	// (util/test/helpers.go:38-41: MaxRetries=30, SleepBetweenRetries=50ms,
+	// SleepMultiplier=2, TotalTimeout=30s) to paper over hot-key errors in
+	// ordinary tests. Left in place it would add up to ~25s of exponential backoff
+	// to a single contended write and this harness would report production code as
+	// slow when the cost was a test setting. Restore the production policy from
+	// settings.conf (:172-173) so the numbers mean something.
+	prodSettings := settings.NewSettings()
+	tSettings.Aerospike.WritePolicyURL = prodSettings.Aerospike.WritePolicyURL
+	tSettings.Aerospike.ReadPolicyURL = prodSettings.Aerospike.ReadPolicyURL
 
 	// Block assembly ENABLED is the baseline: at the tip the FSM is RUNNING, so
 	// addTXToBlockAssembly is true (check_block_subtrees.go:504) and every unseen
@@ -170,8 +217,8 @@ func newPerfHarness(t *testing.T, tune func(*settings.Settings)) *perfHarness {
 	// which is exactly the fast/slow discriminator.
 	tSettings.BlockAssembly.Disabled = false
 
-	if tune != nil {
-		tune(tSettings)
+	if opts.tune != nil {
+		opts.tune(tSettings)
 	}
 
 	parsedURL, err := url.Parse(aeroURL)
@@ -180,7 +227,7 @@ func newPerfHarness(t *testing.T, tune func(*settings.Settings)) *perfHarness {
 	utxoStore, err := aerospikestore.New(ctx, logger, tSettings, parsedURL)
 	require.NoError(t, err, "aerospike store must construct — this also proves Lua UDF registration succeeded")
 
-	require.NoError(t, utxoStore.SetBlockHeight(perfFixtureHeight))
+	require.NoError(t, utxoStore.SetBlockHeight(opts.blockHeight))
 
 	subtreeStore := blobmemory.New()
 	txStore := blobmemory.New()
@@ -188,12 +235,28 @@ func newPerfHarness(t *testing.T, tune func(*settings.Settings)) *perfHarness {
 	blockchainClient := &perfBlockchainClient{
 		state:          blockchain.FSMStateRUNNING,
 		blockHeaderIDs: []uint32{1, 2, 3},
+		height:         opts.blockHeight,
 	}
 
 	baStub := &blockAssemblyStub{}
 
+	// KafkaAsyncProducerMock.Publish is a blocking send into a 100-deep buffer
+	// (util/kafka/kafka_producer_async_mock.go:19,47) that nothing drains. The
+	// validator publishes one txmeta per validated tx
+	// (Validator.go:1005-1016), so past 100 txs every remaining
+	// blessMissingTransaction goroutine parks in Publish forever. Draining keeps
+	// the real per-tx enqueue cost in the measurement without the deadlock.
+	//
+	// Boundary, same class as the block-assembly hop: the Kafka broker round trip
+	// itself is not measured, only the enqueue.
+	txMetaProducer := kafka.NewKafkaAsyncProducerMock()
+	rejectedProducer := kafka.NewKafkaAsyncProducerMock()
+
+	drained := drainProducer(t, txMetaProducer)
+	drainProducer(t, rejectedProducer)
+
 	realValidator, err := validator.New(ctx, logger, tSettings, utxoStore,
-		kafka.NewKafkaAsyncProducerMock(), kafka.NewKafkaAsyncProducerMock(), nil,
+		txMetaProducer, rejectedProducer, nil,
 		baStub, blockchainClient)
 	require.NoError(t, err)
 
@@ -204,14 +267,41 @@ func newPerfHarness(t *testing.T, tune func(*settings.Settings)) *perfHarness {
 	require.NoError(t, err)
 
 	return &perfHarness{
-		server:        server,
-		utxoStore:     utxoStore,
-		subtreeStore:  subtreeStore,
-		blockAssembly: baStub,
-		blockchain:    blockchainClient,
-		settings:      tSettings,
-		logger:        logger,
+		server:          server,
+		utxoStore:       utxoStore,
+		subtreeStore:    subtreeStore,
+		blockAssembly:   baStub,
+		blockchain:      blockchainClient,
+		settings:        tSettings,
+		logger:          logger,
+		txMetaPublished: drained,
+		blockHeight:     opts.blockHeight,
 	}
+}
+
+// drainProducer consumes a mock producer's publish channel for the life of the
+// test and counts the messages, so Publish never blocks. Returns the counter.
+func drainProducer(t *testing.T, producer *kafka.KafkaAsyncProducerMock) *atomic.Uint64 {
+	t.Helper()
+
+	counter := &atomic.Uint64{}
+	done := make(chan struct{})
+	ch := producer.PublishChannel()
+
+	go func() {
+		for {
+			select {
+			case <-ch:
+				counter.Add(1)
+			case <-done:
+				return
+			}
+		}
+	}()
+
+	t.Cleanup(func() { close(done) })
+
+	return counter
 }
 
 // TestUnseenTxThroughput_Smoke is phase 1: prove every real component connects
@@ -219,7 +309,17 @@ func newPerfHarness(t *testing.T, tune func(*settings.Settings)) *perfHarness {
 // silently ran with addTXToBlockAssembly == false would measure the catchup path
 // instead of the tip path and every later number would be wrong.
 func TestUnseenTxThroughput_Smoke(t *testing.T) {
-	h := newPerfHarness(t, nil)
+	// Mainnet params at a pre-fork height: the fixtures below are real 2013-era
+	// mainnet transactions whose signatures predate SIGHASH_FORKID, so they only
+	// verify under the pre-UAHF sighash algorithm. 257727 is also below mainnet
+	// CSVHeight (419328), keeping the MTP paths no-ops.
+	mainnetParams := chaincfg.MainNetParams
+
+	h := newPerfHarness(t, perfHarnessOptions{
+		chainParams: &mainnetParams,
+		blockHeight: 257727,
+	})
+
 	ctx := context.Background()
 
 	// Same real-mainnet parent/child pair the validator-level consensus tests and
@@ -233,10 +333,10 @@ func TestUnseenTxThroughput_Smoke(t *testing.T) {
 
 	// Seed ONLY the parent. The child stays absent from cache and store — that is
 	// the unseen precondition the whole reproduction depends on.
-	_, err = h.utxoStore.Create(ctx, parentTx, perfFixtureHeight-1)
+	_, err = h.utxoStore.Create(ctx, parentTx, h.blockHeight-1)
 	require.NoError(t, err)
 
-	blockBytes, subtreeHash := buildUnseenBlock(t, h, []*bt.Tx{childTx})
+	blockBytes, _ := buildUnseenBlockFromTxs(t, h, []*bt.Tx{childTx}, 1)
 
 	response, err := h.server.CheckBlockSubtrees(ctx, &subtreevalidation_api.CheckBlockSubtreesRequest{
 		Block:   blockBytes,
@@ -244,7 +344,6 @@ func TestUnseenTxThroughput_Smoke(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.True(t, response.Blessed)
-	_ = subtreeHash
 
 	// The child must exist and be spendable: Create marked it locked because it
 	// went to block assembly, then twoPhaseCommitTransaction unlocked it. Locked
@@ -258,58 +357,4 @@ func TestUnseenTxThroughput_Smoke(t *testing.T) {
 	// catchup path, not the tip path.
 	require.Equal(t, uint64(1), h.blockAssembly.stores.Load(),
 		"block assembly must have received the tx — zero means the RUNNING FSM pin did not take effect")
-}
-
-// buildUnseenBlock writes the given txs into a single subtree as legacy files and
-// returns the serialized block referencing it.
-//
-// The subtree is written as FileTypeSubtreeToCheck and FileTypeSubtreeData but
-// deliberately NOT as FileTypeSubtree: CheckBlockSubtrees early-returns Blessed
-// for subtrees that already exist as FileTypeSubtree
-// (check_block_subtrees.go:438-465), which would skip all the work being
-// measured.
-func buildUnseenBlock(t *testing.T, h *perfHarness, txs []*bt.Tx) ([]byte, *chainhash.Hash) {
-	t.Helper()
-
-	ctx := context.Background()
-
-	subtree, err := subtreepkg.NewTreeByLeafCount(subtreepkg.CeilPowerOfTwo(len(txs)))
-	require.NoError(t, err)
-
-	subtreeData := subtreepkg.NewSubtreeData(subtree)
-
-	for idx, tx := range txs {
-		require.NoError(t, subtree.AddNode(*tx.TxIDChainHash(), 1, 0))
-		require.NoError(t, subtreeData.AddTx(tx, idx))
-	}
-
-	subtreeBytes, err := subtree.Serialize()
-	require.NoError(t, err)
-
-	subtreeDataBytes, err := subtreeData.Serialize()
-	require.NoError(t, err)
-
-	root := subtree.RootHash()
-
-	require.NoError(t, h.subtreeStore.Set(ctx, root[:], fileformat.FileTypeSubtreeToCheck, subtreeBytes))
-	require.NoError(t, h.subtreeStore.Set(ctx, root[:], fileformat.FileTypeSubtreeData, subtreeDataBytes))
-
-	header := &model.BlockHeader{
-		Version:        1,
-		HashPrevBlock:  &chainhash.Hash{},
-		HashMerkleRoot: &chainhash.Hash{},
-		Timestamp:      1,
-		Bits:           model.NBit{},
-		Nonce:          0,
-	}
-
-	coinbaseTx := &bt.Tx{Version: 1}
-
-	block, err := model.NewBlock(header, coinbaseTx, []*chainhash.Hash{root}, uint64(len(txs)+1), 0, perfFixtureHeight, 0)
-	require.NoError(t, err)
-
-	blockBytes, err := block.Bytes()
-	require.NoError(t, err)
-
-	return blockBytes, root
 }
