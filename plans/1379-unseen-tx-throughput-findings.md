@@ -676,3 +676,78 @@ repeated work rather than per-conflict work.
 Next step is a CPU profile alongside the block profile for a conflict run, to
 separate "waiting on saturated batchers" from whatever is generating the batch
 volume. The block profile alone shows the queue, not its source.
+
+## Follow-up 8: the profiles were misleading; op counts locate it
+
+### Correction: the block profile measures idle parking, not contention
+
+Follow-up 7 read 79.7% of blocking delay on `go-batcher SetMaxConcurrent` as batcher
+saturation, and built a `batcherMaxConcurrent.docker.m = 24` story on it. **Both are
+withdrawn.**
+
+The goroutine profile shows 7 batchers each holding exactly 128 goroutines parked in
+`SetMaxConcurrent.func1` on an empty channel — idle worker pools, not queued work.
+Decisive check: the 0.89 s baseline run reports 69 s of blocking delay (78x wall) and
+the 78 s conflict run reports 6,200 s (also 78x wall). Identical ratio, so the block
+profile is measuring goroutines parked idle, proportional to pool size times wall
+time. It says nothing about contention.
+
+The CPU profile is the reliable one: **4.45 s of samples over 78.5 s wall — 5.67%**.
+The process is idle. What CPU exists is in the Aerospike client's batch command
+execute and connection read/write. So the run is latency-bound on store round trips,
+and the question is only how many.
+
+### Op counts from the in-process Prometheus registry
+
+| metric | baseline (0.9 s) | conflicts=50 (86.8 s) |
+|---|---|---|
+| `subtreevalidation_bless_missing_transaction` | 1,561 (= tx count) | **3,122 (2x)** |
+| **`aerospike_txmeta_get`** (single record) | **0** | **15,125** |
+| `aerospike_txmeta_get_multi_n` (batched) | 6,245 | 27,613 |
+| `validator_transactions_spend_utxos` | 1,561 | 3,122 |
+
+Two measured facts:
+
+1. **Every transaction is blessed twice** in the conflict run and once in the
+   baseline. So the second (per-subtree) pass skips everything in the baseline and
+   re-validates everything when conflicts are present — all 1,561, not just the 50
+   conflicting ones.
+2. **15,125 single-record Gets against zero in the baseline.** At 86 s / 15,125 ≈
+   5.7 ms each this accounts for the entire runtime, and 5.7 ms is what a partially
+   filled 10 ms get-batcher window costs (`utxostore_getBatcherDurationMillis = 10`).
+
+### Mechanism (measured parts vs inferred parts)
+
+Measured: the doubling of blessings, the 15,125 single Gets, 5.67% CPU, and the
+per-Get cost matching the batcher window.
+
+Inferred and still to be confirmed: that the second pass is
+`validateMissingSubtreesWithOrderedRetry` re-validating whole subtrees because they
+contain a conflicting transaction, and that the single Gets arise because
+`ValidateSubtreeInternal` has no equivalent of `prefetchLevelParents` — so parent
+resolution falls back to a per-parent `Get` in the validator instead of one batched
+read per level.
+
+This also accounts for the two anomalies follow-up 7 could not explain:
+
+- **Sub-linearity** (50 conflicts → 80 s, 200 → 132 s rather than 4x): in both cases
+  every subtree is already being reprocessed, so extra conflicts add little.
+- **Near-constant warning count** (807 at 50 conflicts, 1,027 at 200): the repeated
+  work is per-subtree, not per-conflict.
+
+### Fix direction
+
+The cost is not the conflict handling itself — it is that one conflicting transaction
+in a subtree forfeits the level pass's batched parent prefetch for every transaction
+in that subtree. Two candidate directions, both needing the inference above confirmed
+first:
+
+1. Stop a conflicting transaction from invalidating the whole subtree's
+   already-validated state, so the second pass skips the other transactions as it does
+   in the baseline.
+2. Give the per-subtree path the same batched parent prefetch the level path has, so
+   the fallback costs one batched read per subtree rather than ~10 single Gets per
+   transaction.
+
+The harness now dumps these op counts on every run, so either change can be checked
+against `aerospike_txmeta_get` returning to zero rather than only against tx/s.

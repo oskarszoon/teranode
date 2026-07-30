@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/pprof"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -23,6 +24,7 @@ import (
 	utxostore "github.com/bsv-blockchain/teranode/stores/utxo"
 	"github.com/bsv-blockchain/teranode/stores/utxo/fields"
 	"github.com/bsv-blockchain/teranode/ulogger"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
 
@@ -205,6 +207,74 @@ func assertUnseenPrecondition(t *testing.T, h *perfHarness, fx *unseenFixture) {
 		"seeded parent must be mined — empty BlockHeights sends the validator down the unconfirmed-parent path instead of steady state")
 }
 
+// dumpStoreOpCounts reports Aerospike and validator operation counts from the
+// in-process Prometheus registry.
+//
+// This is the instrument the profiles could not provide. The CPU profile shows the
+// conflict run is only ~6% busy, and the block profile turned out to be dominated by
+// idle batcher worker pools parked on empty channels (the same ~78x-wall ratio
+// appears in a 0.89s baseline run, so it measures parking, not contention). What
+// remains unanswered is how many store round trips each run makes and of which kind —
+// which these counters answer directly.
+func dumpStoreOpCounts(t *testing.T, label string) {
+	t.Helper()
+
+	families, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		t.Logf("could not gather metrics: %v", err)
+		return
+	}
+
+	type row struct {
+		name  string
+		count uint64
+		sum   float64
+	}
+
+	rows := make([]row, 0, 32)
+
+	for _, fam := range families {
+		n := fam.GetName()
+		if !strings.Contains(n, "aerospike") && !strings.Contains(n, "validator_transactions") &&
+			!strings.Contains(n, "subtreevalidation_bless") {
+			continue
+		}
+
+		var c uint64
+		var sum float64
+
+		for _, m := range fam.GetMetric() {
+			if h := m.GetHistogram(); h != nil {
+				c += h.GetSampleCount()
+				sum += h.GetSampleSum()
+			} else if cnt := m.GetCounter(); cnt != nil {
+				c += uint64(cnt.GetValue())
+			}
+		}
+
+		if c > 0 {
+			rows = append(rows, row{n, c, sum})
+		}
+	}
+
+	sort.Slice(rows, func(i, j int) bool { return rows[i].count > rows[j].count })
+
+	t.Logf("--- store op counts [%s] ---", label)
+
+	for i, r := range rows {
+		if i >= 14 {
+			break
+		}
+
+		mean := 0.0
+		if r.count > 0 {
+			mean = r.sum / float64(r.count) * 1000
+		}
+
+		t.Logf("  %-58s n=%-8d mean=%.2fms", strings.TrimPrefix(r.name, "teranode_"), r.count, mean)
+	}
+}
+
 // profileDir resolves where profiles are written. TERANODE_PERF_PROFILE_DIR keeps
 // them after the test process exits; otherwise they land in the test temp dir and
 // the path is logged.
@@ -267,6 +337,8 @@ func runUnseenBlock(t *testing.T, h *perfHarness, capture *levelCaptureLogger, f
 		require.NoError(t, pprof.Lookup(name).WriteTo(f, 0))
 		require.NoError(t, f.Close())
 	}
+
+	dumpStoreOpCounts(t, label)
 
 	txPerSec := float64(fx.txCount) / elapsed.Seconds()
 
