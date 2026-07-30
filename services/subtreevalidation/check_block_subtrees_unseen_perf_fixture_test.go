@@ -16,6 +16,7 @@ import (
 	"context"
 	"encoding/binary"
 	"runtime"
+	"sync/atomic"
 	"testing"
 
 	"github.com/bsv-blockchain/go-bt/v2"
@@ -52,6 +53,14 @@ type unseenFixtureConfig struct {
 	// what exercises the serial GetTxFromExternalStore loop in BatchDecorate
 	// (stores/utxo/aerospike/get.go:697-742).
 	parentFillerBytes int
+
+	// inputsPerTx is how many outputs each generated tx spends. Input 0 always
+	// comes from the tx's 1:1 parent-level transaction, which is what fixes the
+	// level histogram; any additional inputs come from extra freshly-seeded mined
+	// parents. So raising this multiplies the distinct-parent fan-out per level —
+	// the work prefetchLevelParents does and the per-parent reads the validator
+	// makes — without perturbing the level shape. Defaults to 1.
+	inputsPerTx int
 
 	// txsPerSubtree splits the block across subtrees. The default TxBatchSize is
 	// 1048576 (settings/settings.go:616), so for fixtures of this size all
@@ -151,15 +160,53 @@ func generateUnseenFixture(t *testing.T, h *perfHarness, cfg unseenFixtureConfig
 	// thousands of distinct earlier outputs, and prefetchLevelParents dedups
 	// distinct parents per level, so funding a whole level from a handful of
 	// parents would collapse exactly the fan-out the prefetch axis is testing.
+	inputsPerTx := cfg.inputsPerTx
+	if inputsPerTx < 1 {
+		inputsPerTx = 1
+	}
+
 	levelTxs := make([][]*bt.Tx, len(cfg.levelSizes))
 	allTxs := make([]*bt.Tx, 0, sumInts(cfg.levelSizes))
+
+	// parentIdx hands out unique synthetic outpoints across all goroutines so no
+	// two seeded parents can collide (a collision would be a double spend admitted
+	// as conflicting, silently changing what is measured).
+	var parentIdx atomic.Int64
+
+	// seedParent builds a mined parent and writes it to the store, returning it for
+	// a child to spend.
+	seedParent := func(ctx context.Context) (*bt.Tx, error) {
+		idx := int(parentIdx.Add(1))
+
+		parentTx, err := buildSeededParent(idx, lockingScript, unlockerGetter, cfg.parentFillerBytes)
+		if err != nil {
+			return nil, err
+		}
+
+		// Mined info makes BlockHeights non-empty: a parent confirmed in an earlier
+		// block, the steady-state case. Block ID 1 is inside the set
+		// perfBlockchainClient.GetBlockHeaderIDs reports, so
+		// blessMissingTransaction's already-mined-on-our-chain check
+		// (SubtreeValidation.go:439) sees a consistent view.
+		if _, err = h.utxoStore.Create(ctx, parentTx, h.blockHeight-1,
+			utxo.WithMinedBlockInfo(utxo.MinedBlockInfo{
+				BlockID:        1,
+				BlockHeight:    h.blockHeight - 1,
+				SubtreeIdx:     0,
+				OnLongestChain: true,
+			})); err != nil {
+			return nil, err
+		}
+
+		return parentTx, nil
+	}
 
 	// Level 0 is built and seeded in parallel. Sequentially it is the dominant
 	// setup cost: every Create waits out the store batcher's 10 ms timer
 	// (utxostore_storeBatcherDurationMillis, settings.conf:1308) because a lone
-	// Create never fills the 2048-deep batch, so 2,936 parents would cost ~30 s of
-	// setup. This is fixture construction, outside the measured window, but there
-	// is no reason to pay it.
+	// Create never fills the 2048-deep batch, so thousands of parents would cost
+	// tens of seconds. This is fixture construction, outside the measured window,
+	// but there is no reason to pay it.
 	levelTxs[0] = make([]*bt.Tx, cfg.levelSizes[0])
 
 	seedGroup, seedCtx := errgroup.WithContext(ctx)
@@ -169,29 +216,19 @@ func generateUnseenFixture(t *testing.T, h *perfHarness, cfg unseenFixtureConfig
 		i := i
 
 		seedGroup.Go(func() error {
-			parentTx, buildErr := buildSeededParent(i, lockingScript, unlockerGetter, cfg.parentFillerBytes)
-			if buildErr != nil {
-				return buildErr
+			primary, err := seedParent(seedCtx)
+			if err != nil {
+				return err
 			}
 
-			// Mined info makes BlockHeights non-empty: a parent confirmed in an earlier
-			// block, which is the steady-state case. Block ID 1 is inside the set
-			// perfBlockchainClient.GetBlockHeaderIDs reports, so
-			// blessMissingTransaction's already-mined-on-our-chain check
-			// (SubtreeValidation.go:439) sees a consistent view.
-			if _, createErr := h.utxoStore.Create(seedCtx, parentTx, h.blockHeight-1,
-				utxo.WithMinedBlockInfo(utxo.MinedBlockInfo{
-					BlockID:        1,
-					BlockHeight:    h.blockHeight - 1,
-					SubtreeIdx:     0,
-					OnLongestChain: true,
-				})); createErr != nil {
-				return createErr
+			extras, err := seedExtraParents(seedCtx, seedParent, inputsPerTx-1)
+			if err != nil {
+				return err
 			}
 
-			tx, spendErr := spendOutput(parentTx, 0, lockingScript, unlockerGetter)
-			if spendErr != nil {
-				return spendErr
+			tx, err := spendOutputs(append([]*bt.Tx{primary}, extras...), lockingScript, unlockerGetter)
+			if err != nil {
+				return err
 			}
 
 			levelTxs[0][i] = tx
@@ -209,7 +246,7 @@ func generateUnseenFixture(t *testing.T, h *perfHarness, cfg unseenFixtureConfig
 	for k := 1; k < len(cfg.levelSizes); k++ {
 		levelTxs[k] = make([]*bt.Tx, cfg.levelSizes[k])
 
-		levelGroup := new(errgroup.Group)
+		levelGroup, levelCtx := errgroup.WithContext(ctx)
 		levelGroup.SetLimit(runtime.NumCPU() * 4)
 
 		for i := 0; i < cfg.levelSizes[k]; i++ {
@@ -219,9 +256,16 @@ func generateUnseenFixture(t *testing.T, h *perfHarness, cfg unseenFixtureConfig
 				// Index i into the parent level, not i modulo its width: the width check
 				// above guarantees i is in range, and a modulo would silently produce
 				// double spends the moment that invariant broke.
-				tx, spendErr := spendOutput(levelTxs[k-1][i], 0, lockingScript, unlockerGetter)
-				if spendErr != nil {
-					return spendErr
+				primary := levelTxs[k-1][i]
+
+				extras, err := seedExtraParents(levelCtx, seedParent, inputsPerTx-1)
+				if err != nil {
+					return err
+				}
+
+				tx, err := spendOutputs(append([]*bt.Tx{primary}, extras...), lockingScript, unlockerGetter)
+				if err != nil {
+					return err
 				}
 
 				levelTxs[k][i] = tx
@@ -235,7 +279,7 @@ func generateUnseenFixture(t *testing.T, h *perfHarness, cfg unseenFixtureConfig
 		allTxs = append(allTxs, levelTxs[k]...)
 	}
 
-	seeded := cfg.levelSizes[0]
+	seeded := int(parentIdx.Load())
 
 	// allTxs is in level order, which is a topological order — the same order a
 	// miner would have to place them in for the block to be valid.
@@ -297,25 +341,52 @@ func buildSeededParent(idx int, lockingScript *bscript.Script, ug *unlocker.Gett
 	return tx, nil
 }
 
-// spendOutput builds a tx spending one output of parent, signed for real so
-// GoBDK script verification does genuine work. Zero fee: the output carries the
-// full input value.
+// seedExtraParents seeds n additional mined parents for a tx's non-primary
+// inputs.
+func seedExtraParents(ctx context.Context, seed func(context.Context) (*bt.Tx, error), n int) ([]*bt.Tx, error) {
+	if n <= 0 {
+		return nil, nil
+	}
+
+	out := make([]*bt.Tx, 0, n)
+
+	for i := 0; i < n; i++ {
+		parent, err := seed(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		out = append(out, parent)
+	}
+
+	return out, nil
+}
+
+// spendOutputs builds a tx spending output 0 of every given parent, signed for
+// real so GoBDK script verification does genuine work. Zero fee: the single
+// output carries the summed input value.
 //
 // Returns an error rather than calling require, for the same goroutine-safety
 // reason as buildSeededParent.
-func spendOutput(parent *bt.Tx, vout uint32, lockingScript *bscript.Script, ug *unlocker.Getter) (*bt.Tx, error) {
+func spendOutputs(parents []*bt.Tx, lockingScript *bscript.Script, ug *unlocker.Getter) (*bt.Tx, error) {
 	tx := bt.NewTx()
 
-	if err := tx.FromUTXOs(&bt.UTXO{
-		TxIDHash:      parent.TxIDChainHash(),
-		Vout:          vout,
-		LockingScript: parent.Outputs[vout].LockingScript,
-		Satoshis:      parent.Outputs[vout].Satoshis,
-	}); err != nil {
-		return nil, err
+	total := uint64(0)
+
+	for _, parent := range parents {
+		if err := tx.FromUTXOs(&bt.UTXO{
+			TxIDHash:      parent.TxIDChainHash(),
+			Vout:          0,
+			LockingScript: parent.Outputs[0].LockingScript,
+			Satoshis:      parent.Outputs[0].Satoshis,
+		}); err != nil {
+			return nil, err
+		}
+
+		total += parent.Outputs[0].Satoshis
 	}
 
-	if err := tx.AddP2PKHOutputFromScript(lockingScript, parent.Outputs[vout].Satoshis); err != nil {
+	if err := tx.AddP2PKHOutputFromScript(lockingScript, total); err != nil {
 		return nil, err
 	}
 
