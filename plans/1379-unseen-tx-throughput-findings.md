@@ -913,3 +913,64 @@ Once deployed, `levels_per_block` on real mainnet traffic answers the question i
 currently rests on an assumption for: whether real blocks are deep enough for the
 measured 10x level-depth penalty to matter. The #1379 blocks were reconstructed at 25
 levels, but that is one third-party measurement of one block.
+
+## Follow-up 12: the 2PC robustness fix, and ask 3 is already shipped
+
+### Fixed: a failed 2PC unlock no longer fails the transaction
+
+`validateInternal` logged the two-phase-commit unlock failure as recoverable —
+"transaction will be marked as spendable on next block" — and then returned the error
+anyway. The two statements contradicted each other and the error won.
+
+By that point the tx is fully validated: inputs spent, record created, sent to block
+assembly, txmeta published. Clearing the locked flag also happens when the tx is mined
+(SetMinedMulti, the "set the record to not be locked again" branch in `teranode.lua`),
+exactly as the warning claimed. Returning the error escalated a self-healing condition
+into a transaction failure, and on the block-validation path
+`blessMissingTransaction` turns that into a processing error which increments
+`errorsFound` and can fail an entire batch of an otherwise valid block.
+
+Now logged and swallowed, kept out of the named `err` return so tracing records the tx
+as the success it is; `Locked` stays true on failure so the returned metadata still
+matches the stored record.
+`TestValidator_FailedTwoPhaseCommitDoesNotFailTransaction` injects a `SetLocked`
+failure, asserts the tx still validates and its parent output is still spent, and
+asserts `SetLocked` was actually attempted so it cannot silently prove nothing.
+Confirmed failing without the change and passing with it.
+
+### Ask 3 (dedupe concurrent legacy deliveries) needs no code — it exists
+
+`SyncManager.inFlightBlocks` (manager.go:544) already holds the hash of every block
+admitted or parked, so at most one copy of a hash is in flight at a time.
+`AcquireBlockPrefetch` (:2764) inserts before the budget acquire and returns
+`ErrDuplicateBlockInFlight` for a duplicate; it is called from the peer read loop
+(`peer_server.go:1112`), so dedup happens at receipt across peers. It is active
+whenever `legacy_blockPrefetchBufferBytes > 0`, which defaults to 256 MB and is not
+overridden — so enabled on mainnet.
+
+It landed in commit `3c400fd97` (#1190, 2026-07-14), first tagged **v0.16.0-beta-4**.
+
+At the time of the incident on 2026-07-29 none of the three nodes had it:
+
+| node | version then | dedup? |
+|---|---|---|
+| `teranode-mainnet-eu-1` | v0.15 | no |
+| `bsva-ovh-teranode-eu-1` | v0.15 | no |
+| `bsva-ovh-teranode-eu-2` | v0.16.0-beta-1 | no (beta-1 < beta-4) |
+
+`bsva-ovh-teranode-eu-2` now runs beta-9 and therefore has it. **Ask 3 is a deployment
+item, not a code item** — the other two nodes are still on v0.15.
+
+### What the incident's duplicate work actually was
+
+Worth separating, because "dedupe deliveries" does not describe it. The timeline was
+sequential, not two concurrent deliveries: attempt 1 at 14:29 from one peer ran 10m40
+and ended in `context canceled`; attempt 2 at 14:39:59 from another peer then **latched
+onto attempt 1's still-running `CheckBlockSubtrees`** and both completions logged at the
+same instant.
+
+So the subtreevalidation-layer dedup already worked — attempt 2 did not redo the work.
+The waste was attempt 1's `HandleBlockDirect` being cancelled after 10m40 with its
+downstream validation still running. **Why that cancellation happened is not
+diagnosed**, and it is a different problem from delivery dedup. That is the real
+residual item from the issue's ask 3, restated.
