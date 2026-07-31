@@ -1002,13 +1002,28 @@ func (v *Validator) validateInternal(ctx context.Context, tx *bt.Tx, blockHeight
 	}
 
 	if txMetaData.Locked {
-		if err = v.twoPhaseCommitTransaction(decoupledCtx, tx, txID); err != nil {
-			v.logger.Warnf("[Validate][%s] error during two phase commit, transaction will be marked as spendable on next block: %v", txID, err)
-
-			return txMetaData, err
+		// A failed unlock is recoverable and must NOT fail the transaction.
+		//
+		// By this point the tx is fully validated: inputs spent, record created, sent
+		// to block assembly, txmeta published. The only outstanding work is clearing
+		// the locked flag, and that happens anyway when the tx is mined
+		// (SetMinedMulti clears it — see the "set the record to not be locked again"
+		// branch in stores/utxo/aerospike/teranode.lua), which is exactly what the
+		// warning below has always claimed.
+		//
+		// Returning the error here contradicted that: it escalated a self-healing
+		// condition into a transaction failure. On the block-validation path that
+		// increments errorsFound in processTransactionsInLevels, which can fail an
+		// entire batch of an otherwise valid block (#1379).
+		//
+		// The error is deliberately kept out of the named `err` return so the
+		// tracing/metrics deferral records this tx as the success it is. Locked stays
+		// true on failure so the in-memory metadata still reflects the stored state.
+		if commitErr := v.twoPhaseCommitTransaction(decoupledCtx, tx, txID); commitErr != nil {
+			v.logger.Warnf("[Validate][%s] error during two phase commit, transaction will be marked as spendable on next block: %v", txID, commitErr)
+		} else {
+			txMetaData.Locked = false
 		}
-
-		txMetaData.Locked = false
 	}
 
 	return txMetaData, nil

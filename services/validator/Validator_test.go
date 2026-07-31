@@ -30,6 +30,7 @@ import (
 	"os"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1356,6 +1357,98 @@ func TestValidator_TwoPhaseCommitTransaction_SetLockedFails(t *testing.T) {
 	err = utxoStore.GetMeta(ctx, tx.TxIDChainHash(), metaData)
 	require.NoError(t, err)
 	require.True(t, metaData.Locked)
+}
+
+// failSetLockedStore fails only SetLocked, so the two-phase-commit unlock at the end
+// of validateInternal is the single operation that errors.
+type failSetLockedStore struct {
+	utxostore.Store
+
+	calls atomic.Uint64
+}
+
+func (s *failSetLockedStore) SetLocked(_ context.Context, _ []chainhash.Hash, _ bool) error {
+	s.calls.Add(1)
+	return errors.NewStorageError("injected SetLocked failure")
+}
+
+// TestValidator_FailedTwoPhaseCommitDoesNotFailTransaction pins that a failed unlock
+// is reported but does not fail the transaction.
+//
+// The unlock is the last step of validateInternal: by then the inputs are spent, the
+// record is created, the tx has gone to block assembly and the txmeta is published.
+// Clearing the locked flag also happens anyway when the tx is mined (SetMinedMulti),
+// which is what the warning on that path has always stated.
+//
+// It previously returned the error regardless, which on the block-validation path
+// increments errorsFound in processTransactionsInLevels and can fail an entire batch
+// of an otherwise valid block (#1379). Locked must stay true so the returned metadata
+// still matches what is stored.
+func TestValidator_FailedTwoPhaseCommitDoesNotFailTransaction(t *testing.T) {
+	tracing.SetupMockTracer()
+
+	ctx := context.Background()
+	logger := ulogger.TestLogger{}
+
+	tSettings := test.CreateBaseTestSettings(t)
+
+	utxoStoreURL, err := url.Parse("sqlitememory:///test_2pc_failure")
+	require.NoError(t, err)
+
+	baseStore, err := sql.New(ctx, logger, tSettings, utxoStoreURL)
+	require.NoError(t, err)
+
+	utxoStore := &failSetLockedStore{Store: baseStore}
+
+	txs := transactions.CreateTestTransactionChainWithCount(t, 3)
+
+	_, err = baseStore.Create(ctx, txs[0], 1, utxostore.WithLocked(false))
+	require.NoError(t, err)
+
+	blockAsmMock := blockassembly.NewMock()
+	blockAsmMock.On("Store", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		Return(true, nil).Times(1)
+
+	settings := test.CreateBaseTestSettings(t)
+	settings.BlockAssembly.Disabled = false
+
+	v := &Validator{
+		logger:         logger,
+		utxoStore:      utxoStore,
+		blockAssembler: blockAsmMock,
+		settings:       settings,
+		txValidator:    NewTxValidator(logger, test.CreateBaseTestSettings(t)),
+		stats:          gocore.NewStat("validator"),
+	}
+
+	require.NoError(t, baseStore.SetBlockHeight(2))
+	require.NoError(t, baseStore.SetMedianBlockTime(1700000000))
+
+	txMeta, err := v.ValidateWithOptions(ctx, txs[1], 2, &Options{AddTXToBlockAssembly: true})
+
+	require.NoError(t, err, "a failed two-phase-commit unlock must not fail the transaction — it is recoverable when the tx is mined")
+	require.NotNil(t, txMeta)
+	require.Positive(t, utxoStore.calls.Load(), "SetLocked must actually have been attempted, otherwise this test proves nothing")
+
+	// The unlock failed, so the flag is still set both in the returned metadata and in
+	// the store. Reporting it as cleared would misrepresent the stored state.
+	require.True(t, txMeta.Locked, "returned metadata must still report Locked after a failed unlock")
+
+	stored := &meta.Data{}
+	require.NoError(t, baseStore.GetMeta(ctx, txs[1].TxIDChainHash(), stored))
+	require.True(t, stored.Locked, "stored record must still be locked after a failed unlock")
+
+	// The transaction is nonetheless fully validated: its parent's output is spent.
+	spentUtxoHash, err := util.UTXOHashFromOutput(txs[0].TxIDChainHash(), txs[0].Outputs[0], 0)
+	require.NoError(t, err)
+
+	spendStatus, err := baseStore.GetSpend(ctx, &utxostore.Spend{
+		TxID:     txs[0].TxIDChainHash(),
+		Vout:     0,
+		UTXOHash: spentUtxoHash,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, spendStatus.SpendingData, "parent output must be spent — the tx was validated despite the unlock failing")
 }
 
 func TestValidator_LockedFlagChangedIfBlockAssemblyStoreSucceeds(t *testing.T) {
