@@ -807,3 +807,50 @@ refuted three successive mechanism hypotheses — the phase-3 fallback (follow-u
 batcher saturation (follow-up 7), and per-subtree revalidation (follow-up 8). The
 remaining question is narrow and instrumented: what issues single-record Gets on each
 of these two paths.
+
+## Follow-up 10: two corrections that change the severity claim
+
+### The "blessed twice" finding was an instrumentation artifact
+
+`prometheus.DefaultGatherer` is process-global, and `TestUnseenTxBisect_ConflictingTxs`
+runs its baseline first in the same test binary, so `dumpStoreOpCounts` reports
+**cumulative** totals. The conflict run's 3,122 blessings are 1,561 (baseline) + 1,561
+(conflict run).
+
+The arithmetic is exact and self-consistent:
+
+- `bless`, `validate` and `spend_utxos` are all precisely 2x the baseline.
+- `2phase_commit` is 2,315 rather than 3,122, and decomposes as 1,561 + 754 — where
+  754 non-conflicting + **807 conflicting = 1,561**, the conflict run's tx count.
+  Conflicting transactions skip the 2PC unlock because they are never locked.
+
+So each transaction is blessed **once**. Follow-up 9's claim that the level pipeline
+blesses everything twice is withdrawn.
+
+The single-Get finding survives, because the baseline contributes almost nothing to it
+(1 Get total): the conflict run really does issue ~3,379 single Gets in the level
+pipeline and 11,745 in the per-subtree pass.
+
+### The conflict rate is 52%, not 3% — the severity claim was overstated
+
+The same accounting shows **807 of 1,561 transactions conflicting**, from only 50
+seeded double-spends. Conflicts cascade: a block transaction spending a conflicting
+parent's output is itself conflicting, so the 50 seeds propagate down the dependency
+graph.
+
+Mainnet block 959979 logged 189 conflicting warnings across 6,258 transactions, ~3%.
+So the fixture runs at roughly 17x mainnet's conflict density, and every earlier
+statement of the form "3% conflicts collapse throughput 83x" is wrong. The correct
+statement is that **52% conflicting transactions collapse throughput 83x**.
+
+Whether mainnet's actual ~3% is sufficient to produce the observed 27–50 tx/s is
+therefore **not established**. The cascade property means a small number of seeded
+double-spends near the top of the dependency graph can still conflict a large fraction
+of a block, which is a plausible route from 3% seeds to a large conflicting
+population — but that is a hypothesis, not a measurement.
+
+The missing experiment is a fixture parameterised on the *resulting* conflicting
+fraction rather than the seed count: seed conflicts in the deepest level (no
+descendants to cascade into) and sweep the total conflicting share through 3%, 10%,
+25%, 50% to find where the collapse begins. That would establish whether mainnet's
+conflict density is enough.
