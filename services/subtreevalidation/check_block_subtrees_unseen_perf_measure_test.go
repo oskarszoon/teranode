@@ -128,6 +128,43 @@ func (l *levelCaptureLogger) Infof(format string, args ...interface{}) {
 		return
 	}
 
+	// The per-level and pre-check lines are emitted at INFO as of the #1379
+	// instrumentation change, so they are captured here rather than in Debugf. The
+	// harness therefore reads exactly what production log aggregation now sees.
+	switch {
+	case strings.HasPrefix(format, "[processTransactionsInLevels] Processing level "):
+		if len(args) < 3 {
+			return
+		}
+
+		level, ok1 := args[0].(uint32)
+		count, ok2 := args[2].(int)
+
+		if !ok1 || !ok2 {
+			return
+		}
+
+		l.mu.Lock()
+		l.events = append(l.events, levelEvent{
+			level: int(level),
+			txs:   count,
+			// The DONE variant now carries a duration ("... DONE in %s"), so match on
+			// the substring rather than a suffix.
+			done: strings.Contains(format, "DONE in"),
+			at:   time.Now(),
+		})
+		l.mu.Unlock()
+
+		return
+
+	case strings.HasPrefix(format, "[processTransactionsInLevels] Pre-check:"):
+		l.mu.Lock()
+		l.preCheck = append(l.preCheck, fmt.Sprintf(format, args...))
+		l.mu.Unlock()
+
+		return
+	}
+
 	if !strings.HasPrefix(format, "[BatchDecorate] Processed") || len(args) < 3 {
 		return
 	}
@@ -146,35 +183,11 @@ func (l *levelCaptureLogger) Infof(format string, args ...interface{}) {
 	l.externalSkipped.Add(uint64(skipped))
 }
 
-func (l *levelCaptureLogger) Debugf(format string, args ...interface{}) {
-	switch {
-	case strings.HasPrefix(format, "[processTransactionsInLevels] Processing level "):
-		if len(args) < 3 {
-			return
-		}
-
-		level, ok1 := args[0].(uint32)
-		count, ok2 := args[2].(int)
-
-		if !ok1 || !ok2 {
-			return
-		}
-
-		l.mu.Lock()
-		l.events = append(l.events, levelEvent{
-			level: int(level),
-			txs:   count,
-			done:  strings.HasSuffix(format, "DONE"),
-			at:    time.Now(),
-		})
-		l.mu.Unlock()
-
-	case strings.HasPrefix(format, "[processTransactionsInLevels] Pre-check:"):
-		l.mu.Lock()
-		l.preCheck = append(l.preCheck, fmt.Sprintf(format, args...))
-		l.mu.Unlock()
-	}
-}
+// Debugf is deliberately a no-op. The level and pre-check lines this harness needs
+// are emitted at INFO now, and the remaining Debugf sites in
+// processTransactionsInLevels are per-transaction — capturing those under a mutex
+// would serialise the fan-out being measured.
+func (l *levelCaptureLogger) Debugf(_ string, _ ...interface{}) {}
 
 // The server replaces its logger via these in places; returning the same
 // instance keeps the capture attached.
@@ -284,7 +297,8 @@ func dumpStoreOpCounts(t *testing.T, label string) {
 	for _, fam := range families {
 		n := fam.GetName()
 		if !strings.Contains(n, "aerospike") && !strings.Contains(n, "validator_transactions") &&
-			!strings.Contains(n, "subtreevalidation_bless") {
+			!strings.Contains(n, "subtreevalidation_bless") && !strings.Contains(n, "subtreevalidation_level") &&
+			!strings.Contains(n, "prefetch_level_parents") {
 			continue
 		}
 
@@ -310,7 +324,7 @@ func dumpStoreOpCounts(t *testing.T, label string) {
 	t.Logf("--- store op counts [%s] ---", label)
 
 	for i, r := range rows {
-		if i >= 14 {
+		if i >= 26 {
 			break
 		}
 

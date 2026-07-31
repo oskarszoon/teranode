@@ -58,6 +58,30 @@ var (
 	// validation logic, separate from handler overhead.
 	prometheusSubtreeValidationValidateSubtreeDuration prometheus.Histogram
 
+	// prometheusSubtreeValidationLevelsPerBlock records how many dependency levels a
+	// block's unseen transactions were organised into by selectPrepareTxsPerLevel.
+	//
+	// This is the number that decides the cost of a block on this path. Levels are
+	// processed serially with a barrier each (check_block_subtrees.go), and a level
+	// costs roughly a fixed set of store round trips regardless of how many
+	// transactions it holds — so total cost tracks level COUNT, not transaction count.
+	// It was previously available only at Debugf, which meant the depth of the two
+	// slow mainnet blocks in #1379 had to be reconstructed from a third-party API.
+	prometheusSubtreeValidationLevelsPerBlock prometheus.Histogram
+
+	// prometheusSubtreeValidationLevelDuration tracks the wall time of a single
+	// dependency level: parent prefetch, then the bounded-parallel validation of every
+	// transaction at that level, up to the barrier.
+	//
+	// Per-level timing was Debugf-only, so diagnosing #1379 required deriving a
+	// per-level average by dividing a total by a level count obtained elsewhere.
+	prometheusSubtreeValidationLevelDuration prometheus.Histogram
+
+	// prometheusSubtreeValidationPrefetchLevelParents tracks the duration of the
+	// per-level bulk parent read. It is one of the serialised round trips on a level's
+	// critical path and had no instrumentation at all.
+	prometheusSubtreeValidationPrefetchLevelParents prometheus.Histogram
+
 	// prometheusSubtreeValidationBlessMissingTransaction tracks the duration of bless missing transaction operations.
 	// This histogram measures the time taken to handle missing transactions,
 	// which is an important aspect of subtree validation.
@@ -161,6 +185,38 @@ func _initPrometheusMetrics() {
 			Name:      "validate_subtree_duration",
 			Help:      "Duration of validate subtree",
 			Buckets:   util.MetricsBucketsMilliLongSeconds,
+		},
+	)
+
+	prometheusSubtreeValidationLevelsPerBlock = promauto.NewHistogram(
+		prometheus.HistogramOpts{
+			Namespace: "teranode",
+			Subsystem: "subtreevalidation",
+			Name:      "levels_per_block",
+			Help:      "Number of dependency levels the unseen transactions of a block were organised into",
+			// Level depth, not a duration: powers of two up to 4096 so both a flat
+			// block (1) and a pathologically deep one land in distinct buckets.
+			Buckets: []float64{1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096},
+		},
+	)
+
+	prometheusSubtreeValidationLevelDuration = promauto.NewHistogram(
+		prometheus.HistogramOpts{
+			Namespace: "teranode",
+			Subsystem: "subtreevalidation",
+			Name:      "level_duration",
+			Help:      "Duration of processing a single dependency level, including parent prefetch",
+			Buckets:   util.MetricsBucketsMilliSeconds,
+		},
+	)
+
+	prometheusSubtreeValidationPrefetchLevelParents = promauto.NewHistogram(
+		prometheus.HistogramOpts{
+			Namespace: "teranode",
+			Subsystem: "subtreevalidation",
+			Name:      "prefetch_level_parents",
+			Help:      "Duration of the per-level bulk parent read",
+			Buckets:   util.MetricsBucketsMilliSeconds,
 		},
 	)
 

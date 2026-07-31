@@ -854,3 +854,62 @@ fraction rather than the seed count: seed conflicts in the deepest level (no
 descendants to cascade into) and sweep the total conflicting share through 3%, 10%,
 25%, 50% to find where the collapse begins. That would establish whether mainnet's
 conflict density is enough.
+
+## Follow-up 11: instrumentation shipped (issue ask 1)
+
+Done first, before touching the per-level cost, so the production level depth is known
+rather than assumed.
+
+### Logs promoted to INFO
+
+Five sites in `processTransactionsInLevels`, all at block or level grain:
+
+- pre-check `missed` counts (two variants) — once per batch
+- `Processing transactions across %d levels` — once per batch, **the level count that
+  had to be reconstructed from a third-party API for #1379**
+- per-level start, and per-level DONE now carrying its duration
+
+All six per-transaction `Debugf` sites are deliberately untouched. They are the ones
+that would flood: at ~750 blessings/minute in steady state they would add 25–40x the
+current log volume, and they sit inside the 2048-wide fan-out where writing to one
+stdout lock would contend with the work being measured. Volume added is ~52 lines per
+block (2 pre-check + 1 level count + 2 x levels), negligible against a 10-minute block
+interval.
+
+INFO matters specifically because this deployment's Coralogix pipeline **drops DEBUG**,
+so a log-level flip would have put the data only in a local file that rotates in ~5
+hours. See follow-up 2.
+
+### Metrics added
+
+| metric | purpose |
+|---|---|
+| `teranode_subtreevalidation_levels_per_block` | level depth distribution — the cost driver for item 1, previously unmeasurable |
+| `teranode_subtreevalidation_level_duration` | per-level wall time including prefetch |
+| `teranode_subtreevalidation_prefetch_level_parents` | the per-level bulk parent read, previously uninstrumented |
+
+`levels_per_block` uses power-of-two buckets to 4096 rather than latency buckets, so a
+flat block (1) and a pathologically deep one land in distinct buckets.
+
+### Verified
+
+- Untagged package tests pass.
+- Harness runs green; `level_duration` reports mean 44.87 ms against a captured
+  per-level table of 38–49 ms, an independent cross-check that the metric is correct.
+- `prefetch_level_parents` mean 2.69 ms, so the prefetch is a small part of the ~45 ms
+  level floor — useful on its own, since it means the floor is the spend/create/unlock
+  round trips rather than the parent read.
+- `golangci-lint` clean on both changed files (the 5 remaining `prealloc` findings are
+  pre-existing, in test files not touched here).
+
+One consequence worth noting: the harness's own level capture had to move from `Debugf`
+to `Infof`, because the lines it reads are now emitted at INFO. It therefore reads
+exactly what production aggregation sees, which is a better arrangement than the
+Debug-level capture it replaced.
+
+### What this unblocks
+
+Once deployed, `levels_per_block` on real mainnet traffic answers the question item 1
+currently rests on an assumption for: whether real blocks are deep enough for the
+measured 10x level-depth penalty to matter. The #1379 blocks were reconstructed at 25
+levels, but that is one third-party measurement of one block.

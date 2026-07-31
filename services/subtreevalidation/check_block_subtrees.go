@@ -8,6 +8,7 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/bsv-blockchain/go-bt/v2"
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
@@ -1012,7 +1013,7 @@ func (u *Server) processTransactionsInLevels(ctx context.Context, allTransaction
 	}
 
 	if missed > 0 {
-		u.logger.Debugf("[processTransactionsInLevels] Pre-check: %d/%d transactions missed in cache, checking UTXO store", missed, len(txHashes))
+		u.logger.Infof("[processTransactionsInLevels] Pre-check: %d/%d transactions missed in cache, checking UTXO store", missed, len(txHashes))
 
 		batched := u.settings.SubtreeValidation.BatchMissingTransactions
 		missed, err = u.processTxMetaUsingStore(ctx, txHashes, txMetaSlice, blockIds, batched, false)
@@ -1027,7 +1028,7 @@ func (u *Server) processTransactionsInLevels(ctx context.Context, allTransaction
 		u.logger.Debugf("[processTransactionsInLevels] All transactions already validated, skipping processing")
 		return nil
 	} else if alreadyValidated > 0 {
-		u.logger.Debugf("[processTransactionsInLevels] Pre-check: %d/%d transactions already validated, %d need validation", alreadyValidated, len(txHashes), missed)
+		u.logger.Infof("[processTransactionsInLevels] Pre-check: %d/%d transactions already validated, %d need validation", alreadyValidated, len(txHashes), missed)
 	}
 
 	// Convert transactions to missingTx format for prepareTxsPerLevel
@@ -1062,7 +1063,12 @@ func (u *Server) processTransactionsInLevels(ctx context.Context, allTransaction
 	allTransactions = nil //nolint:ineffassign // Intentional early GC hint
 	missingTxs = nil      //nolint:ineffassign // Intentional early GC hint
 
-	u.logger.Debugf("[processTransactionsInLevels] Processing transactions across %d levels", maxLevel+1)
+	// Level count is the primary cost driver on this path and is emitted at INFO so it
+	// reaches log aggregation: levels are processed serially with a barrier each, and a
+	// level costs a roughly fixed set of store round trips regardless of its width. In
+	// #1379 this had to be reconstructed from a third-party API because it was Debugf.
+	u.logger.Infof("[processTransactionsInLevels] Processing transactions across %d levels", maxLevel+1)
+	prometheusSubtreeValidationLevelsPerBlock.Observe(float64(maxLevel + 1))
 
 	// WithUnconfirmedParentsAtCandidateHeight must agree with the
 	// validateSubtree closure in CheckBlockSubtrees (which carries the full
@@ -1109,7 +1115,9 @@ func (u *Server) processTransactionsInLevels(ctx context.Context, allTransaction
 			continue
 		}
 
-		u.logger.Debugf("[processTransactionsInLevels] Processing level %d/%d with %d transactions", level+1, maxLevel+1, len(levelTxs))
+		levelStart := time.Now()
+
+		u.logger.Infof("[processTransactionsInLevels] Processing level %d/%d with %d transactions", level+1, maxLevel+1, len(levelTxs))
 
 		// PHASE 2 OPTIMIZATION: Extend transactions with in-block parent outputs
 		// This avoids Aerospike fetches for intra-block dependencies (~500MB+ savings)
@@ -1143,7 +1151,12 @@ func (u *Server) processTransactionsInLevels(ctx context.Context, allTransaction
 		// Get would see it (empty BlockHeights → unconfirmed sentinel). Parents the
 		// store does not resolve are omitted, so the validator falls back to a Get
 		// and the existing missing-parent handling is preserved.
+		prefetchStart := time.Now()
+
 		prefetchedParents, prefetchErr := u.prefetchLevelParents(ctx, levelTxs)
+
+		prometheusSubtreeValidationPrefetchLevelParents.Observe(time.Since(prefetchStart).Seconds())
+
 		if prefetchErr != nil {
 			return prefetchErr
 		}
@@ -1220,7 +1233,10 @@ func (u *Server) processTransactionsInLevels(ctx context.Context, allTransaction
 			return errors.NewProcessingError("[processTransactionsInLevels] Failed to process level %d", level+1, err)
 		}
 
-		u.logger.Debugf("[processTransactionsInLevels] Processing level %d/%d with %d transactions DONE", level+1, maxLevel+1, len(levelTxs))
+		levelDuration := time.Since(levelStart)
+		prometheusSubtreeValidationLevelDuration.Observe(levelDuration.Seconds())
+
+		u.logger.Infof("[processTransactionsInLevels] Processing level %d/%d with %d transactions DONE in %s", level+1, maxLevel+1, len(levelTxs), levelDuration)
 
 		// PHASE 2 OPTIMIZATION: Release grandparent level (level-2) after current level succeeds
 		// Keep current level (being processed) and parent level (level-1) for safety
