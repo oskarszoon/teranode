@@ -1329,3 +1329,54 @@ func stubCounterConflictingWalk(mockStore *MockUtxostore, rootTx *bt.Tx, spender
 	mockStore.On("GetConflictingChildren", mock.Anything, spenderTxHash).
 		Return([]chainhash.Hash{}, nil).Once()
 }
+
+// TestGetCounterConflictingTxHashes_DedupesSpenderWalks pins the per-input walk
+// dedupe of issue 1391: a tx whose inputs are all counter-spent by the same
+// transaction must walk that spender's descendant cone exactly once, not once
+// per input.
+func TestGetCounterConflictingTxHashes_DedupesSpenderWalks(t *testing.T) {
+	ctx := context.Background()
+	mockStore := &MockUtxostore{}
+
+	txHash := createTestHash("dedupe-tx")
+	parentTxHash := createTestHash("dedupe-parent")
+	spenderHash := createTestHash("dedupe-spender")
+	childHash := createTestHash("dedupe-spender-child")
+
+	// tx spends three outputs of the same parent, all counter-spent by the same tx
+	testTx := bt.NewTx()
+
+	for vout := uint32(0); vout < 3; vout++ {
+		input := &bt.Input{PreviousTxOutIndex: vout}
+		_ = input.PreviousTxIDAdd(&parentTxHash)
+		testTx.Inputs = append(testTx.Inputs, input)
+	}
+
+	testTx.Outputs = append(testTx.Outputs, &bt.Output{Satoshis: 1000})
+
+	mockStore.On("Get", mock.Anything, &txHash, mock.Anything).
+		Return(&meta.Data{Tx: testTx}, nil)
+	mockStore.On("Get", mock.Anything, &parentTxHash, mock.Anything).
+		Return(&meta.Data{
+			SpendingDatas: []*spend.SpendingData{
+				{TxID: &spenderHash},
+				{TxID: &spenderHash},
+				{TxID: &spenderHash},
+			},
+		}, nil)
+
+	// exactly ONE walk of the unique counter-spender, not one per input
+	mockStore.On("GetConflictingChildren", mock.Anything, spenderHash).
+		Return([]chainhash.Hash{childHash}, nil).Once()
+
+	result, err := GetCounterConflictingTxHashes(ctx, mockStore, txHash)
+	require.NoError(t, err)
+
+	assert.Contains(t, result, txHash)
+	assert.Contains(t, result, spenderHash)
+	assert.Contains(t, result, childHash)
+	assert.Len(t, result, 3)
+
+	mockStore.AssertExpectations(t)
+	mockStore.AssertNumberOfCalls(t, "GetConflictingChildren", 1)
+}

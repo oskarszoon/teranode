@@ -499,17 +499,22 @@ func (u *Server) checkCounterConflictingOnCurrentChain(ctx context.Context, txHa
 		return errors.NewProcessingError("[checkCounterConflictingOnCurrentChain][%s] failed to get counter conflicting tx meta", txHash.String(), err)
 	}
 
-	// check whether the child transactions of the counter-conflicting transactions are frozen
-	for _, counterConflictingTxHash := range counterConflictingTxHashes {
-		childTransactionHashes, err := utxo.GetConflictingChildren(ctx, u.utxoStore, counterConflictingTxHash)
-		if err != nil {
-			return errors.NewProcessingError("[checkCounterConflictingOnCurrentChain][%s] failed to get child transactions", txHash.String(), err)
-		}
+	// check whether any child transaction of txHash itself is frozen. This is the
+	// only walk the counter-conflicting set does not already cover: every
+	// counter-spender's descendant cone was walked (and frozen-checked against the
+	// same 32x0xFF sentinel) inside GetCounterConflictingTxHashes above, and any
+	// sentinel found there already failed the call. Re-walking each member of the
+	// set re-derived subsets of those same cones — O(N^2) store reads that wedged
+	// the mainnet fleet at height 960,827 (issue 1391) — so only the single
+	// txHash-cone walk remains.
+	childTransactionHashes, err := utxo.GetConflictingChildren(ctx, u.utxoStore, txHash)
+	if err != nil {
+		return errors.NewProcessingError("[checkCounterConflictingOnCurrentChain][%s] failed to get child transactions", txHash.String(), err)
+	}
 
-		for _, childTransactionHash := range childTransactionHashes {
-			if childTransactionHash.Equal(subtreepkg.CoinbasePlaceholderHashValue) {
-				return errors.NewProcessingError("[checkCounterConflictingOnCurrentChain][%s] child transaction is frozen", txHash.String())
-			}
+	for _, childTransactionHash := range childTransactionHashes {
+		if childTransactionHash.Equal(subtreepkg.CoinbasePlaceholderHashValue) {
+			return errors.NewProcessingError("[checkCounterConflictingOnCurrentChain][%s] child transaction is frozen", txHash.String())
 		}
 	}
 

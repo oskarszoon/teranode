@@ -1022,6 +1022,9 @@ func GetConflictingChildren(ctx context.Context, s Store, hash chainhash.Hash) (
 	for len(currentLevel) > 0 {
 		results := make([]*meta.Data, len(currentLevel))
 		g, gCtx := errgroup.WithContext(ctx)
+		// a wide level must not fan out one goroutine (and one store read) per
+		// descendant without bound
+		g.SetLimit(128)
 
 		for i, current := range currentLevel {
 			i := i
@@ -1179,6 +1182,28 @@ func getCounterConflictingTxHashesAndGhostSpends(ctx context.Context, s Store, t
 
 	var ghostSpends []*Spend
 
+	// Several inputs are commonly spent by the same counter-conflicting tx. The
+	// descendant walk is by far the expensive part and its result does not depend
+	// on which input reached the spender, so memoise it per unique spender: one
+	// walk instead of one per input (issue 1391).
+	type spenderWalk struct {
+		children []chainhash.Hash
+		err      error
+	}
+
+	spenderWalks := make(map[chainhash.Hash]spenderWalk, len(txMeta.Tx.Inputs))
+
+	walkSpender := func(spendingTxID chainhash.Hash) ([]chainhash.Hash, error) {
+		if cached, ok := spenderWalks[spendingTxID]; ok {
+			return cached.children, cached.err
+		}
+
+		children, err := s.GetConflictingChildren(ctx, spendingTxID)
+		spenderWalks[spendingTxID] = spenderWalk{children: children, err: err}
+
+		return children, err
+	}
+
 	for _, input := range txMeta.Tx.Inputs {
 		parentTxMeta, ok := parentTxs[*input.PreviousTxIDChainHash()]
 		if ok {
@@ -1193,7 +1218,7 @@ func getCounterConflictingTxHashesAndGhostSpends(ctx context.Context, s Store, t
 			if spendingData != nil && spendingData.TxID != nil {
 				spendingTxID := spendingData.TxID
 
-				childHashes, err := s.GetConflictingChildren(ctx, *spendingTxID)
+				childHashes, err := walkSpender(*spendingTxID)
 				if err != nil {
 					if !isNotFoundErr(err) {
 						return nil, nil, err
