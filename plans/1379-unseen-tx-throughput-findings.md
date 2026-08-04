@@ -974,3 +974,88 @@ The waste was attempt 1's `HandleBlockDirect` being cancelled after 10m40 with i
 downstream validation still running. **Why that cancellation happened is not
 diagnosed**, and it is a different problem from delivery dedup. That is the real
 residual item from the issue's ask 3, restated.
+
+## Follow-up 13: #1391's O(N^2) cone re-walk confirmed — very likely the Class B mechanism
+
+Issue #1391 (mainnet fleet wedged at 960,827) proposes that
+`checkCounterConflictingOnCurrentChain` re-walks the counter-conflicting descendant cone
+once per node **of that same cone**. All three of its code claims verify:
+
+1. `GetConflictingChildren` recurses into `SpendingDatas`
+   (`stores/utxo/process_conflicting.go:1038-1048`), not just `ConflictingChildren` — so
+   the walk covers the whole descendant spend cone.
+2. Its per-level errgroup (`:1004`) has **no `SetLimit`**, and issues a **single-record
+   `s.Get` per node per level**.
+3. `GetCounterConflictingTxHashes` adds every descendant to `counterConflictingMap`
+   (`:1129`, after the walk at `:1119`), so the slice it returns *is* the descendant set.
+   `SubtreeValidation.go:503-514` then calls `GetConflictingChildren` again per element,
+   with a fresh `visited` map each time and the outer loop fully serial.
+
+### Measured: it is quadratic
+
+`TestUnseenTxBisect_ConflictCone` isolates it — a trivial flat single-level block with
+exactly ONE conflicting transaction, whose squatter heads a linear descendant chain of
+length `depth`. Nothing but the cone size varies.
+
+| depth | N | elapsed | single-record Gets | gets/N² |
+|---|---|---|---|---|
+| 0 | 1 | 168 ms | 13 | 13.00 |
+| 25 | 26 | 8.3 s | 788 | **1.17** |
+| 50 | 51 | 29.9 s | 2,813 | **1.08** |
+| 100 | 101 | **1 m 55 s** | 10,613 | **1.04** |
+
+`gets/N²` converges on 1.0 and elapsed grows ~4x per doubling of N. **One** conflicting
+transaction with a 100-node cone costs 115 seconds and ~105 Gets per cone node.
+
+Extrapolating: N≈350–400 gives ~26 minutes, which is what #1391 observed before context
+cancellation. Consistent.
+
+### Why this is very likely Class B's mechanism
+
+It matches every Class B observation, including the one this document could not explain:
+
+- **Conflicting transactions are the trigger** — the only positive content correlation
+  found (189 and 13 conflicting warnings in the two slow windows, 0 in a fast window the
+  same day).
+- **Single-record Gets** — the smoking gun was `aerospike_txmeta_get` at 15,125 in the
+  conflict run against 0 in the baseline. This walk is single-record `s.Get` per node.
+- **`checkCounterConflictingOnCurrentChain` was the largest teranode-attributed frame** in
+  the block profile at 173.9 s cumulative.
+- **Latency-bound and serial** — 5.67% CPU, what little there was inside the Aerospike
+  client.
+- **Deterministic and version-independent** — explains all three nodes across two
+  providers stalling on the same block.
+- **It explains 13 conflicts costing more than 189.** Cost is Σ(N² ) over conflicts, so a
+  few conflicts with large cones dominate many with small ones. Follow-up 6's
+  "whole-block revalidation" explanation for that inversion was withdrawn as an
+  instrumentation artifact; this replaces it with a measured one.
+
+### What it does not explain
+
+The 83x collapse measured in follow-up 6 used cone depths of 0 and 5, i.e. N of 1 and 6,
+where the quadratic term is negligible — 13 Gets at N=1. So **that** collapse is a
+separate, milder conflict-path cost and should not be conflated with this one. That depth
+0 vs 5 showed no difference is consistent with the quadratic only biting at large N,
+rather than evidence against it.
+
+Also still open: follow-up 9 attributed 11,745 of the 15,125 Gets to the per-subtree pass,
+which recorded zero blessings — yet `checkCounterConflictingOnCurrentChain` only runs
+under `blessMissingTransaction`. Either the split-point capture mis-attributes or
+something else issues them.
+
+### Regression test
+
+`TestConflictConeBlessesInBoundedTime` asserts one conflicting transaction with a
+101-node cone blesses within 15 s **and** issues fewer than 10 Gets per cone node. It
+currently fails at 1 m 56 s and 105.1 Gets per node, which is the point: it must be seen
+failing before the fix and passing after.
+
+The budget sits an order of magnitude above the expected post-fix O(N) figure (~101
+sequential Gets, ~1 s) and an order of magnitude below the measured O(N²) figure, so it
+is neither flaky nor able to pass while the quadratic remains. The Gets-per-node
+assertion guards against the time budget being met on faster hardware while the shape is
+unchanged.
+
+It is behind `//go:build aerospike`, which CI does not run for this package (`make test`
+passes no tag, and the one tagged job covers only `./stores/utxo/aerospike/...`), so the
+intentional failure does not turn CI red.

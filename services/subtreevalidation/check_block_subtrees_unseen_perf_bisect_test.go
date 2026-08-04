@@ -13,6 +13,7 @@ package subtreevalidation
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/bsv-blockchain/teranode/settings"
 	"github.com/stretchr/testify/require"
@@ -230,4 +231,124 @@ func TestUnseenTxBisect_ConflictingTxs(t *testing.T) {
 				c.n, c.depth, rate, rate/baseline, baseline)
 		})
 	}
+}
+
+// TestUnseenTxBisect_ConflictCone tests the mechanism described in issue #1391:
+// checkCounterConflictingOnCurrentChain's loop at SubtreeValidation.go:503-514 calls
+// utxo.GetConflictingChildren once per element of counterConflictingTxHashes — but
+// GetCounterConflictingTxHashes already put every descendant into that slice
+// (process_conflicting.go:1129, after the walk at :1119). So it re-walks the whole
+// descendant cone once per node of that same cone, with a fresh visited map each time
+// and the outer loop fully serial. That is O(N^2) single-record Gets in the cone size.
+//
+// GetConflictingChildren also recurses into SpendingDatas (:1038-1048), not just
+// ConflictingChildren, so the cone is the entire descendant spend cone rather than the
+// conflicting sub-DAG; and its per-level errgroup (:1004) has no SetLimit.
+//
+// The fixture is deliberately minimal so nothing but the cone varies: a trivial flat
+// single-level block with exactly ONE conflicting transaction, whose squatter heads a
+// linear descendant chain of conflictChainDepth. Linear is the production shape — #1391
+// found an automated self-spend chain growing ~100 txs per block.
+//
+// If #1391 is right, both elapsed time and the single-record Get count grow roughly
+// quadratically in depth. A linear growth would refute it.
+//
+// Note the earlier conflict axis (TestUnseenTxBisect_ConflictingTxs) used depth 0 and 5,
+// where N is 1 and 6 — far too small for the quadratic term to show, which is why that
+// axis saw no difference between them.
+func TestUnseenTxBisect_ConflictCone(t *testing.T) {
+	for _, depth := range []int{0, 25, 50, 100, 200} {
+		depth := depth
+
+		t.Run(fmt.Sprintf("depth%d", depth), func(t *testing.T) {
+			h, capture := newCapturingPerfHarness(t, defaultPerfOptions())
+
+			cfg := unseenFixtureConfig{
+				// Flat single level: no in-block children, so the conflict cannot cascade
+				// to other block transactions and the cone is the only variable.
+				levelSizes:         []int{20},
+				txsPerSubtree:      1024,
+				conflictingTxs:     1,
+				conflictChainDepth: depth,
+			}
+
+			fx := generateUnseenFixture(t, h, cfg)
+			assertUnseenPrecondition(t, h, fx)
+
+			getsBefore := readCounterSum("teranode_aerospike_txmeta_get")
+
+			elapsed := runUnseenBlock(t, h, capture, fx, fmt.Sprintf("bisect-cone-d%d", depth))
+
+			gets := readCounterSum("teranode_aerospike_txmeta_get") - getsBefore
+
+			require.Positive(t, capture.conflictingSeen.Load(),
+				"no conflicting-tx warning — the conflict path was never entered, so this run measured nothing")
+
+			// N is the cone size: the squatter plus its linear descendant chain.
+			n := depth + 1
+
+			t.Logf("CONE depth=%-4d N=%-4d elapsed=%-12s singleGets=%-8d gets/N^2=%.2f",
+				depth, n, elapsed.Round(time.Millisecond), gets, float64(gets)/float64(n*n))
+		})
+	}
+}
+
+// coneRegressionDepth and coneRegressionBudget define the #1391 regression bound.
+//
+// Measured on the O(N^2) code: N=101 takes ~115s and issues ~10,600 single-record Gets
+// (gets/N^2 = 1.04). Once checkCounterConflictingOnCurrentChain stops re-walking the
+// cone once per cone node, the work is O(N) — on the order of 101 sequential Gets, ~1s.
+//
+// The budget sits an order of magnitude above that expected O(N) figure and an order of
+// magnitude below the measured O(N^2) figure, so it is neither flaky nor able to pass
+// while the quadratic remains.
+const (
+	coneRegressionDepth  = 100
+	coneRegressionBudget = 15 * time.Second
+)
+
+// TestConflictConeBlessesInBoundedTime is the #1391 regression test: a conflicting
+// transaction whose counter-conflicting transaction heads a long linear descendant chain
+// must bless in time proportional to the chain, not to its square.
+//
+// FAILS on the current code by design — that is the point. It is the check that the
+// O(N^2) re-walk at SubtreeValidation.go:503-514 has actually been removed, and it must
+// be seen to fail before the fix and pass after, or it proves nothing.
+func TestConflictConeBlessesInBoundedTime(t *testing.T) {
+	h, capture := newCapturingPerfHarness(t, defaultPerfOptions())
+
+	fx := generateUnseenFixture(t, h, unseenFixtureConfig{
+		levelSizes:         []int{20},
+		txsPerSubtree:      1024,
+		conflictingTxs:     1,
+		conflictChainDepth: coneRegressionDepth,
+	})
+
+	assertUnseenPrecondition(t, h, fx)
+
+	getsBefore := readCounterSum("teranode_aerospike_txmeta_get")
+
+	elapsed := runUnseenBlock(t, h, capture, fx, "cone-regression")
+
+	gets := readCounterSum("teranode_aerospike_txmeta_get") - getsBefore
+	n := coneRegressionDepth + 1
+
+	require.Positive(t, capture.conflictingSeen.Load(),
+		"no conflicting-tx warning — the conflict path was never entered, so this test proves nothing")
+
+	t.Logf("cone N=%d elapsed=%s singleGets=%d gets/N=%.1f gets/N^2=%.2f",
+		n, elapsed.Round(time.Millisecond), gets, float64(gets)/float64(n), float64(gets)/float64(n*n))
+
+	require.Less(t, elapsed, coneRegressionBudget,
+		"blessing one conflicting tx with a %d-node descendant cone took %s (budget %s). "+
+			"checkCounterConflictingOnCurrentChain re-walks the whole cone once per cone node "+
+			"(SubtreeValidation.go:503-514 over the set GetCounterConflictingTxHashes already "+
+			"populated), which is O(N^2) single-record Gets — see issue #1391",
+		n, elapsed.Round(time.Millisecond), coneRegressionBudget)
+
+	// Independent of wall time, pin the shape: O(N) work, not O(N^2). Guards against the
+	// budget being met on faster hardware while the quadratic is still there.
+	require.Less(t, gets, uint64(10*n),
+		"issued %d single-record Gets for a %d-node cone (%.1f per node) — expected O(N), so the cone is still being re-walked per node",
+		gets, n, float64(gets)/float64(n))
 }
