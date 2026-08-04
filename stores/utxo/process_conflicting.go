@@ -56,6 +56,31 @@ var (
 	)
 )
 
+// conflictingWalkFanOut caps the per-level width of the conflicting-descendant
+// walks (GetAndLockChildren and GetConflictingChildren). 4096 matches
+// settings.conf's utxostore_getBatcherSize so a level fills one aerospike batch
+// in a single wave rather than waiting out getBatcherDurationMillis per wave.
+// These free functions cannot read settings, so the match is by convention:
+// settings.go's own default for GetBatcherSize is 1, which disables batching
+// entirely and makes the ceiling moot rather than wrong on that path.
+//
+// Two caveats, not reasons to change the number, but reasons not to raise it
+// further without checking both:
+//   - On the SQL backend (postgres/sqlite), Store.get falls back to
+//     getUnbatched whenever the requested bins include ConflictingChildren or
+//     Utxos (stores/utxo/sql/sql.go) — exactly the fields these walks request.
+//     So a wide level here opens up to conflictingWalkFanOut concurrent
+//     unbatched Gets, each issuing several queries, against postgres_maxOpenConns
+//     (50 by default). That is database/sql queueing rather than a new error
+//     path, and still strictly better than the pre-fix unbounded errgroup, but
+//     it is materially worse than a smaller ceiling on that one backend.
+//   - The ceiling is per-walk, not global: checkCounterConflictingOnCurrentChain
+//     runs inside an errgroup bounded by
+//     blockvalidation_processTxMetaUsingStore_Concurrency (default
+//     max(4, NumCPU/2)), so the aggregate worst case on an N-core node is
+//     roughly (N/2) * conflictingWalkFanOut concurrent store reads.
+const conflictingWalkFanOut = 4096
+
 // step5RetryDelays controls the bounded back-off when SetLocked(false) fails at the very
 // last step of ProcessConflicting. The slice length is the number of attempts; the value
 // at index i is the delay BEFORE attempt i (so index 0 is always zero — the first attempt
@@ -958,10 +983,9 @@ func GetAndLockChildren(ctx context.Context, s Store, hash chainhash.Hash) ([]ch
 	for len(currentLevel) > 0 {
 		results := make([]*meta.Data, len(currentLevel))
 		g, gCtx := errgroup.WithContext(ctx)
-		// Same unbounded per-level width as GetConflictingChildren, same ceiling, same
-		// reason: 4096 matches the aerospike Get batcher's getBatcherSize so a level
-		// still fills a batch in one wave rather than waiting out getBatcherDurationMillis.
-		g.SetLimit(4096)
+		// Same per-level ceiling as GetConflictingChildren, same rationale — see
+		// conflictingWalkFanOut.
+		g.SetLimit(conflictingWalkFanOut)
 
 		for i, current := range currentLevel {
 			i := i
@@ -1039,13 +1063,9 @@ func GetConflictingChildren(ctx context.Context, s Store, hash chainhash.Hash) (
 	for len(currentLevel) > 0 {
 		results := make([]*meta.Data, len(currentLevel))
 		g, gCtx := errgroup.WithContext(ctx)
-		// A single level is unbounded in width: one Get per member, no ceiling. A wide
-		// cone would otherwise open one concurrent store read per level member. 4096
-		// matches the aerospike Get batcher's getBatcherSize, so a level still fills a
-		// batch in a single wave instead of waiting out the batcher's
-		// getBatcherDurationMillis flush timer on an otherwise-quiet node — the state a
-		// wedged node is in, which is the condition this walk exists to make visible.
-		g.SetLimit(4096)
+		// Without this, a level would open one concurrent store read per level member
+		// with no ceiling — see conflictingWalkFanOut for why 4096 and its caveats.
+		g.SetLimit(conflictingWalkFanOut)
 
 		depth++
 

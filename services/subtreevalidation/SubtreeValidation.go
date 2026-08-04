@@ -510,20 +510,20 @@ func (u *Server) checkCounterConflictingOnCurrentChain(ctx context.Context, txHa
 	}
 
 	// One walk, not one per element. counterConflictingTxHashes is already the
-	// transitive closure of the counter-conflicting transactions' descendants
-	// (GetCounterConflictingTxHashes unions GetConflictingChildren of every spender
-	// into it at process_conflicting.go:1129), so re-walking each element only
+	// transitive closure of the counter-conflicting transactions' descendants —
+	// GetCounterConflictingTxHashes unions each spender's GetConflictingChildren
+	// result into counterConflictingMap — so re-walking each element only
 	// re-derives subsets of what is already in hand: N serial BFS walks over the set
 	// that IS the descendant set, one store round trip per level. With a linear
 	// self-spend chain for a cone that is O(N^2) reads, which wedged the mainnet
 	// fleet at height 960,827 for 26 minutes per attempt — see #1391.
 	//
-	// The frozen sentinel is already rejected on the counter side: inside the counter
-	// walk for descendants (process_conflicting.go:1125) and in the errgroup above for
-	// a directly-frozen counter. The one term no earlier walk covers is the descendant
-	// cone of the transaction under check itself, so that is the single walk that
-	// remains. It is cheap — the transaction has just arrived in a block, so it
-	// normally has no descendants in the store at all.
+	// The frozen sentinel is already rejected on the counter side: by the
+	// FrozenBytesTxHash check inside GetCounterConflictingTxHashes, and in the
+	// errgroup above for a directly-frozen counter. The one term no earlier walk
+	// covers is the descendant cone of the transaction under check itself, so that
+	// is the single walk that remains. It is cheap — the transaction has just
+	// arrived in a block, so it normally has no descendants in the store at all.
 	childTransactionHashes, err := utxo.GetConflictingChildren(ctx, u.utxoStore, txHash)
 	if err != nil {
 		return errors.NewProcessingError("[checkCounterConflictingOnCurrentChain][%s] failed to get child transactions", txHash.String(), err)

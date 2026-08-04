@@ -1015,6 +1015,7 @@ func Test_checkCounterConflictingOnCurrentChain(t *testing.T) {
 
 		// Create a mock Server struct
 		s := &Server{
+			logger:    ulogger.New("test"),
 			utxoStore: utxoStore,
 		}
 
@@ -1043,6 +1044,7 @@ func Test_checkCounterConflictingOnCurrentChain(t *testing.T) {
 
 		// Create a mock Server struct
 		s := &Server{
+			logger:    ulogger.New("test"),
 			utxoStore: utxoStore,
 		}
 

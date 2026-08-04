@@ -60,10 +60,11 @@ func (s *countingStore) getMetas() int64 { return s.metaCount.Load() }
 // which is the number the cost assertion is about.
 func (s *countingStore) lookup(hash *chainhash.Hash) (*meta.Data, error) {
 	// The frozen / coinbase-placeholder sentinel is a record-less pseudo-hash.
-	// Aerospike returns (nil, nil) for it rather than an error
-	// (stores/utxo/aerospike/get.go:724) and the walk relies on that, so the fake
-	// must reproduce it or frozen detection behaves differently here than in
-	// production.
+	// Aerospike returns (nil, nil) for it rather than an error — BatchDecorate's
+	// per-record error handling special-cases CoinbasePlaceholderHashValue so no
+	// Err is set for it even when the batch record itself errored — and the walk
+	// relies on that, so the fake must reproduce it or frozen detection behaves
+	// differently here than in production.
 	if hash.Equal(subtree.CoinbasePlaceholderHashValue) {
 		return nil, nil
 	}
@@ -174,8 +175,10 @@ func plantLinearChain(t *testing.T, store *countingStore) (chainhash.Hash, chain
 
 // The counter-conflicting check must cost O(N) store reads, not O(N^2). Before the
 // fix it walked the full descendant cone once per element of a slice that already
-// IS the cone: 1002 reads for the first walk plus sum(1..1000) = 500500 for the
-// re-walks, which is the 26-minute mainnet stall at 960,827.
+// IS the cone: 1002 reads to build the set (see GetCounterConflictingTxHashes) plus
+// sum(1..1000) = 500500 for re-walking the chain elements plus 1 more for re-walking
+// the tx-under-check itself, which is also a member of that slice — 501503 reads
+// total, the 26-minute mainnet stall at 960,827.
 func TestCheckCounterConflictingOnCurrentChain_CostIsLinear(t *testing.T) {
 	ctx := context.Background()
 	store := newCountingStore(t)
@@ -188,7 +191,7 @@ func TestCheckCounterConflictingOnCurrentChain_CostIsLinear(t *testing.T) {
 
 	// Post-fix: 1 (X.Tx) + 1 (parent utxos) + coneChainLength (the single cone walk)
 	// + 1 (the one walk rooted at X) = coneChainLength + 3.
-	require.Less(t, store.gets(), int64(3*coneChainLength),
+	require.Equal(t, int64(coneChainLength+3), store.gets(),
 		"descendant walk cost is not linear in the chain length — the per-element re-walk is back")
 
 	// The mined-on-our-chain check still reads every counter's meta exactly once.
