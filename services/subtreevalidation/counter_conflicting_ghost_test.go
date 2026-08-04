@@ -99,9 +99,10 @@ func TestCheckCounterConflictingOnCurrentChain_StillRejectsMinedCounter(t *testi
 	mockStore.On("GetMeta", mock.Anything, hashMatcher(counterTxHash), mock.Anything).
 		Return(&meta.Data{BlockIDs: []uint32{7}}, nil)
 
+	// only the conflicting tx's own cone is walked here; the counter's cone was
+	// already walked (and frozen-checked) inside GetCounterConflictingTxHashes, so
+	// the per-member re-walk was dropped in issue 1391
 	mockStore.On("Get", mock.Anything, hashMatcher(conflictingTxHash), []fields.FieldName{fields.Utxos, fields.ConflictingChildren, fields.DeletedChildren}).
-		Return(&meta.Data{}, nil)
-	mockStore.On("Get", mock.Anything, hashMatcher(counterTxHash), []fields.FieldName{fields.Utxos, fields.ConflictingChildren, fields.DeletedChildren}).
 		Return(&meta.Data{}, nil)
 
 	u := &Server{utxoStore: mockStore}
