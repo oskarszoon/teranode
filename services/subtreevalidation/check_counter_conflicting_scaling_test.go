@@ -119,6 +119,7 @@ func Test_checkCounterConflictingOnCurrentChain_scaling(t *testing.T) {
 
 	countingStore := &countingUtxoStore{Store: utxoStore}
 	s := &Server{
+		logger:    logger,
 		utxoStore: countingStore,
 		settings:  tSettings,
 	}
@@ -166,6 +167,7 @@ func Test_checkCounterConflictingOnCurrentChain_frozen(t *testing.T) {
 		require.NoError(t, err)
 
 		s := &Server{
+			logger:    logger,
 			utxoStore: utxoStore,
 			settings:  tSettings,
 		}
