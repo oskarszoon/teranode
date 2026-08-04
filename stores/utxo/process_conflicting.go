@@ -958,8 +958,10 @@ func GetAndLockChildren(ctx context.Context, s Store, hash chainhash.Hash) ([]ch
 	for len(currentLevel) > 0 {
 		results := make([]*meta.Data, len(currentLevel))
 		g, gCtx := errgroup.WithContext(ctx)
-		// Same unbounded per-level width as GetConflictingChildren; same ceiling.
-		g.SetLimit(128)
+		// Same unbounded per-level width as GetConflictingChildren, same ceiling, same
+		// reason: 4096 matches the aerospike Get batcher's getBatcherSize so a level
+		// still fills a batch in one wave rather than waiting out getBatcherDurationMillis.
+		g.SetLimit(4096)
 
 		for i, current := range currentLevel {
 			i := i
@@ -1038,11 +1040,12 @@ func GetConflictingChildren(ctx context.Context, s Store, hash chainhash.Hash) (
 		results := make([]*meta.Data, len(currentLevel))
 		g, gCtx := errgroup.WithContext(ctx)
 		// A single level is unbounded in width: one Get per member, no ceiling. A wide
-		// cone would open tens of thousands of concurrent store reads. 128 matches the
-		// limit the caller uses for its own per-hash fan-out
-		// (services/subtreevalidation/SubtreeValidation.go:476). Note this does not
-		// bind on the linear-chain shape from #1391, where every level holds one node.
-		g.SetLimit(128)
+		// cone would otherwise open one concurrent store read per level member. 4096
+		// matches the aerospike Get batcher's getBatcherSize, so a level still fills a
+		// batch in a single wave instead of waiting out the batcher's
+		// getBatcherDurationMillis flush timer on an otherwise-quiet node — the state a
+		// wedged node is in, which is the condition this walk exists to make visible.
+		g.SetLimit(4096)
 
 		depth++
 
