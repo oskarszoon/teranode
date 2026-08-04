@@ -21,7 +21,39 @@ import (
 	spendpkg "github.com/bsv-blockchain/teranode/stores/utxo/spend"
 	"github.com/bsv-blockchain/teranode/util"
 	"github.com/bsv-blockchain/teranode/util/tracing"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"golang.org/x/sync/errgroup"
+)
+
+// prometheusUtxoConflictingWalkNodes and prometheusUtxoConflictingWalkDepth record the
+// shape of each completed GetConflictingChildren walk. The cone is unbounded by
+// construction — it is every spender of every output of a transaction's descendants —
+// and in the #1391 incident it was a linear self-spend chain growing by roughly a
+// hundred transactions per block, so the walk degenerated to one store round trip per
+// node with no fan-out at all. These free functions have no logger, so the histograms
+// are the surface that makes a growing cone visible before it becomes a stall.
+// Only completed walks are observed; an aborted walk returns before the observation.
+var (
+	prometheusUtxoConflictingWalkNodes = promauto.NewHistogram(
+		prometheus.HistogramOpts{
+			Namespace: "teranode",
+			Subsystem: "utxo",
+			Name:      "conflicting_walk_nodes",
+			Help:      "Number of transactions visited by a completed conflicting-descendant walk",
+			Buckets:   prometheus.ExponentialBuckets(1, 4, 10),
+		},
+	)
+
+	prometheusUtxoConflictingWalkDepth = promauto.NewHistogram(
+		prometheus.HistogramOpts{
+			Namespace: "teranode",
+			Subsystem: "utxo",
+			Name:      "conflicting_walk_depth",
+			Help:      "Number of BFS levels walked by a completed conflicting-descendant walk",
+			Buckets:   prometheus.ExponentialBuckets(1, 4, 8),
+		},
+	)
 )
 
 // step5RetryDelays controls the bounded back-off when SetLocked(false) fails at the very
@@ -926,6 +958,8 @@ func GetAndLockChildren(ctx context.Context, s Store, hash chainhash.Hash) ([]ch
 	for len(currentLevel) > 0 {
 		results := make([]*meta.Data, len(currentLevel))
 		g, gCtx := errgroup.WithContext(ctx)
+		// Same unbounded per-level width as GetConflictingChildren; same ceiling.
+		g.SetLimit(128)
 
 		for i, current := range currentLevel {
 			i := i
@@ -998,10 +1032,19 @@ func GetConflictingChildren(ctx context.Context, s Store, hash chainhash.Hash) (
 	visited := make(map[chainhash.Hash]struct{})
 	visited[hash] = struct{}{}
 	currentLevel := []chainhash.Hash{hash}
+	depth := 0
 
 	for len(currentLevel) > 0 {
 		results := make([]*meta.Data, len(currentLevel))
 		g, gCtx := errgroup.WithContext(ctx)
+		// A single level is unbounded in width: one Get per member, no ceiling. A wide
+		// cone would open tens of thousands of concurrent store reads. 128 matches the
+		// limit the caller uses for its own per-hash fan-out
+		// (services/subtreevalidation/SubtreeValidation.go:476). Note this does not
+		// bind on the linear-chain shape from #1391, where every level holds one node.
+		g.SetLimit(128)
+
+		depth++
 
 		for i, current := range currentLevel {
 			i := i
@@ -1057,6 +1100,9 @@ func GetConflictingChildren(ctx context.Context, s Store, hash chainhash.Hash) (
 	for child := range visited {
 		conflictingChildren = append(conflictingChildren, child)
 	}
+
+	prometheusUtxoConflictingWalkNodes.Observe(float64(len(visited) + 1)) // + the root, deleted above
+	prometheusUtxoConflictingWalkDepth.Observe(float64(depth))
 
 	return conflictingChildren, nil
 }
