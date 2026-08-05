@@ -652,34 +652,30 @@ func (sc *SyncCoordinator) HandlePeerDisconnected(peerID peer.ID) {
 	}
 }
 
-// HandleCatchupFailure handles catchup failures
-func (sc *SyncCoordinator) HandleCatchupFailure(reason string) {
-	sc.logger.Infof("[SyncCoordinator] Handling catchup failure: %s", reason)
+// HandleCatchupFailureForPeer handles an operation-level failure notification only
+// when the reported peer is still the active sync peer. Per-peer reputation is
+// updated by the direct RecordCatchupFailure path before this notification arrives;
+// this method only performs the peer switch, avoiding a duplicate failure count.
+func (sc *SyncCoordinator) HandleCatchupFailureForPeer(peerID, reason string) {
+	sc.logger.Infof("[SyncCoordinator] Handling catchup failure for peer %s: %s", peerID, reason)
 
-	// Hold decisionMu across the whole read-record-clear-retrigger sequence so a
-	// concurrent trigger cannot activate a new peer between the read and the clear
-	// (which would wrongly evict the freshly-activated peer).
+	// Hold decisionMu across the whole compare-clear-retrigger so a concurrent trigger
+	// cannot activate a new peer between the check and the clear.
 	sc.decisionMu.Lock()
 	defer sc.decisionMu.Unlock()
 
-	// Get the failed peer before clearing
-	sc.mu.RLock()
-	failedPeer := sc.currentSyncPeer
-	sc.mu.RUnlock()
-
-	// Record failure for the failed peer BEFORE clearing and triggering sync
-	// This ensures reputation is updated so the peer selector won't re-select the same peer
-	if failedPeer != "" {
-		sc.logger.Infof("[SyncCoordinator] Recording failure for failed peer %s", failedPeer)
-		if err := sc.registryRecordSyncFailure(failedPeer); err != nil {
-			sc.logger.Warnf("[SyncCoordinator] UpdatePeerMetrics(failure) for %s: %v", failedPeer, err)
-		}
+	if peerID == "" {
+		sc.logger.Infof("[SyncCoordinator] Ignoring catchup failure without peer attribution")
+		return
+	}
+	// Only switch when the failure names the current sync peer. clearSyncPeerIfCurrent is the
+	// atomic compare-and-clear shared with the other decision paths.
+	if !sc.clearSyncPeerIfCurrent(peerID) {
+		sc.logger.Infof("[SyncCoordinator] Ignoring catchup failure for non-current peer %s", peerID)
+		return
 	}
 
-	// Clear current sync peer
-	sc.clearSyncPeerIfCurrent("")
-
-	// Trigger new sync
+	sc.logger.Infof("[SyncCoordinator] Cleared failed sync peer %s", peerID)
 	if err := sc.triggerSyncLocked(); err != nil {
 		sc.logger.Errorf("[SyncCoordinator] Failed to trigger sync after failure: %v", err)
 	}
