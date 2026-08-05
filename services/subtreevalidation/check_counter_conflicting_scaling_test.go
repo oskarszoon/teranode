@@ -55,7 +55,7 @@ func spendingChild(t *testing.T, parent *bt.Tx, vout uint32) *bt.Tx {
 // buildLoserChain seeds the store with the shape of the mainnet 960,828 wedge: a
 // conflicting (mined-winner) tx1 whose counter-conflicting loser heads a linear
 // self-spend chain of the given length.
-func buildLoserChain(t *testing.T, ctx context.Context, utxoStore utxo.Store, chainLength int) {
+func buildLoserChain(ctx context.Context, t *testing.T, utxoStore utxo.Store, chainLength int) {
 	t.Helper()
 
 	_, err := utxoStore.Create(ctx, parentTx1, 122)
@@ -115,7 +115,7 @@ func Test_checkCounterConflictingOnCurrentChain_scaling(t *testing.T) {
 	utxoStore, err := sql.New(ctx, logger, tSettings, utxoStoreURL)
 	require.NoError(t, err)
 
-	buildLoserChain(t, ctx, utxoStore, chainLength)
+	buildLoserChain(ctx, t, utxoStore, chainLength)
 
 	countingStore := &countingUtxoStore{Store: utxoStore}
 	s := &Server{
@@ -128,6 +128,14 @@ func Test_checkCounterConflictingOnCurrentChain_scaling(t *testing.T) {
 	require.NoError(t, err)
 
 	gets := countingStore.gets.Load()
+
+	// Lower bound first: without it a regression that skips the descendant walk
+	// entirely (GetConflictingChildren returning early) would satisfy the upper
+	// bound and pass. The walk has to actually visit the chain.
+	require.GreaterOrEqualf(t, gets, int64(chainLength),
+		"the walk must actually cover the counter-conflicting chain, got only %d Get calls for K=%d",
+		gets, chainLength)
+
 	require.LessOrEqualf(t, gets, int64(4*chainLength),
 		"blessing a conflicting tx must read the counter-conflicting descendant chain O(K) times, got %d Get calls for K=%d (O(K^2) indicates the per-element re-walk of issue 1391)",
 		gets, chainLength)
@@ -135,7 +143,7 @@ func Test_checkCounterConflictingOnCurrentChain_scaling(t *testing.T) {
 
 // freezeOutput marks the given output of tx as frozen in the store, so its
 // spending data carries the frozen sentinel hash.
-func freezeOutput(t *testing.T, ctx context.Context, store utxo.Store, tx *bt.Tx, vout uint32, tSettings *settings.Settings) {
+func freezeOutput(ctx context.Context, t *testing.T, store utxo.Store, tx *bt.Tx, vout uint32, tSettings *settings.Settings) {
 	t.Helper()
 
 	utxoHash, err := util.UTXOHashFromOutput(tx.TxIDChainHash(), tx.Outputs[vout], vout)
@@ -183,7 +191,7 @@ func Test_checkCounterConflictingOnCurrentChain_frozen(t *testing.T) {
 
 		// freeze the parent output the conflicting tx spends: its spending data
 		// becomes the frozen sentinel, i.e. the counter-conflicting "tx" is frozen
-		freezeOutput(t, ctx, utxoStore, parentTx1, tx1.Inputs[0].PreviousTxOutIndex, tSettings)
+		freezeOutput(ctx, t, utxoStore, parentTx1, tx1.Inputs[0].PreviousTxOutIndex, tSettings)
 
 		_, err = utxoStore.Create(ctx, tx1, 123, utxo.WithConflicting(true))
 		require.NoError(t, err)
@@ -218,7 +226,7 @@ func Test_checkCounterConflictingOnCurrentChain_frozen(t *testing.T) {
 
 		// freeze the chain tip's output: the frozen sentinel appears deep inside
 		// the loser's descendant cone
-		freezeOutput(t, ctx, utxoStore, child, 0, tSettings)
+		freezeOutput(ctx, t, utxoStore, child, 0, tSettings)
 
 		_, err = utxoStore.Create(ctx, tx1, 123, utxo.WithConflicting(true))
 		require.NoError(t, err)
@@ -249,7 +257,7 @@ func Test_checkCounterConflictingOnCurrentChain_frozen(t *testing.T) {
 		// freeze one of the winner's own outputs: the sentinel appears in the
 		// winner's own descendant cone, which the single remaining walk must still
 		// reject
-		freezeOutput(t, ctx, utxoStore, tx1, 0, tSettings)
+		freezeOutput(ctx, t, utxoStore, tx1, 0, tSettings)
 
 		err = s.checkCounterConflictingOnCurrentChain(ctx, *tx1.TxIDChainHash(), map[uint32]bool{})
 		require.Error(t, err)
