@@ -1270,6 +1270,49 @@ func TestBlock_Bytes(t *testing.T) {
 	})
 }
 
+func TestReadTransactionAllocationSafe_Parity(t *testing.T) {
+	standard := []byte{1, 0, 0, 0, 1}
+	standard = append(standard, make([]byte, 36)...)
+	standard = append(standard, 0)
+	standard = append(standard, make([]byte, 4)...)
+	standard = append(standard, 1)
+	standard = append(standard, make([]byte, 8)...)
+	standard = append(standard, 0)
+	standard = append(standard, make([]byte, 4)...)
+
+	nonCanonical := append([]byte{1, 0, 0, 0, 0xfd, 1, 0}, standard[5:]...)
+	empty := []byte{1, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+
+	extended := []byte{1, 0, 0, 0, 0, 0}
+	extended = append(extended, 0, 0, 0, 0xef, 1)
+	extended = append(extended, make([]byte, 36)...)
+	extended = append(extended, 0)
+	extended = append(extended, make([]byte, 4)...)
+	extended = append(extended, make([]byte, 8)...)
+	extended = append(extended, 0)
+	extended = append(extended, 1)
+	extended = append(extended, make([]byte, 8)...)
+	extended = append(extended, 0)
+	extended = append(extended, make([]byte, 4)...)
+
+	for name, raw := range map[string][]byte{
+		"standard":            standard,
+		"noncanonical varint": nonCanonical,
+		"empty":               empty,
+		"extended":            extended,
+	} {
+		t.Run(name, func(t *testing.T) {
+			want := new(bt.Tx)
+			_, err := want.ReadFrom(bytes.NewReader(raw))
+			require.NoError(t, err)
+
+			got, err := readTransactionAllocationSafe(bytes.NewReader(raw))
+			require.NoError(t, err)
+			require.Equal(t, want.Bytes(), got.Bytes())
+		})
+	}
+}
+
 func TestMedianTimestamp(t *testing.T) {
 	timestamps := make([]time.Time, 11)
 	for i := range timestamps {

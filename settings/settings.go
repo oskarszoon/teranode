@@ -389,6 +389,8 @@ func NewSettings(alternativeContext ...string) *Settings {
 			FetchNumWorkers:                 getInt("blockvalidation_fetch_num_workers", 16, alternativeContext...),
 			FetchBufferSize:                 getInt("blockvalidation_fetch_buffer_size", 50, alternativeContext...),
 			SubtreeFetchConcurrency:         getInt("blockvalidation_subtree_fetch_concurrency", 32, alternativeContext...),
+			MaxIncomingBlockBytes:           getInt64("blockvalidation_max_incoming_block_bytes", 8*1024*1024*1024, alternativeContext...),
+			PerPeerFetchRate:                getInt("blockvalidation_per_peer_fetch_rate", 8, alternativeContext...),
 			SubtreeBatchSize:                getInt("blockvalidation_subtree_batch_size", 16, alternativeContext...),
 			ExtendTransactionTimeout:        getDuration("blockvalidation_extend_transaction_timeout", 120*time.Second, alternativeContext...),
 			GetBlockTransactionsConcurrency: getInt("blockvalidation_get_block_transactions_concurrency", 64, alternativeContext...),
