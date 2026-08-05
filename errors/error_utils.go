@@ -265,6 +265,11 @@ func IsLocalError(err error) bool {
 		return true
 	}
 
+	// Configuration errors originate from this node, never from a peer.
+	if Is(err, ErrConfiguration) {
+		return true
+	}
+
 	return false
 }
 
