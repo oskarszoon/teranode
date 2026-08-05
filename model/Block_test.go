@@ -1313,6 +1313,43 @@ func TestReadTransactionAllocationSafe_Parity(t *testing.T) {
 	}
 }
 
+// FuzzReadTransactionAllocationSafe locks the parity the allocation-safe pre-scan relies on:
+// whenever go-bt can decode a transaction from the input, readTransactionAllocationSafe must accept
+// it too and yield byte-identical output. A scanner stricter than go-bt would reject a legitimate
+// coinbase and needlessly fail a block over to another peer (availability, not consensus), so this
+// guards the hand-rolled scan against future go-bt encoding changes. The pre-scan's accept-set is a
+// subset of go-bt's by construction (the real decode is bt.NewTxFromBytes on the scanned bytes), so
+// only the "go-bt accepts => scan must accept identically" direction needs asserting.
+func FuzzReadTransactionAllocationSafe(f *testing.F) {
+	standard := []byte{1, 0, 0, 0, 1}
+	standard = append(standard, make([]byte, 36)...)
+	standard = append(standard, 0)
+	standard = append(standard, make([]byte, 4)...)
+	standard = append(standard, 1)
+	standard = append(standard, make([]byte, 8)...)
+	standard = append(standard, 0)
+	standard = append(standard, make([]byte, 4)...)
+	f.Add(standard)
+	f.Add(append([]byte{1, 0, 0, 0, 0xfd, 1, 0}, standard[5:]...)) // non-canonical varint
+	f.Add([]byte{1, 0, 0, 0, 0, 0, 0, 0, 0, 0})                    // empty
+	f.Add([]byte{})
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		want := new(bt.Tx)
+		n, err := want.ReadFrom(bytes.NewReader(data))
+		if err != nil {
+			return // go-bt can't decode a tx here; nothing to assert (accept-set is a subset)
+		}
+		if n > int64(bt.MaxArenaAlloc) {
+			return // beyond the allocation budget the scan is intended to reject — not a parity case
+		}
+
+		got, err := readTransactionAllocationSafe(bytes.NewReader(data))
+		require.NoError(t, err, "go-bt accepted a %d-byte tx but the allocation-safe scan rejected it", n)
+		require.Equal(t, want.Bytes(), got.Bytes(), "allocation-safe scan must decode identically to go-bt")
+	})
+}
+
 func TestMedianTimestamp(t *testing.T) {
 	timestamps := make([]time.Time, 11)
 	for i := range timestamps {
