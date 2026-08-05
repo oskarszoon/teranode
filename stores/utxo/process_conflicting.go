@@ -26,6 +26,17 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// conflictingWalkFanOut caps the per-level width of the conflicting-descendant
+// BFS, which previously opened one concurrent store read per level member with
+// no ceiling at all. It matches utxostore_getBatcherSize (settings.conf:1240,
+// 4096) so one full wave fills exactly one Aerospike get batch: the ceiling
+// still stops unbounded goroutine and read explosion, without converting the
+// batcher's fill-triggered flushes into utxostore_getBatcherDurationMillis
+// timer flushes the way a smaller ceiling would. On the SQL backend it makes no
+// difference either way — the ConflictingChildren/Utxos fields force unbatched
+// queries, so level members queue on postgres_maxOpenConns regardless.
+const conflictingWalkFanOut = 4096
+
 // prometheusUtxoCounterConflictingGhostSpends counts every confirmed ghost spender
 // tolerated by the counter-conflicting walk: a parent output that still records a
 // spender whose own record no longer exists (e.g. a never-mined conflicting loser
@@ -1022,9 +1033,7 @@ func GetConflictingChildren(ctx context.Context, s Store, hash chainhash.Hash) (
 	for len(currentLevel) > 0 {
 		results := make([]*meta.Data, len(currentLevel))
 		g, gCtx := errgroup.WithContext(ctx)
-		// a wide level must not fan out one goroutine (and one store read) per
-		// descendant without bound
-		g.SetLimit(128)
+		util.SafeSetLimit(g, conflictingWalkFanOut)
 
 		for i, current := range currentLevel {
 			i := i
