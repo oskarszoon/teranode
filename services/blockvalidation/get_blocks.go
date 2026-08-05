@@ -1118,6 +1118,15 @@ func (u *Server) fetchSubtreeDataFromPeer(ctx context.Context, subtreeHash *chai
 
 const blockBatchCapacityHint = 100
 
+// blockStreamReadBufferMinSize keeps the catchup block-decode read-ahead at bufio's floor ON
+// PURPOSE. The decode's io.LimitedReader (decodeBoundedBlock) sits INSIDE this bufio.Reader, so
+// bufio's read-ahead pulls from the peer BEFORE the transport-envelope limit can gate it — a larger
+// buffer would let a hostile peer's oversized-block tail be drained past the DoS bound that
+// TestPeerBlockFetches_StreamAndBoundResponses guards (bytesRead <= maxTransportBytes + this floor).
+// Growing it safely would require re-nesting the LimitedReader outside bufio; not worth it for a
+// read-ahead micro-optimisation on a path already bounded by the per-attempt fetch pacing.
+const blockStreamReadBufferMinSize = 16
+
 type blockResponseLimits struct {
 	maxTransportBytes int64
 	maxDeclaredBytes  uint64
@@ -1238,7 +1247,7 @@ func (u *Server) fetchBlocksBatch(ctx context.Context, hash *chainhash.Hash, n u
 	trackedBody := u.trackedBlockResponse(ctx, responseBody, hash, peerID, "fetchBlocksBatch")
 	defer func() { _ = trackedBody.Close() }()
 
-	blockReader := bufio.NewReaderSize(trackedBody, 16)
+	blockReader := bufio.NewReaderSize(trackedBody, blockStreamReadBufferMinSize)
 	capacityHint := blockBatchCapacityHint
 	if n < uint32(capacityHint) {
 		capacityHint = int(n)
@@ -1309,7 +1318,7 @@ func (u *Server) fetchSingleBlock(ctx context.Context, hash *chainhash.Hash, pee
 	trackedBody := u.trackedBlockResponse(ctx, responseBody, hash, peerID, "fetchSingleBlock")
 	defer func() { _ = trackedBody.Close() }()
 
-	blockReader := bufio.NewReaderSize(trackedBody, 16)
+	blockReader := bufio.NewReaderSize(trackedBody, blockStreamReadBufferMinSize)
 	block, err := decodeBoundedBlock(blockReader, limits)
 	if err != nil {
 		if classified := classifyBlockStreamErr(ctx, hash, err); classified != nil {
