@@ -1173,9 +1173,19 @@ func decodeBoundedBlock(reader io.Reader, limits blockResponseLimits) (*model.Bl
 		if limited.N == 0 {
 			return nil, errors.NewExternalError("peer block response reached transport envelope limit of %d bytes", limits.maxTransportBytes)
 		}
-		// A block that fails to decode is the peer's bad payload, not a local fault:
-		// classify it as external so catchup fails over to another peer. The model's
-		// block-layer error (e.g. declared size / go-bt limit) is preserved as the cause.
+		// A TRUNCATED response (peer restart, TCP RST, LB/proxy close mid-stream) surfaces from the
+		// model as a BlockInvalidError wrapping io.EOF/io.ErrUnexpectedEOF. Return a FRESH, UNWRAPPED
+		// external error for it: (*Error).Is matches by code ANYWHERE in the chain, so if the
+		// BlockInvalid code rode along in a wrapped error, catchup.go's validation_failure case
+		// (evaluated before the ErrExternal case) would report an HONEST peer as malicious and pin its
+		// reputation. Unwrapped is load-bearing — the same idiom classifyPeerFetchCtxErr uses for its
+		// timeout branch. (limited.N == 0 above already peeled off the oversized-block case.)
+		if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
+			return nil, errors.NewExternalError("peer block response truncated (read %d of up to %d transport bytes)", limits.maxTransportBytes-limited.N, limits.maxTransportBytes)
+		}
+		// A decode failure on a fully-received response is the peer's bad payload: classify external
+		// so catchup fails over. The model's block-layer cause (declared size / go-bt limit) is
+		// preserved — a structurally invalid complete block is genuinely the peer serving bad data.
 		return nil, errors.NewExternalError("peer block response failed to decode", err)
 	}
 

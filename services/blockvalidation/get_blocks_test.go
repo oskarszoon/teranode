@@ -95,6 +95,31 @@ func blockHTTPResponse(body io.ReadCloser) *http.Response {
 	}
 }
 
+// TestDecodeBoundedBlock_TruncationIsExternalNotInvalid is the F1 regression: an honest peer whose
+// block response is truncated mid-stream must classify as ErrExternal (catchup fails over), NOT
+// ErrBlockInvalid — which catchup.go turns into a malicious-peer report that pins the peer's
+// reputation. The model emits BlockInvalidError wrapping io.ErrUnexpectedEOF on a short read, and
+// (*Error).Is matches by code anywhere in the chain, so decodeBoundedBlock must return a FRESH,
+// unwrapped error for truncation rather than wrapping the BlockInvalid cause.
+func TestDecodeBoundedBlock_TruncationIsExternalNotInvalid(t *testing.T) {
+	block := testhelpers.CreateTestBlockChain(t, 2)[1]
+	full, err := block.Bytes()
+	require.NoError(t, err)
+	require.Greater(t, len(full), 90, "need a block longer than its 80-byte header to truncate mid-body")
+
+	// Cut mid-body (past the header) so the model fails on a short read, not a bad header.
+	truncated := full[:len(full)*3/4]
+	// Cap well above the truncated length so limited.N > 0 (this is NOT the oversized-block path).
+	limits := blockResponseLimits{maxTransportBytes: int64(len(full) + 1024)}
+
+	_, decodeErr := decodeBoundedBlock(bytes.NewReader(truncated), limits)
+	require.Error(t, decodeErr)
+	require.True(t, errors.Is(decodeErr, errors.ErrExternal),
+		"a truncated response must be external (peer fail-over): %v", decodeErr)
+	require.False(t, errors.Is(decodeErr, errors.ErrBlockInvalid),
+		"truncation must NOT carry ErrBlockInvalid — catchup.go would report the honest peer malicious: %v", decodeErr)
+}
+
 func TestPeerBlockFetches_StreamAndBoundResponses(t *testing.T) {
 	t.Run("single rejects trailing oversized body without reading it all", func(t *testing.T) {
 		suite := NewCatchupTestSuite(t)
