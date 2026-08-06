@@ -8,6 +8,7 @@ import (
 	"io"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	subtreepkg "github.com/bsv-blockchain/go-subtree"
@@ -88,7 +89,7 @@ func (u *Server) awaitPeerFetchSlot(ctx context.Context, baseURL string) error {
 		// ProcessingError/ServiceError on the way to the reputation gate — teranode's
 		// IsContextError matches the wrapped stdlib sentinel's rendered string, which a
 		// bare ErrContextCanceled message would not carry once wrapped.
-		return errors.NewContextCanceledError("[peerFetchLimiter] wait aborted for %s", baseURL, context.DeadlineExceeded)
+		return errors.NewContextCanceledError("[peerFetchLimiter] wait aborted for %s", util.RedactPeerURL(baseURL), context.DeadlineExceeded)
 	}
 
 	return nil
@@ -821,9 +822,11 @@ func (u *Server) fetchAndStoreSubtreeData(ctx context.Context, shutdownCtx conte
 // maxSubtreeFailoverPeers bounds how many alternative peers a single subtree fetch tries after its
 // assigned peer fails. It is deliberately NOT CatchupMaxRetries (which bounds peer retries WITHIN
 // one catchup operation): failover BREADTH should track how many max-height peers might hold a
-// subtree whose data is skewed to a minority, not a retry count. Each alternative is itself up to
-// the retry helper's paced HTTP attempts, and the catchup iteration deadline is the hard stop, so
-// this only caps the per-subtree fan-out width.
+// subtree whose data is skewed to a minority, not a retry count. Each alternative fetch is itself
+// bounded (the per-attempt HTTP timeout times the retry helper's attempt count), and the per-block
+// attempt cap (CatchupMaxAttemptsPerBlock) bounds re-entry — so this only caps the per-subtree
+// fan-out width, not total time. (Block fetches additionally carry a per-fetch wall clock; see
+// withCatchupFetchTimeout.)
 const maxSubtreeFailoverPeers = 10
 
 func alternativePeerCapacity(maxAttempts, peerCount int) int {
@@ -1025,7 +1028,7 @@ func (u *Server) fetchSubtreeFromPeer(ctx context.Context, subtreeHash *chainhas
 	subtreeBytes, err := util.DoHTTPRequestBoundedWithRetry(ctx, url, maxSubtreeBytes,
 		func(c context.Context) error { return u.awaitPeerFetchSlot(c, baseURL) })
 	if err != nil {
-		return nil, errors.NewServiceError("[catchup:fetchSubtreeFromPeer] failed to fetch subtree from %s", url, err)
+		return nil, errors.NewServiceError("[catchup:fetchSubtreeFromPeer] failed to fetch subtree from %s", util.RedactPeerURL(url), err)
 	}
 
 	// Track bytes downloaded from peer
@@ -1094,7 +1097,7 @@ func (u *Server) fetchSubtreeDataFromPeer(ctx context.Context, subtreeHash *chai
 	// be detached via context.WithoutCancel by the caller).
 	subtreeDataReader, err := util.DoHTTPRequestBodyReaderWithRetryFunc(ctx, url, beforeAttempt)
 	if err != nil {
-		return nil, errors.NewServiceError("[catchup:fetchSubtreeDataFromPeer] failed to fetch subtree data from %s", url, err)
+		return nil, errors.NewServiceError("[catchup:fetchSubtreeDataFromPeer] failed to fetch subtree data from %s", util.RedactPeerURL(url), err)
 	}
 
 	// Wrap with counting reader to track bytes when stream is consumed
@@ -1133,6 +1136,19 @@ type blockResponseLimits struct {
 	enforceDeclared   bool
 }
 
+// withCatchupFetchTimeout bounds a single catchup block fetch — all retry attempts AND the
+// streaming body read — by the configured catchup-iteration timeout (default 30s). The streaming
+// retry helper mints a fresh per-attempt timeout and the catchup path is otherwise deadline-free,
+// so without this a peer that stalls each attempt just under the per-attempt streaming timeout
+// could hold one fetch for ~maxAttempts x http_streaming_timeout.
+func (u *Server) withCatchupFetchTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	timeout := time.Duration(u.settings.BlockValidation.CatchupIterationTimeout) * time.Second
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	return context.WithTimeout(ctx, timeout)
+}
+
 func resolveBlockResponseLimits(maxTransportBytes int64, excessiveBlockSize int) (blockResponseLimits, error) {
 	if maxTransportBytes <= 0 {
 		configErr := errors.NewConfigurationError("blockvalidation_max_incoming_block_bytes must be positive, got %d", maxTransportBytes)
@@ -1160,14 +1176,17 @@ func classifyBlockStreamErr(ctx context.Context, hash *chainhash.Hash, err error
 		fmt.Sprintf("[catchup:blockFetch][%s] peer block response timed out", hash.String()))
 }
 
-func decodeBoundedBlock(reader io.Reader, limits blockResponseLimits) (*model.Block, error) {
-	limited := &io.LimitedReader{R: reader, N: limits.maxTransportBytes}
+// decodeBoundedBlock decodes one block from r, which must be layered over `limited` — the transport
+// budget SHARED across a whole response. The caller owns the LimitedReader so a multi-block batch is
+// bounded in aggregate (one budget for the entire response), not per block; passing a fresh limiter
+// per call would give an n x cap ceiling with no bound on one batch's resident set.
+func decodeBoundedBlock(r io.Reader, limited *io.LimitedReader, limits blockResponseLimits) (*model.Block, error) {
 	var block *model.Block
 	var err error
 	if limits.enforceDeclared {
-		block, err = model.NewBlockFromReaderWithDeclaredSizeLimit(limited, limits.maxDeclaredBytes)
+		block, err = model.NewBlockFromReaderWithDeclaredSizeLimit(r, limits.maxDeclaredBytes)
 	} else {
-		block, err = model.NewBlockFromReader(limited)
+		block, err = model.NewBlockFromReader(r)
 	}
 	if err != nil {
 		if limited.N == 0 {
@@ -1244,6 +1263,14 @@ func (u *Server) fetchBlocksBatch(ctx context.Context, hash *chainhash.Hash, n u
 		return nil, err
 	}
 
+	// Bound the whole fetch — all retry attempts AND the streaming read — by one catchup-iteration
+	// timeout. The streaming retry helper mints a fresh per-attempt timeout, and the catchup path
+	// otherwise carries no deadline, so a peer that stalls each attempt just under the per-attempt
+	// timeout could pin a single fetch for ~1h. This restores the pre-streaming wall clock and
+	// activates retryHTTP's deadline-based peer attribution.
+	ctx, cancel := u.withCatchupFetchTimeout(ctx)
+	defer cancel()
+
 	// WithRetry backs off on 429/503 instead of failing the whole batch; the hook paces
 	// every attempt through the per-peer limiter so retries don't re-burst.
 	responseBody, err := util.DoHTTPRequestBodyReaderWithRetryFunc(ctx, fmt.Sprintf("%s/blocks/%s?n=%d", baseURL, hash.String(), n),
@@ -1257,7 +1284,11 @@ func (u *Server) fetchBlocksBatch(ctx context.Context, hash *chainhash.Hash, n u
 	trackedBody := u.trackedBlockResponse(ctx, responseBody, hash, peerID, "fetchBlocksBatch")
 	defer func() { _ = trackedBody.Close() }()
 
-	blockReader := bufio.NewReaderSize(trackedBody, blockStreamReadBufferMinSize)
+	// One aggregate transport budget for the WHOLE batch response, so n blocks share a single
+	// maxTransportBytes ceiling rather than n x maxTransportBytes (a fresh per-block limiter left
+	// one batch's resident set unbounded).
+	limited := &io.LimitedReader{R: trackedBody, N: limits.maxTransportBytes}
+	blockReader := bufio.NewReaderSize(limited, blockStreamReadBufferMinSize)
 	capacityHint := blockBatchCapacityHint
 	if n < uint32(capacityHint) {
 		capacityHint = int(n)
@@ -1270,7 +1301,7 @@ func (u *Server) fetchBlocksBatch(ctx context.Context, hash *chainhash.Hash, n u
 			}
 			return nil, errors.NewProcessingError("[catchup:fetchBlocksBatch][%s] truncated batch: expected %d blocks, got %d", hash.String(), n, count, err)
 		}
-		block, decodeErr := decodeBoundedBlock(blockReader, limits)
+		block, decodeErr := decodeBoundedBlock(blockReader, limited, limits)
 		if decodeErr != nil {
 			if classified := classifyBlockStreamErr(ctx, hash, decodeErr); classified != nil {
 				return nil, classified
@@ -1315,6 +1346,11 @@ func (u *Server) fetchSingleBlock(ctx context.Context, hash *chainhash.Hash, pee
 		return nil, err
 	}
 
+	// Bound the whole fetch (retries + streaming read) by one catchup-iteration timeout; see
+	// withCatchupFetchTimeout and the note in fetchBlocksBatch.
+	ctx, cancel := u.withCatchupFetchTimeout(ctx)
+	defer cancel()
+
 	// WithRetry backs off on 429/503 (peer rate limiting) instead of failing; the hook
 	// paces every attempt through the per-peer limiter so retries don't re-burst.
 	responseBody, err := util.DoHTTPRequestBodyReaderWithRetryFunc(ctx, fmt.Sprintf("%s/block/%s", baseURL, hash.String()),
@@ -1328,8 +1364,9 @@ func (u *Server) fetchSingleBlock(ctx context.Context, hash *chainhash.Hash, pee
 	trackedBody := u.trackedBlockResponse(ctx, responseBody, hash, peerID, "fetchSingleBlock")
 	defer func() { _ = trackedBody.Close() }()
 
-	blockReader := bufio.NewReaderSize(trackedBody, blockStreamReadBufferMinSize)
-	block, err := decodeBoundedBlock(blockReader, limits)
+	limited := &io.LimitedReader{R: trackedBody, N: limits.maxTransportBytes}
+	blockReader := bufio.NewReaderSize(limited, blockStreamReadBufferMinSize)
+	block, err := decodeBoundedBlock(blockReader, limited, limits)
 	if err != nil {
 		if classified := classifyBlockStreamErr(ctx, hash, err); classified != nil {
 			return nil, classified

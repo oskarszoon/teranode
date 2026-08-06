@@ -95,6 +95,13 @@ func blockHTTPResponse(body io.ReadCloser) *http.Response {
 	}
 }
 
+// decodeBoundedBlockTest wraps r in the shared transport LimitedReader that decodeBoundedBlock now
+// expects the caller to own (production hoists it per response for an aggregate batch budget).
+func decodeBoundedBlockTest(r io.Reader, limits blockResponseLimits) (*model.Block, error) {
+	limited := &io.LimitedReader{R: r, N: limits.maxTransportBytes}
+	return decodeBoundedBlock(limited, limited, limits)
+}
+
 // TestDecodeBoundedBlock_TruncationIsExternalNotInvalid is the F1 regression: an honest peer whose
 // block response is truncated mid-stream must classify as ErrExternal (catchup fails over), NOT
 // ErrBlockInvalid — which catchup.go turns into a malicious-peer report that pins the peer's
@@ -112,7 +119,7 @@ func TestDecodeBoundedBlock_TruncationIsExternalNotInvalid(t *testing.T) {
 	// Cap well above the truncated length so limited.N > 0 (this is NOT the oversized-block path).
 	limits := blockResponseLimits{maxTransportBytes: int64(len(full) + 1024)}
 
-	_, decodeErr := decodeBoundedBlock(bytes.NewReader(truncated), limits)
+	_, decodeErr := decodeBoundedBlockTest(bytes.NewReader(truncated), limits)
 	require.Error(t, decodeErr)
 	require.True(t, errors.Is(decodeErr, errors.ErrExternal),
 		"a truncated response must be external (peer fail-over): %v", decodeErr)
@@ -288,7 +295,10 @@ func TestPeerBlockFetches_StreamAndBoundResponses(t *testing.T) {
 		blockBytes, err := block.Bytes()
 		require.NoError(t, err)
 		suite.Server.settings.Policy.ExcessiveBlockSize = 0
-		suite.Server.settings.BlockValidation.MaxIncomingBlockBytes = int64(len(blockBytes) - 1)
+		// Budget well under the serialized size: the decoder tolerates a byte or two of
+		// trailing-framing truncation, so an off-by-one cap would still decode. Halving the
+		// budget guarantees the block cannot fit and the transport envelope must reject it.
+		suite.Server.settings.BlockValidation.MaxIncomingBlockBytes = int64(len(blockBytes) / 2)
 		body := &trackedBlockResponseBody{data: append(append([]byte{}, blockBytes...), bytes.Repeat([]byte{0xaa}, 1<<20)...)}
 		var requests atomic.Int32
 
@@ -446,7 +456,7 @@ func TestDecodeBoundedBlock_RejectsCoinbaseAllocationAmplification(t *testing.T)
 	runtime.GC()
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
-	_, err := decodeBoundedBlock(bytes.NewReader(hostile), blockResponseLimits{maxTransportBytes: 1024})
+	_, err := decodeBoundedBlockTest(bytes.NewReader(hostile), blockResponseLimits{maxTransportBytes: 1024})
 	runtime.ReadMemStats(&after)
 
 	require.Error(t, err)
@@ -457,7 +467,7 @@ func TestDecodeBoundedBlock_RejectsCoinbaseAllocationAmplification(t *testing.T)
 func TestDecodeBoundedBlock_RejectsDeterministicallyInvalidCoinbaseBeforeBuffering(t *testing.T) {
 	hostile := hostileCoinbaseBlock(t, 2048, uint64(bt.MaxArenaAlloc)+1)
 
-	_, err := decodeBoundedBlock(bytes.NewReader(hostile), blockResponseLimits{
+	_, err := decodeBoundedBlockTest(bytes.NewReader(hostile), blockResponseLimits{
 		maxTransportBytes: 8 << 30,
 		maxDeclaredBytes:  1024,
 		enforceDeclared:   true,
@@ -467,7 +477,7 @@ func TestDecodeBoundedBlock_RejectsDeterministicallyInvalidCoinbaseBeforeBufferi
 		"declared policy must reject before scanning the hostile coinbase")
 
 	hostile = hostileCoinbaseBlock(t, 0, uint64(bt.MaxArenaAlloc)+1)
-	_, err = decodeBoundedBlock(bytes.NewReader(hostile), blockResponseLimits{maxTransportBytes: 8 << 30})
+	_, err = decodeBoundedBlockTest(bytes.NewReader(hostile), blockResponseLimits{maxTransportBytes: 8 << 30})
 	require.ErrorContains(t, err, "MaxArenaAlloc", "go-bt's deterministic script limit must reject before buffering")
 }
 

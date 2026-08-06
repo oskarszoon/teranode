@@ -1306,11 +1306,32 @@ func TestReadTransactionAllocationSafe_Parity(t *testing.T) {
 			_, err := want.ReadFrom(bytes.NewReader(raw))
 			require.NoError(t, err)
 
-			got, err := readTransactionAllocationSafe(bytes.NewReader(raw))
+			got, err := readTransactionAllocationSafe(bytes.NewReader(raw), int64(bt.MaxArenaAlloc))
 			require.NoError(t, err)
 			require.Equal(t, want.Bytes(), got.Bytes())
 		})
 	}
+}
+
+// TestReadTransactionAllocationSafe_BudgetRejectsOversized proves the maxBytes budget bounds the
+// buffered transaction: a tx larger than the budget is rejected before go-bt decodes it. This is
+// what caps the coinbase (via maxCoinbaseTxBytes) so a delivered giant coinbase can't drive the
+// allocator.
+func TestReadTransactionAllocationSafe_BudgetRejectsOversized(t *testing.T) {
+	standard := []byte{1, 0, 0, 0, 1}
+	standard = append(standard, make([]byte, 36)...)
+	standard = append(standard, 0)
+	standard = append(standard, make([]byte, 4)...)
+	standard = append(standard, 1)
+	standard = append(standard, make([]byte, 8)...)
+	standard = append(standard, 0)
+	standard = append(standard, make([]byte, 4)...)
+
+	_, err := readTransactionAllocationSafe(bytes.NewReader(standard), int64(bt.MaxArenaAlloc))
+	require.NoError(t, err, "a generous budget accepts a normal tx")
+
+	_, err = readTransactionAllocationSafe(bytes.NewReader(standard), int64(len(standard)-1))
+	require.Error(t, err, "a budget below the tx size must reject before decode")
 }
 
 // FuzzReadTransactionAllocationSafe locks the parity the allocation-safe pre-scan relies on:
@@ -1344,7 +1365,7 @@ func FuzzReadTransactionAllocationSafe(f *testing.F) {
 			return // beyond the allocation budget the scan is intended to reject — not a parity case
 		}
 
-		got, err := readTransactionAllocationSafe(bytes.NewReader(data))
+		got, err := readTransactionAllocationSafe(bytes.NewReader(data), int64(bt.MaxArenaAlloc))
 		require.NoError(t, err, "go-bt accepted a %d-byte tx but the allocation-safe scan rejected it", n)
 		require.Equal(t, want.Bytes(), got.Bytes(), "allocation-safe scan must decode identically to go-bt")
 	})

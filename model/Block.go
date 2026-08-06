@@ -423,7 +423,7 @@ func readBlockFromReaderWithLimits(block *Block, buf io.Reader, maxDeclaredBytes
 		return nil, errors.NewBlockInvalidError("block subtree length mismatch, expected %d, actual %d", block.subtreeLength, block.Subtrees)
 	}
 
-	coinbaseTx, err := readTransactionAllocationSafe(buf)
+	coinbaseTx, err := readTransactionAllocationSafe(buf, maxCoinbaseTxBytes)
 	if err != nil {
 		return nil, errors.NewBlockInvalidError("error reading coinbase tx", err)
 	}
@@ -462,12 +462,21 @@ func readBlockFromReaderWithLimits(block *Block, buf io.Reader, maxDeclaredBytes
 	return block, nil
 }
 
+// maxCoinbaseTxBytes bounds the coinbase transaction buffered by readTransactionAllocationSafe.
+// A delivered coinbase this large is already abusive (Teranode emits ~200 bytes; a consensus
+// coinbase scriptSig is 2-100 bytes and a real coinbase has one input), so 8 MiB leaves enormous
+// headroom while capping the derived heap at ~22 MiB — versus the ~3.7 GiB a 1 GiB coinbase of
+// minimal inputs would cost against the go-bt allocator's 1 GiB arena default.
+const maxCoinbaseTxBytes = 8 << 20 // 8 MiB
+
 // readTransactionAllocationSafe consumes one serialized transaction without allocating
 // directly from attacker-controlled count or script-length prefixes. Raw bytes are buffered
 // only as they are actually received, then decoded by go-bt after every advertised field has
-// been proven present inside the reader's remaining transport budget.
-func readTransactionAllocationSafe(r io.Reader) (*bt.Tx, error) {
-	transactionBudget := int64(bt.MaxArenaAlloc)
+// been proven present inside the reader's remaining transport budget. maxBytes caps the buffered
+// transaction (and hence the derived allocation), on top of any tighter remaining transport budget
+// already on the reader.
+func readTransactionAllocationSafe(r io.Reader, maxBytes int64) (*bt.Tx, error) {
+	transactionBudget := maxBytes
 	if outer, ok := r.(*io.LimitedReader); ok && outer.N < transactionBudget {
 		transactionBudget = outer.N
 	}

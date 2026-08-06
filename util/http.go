@@ -471,6 +471,19 @@ func executeHTTPRequest(ctx context.Context, cancelFn context.CancelFunc, rawURL
 // embedding closes that channel while still bounding the read against a hostile infinite stream.
 const maxErrorBodyBytes = 64 << 10 // 64 KiB
 
+// RedactPeerURL reduces a possibly peer-supplied URL to scheme://host[:port], dropping path/query.
+// A peer-gossiped DataHubURL is validated for scheme + SSRF host only, so its path can carry
+// arbitrary bytes; interpolating the raw string into an error that feeds (*Error).Is substring
+// classification lets a peer forge a "local" verdict (e.g. a path containing "context canceled").
+// Returns "[redacted url]" when the input can't be parsed into a host.
+func RedactPeerURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "[redacted url]"
+	}
+	return u.Scheme + "://" + u.Host
+}
+
 // buildHTTPError constructs an appropriate error from a non-OK HTTP response.
 //
 // The error type is chosen to let callers branch with errors.Is:
@@ -486,6 +499,10 @@ const maxErrorBodyBytes = 64 << 10 // 64 KiB
 // feeds substring-based classification at the catchup gates, so echoing it (even escaped) would let
 // a peer forge a "local" classification. Callers on peer-controlled paths should redact the URL too.
 func buildHTTPError(resp *http.Response, rawURL string) error {
+	// Redact to scheme://host: rawURL may be a peer-gossiped DataHubURL whose crafted path (e.g.
+	// one containing "context canceled") would otherwise ride into this message and be substring-
+	// matched by the catchup classifiers.
+	rawURL = RedactPeerURL(rawURL)
 	errFn := errors.NewServiceError
 	switch resp.StatusCode {
 	case http.StatusNotFound:
@@ -617,12 +634,14 @@ func retryHTTP[T any](ctx context.Context, cfg retryConfig, attempt func(context
 
 		sleepFor := jitterDelay(delay)
 		if retryAfter > 0 {
-			// Server named a minimum — honor it (never wake earlier), but add UPWARD jitter
-			// ([retryAfter, 1.5*retryAfter]) so a fan-out of concurrent same-peer fetches doesn't
-			// all re-issue on the same tick (de-syncs the herd even when the per-peer client
-			// limiter is disabled). Clamp to maxRetryAfter — an absolute ceiling above the backoff
-			// cap (maxDelay) — so an honest-but-busy peer whose hint exceeds maxDelay is honored,
-			// while a hostile hint can't stall us indefinitely.
+			// Server named a minimum — honor it (never wake earlier), and add UPWARD jitter
+			// ([retryAfter, 1.5*retryAfter]) so a fan-out of concurrent same-peer fetches doesn't all
+			// re-issue on the same tick. The de-sync is effective for hints comfortably below the
+			// ceiling and shrinks to zero at exactly maxRetryAfter — at the ceiling there is no
+			// headroom to wait longer without exceeding our own cap, and we will not wait less than
+			// the server's stated minimum, so that case is unavoidably deterministic. Clamp to
+			// maxRetryAfter (an absolute ceiling above the backoff cap maxDelay) so an honest-but-busy
+			// peer whose hint exceeds maxDelay is honored while a hostile hint can't stall us.
 			ceiling := cfg.maxRetryAfter
 			if ceiling <= 0 {
 				ceiling = cfg.maxDelay

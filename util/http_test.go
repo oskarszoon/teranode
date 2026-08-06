@@ -1762,3 +1762,12 @@ func TestParseRetryAfter(t *testing.T) {
 		})
 	}
 }
+
+func TestRedactPeerURL(t *testing.T) {
+	// The F3 forgery vector: a peer path containing "context canceled" must not survive redaction.
+	require.Equal(t, "http://evil.example", RedactPeerURL("http://evil.example/context canceled"))
+	require.Equal(t, "https://peer:8080", RedactPeerURL("https://peer:8080/subtree/abc?cachebust=1"))
+	require.NotContains(t, RedactPeerURL("http://evil.example/context canceled"), "context canceled")
+	// Unparseable / hostless inputs collapse to a safe placeholder.
+	require.Equal(t, "[redacted url]", RedactPeerURL("/no/scheme/or/host"))
+}
