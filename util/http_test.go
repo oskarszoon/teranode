@@ -151,6 +151,68 @@ func TestDoHTTPRequestNotFound(t *testing.T) {
 	require.NotContains(t, err.Error(), "not found", "peer-controlled body must not be echoed into the classified error")
 }
 
+// TestBuildHTTPErrorBodyIsBoundedAndNotEchoed pins two properties of the non-2xx error body: the
+// read is bounded (a hostile peer that answers with an error status then streams indefinitely
+// cannot defeat the cap), and the peer body is NEVER embedded in the message (it would otherwise
+// feed substring-based classification at the catchup gates).
+func TestBuildHTTPErrorBodyIsBoundedAndNotEchoed(t *testing.T) {
+	// headMarker is in the first bytes (drained, so its ABSENCE proves no-echo); tailMarker is past
+	// the drain cap (so its absence proves the read was bounded, not run to completion).
+	const headMarker = "ERRBODYHEAD"
+	const tailMarker = "ERRBODYTAIL"
+
+	oversizedBody := headMarker + strings.Repeat("A", 4*maxErrorBodyBytes) + tailMarker
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, err := w.Write([]byte(oversizedBody))
+		require.NoError(t, err)
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+
+	t.Run("unbounded caller", func(t *testing.T) {
+		_, err := DoHTTPRequest(ctx, server.URL)
+		require.Error(t, err)
+		require.NotContains(t, err.Error(), headMarker, "peer body must never be echoed into the classified error")
+		require.NotContains(t, err.Error(), tailMarker, "the read must be bounded, not run to completion")
+		require.Less(t, len(err.Error()), 512, "message carries only status + URL + byte count, not the body")
+	})
+
+	t.Run("bounded caller keeps its cap on an error status", func(t *testing.T) {
+		// A non-2xx status short-circuits into buildHTTPError before DoHTTPRequestBounded's own cap.
+		_, err := DoHTTPRequestBounded(ctx, server.URL, 1024)
+		require.Error(t, err)
+		require.NotContains(t, err.Error(), headMarker)
+		require.NotContains(t, err.Error(), tailMarker)
+	})
+}
+
+// TestBuildHTTPErrorBodyNotEchoed pins that a hostile body's content never reaches the error
+// string at all — stronger than escaping. Because the body is not embedded, there is nothing to
+// forge log lines with, and nothing feeds the catchup substring classifiers.
+func TestBuildHTTPErrorBodyNotEchoed(t *testing.T) {
+	// A forged log line, an ANSI escape, and a NUL.
+	hostileBody := "real\nERROR forged log line\x1b[31m\x00tail"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, err := w.Write([]byte(hostileBody))
+		require.NoError(t, err)
+	}))
+	defer server.Close()
+
+	_, err := DoHTTPRequest(context.Background(), server.URL)
+	require.Error(t, err)
+
+	msg := err.Error()
+	require.NotContains(t, msg, "\n", "no newline can reach the log line")
+	require.NotContains(t, msg, "\x1b", "no terminal escape can reach operator logs")
+	require.NotContains(t, msg, "\x00", "no control byte can reach operator logs")
+	require.NotContains(t, msg, "forged log line", "peer body content must not appear in the classified error at all")
+}
+
 func TestDoHTTPRequestServerError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)

@@ -464,6 +464,11 @@ func executeHTTPRequest(ctx context.Context, cancelFn context.CancelFunc, rawURL
 // lets net/http return the connection to the pool instead of forcing a fresh TCP+TLS handshake on
 // the next backoff retry. A body larger than this is anomalous/hostile and its connection is
 // intentionally left undrained (dropped rather than reused).
+//
+// NB: this deliberately diverges from upstream's body-in-message form. Embedding the peer body
+// (even %q-escaped) feeds it into (*Error).Is's substring classification at the catchup gates, so a
+// peer body containing "context canceled" could forge a local classification. Draining without
+// embedding closes that channel while still bounding the read against a hostile infinite stream.
 const maxErrorBodyBytes = 64 << 10 // 64 KiB
 
 // buildHTTPError constructs an appropriate error from a non-OK HTTP response.
@@ -474,6 +479,12 @@ const maxErrorBodyBytes = 64 << 10 // 64 KiB
 //   - 429 → ErrServiceUnavailable (rate limited; same retryable class so the retry
 //     helpers back off rather than fail the caller — see the *WithRetry helpers)
 //   - other → generic ServiceError
+//
+// The body is drained up to maxErrorBodyBytes (bounding a hostile peer that answers with an error
+// status and then streams indefinitely) but is NOT embedded in the message — only the status code,
+// the caller-supplied URL and the drained byte count. The body is peer-controlled and this error
+// feeds substring-based classification at the catchup gates, so echoing it (even escaped) would let
+// a peer forge a "local" classification. Callers on peer-controlled paths should redact the URL too.
 func buildHTTPError(resp *http.Response, rawURL string) error {
 	errFn := errors.NewServiceError
 	switch resp.StatusCode {
@@ -495,7 +506,8 @@ func buildHTTPError(resp *http.Response, rawURL string) error {
 		// body contained e.g. "context deadline exceeded" or "block assembly is behind"
 		// could otherwise forge a "local" classification — clearing its reputation penalty
 		// AND halting failover to honest peers, re-opening the #1174 wedge. Only the
-		// (trusted) status code and body length go into the message.
+		// status code and body length go into the message (plus rawURL, which callers
+		// on peer-controlled paths must redact — see buildHTTPError callers).
 		n, _ := io.Copy(io.Discard, io.LimitReader(resp.Body, maxErrorBodyBytes))
 		if n > 0 {
 			return errFn("http request [%s] returned status code [%d] (%d body bytes, omitted)", rawURL, resp.StatusCode, n)
