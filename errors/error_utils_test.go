@@ -226,6 +226,29 @@ func TestIsMaliciousResponseError(t *testing.T) {
 	}
 }
 
+// TestPeerURLTextCannotForgeContextClassification is the security regression for review finding 1.
+// A peer-controlled URL string containing the literal "context canceled" must NOT be classified as
+// a local/context error: only a genuinely-wrapped stdlib sentinel (by identity) or an ERR_CONTEXT*
+// code may. Otherwise a peer could serve garbage under a crafted DataHubURL, dodge its reputation
+// penalty and block failover to honest peers (#1174).
+func TestPeerURLTextCannotForgeContextClassification(t *testing.T) {
+	// The chain shape the catchup constructors produce, with a hostile URL as the reviewer showed
+	// url.Parse accepts (a space escapes fine on the wire): "https://evil.example/dh/context canceled".
+	forged := NewProcessingError("[catchup] all peers failed",
+		NewServiceError("failed to fetch subtree from https://evil.example/dh/context canceled",
+			NewExternalError("peer returned garbage")))
+
+	assert.Contains(t, forged.Error(), "context canceled", "fixture must embed the forged phrase")
+	assert.True(t, Is(forged, ErrExternal), "the error really is external")
+	assert.False(t, IsContextError(forged), "peer URL text must not forge a context classification")
+	assert.False(t, IsLocalError(forged), "peer URL text must not forge a local classification")
+
+	// A genuinely-wrapped context cancellation is still classified local (native identity survives).
+	genuine := NewServiceError("service call failed", context.Canceled)
+	assert.True(t, IsContextError(genuine))
+	assert.True(t, IsLocalError(genuine))
+}
+
 func TestIsContextError(t *testing.T) {
 	tests := []struct {
 		name     string

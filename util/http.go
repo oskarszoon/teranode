@@ -188,6 +188,11 @@ func DoHTTPRequest(ctx context.Context, url string, requestBody ...[]byte) ([]by
 // maxBytes < 0 means unbounded; otherwise the body is capped and ErrExternal is returned if
 // the peer streams more than the cap.
 func readBodyWithCtx(ctx context.Context, url string, r io.Reader, maxBytes int64) ([]byte, error) {
+	// url is used only for error text here (the request already happened). Redact it to
+	// scheme://host so peer-gossiped path/query bytes never reach logs or the substring-matching
+	// error classifiers (IsNetworkError, IsMaliciousResponseError). See RedactPeerURL.
+	url = RedactPeerURL(url)
+
 	if maxBytes >= 0 {
 		r = io.LimitReader(r, maxBytes+1)
 	}
@@ -806,6 +811,11 @@ func doHTTPRequestForStreamingWithRetryAfter(ctx context.Context, rawURL string,
 // streaming downloads get the longer http_streaming_timeout while bounded/whole-body
 // byte fetches keep the shorter http_timeout they had before retries were added.
 func doRequestReaderWithRetryAfter(ctx context.Context, timeout time.Duration, rawURL string, requestBody ...[]byte) (io.ReadCloser, time.Duration, error) {
+	// displayURL is the redacted (scheme://host) form for error text; rawURL itself is still used
+	// to build the request. Peer-gossiped path/query bytes must never reach error messages, both to
+	// avoid leaking them and to keep them out of the substring-matching error classifiers.
+	displayURL := RedactPeerURL(rawURL)
+
 	cancelFn := func() {}
 	if _, ok := ctx.Deadline(); !ok {
 		ctx, cancelFn = context.WithTimeout(ctx, timeout)
@@ -828,12 +838,18 @@ func doRequestReaderWithRetryAfter(ctx context.Context, timeout time.Duration, r
 		// reputation gate blames the peer and catchup keeps failing over. A cancel
 		// (e.g. node shutdown) is local. Other Do errors stay generic ServiceErrors.
 		if errors.Is(err, context.DeadlineExceeded) {
-			return nil, 0, errors.NewNetworkTimeoutError("http request [%s] timed out before response", rawURL)
+			return nil, 0, errors.NewNetworkTimeoutError("http request [%s] timed out before response", displayURL)
 		}
 		if errors.Is(err, context.Canceled) {
-			return nil, 0, errors.NewContextCanceledError("http request [%s] canceled before response", rawURL, context.Canceled)
+			return nil, 0, errors.NewContextCanceledError("http request [%s] canceled before response", displayURL, context.Canceled)
 		}
-		return nil, 0, errors.NewServiceError("failed to do http request", err)
+		// *url.Error renders as `Get "<full rawURL>": <cause>`, embedding the peer path/query.
+		// Unwrap to the cause and attach only the redacted display URL ourselves.
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			err = urlErr.Err
+		}
+		return nil, 0, errors.NewServiceError("http request [%s] failed", displayURL, err)
 	}
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
@@ -846,7 +862,7 @@ func doRequestReaderWithRetryAfter(ctx context.Context, timeout time.Duration, r
 	ct := strings.ToLower(resp.Header.Get("content-type"))
 	if strings.HasPrefix(ct, "text/html") {
 		cancelFn()
-		return nil, 0, errors.NewServiceError("http request [%s] returned HTML - assume bad URL", rawURL)
+		return nil, 0, errors.NewServiceError("http request [%s] returned HTML - assume bad URL", displayURL)
 	}
 
 	return &readCloserWithCancel{ReadCloser: resp.Body, cancelFn: cancelFn}, 0, nil

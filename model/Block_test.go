@@ -1315,8 +1315,8 @@ func TestReadTransactionAllocationSafe_Parity(t *testing.T) {
 
 // TestReadTransactionAllocationSafe_BudgetRejectsOversized proves the maxBytes budget bounds the
 // buffered transaction: a tx larger than the budget is rejected before go-bt decodes it. This is
-// what caps the coinbase (via maxCoinbaseTxBytes) so a delivered giant coinbase can't drive the
-// allocator.
+// what caps the coinbase on the untrusted transport path (the budget threaded in from
+// decodeBoundedBlock) so a delivered giant coinbase can't drive the allocator.
 func TestReadTransactionAllocationSafe_BudgetRejectsOversized(t *testing.T) {
 	standard := []byte{1, 0, 0, 0, 1}
 	standard = append(standard, make([]byte, 36)...)
@@ -1332,6 +1332,51 @@ func TestReadTransactionAllocationSafe_BudgetRejectsOversized(t *testing.T) {
 
 	_, err = readTransactionAllocationSafe(bytes.NewReader(standard), int64(len(standard)-1))
 	require.Error(t, err, "a budget below the tx size must reject before decode")
+
+	_, err = readTransactionAllocationSafe(bytes.NewReader(standard), 0)
+	require.NoError(t, err, "a non-positive budget means unbounded and must accept")
+}
+
+// TestNewBlockFromBytes_LargeCoinbaseDecodes is the consensus regression for review finding 2:
+// the transport-only 8 MiB coinbase cap must not leak onto the trusted decode paths. A coinbase
+// with 300k standard P2PKH outputs (~10 MB) is consensus-valid and accepted by SVNode, so
+// model.NewBlockFromBytes — the store read-back and consensus-validation decode path — must
+// decode it. Before the fix this returned ErrBlockInvalid, letting a miner fork Teranode off the
+// longest chain for ~10 MB of block space and making persisted blocks unreadable.
+func TestNewBlockFromBytes_LargeCoinbaseDecodes(t *testing.T) {
+	coinbase, err := bt.NewTxFromString("02000000010000000000000000000000000000000000000000000000000000000000000000ffffffff03510101ffffffff0100f2052a01000000232103656065e6886ca1e947de3471c9e723673ab6ba34724476417fa9fcef8bafa604ac00000000")
+	require.NoError(t, err)
+
+	// Standard 25-byte P2PKH output script (OP_DUP OP_HASH160 <20> OP_EQUALVERIFY OP_CHECKSIG).
+	p2pkh := &bscript.Script{0x76, 0xa9, 0x14}
+	*p2pkh = append(*p2pkh, make([]byte, 20)...)
+	*p2pkh = append(*p2pkh, 0x88, 0xac)
+	const extraOutputs = 300_000
+	for i := 0; i < extraOutputs; i++ {
+		coinbase.AddOutput(&bt.Output{Satoshis: 1, LockingScript: p2pkh})
+	}
+	coinbaseBytes := coinbase.Bytes()
+	require.Greater(t, len(coinbaseBytes), 8<<20, "fixture coinbase must exceed the old 8 MiB cap to exercise the regression")
+
+	blockHeaderBytes, err := hex.DecodeString(block1Header)
+	require.NoError(t, err)
+	blockHeader, err := NewBlockHeaderFromBytes(blockHeaderBytes)
+	require.NoError(t, err)
+
+	block := &Block{
+		Header:           blockHeader,
+		CoinbaseTx:       coinbase,
+		TransactionCount: 1,
+		SizeInBytes:      uint64(len(coinbaseBytes)) + 80 + util.VarintSize(1),
+		Subtrees:         []*chainhash.Hash{},
+		Height:           800000,
+	}
+	blockBytes, err := block.Bytes()
+	require.NoError(t, err)
+
+	got, err := NewBlockFromBytes(blockBytes)
+	require.NoError(t, err, "trusted decode path must accept a consensus-valid large coinbase")
+	require.Equal(t, extraOutputs+1, got.CoinbaseTx.OutputCount())
 }
 
 // FuzzReadTransactionAllocationSafe locks the parity the allocation-safe pre-scan relies on:

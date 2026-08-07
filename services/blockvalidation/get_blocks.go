@@ -84,11 +84,12 @@ func (u *Server) awaitPeerFetchSlot(ctx context.Context, baseURL string) error {
 			return errors.NewContextCanceledError("[peerFetchLimiter] local pacing wait aborted", cerr)
 		}
 		// x/time/rate.Wait returns a plain "would exceed context deadline" error here
-		// (ctx not yet done). Wrap the real context.DeadlineExceeded sentinel so the error
-		// still classifies as local (errors.IsLocalError) AFTER callers wrap it in a
-		// ProcessingError/ServiceError on the way to the reputation gate — teranode's
-		// IsContextError matches the wrapped stdlib sentinel's rendered string, which a
-		// bare ErrContextCanceled message would not carry once wrapped.
+		// (ctx not yet done). NewContextCanceledError stamps ERR_CONTEXT_CANCELED, which
+		// errors.IsContextError/IsLocalError detect by CODE anywhere in the chain even after
+		// callers wrap it in a ProcessingError/ServiceError on the way to the reputation gate,
+		// so the gate does not blame the peer for our local stall. Passing the real
+		// context.DeadlineExceeded sentinel also preserves it natively (identity), not as
+		// forgeable message text.
 		return errors.NewContextCanceledError("[peerFetchLimiter] wait aborted for %s", util.RedactPeerURL(baseURL), context.DeadlineExceeded)
 	}
 
@@ -709,9 +710,14 @@ func (u *Server) fetchAndStoreSubtreeData(ctx context.Context, shutdownCtx conte
 	// span), so re-attach this function's span afterwards — otherwise the fetch/store child
 	// spans reparent to the catchup root instead of nesting under fetchAndStoreSubtreeData.
 	// Observability-only; the cancellation behaviour is unchanged.
+	// WithTimeout (not WithCancel): this download context lives across the fetch AND the streaming
+	// read+store of the returned body and is cancelled only when this function returns, so it is the
+	// correct owner of the subtree-fetch wall clock (all retry attempts plus the streaming read).
+	// Without it doRequestReaderWithRetryAfter mints a fresh per-attempt streaming timeout with no
+	// ceiling, so a peer stalling each attempt could hold this ~maxAttempts x http_streaming_timeout.
 	spanCtx := ctx
 	var dlCancel context.CancelFunc
-	ctx, dlCancel = context.WithCancel(shutdownCtx)
+	ctx, dlCancel = u.withCatchupSubtreeFetchTimeout(shutdownCtx)
 	defer dlCancel()
 	ctx = trace.ContextWithSpan(ctx, trace.SpanFromContext(spanCtx))
 
@@ -797,7 +803,7 @@ func (u *Server) fetchAndStoreSubtreeData(ctx context.Context, shutdownCtx conte
 		if c := classifyDownloadErr(ctx, subtreeHash, err); c != nil {
 			return c
 		}
-		return errors.NewProcessingError("[catchup:fetchAndStoreSubtreeData] Peer %s (%s) provided incomplete subtree data for %s", peerID, baseURL, subtreeHash.String(), err)
+		return errors.NewProcessingError("[catchup:fetchAndStoreSubtreeData] Peer %s (%s) provided incomplete subtree data for %s", peerID, util.RedactPeerURL(baseURL), subtreeHash.String(), err)
 	}
 
 	// Store subtreeData (raw data) in subtreeStore
@@ -823,10 +829,10 @@ func (u *Server) fetchAndStoreSubtreeData(ctx context.Context, shutdownCtx conte
 // assigned peer fails. It is deliberately NOT CatchupMaxRetries (which bounds peer retries WITHIN
 // one catchup operation): failover BREADTH should track how many max-height peers might hold a
 // subtree whose data is skewed to a minority, not a retry count. Each alternative fetch is itself
-// bounded (the per-attempt HTTP timeout times the retry helper's attempt count), and the per-block
-// attempt cap (CatchupMaxAttemptsPerBlock) bounds re-entry — so this only caps the per-subtree
-// fan-out width, not total time. (Block fetches additionally carry a per-fetch wall clock; see
-// withCatchupFetchTimeout.)
+// bounded by a wall clock (withCatchupSubtreeFetchTimeout, default 120s, covering all retry attempts
+// plus the streaming read), and the per-block attempt cap (CatchupMaxAttemptsPerBlock) bounds
+// re-entry — so this only caps the per-subtree fan-out width, not total time. (Block fetches carry
+// the analogous withCatchupFetchTimeout wall clock.)
 const maxSubtreeFailoverPeers = 10
 
 func alternativePeerCapacity(maxAttempts, peerCount int) int {
@@ -1011,6 +1017,11 @@ func (u *Server) fetchSubtreeFromPeer(ctx context.Context, subtreeHash *chainhas
 	)
 	defer deferFn()
 
+	// Bound the whole fetch (all retry attempts + streaming read) by one wall clock so a stalling
+	// peer can't hold it for maxAttempts x http_streaming_timeout.
+	ctx, cancel := u.withCatchupSubtreeFetchTimeout(ctx)
+	defer cancel()
+
 	// Construct URL for subtree endpoint (for subtreeToCheck)
 	url := u.peerResourceURL(baseURL, "subtree", subtreeHash, bypassCache)
 
@@ -1039,7 +1050,7 @@ func (u *Server) fetchSubtreeFromPeer(ctx context.Context, subtreeHash *chainhas
 	}
 
 	if len(subtreeBytes) == 0 {
-		return nil, markCacheBypassRetryable(errors.NewNotFoundError("[catchup:fetchSubtreeFromPeer] empty subtree received from %s", url))
+		return nil, markCacheBypassRetryable(errors.NewNotFoundError("[catchup:fetchSubtreeFromPeer] empty subtree received from %s", util.RedactPeerURL(url)))
 	}
 
 	u.logger.Debugf("[catchup:fetchSubtreeFromPeer] successfully fetched %d bytes of subtree from %s", len(subtreeBytes), url)
@@ -1083,6 +1094,10 @@ func (u *Server) fetchSubtreeDataFromPeer(ctx context.Context, subtreeHash *chai
 		tracing.WithParentStat(u.stats),
 	)
 	defer deferFn()
+
+	// NOTE: the wall-clock bound for subtree_data is applied by the caller
+	// (fetchAndStoreSubtreeData's download context), NOT here — this function returns a STREAMING
+	// body the caller reads after we return, so a defer-cancel here would truncate that stream.
 
 	// peerResourceURL builds <baseURL>/subtree_data/<hash>, appending the cachebust
 	// query parameter when bypassCache is set.
@@ -1149,6 +1164,19 @@ func (u *Server) withCatchupFetchTimeout(ctx context.Context) (context.Context, 
 	return context.WithTimeout(ctx, timeout)
 }
 
+// withCatchupSubtreeFetchTimeout bounds a single catchup subtree/subtree_data fetch — all retry
+// attempts AND the streaming body read — by SubtreeFetchTimeout (default 120s). Same rationale as
+// withCatchupFetchTimeout: this path is otherwise deadline-free and the streaming retry helper mints
+// a fresh per-attempt timeout, so a peer stalling each attempt just under it could hold one subtree
+// fetch for maxAttempts x http_streaming_timeout (~30 min) before failover.
+func (u *Server) withCatchupSubtreeFetchTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	timeout := u.settings.BlockValidation.SubtreeFetchTimeout
+	if timeout <= 0 {
+		timeout = 120 * time.Second
+	}
+	return context.WithTimeout(ctx, timeout)
+}
+
 func resolveBlockResponseLimits(maxTransportBytes int64, excessiveBlockSize int) (blockResponseLimits, error) {
 	if maxTransportBytes <= 0 {
 		configErr := errors.NewConfigurationError("blockvalidation_max_incoming_block_bytes must be positive, got %d", maxTransportBytes)
@@ -1184,8 +1212,14 @@ func decodeBoundedBlock(r io.Reader, limited *io.LimitedReader, limits blockResp
 	var block *model.Block
 	var err error
 	if limits.enforceDeclared {
-		block, err = model.NewBlockFromReaderWithDeclaredSizeLimit(r, limits.maxDeclaredBytes)
+		// Transport path: bound the buffered coinbase by the response envelope. This can never
+		// reject a consensus-valid block (a coinbase cannot exceed the block, which already has
+		// to fit the envelope), and the trusted decode paths (NewBlockFromReader/Bytes) stay
+		// unbounded so store read-back and consensus validation accept any valid coinbase.
+		block, err = model.NewBlockFromReaderWithDeclaredSizeLimit(r, limits.maxDeclaredBytes, limits.maxTransportBytes)
 	} else {
+		// No declared-size policy configured; the transport LimitedReader (limited) still bounds
+		// every read, coinbase included, to maxTransportBytes.
 		block, err = model.NewBlockFromReader(r)
 	}
 	if err != nil {

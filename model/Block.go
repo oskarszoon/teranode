@@ -323,17 +323,19 @@ func NewBlockFromBytes(blockBytes []byte) (block *Block, err error) {
 }
 
 func NewBlockFromReader(blockReader io.Reader) (block *Block, err error) {
-	return newBlockFromReader(blockReader, 0, false)
+	return newBlockFromReader(blockReader, 0, false, 0)
 }
 
 // NewBlockFromReaderWithDeclaredSizeLimit decodes a block while rejecting a
 // declared Bitcoin block size above maxDeclaredBytes before reading subtree or
-// coinbase payloads. The transport reader remains responsible for its byte cap.
-func NewBlockFromReaderWithDeclaredSizeLimit(blockReader io.Reader, maxDeclaredBytes uint64) (block *Block, err error) {
-	return newBlockFromReader(blockReader, maxDeclaredBytes, true)
+// coinbase payloads, and bounds the buffered coinbase to maxCoinbaseBytes
+// (0 = unbounded). Both bounds belong to the untrusted transport path; the
+// transport reader remains responsible for its overall byte cap.
+func NewBlockFromReaderWithDeclaredSizeLimit(blockReader io.Reader, maxDeclaredBytes uint64, maxCoinbaseBytes int64) (block *Block, err error) {
+	return newBlockFromReader(blockReader, maxDeclaredBytes, true, maxCoinbaseBytes)
 }
 
-func newBlockFromReader(blockReader io.Reader, maxDeclaredBytes uint64, enforceDeclaredSize bool) (block *Block, err error) {
+func newBlockFromReader(blockReader io.Reader, maxDeclaredBytes uint64, enforceDeclaredSize bool, maxCoinbaseBytes int64) (block *Block, err error) {
 	startTime := time.Now()
 
 	defer func() {
@@ -359,14 +361,14 @@ func newBlockFromReader(blockReader io.Reader, maxDeclaredBytes uint64, enforceD
 		return nil, errors.NewBlockInvalidError("invalid block header", err)
 	}
 
-	return readBlockFromReaderWithLimits(block, blockReader, maxDeclaredBytes, enforceDeclaredSize)
+	return readBlockFromReaderWithLimits(block, blockReader, maxDeclaredBytes, enforceDeclaredSize, maxCoinbaseBytes)
 }
 
 func readBlockFromReader(block *Block, buf io.Reader) (*Block, error) {
-	return readBlockFromReaderWithLimits(block, buf, 0, false)
+	return readBlockFromReaderWithLimits(block, buf, 0, false, 0)
 }
 
-func readBlockFromReaderWithLimits(block *Block, buf io.Reader, maxDeclaredBytes uint64, enforceDeclaredSize bool) (*Block, error) {
+func readBlockFromReaderWithLimits(block *Block, buf io.Reader, maxDeclaredBytes uint64, enforceDeclaredSize bool, maxCoinbaseBytes int64) (*Block, error) {
 	var err error
 
 	// read the transaction count
@@ -423,7 +425,7 @@ func readBlockFromReaderWithLimits(block *Block, buf io.Reader, maxDeclaredBytes
 		return nil, errors.NewBlockInvalidError("block subtree length mismatch, expected %d, actual %d", block.subtreeLength, block.Subtrees)
 	}
 
-	coinbaseTx, err := readTransactionAllocationSafe(buf, maxCoinbaseTxBytes)
+	coinbaseTx, err := readTransactionAllocationSafe(buf, maxCoinbaseBytes)
 	if err != nil {
 		return nil, errors.NewBlockInvalidError("error reading coinbase tx", err)
 	}
@@ -462,21 +464,23 @@ func readBlockFromReaderWithLimits(block *Block, buf io.Reader, maxDeclaredBytes
 	return block, nil
 }
 
-// maxCoinbaseTxBytes bounds the coinbase transaction buffered by readTransactionAllocationSafe.
-// A delivered coinbase this large is already abusive (Teranode emits ~200 bytes; a consensus
-// coinbase scriptSig is 2-100 bytes and a real coinbase has one input), so 8 MiB leaves enormous
-// headroom while capping the derived heap at ~22 MiB — versus the ~3.7 GiB a 1 GiB coinbase of
-// minimal inputs would cost against the go-bt allocator's 1 GiB arena default.
-const maxCoinbaseTxBytes = 8 << 20 // 8 MiB
-
 // readTransactionAllocationSafe consumes one serialized transaction without allocating
 // directly from attacker-controlled count or script-length prefixes. Raw bytes are buffered
 // only as they are actually received, then decoded by go-bt after every advertised field has
-// been proven present inside the reader's remaining transport budget. maxBytes caps the buffered
-// transaction (and hence the derived allocation), on top of any tighter remaining transport budget
-// already on the reader.
+// been proven present inside the reader's remaining transport budget.
+//
+// maxBytes caps the buffered transaction (and hence the derived allocation) on top of any
+// tighter remaining transport budget already on the reader. maxBytes <= 0 means "no explicit
+// cap" — used by the trusted decode paths (store read-back, gRPC-bounded consensus entry
+// points), which must accept any consensus-valid coinbase; a positive cap belongs only to the
+// untrusted transport path, threaded in from decodeBoundedBlock. A blanket cap here is a
+// consensus bug: BSV bounds neither coinbase output count nor output-script size, so a
+// consensus-valid ~10 MB coinbase must still decode.
 func readTransactionAllocationSafe(r io.Reader, maxBytes int64) (*bt.Tx, error) {
 	transactionBudget := maxBytes
+	if transactionBudget <= 0 {
+		transactionBudget = math.MaxInt64 // unbounded: only the reader's own budget / go-bt arena bound the read
+	}
 	if outer, ok := r.(*io.LimitedReader); ok && outer.N < transactionBudget {
 		transactionBudget = outer.N
 	}

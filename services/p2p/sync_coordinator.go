@@ -306,12 +306,6 @@ func (sc *SyncCoordinator) registryRemovePeer(peerID string) error {
 	return sc.registry.RemovePeer(ctx, peerID)
 }
 
-func (sc *SyncCoordinator) registryRecordSyncFailure(peerID string) error {
-	ctx, cancel := sc.boundedRPCContext()
-	defer cancel()
-	return sc.registry.UpdatePeerMetrics(ctx, peerID, 0, 0, 0, false, true, false, 0)
-}
-
 func (sc *SyncCoordinator) registryRegisterPeer(info *blockchain.PeerInfo) error {
 	ctx, cancel := sc.boundedRPCContext()
 	defer cancel()
@@ -652,32 +646,48 @@ func (sc *SyncCoordinator) HandlePeerDisconnected(peerID peer.ID) {
 	}
 }
 
-// HandleCatchupFailureForPeer handles an operation-level failure notification only
-// when the reported peer is still the active sync peer. Per-peer reputation is
-// updated by the direct RecordCatchupFailure path before this notification arrives;
-// this method only performs the peer switch, avoiding a duplicate failure count.
+// HandleCatchupFailureForPeer reacts to an operation-level catchup failure. Per-peer reputation is
+// charged by the direct recordCatchupPeerFailure path before this notification arrives, so this
+// method never records a failure itself — it only decides whether to switch the active sync peer.
+//
+// Three cases, all under decisionMu so a concurrent trigger cannot activate a new peer between the
+// check and the clear:
+//   - the failure names the current sync peer: compare-and-clear it, then re-select (the #1368 fix
+//     that switches ONLY the named current peer, avoiding a duplicate failure charge);
+//   - the failure has no peer attribution (peerID == "", e.g. a SourceTypeRetry all-peers-failed
+//     cycle that clears the peer ID so any peer can serve) or names a non-current peer: don't
+//     silently drop it — if the current sync peer has stalled (no validated progress within the
+//     no-progress window) clear it now, otherwise still re-run selection so a better peer can
+//     preempt immediately instead of waiting on the periodic evaluator / no-progress timer.
 func (sc *SyncCoordinator) HandleCatchupFailureForPeer(peerID, reason string) {
 	sc.logger.Infof("[SyncCoordinator] Handling catchup failure for peer %s: %s", peerID, reason)
 
-	// Hold decisionMu across the whole compare-clear-retrigger so a concurrent trigger
-	// cannot activate a new peer between the check and the clear.
 	sc.decisionMu.Lock()
 	defer sc.decisionMu.Unlock()
 
-	if peerID == "" {
-		sc.logger.Infof("[SyncCoordinator] Ignoring catchup failure without peer attribution")
-		return
-	}
-	// Only switch when the failure names the current sync peer. clearSyncPeerIfCurrent is the
-	// atomic compare-and-clear shared with the other decision paths.
-	if !sc.clearSyncPeerIfCurrent(peerID) {
-		sc.logger.Infof("[SyncCoordinator] Ignoring catchup failure for non-current peer %s", peerID)
+	// Named current sync peer: atomic compare-and-clear, then re-select.
+	if peerID != "" && sc.clearSyncPeerIfCurrent(peerID) {
+		sc.logger.Infof("[SyncCoordinator] Cleared failed sync peer %s", peerID)
+		if err := sc.triggerSyncLocked(); err != nil {
+			sc.logger.Errorf("[SyncCoordinator] Failed to trigger sync after failure: %v", err)
+		}
 		return
 	}
 
-	sc.logger.Infof("[SyncCoordinator] Cleared failed sync peer %s", peerID)
+	// Unattributed or non-current-peer failure: fall back to a progress check rather than ignoring
+	// it, so an all-peers-failed retry cycle cannot leave a stalled sync peer pinned until the
+	// 5-minute no-progress timer fires.
+	if peerID == "" {
+		sc.logger.Infof("[SyncCoordinator] Catchup failure without peer attribution: %s", reason)
+	} else {
+		sc.logger.Infof("[SyncCoordinator] Catchup failure for non-current peer %s: %s", peerID, reason)
+	}
+	if current, progressAge, timedOut := sc.syncPeerNoProgressTimedOut(time.Now()); timedOut {
+		sc.clearNoProgressSyncPeer(current, progressAge) // clears the current peer and re-triggers
+		return
+	}
 	if err := sc.triggerSyncLocked(); err != nil {
-		sc.logger.Errorf("[SyncCoordinator] Failed to trigger sync after failure: %v", err)
+		sc.logger.Errorf("[SyncCoordinator] Failed to trigger sync after unattributed failure: %v", err)
 	}
 }
 

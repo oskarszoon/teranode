@@ -1905,20 +1905,20 @@ func (u *Server) processCatchupChItem(ctx context.Context, c processBlockCatchup
 			//
 			//   blockchain.Server.ReportPeerFailure broadcasts NotificationType_PeerFailure
 			//   -> p2p.Server routes failure_type "catchup" to
-			//      syncCoordinator.HandleCatchupFailure (and its subscription listener
+			//      syncCoordinator.HandleCatchupFailureForPeer (and its subscription listener
 			//      deliberately bypasses the "skip notifications while syncing" filter for
 			//      this type — "needed to switch peers on catchup failure")
-			//   -> SyncCoordinator clears currentSyncPeer and calls triggerSyncLocked, i.e.
-			//      immediate re-selection of a different sync peer.
+			//   -> HandleCatchupFailureForPeer switches the sync peer: if c.peerID names the
+			//      current sync peer it is cleared and re-selected immediately; if it is empty
+			//      (a SourceTypeRetry cycle clears it) or names a non-current peer, the handler
+			//      falls back to a progress check — clearing the current peer if it has stalled,
+			//      otherwise re-running selection so a better peer can preempt now rather than
+			//      waiting on the 30s periodicEvaluation or the 5-minute SyncPeerNoProgressTimeout.
 			//
-			// A marker gate here is dead code in production: fetchAndStoreSubtreeAndSubtreeData
+			// A marker gate here would be dead code in production: fetchAndStoreSubtreeAndSubtreeData
 			// applies markCatchupFailureReported unconditionally to every all-peers-failed
 			// error and is the only producer of this ErrExternal in the package, so the gate
-			// is always false and rotation never happens. A stuck node would then depend on
-			// the sync coordinator's 30s periodicEvaluation, which only rotates on reputation
-			// below 20 or the 5-minute SyncPeerNoProgressTimeout — a peer with history (say
-			// 100 successes and 1 failure) trips neither, so recovery costs the full five
-			// minutes per stuck cycle.
+			// would always be false and the rotation signal would never be sent.
 			//
 			// The price is one extra interaction-failure charge against the primary. That is
 			// accepted, and consistent with the round-2 adjudication documented in
