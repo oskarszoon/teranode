@@ -1510,7 +1510,7 @@ func (f *fanOutProbeStore) Get(_ context.Context, hash *chainhash.Hash, _ ...fie
 // their cones are linear (BFS level width 1) — this is the only case with a
 // level wide enough for the cap to matter.
 func TestGetConflictingChildren_FanOutCapped(t *testing.T) {
-	const levelWidth = conflictingWalkFanOut * 3
+	const levelWidth = ConflictingWalkFanOut * 3
 
 	rootHash := createTestHash("fanout-root")
 
@@ -1526,8 +1526,8 @@ func TestGetConflictingChildren_FanOutCapped(t *testing.T) {
 	require.Len(t, result, levelWidth)
 
 	peak := store.peak.Load()
-	require.LessOrEqualf(t, peak, int32(conflictingWalkFanOut),
-		"per-level fan-out must stay at or below %d, peaked at %d", conflictingWalkFanOut, peak)
+	require.LessOrEqualf(t, peak, int32(ConflictingWalkFanOut),
+		"per-level fan-out must stay at or below %d, peaked at %d", ConflictingWalkFanOut, peak)
 	require.Greaterf(t, peak, int32(1),
 		"the probe never observed concurrent reads (peak %d), so the ceiling assertion above proves nothing", peak)
 }
@@ -1602,4 +1602,51 @@ func TestGetCounterConflictingTxHashes_MemoDoesNotCacheErrors(t *testing.T) {
 	// input 0 still emitted exactly one ghost slot clear
 	assert.Len(t, ghostSpends, 1)
 	assert.Equal(t, uint32(0), ghostSpends[0].Vout)
+}
+
+// TestGetConflictingChildren_ReapedMarkSameLevelParent pins the harder half of
+// the order-independence property: the parent carrying the deletedChildren mark
+// sits on the SAME BFS level as the reaped descendant, so the mark is not known
+// when the level's goroutines classify the NOT_FOUND.
+//
+// Cone: root spends to A and to X, and X also spends an output of A. Both land
+// on level 1, A lists X in deletedChildren, and X's record was reaped after
+// being mined. Classifying absence inside the goroutine tolerated X as a ghost
+// whenever A happened to be iterated after X was dropped — the verdict flipped
+// on SpendingDatas ordering.
+func TestGetConflictingChildren_ReapedMarkSameLevelParent(t *testing.T) {
+	rootHash := createTestHash("samelevel-root")
+	parentHash := createTestHash("samelevel-parent")
+	reapedHash := createTestHash("samelevel-reaped")
+
+	// both orderings of the root's spending data must reach the same verdict
+	orderings := map[string][]*spend.SpendingData{
+		"parent enqueued first": {{TxID: &parentHash}, {TxID: &reapedHash}},
+		"reaped enqueued first": {{TxID: &reapedHash}, {TxID: &parentHash}},
+	}
+
+	for name, rootSpends := range orderings {
+		t.Run(name, func(t *testing.T) {
+			mockStore := &MockUtxostore{}
+			mockStore.Test(t)
+
+			mockStore.On("Get", mock.Anything, &rootHash, mock.Anything).
+				Return(&meta.Data{SpendingDatas: rootSpends}, nil)
+
+			// the marking parent is on the same level as the reaped descendant
+			mockStore.On("Get", mock.Anything, &parentHash, mock.Anything).
+				Return(&meta.Data{
+					SpendingDatas:   []*spend.SpendingData{{TxID: &reapedHash}},
+					DeletedChildren: map[chainhash.Hash]bool{reapedHash: true},
+				}, nil)
+
+			mockStore.On("Get", mock.Anything, &reapedHash, mock.Anything).
+				Return(nil, errors.NewTxNotFoundError("%v not found", reapedHash))
+
+			result, err := GetConflictingChildren(context.Background(), mockStore, rootHash)
+			require.Error(t, err, "a reaped, marked descendant must fail closed regardless of level ordering")
+			assert.Nil(t, result)
+			assert.Contains(t, err.Error(), "was reaped after being mined")
+		})
+	}
 }

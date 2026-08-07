@@ -26,10 +26,14 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// conflictingWalkFanOut caps the per-level width of the conflicting-descendant
+// ConflictingWalkFanOut caps the per-level width of the conflicting-descendant
 // BFS, which previously opened one concurrent store read per level member with
-// no ceiling. 128 matches main (where #1393 landed it) and the counter-conflicting
-// GetMeta errgroup in subtreevalidation, and is chosen for the SQL backend:
+// no ceiling. 128 matches main, where #1393 landed it. It is exported so the
+// counter-conflicting GetMeta errgroup in subtreevalidation shares it rather than
+// restating the literal — the two are deliberately equal and a tuning pass must
+// move both together.
+//
+// The value is chosen for the SQL backend:
 // Store.get falls back to getUnbatched whenever the requested bins include
 // ConflictingChildren or Utxos (stores/utxo/sql/sql.go) — exactly the fields this
 // walk requests — so every level member is a concurrent unbatched query against
@@ -43,7 +47,7 @@ import (
 // rather than ~N/4096 fill-triggered flushes, so very wide cones walk slower
 // than a batcher-matched ceiling would allow. The incident cone was fully linear
 // (one node per level), where the ceiling is moot either way.
-const conflictingWalkFanOut = 128
+const ConflictingWalkFanOut = 128
 
 // prometheusUtxoCounterConflictingGhostSpends counts every confirmed ghost spender
 // tolerated by the counter-conflicting walk: a parent output that still records a
@@ -1032,16 +1036,31 @@ func GetConflictingChildren(ctx context.Context, s Store, hash chainhash.Hash) (
 	visited[hash] = struct{}{}
 	currentLevel := []chainhash.Hash{hash}
 
-	// reapedByParent records, per enqueued child, whether the node that
-	// enqueued it lists it in deletedChildren — i.e. the pruner deleted the
-	// child's record after it was mined and fully spent. Written between
-	// levels, read only by the next level's goroutines.
+	// reapedByParent records, per reachable child, whether any in-cone parent
+	// lists it in deletedChildren — i.e. the pruner deleted the child's record
+	// after it was mined and fully spent.
+	//
+	// Only the Aerospike store populates DeletedChildren (written by the pruner,
+	// read back in aerospike/get.go); the SQL stores delete transaction rows at
+	// DAH without recording anything on the parents, so on those backends this
+	// map stays empty and every absent descendant takes the ghost-tolerance
+	// branch below. The reaped gate is therefore an Aerospike-only protection,
+	// not a general one.
 	reapedByParent := make(map[chainhash.Hash]bool)
 
 	for len(currentLevel) > 0 {
 		results := make([]*meta.Data, len(currentLevel))
+
+		// absentErrs[i] holds the NOT_FOUND for a descendant whose record is
+		// gone. Classification (reaped-and-mined versus never-created ghost) is
+		// deliberately NOT done in the goroutine: it depends on deletedChildren
+		// marks contributed by parents that may sit on this very level, which are
+		// not collected until the enqueue pass below has run. Deciding early made
+		// the verdict depend on iteration order.
+		absentErrs := make([]error, len(currentLevel))
+
 		g, gCtx := errgroup.WithContext(ctx)
-		util.SafeSetLimit(g, conflictingWalkFanOut)
+		util.SafeSetLimit(g, ConflictingWalkFanOut)
 
 		for i, current := range currentLevel {
 			i := i
@@ -1056,19 +1075,10 @@ func GetConflictingChildren(ctx context.Context, s Store, hash chainhash.Hash) (
 						return err
 					}
 
-					// An absent descendant its parent lists in deletedChildren
-					// was reaped after being mined — the subtree holds settled
-					// history and must not be treated as demotable. Fail closed,
-					// mirroring the counter walk's reaped-spender gate.
-					if reapedByParent[current] {
-						return errors.NewProcessingError("[GetConflictingChildren][%s] descendant %s was reaped after being mined (listed in its parent's deletedChildren)", hash.String(), current.String(), err)
-					}
+					// Defer the reaped-versus-ghost decision to the classification
+					// pass below, once this level's deletedChildren marks are in.
+					absentErrs[i] = err
 
-					// A confirmed-absent ghost descendant (spends applied, record
-					// never created): it cannot be demoted and has no readable
-					// descendants — skip it instead of wedging every consumer of
-					// this walk. results[i] stays nil and the hash is dropped
-					// from the visited set below.
 					return nil
 				}
 				results[i] = txMeta
@@ -1088,9 +1098,13 @@ func GetConflictingChildren(ctx context.Context, s Store, hash chainhash.Hash) (
 		// child, not just the first one to reach it. reapedByParent decides
 		// settled-mined-spend (fail closed) versus tolerated ghost (silently
 		// dropped from the result), so a first-writer-wins verdict let a child
-		// whose deletedChildren mark lives only on a later parent be demoted as a
-		// ghost — clearing a settled spend. Any parent saying "reaped" now wins,
-		// which makes the verdict order-independent and fail-closed.
+		// whose deletedChildren mark lives only on another parent be demoted as a
+		// ghost — clearing a settled spend. Any parent saying "reaped" wins.
+		//
+		// Marks from a parent on a LATER level still arrive after the child was
+		// classified; those are caught because a tolerated ghost is removed from
+		// visited, so the later parent re-enqueues it and the next level re-reads
+		// it with the mark set.
 		enqueue := func(child chainhash.Hash, parent *meta.Data) {
 			if parent.DeletedChildren[child] {
 				reapedByParent[child] = true
@@ -1115,10 +1129,11 @@ func GetConflictingChildren(ctx context.Context, s Store, hash chainhash.Hash) (
 			nextLevel = append(nextLevel, child)
 		}
 
-		for i, txMeta := range results {
+		// Pass 1: collect every deletedChildren mark this level contributes,
+		// before anything absent is classified. A parent on this level can be the
+		// only node marking a sibling on the same level as reaped.
+		for _, txMeta := range results {
 			if txMeta == nil {
-				// tolerated ghost descendant — exclude it from the result set
-				delete(visited, currentLevel[i])
 				continue
 			}
 
@@ -1131,6 +1146,31 @@ func GetConflictingChildren(ctx context.Context, s Store, hash chainhash.Hash) (
 					enqueue(*spendingData.TxID, txMeta)
 				}
 			}
+		}
+
+		// Pass 2: the marks are now complete for this level, so absence can be
+		// classified deterministically.
+		for i, absentErr := range absentErrs {
+			if absentErr == nil {
+				continue
+			}
+
+			current := currentLevel[i]
+
+			// An absent descendant that some in-cone parent lists in
+			// deletedChildren was reaped after being mined — the subtree holds
+			// settled history and must not be treated as demotable. Fail closed,
+			// mirroring the counter walk's reaped-spender gate.
+			if reapedByParent[current] {
+				return nil, errors.NewProcessingError("[GetConflictingChildren][%s] descendant %s was reaped after being mined (listed in its parent's deletedChildren)", hash.String(), current.String(), absentErr)
+			}
+
+			// A confirmed-absent ghost descendant (spends applied, record never
+			// created): it cannot be demoted and has no readable descendants — drop
+			// it instead of wedging every consumer of this walk. Removing it from
+			// visited also lets a later-level parent re-enqueue it, so a mark that
+			// only shows up further down still gets its re-check.
+			delete(visited, current)
 		}
 
 		currentLevel = nextLevel
