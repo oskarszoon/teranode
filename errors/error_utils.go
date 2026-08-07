@@ -219,14 +219,12 @@ func IsContextError(err error) bool {
 		return false
 	}
 
-	// Check standard context errors by identity (no peer-controlled text involved).
+	// Check standard context errors
 	if err == context.Canceled || err == context.DeadlineExceeded {
 		return true
 	}
 
-	// Classify by error CODE, which this node sets on its own context-cancellation paths
-	// (NewContextCanceledError / classifyPeerFetchCtxErr / readBodyWithCtx). The code is never
-	// derivable from a peer's bytes.
+	// Check for wrapped context errors
 	var tErr *Error
 	if As(err, &tErr) {
 		if tErr.Code() == ERR_CONTEXT_CANCELED || tErr.Code() == ERR_CONTEXT {
@@ -234,22 +232,15 @@ func IsContextError(err error) bool {
 		}
 	}
 
-	// Detect a genuinely-wrapped stdlib sentinel by IDENTITY in the Unwrap chain (New preserves
-	// context.Canceled / context.DeadlineExceeded natively). Walk with errors.Unwrap directly —
-	// NOT errors.Is — because errors.Is invokes (*Error).Is at each level, whose non-*Error
-	// fallback is strings.Contains on the rendered chain. That rendered text includes peer-gossiped
-	// URL bytes, so a peer serving a DataHubURL containing the literal "context canceled" could
-	// forge a LOCAL classification, suppress its own reputation penalty, and block failover (the
-	// #1174 wedge). Message text must never decide a trust question.
-	for cur := err; cur != nil; cur = errors.Unwrap(cur) {
-		if cur == context.Canceled || cur == context.DeadlineExceeded {
-			return true
-		}
-	}
-
-	// gRPC transport surfaces cancellation/deadline as status CODES (codes.Canceled /
-	// codes.DeadlineExceeded), also code-based and peer-text-independent.
-	if checkGRPCContextError(err, err, context.Canceled) || checkGRPCContextError(err, err, context.DeadlineExceeded) {
+	// Check if the wrapped error is a context error. This includes a strings.Contains fallback in
+	// (*Error).Is for the stdlib sentinels, which is load-bearing: gRPC surfaces cancellation as
+	// `rpc error: code = Canceled desc = context canceled` that is frequently STRINGIFIED into a
+	// teranode error carrying neither ERR_CONTEXT nor a live gRPC status, so only the message text
+	// remains — and 15+ service shutdown gates rely on detecting it to exit cleanly. Peer-controlled
+	// text cannot forge this: every peer URL is redacted to scheme://host before entering an error
+	// (util.RedactPeerURL) and peer response bodies are never embedded, so no peer bytes can carry a
+	// space-delimited sentinel like "context canceled" into the rendered chain. See review of #1454.
+	if Is(err, context.Canceled) || Is(err, context.DeadlineExceeded) {
 		return true
 	}
 

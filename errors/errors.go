@@ -366,14 +366,6 @@ func New(code ERR, message string, params ...interface{}) *Error {
 			params = params[:len(params)-1]
 		case error:
 			wErr = &Error{message: err.Error()}
-			// Preserve the stdlib context sentinels by IDENTITY in the Unwrap chain. A genuinely
-			// wrapped cancellation must stay distinguishable from a peer that merely spelled
-			// "context canceled" in a gossiped URL string: IsContextError walks for the real
-			// object, never the rendered text (which peer-controlled bytes can forge). Other
-			// non-*Error errors keep the historical message-only flattening.
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				wErr.wrappedErr = err
-			}
 			params = params[:len(params)-1]
 		}
 	}
