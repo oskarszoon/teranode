@@ -1650,3 +1650,49 @@ func TestGetConflictingChildren_ReapedMarkSameLevelParent(t *testing.T) {
 		})
 	}
 }
+
+// TestConflictingWalks_NilSpendingDataTxID pins the nil-TxID guard on both
+// descendant walks. SpendingData.Clone handles a nil TxID and the counter walk
+// checks it, so the codebase treats it as reachable; dereferencing it inside a
+// BFS goroutine is an unrecovered panic that takes the process down rather than
+// failing the block. The entry is skipped, matching the counter walk.
+func TestConflictingWalks_NilSpendingDataTxID(t *testing.T) {
+	rootHash := createTestHash("niltxid-root")
+	childHash := createTestHash("niltxid-child")
+
+	newStore := func() *MockUtxostore {
+		mockStore := &MockUtxostore{}
+		mockStore.Test(t)
+
+		mockStore.On("Get", mock.Anything, &rootHash, mock.Anything).
+			Return(&meta.Data{
+				SpendingDatas: []*spend.SpendingData{
+					{TxID: nil, Vin: 0}, // frozen/unset slot with no spender recorded
+					{TxID: &childHash, Vin: 1},
+				},
+			}, nil)
+		mockStore.On("Get", mock.Anything, &childHash, mock.Anything).
+			Return(&meta.Data{}, nil)
+
+		return mockStore
+	}
+
+	t.Run("GetConflictingChildren", func(t *testing.T) {
+		require.NotPanics(t, func() {
+			result, err := GetConflictingChildren(context.Background(), newStore(), rootHash)
+			require.NoError(t, err)
+			assert.Equal(t, []chainhash.Hash{childHash}, result)
+		})
+	})
+
+	t.Run("GetAndLockChildren", func(t *testing.T) {
+		store := newStore()
+		store.On("SetLocked", mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
+
+		require.NotPanics(t, func() {
+			result, err := GetAndLockChildren(context.Background(), store, rootHash)
+			require.NoError(t, err)
+			assert.Contains(t, result, childHash)
+		})
+	})
+}
