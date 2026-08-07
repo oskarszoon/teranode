@@ -28,14 +28,22 @@ import (
 
 // conflictingWalkFanOut caps the per-level width of the conflicting-descendant
 // BFS, which previously opened one concurrent store read per level member with
-// no ceiling at all. It matches utxostore_getBatcherSize (settings.conf:1240,
-// 4096) so one full wave fills exactly one Aerospike get batch: the ceiling
-// still stops unbounded goroutine and read explosion, without converting the
-// batcher's fill-triggered flushes into utxostore_getBatcherDurationMillis
-// timer flushes the way a smaller ceiling would. On the SQL backend it makes no
-// difference either way — the ConflictingChildren/Utxos fields force unbatched
-// queries, so level members queue on postgres_maxOpenConns regardless.
-const conflictingWalkFanOut = 4096
+// no ceiling. 128 matches main (where #1393 landed it) and the counter-conflicting
+// GetMeta errgroup in subtreevalidation, and is chosen for the SQL backend:
+// Store.get falls back to getUnbatched whenever the requested bins include
+// ConflictingChildren or Utxos (stores/utxo/sql/sql.go) — exactly the fields this
+// walk requests — so every level member is a concurrent unbatched query against
+// postgres_maxOpenConns (50 by default). A ceiling near the Aerospike get-batcher
+// size would oversubscribe that pool by orders of magnitude, and a waiter still
+// queued when the CheckBlockSubtrees deadline fires returns DeadlineExceeded,
+// which isNotFoundErr does not match — a hard error that fails the block.
+//
+// Known tradeoff, accepted deliberately: on Aerospike a wide level fills the
+// getBatcher (utxostore_getBatcherSize 4096) in ~N/128 timer-triggered waves
+// rather than ~N/4096 fill-triggered flushes, so very wide cones walk slower
+// than a batcher-matched ceiling would allow. The incident cone was fully linear
+// (one node per level), where the ceiling is moot either way.
+const conflictingWalkFanOut = 128
 
 // prometheusUtxoCounterConflictingGhostSpends counts every confirmed ghost spender
 // tolerated by the counter-conflicting walk: a parent output that still records a
@@ -1073,6 +1081,40 @@ func GetConflictingChildren(ctx context.Context, s Store, hash chainhash.Hash) (
 		}
 
 		var nextLevel []chainhash.Hash
+
+		// enqueue records one child of parent on the walk.
+		//
+		// The reaped mark is OR-ed across every in-cone parent that lists the
+		// child, not just the first one to reach it. reapedByParent decides
+		// settled-mined-spend (fail closed) versus tolerated ghost (silently
+		// dropped from the result), so a first-writer-wins verdict let a child
+		// whose deletedChildren mark lives only on a later parent be demoted as a
+		// ghost — clearing a settled spend. Any parent saying "reaped" now wins,
+		// which makes the verdict order-independent and fail-closed.
+		enqueue := func(child chainhash.Hash, parent *meta.Data) {
+			if parent.DeletedChildren[child] {
+				reapedByParent[child] = true
+			}
+
+			if _, ok := visited[child]; ok {
+				return
+			}
+
+			visited[child] = struct{}{}
+
+			// The frozen / coinbase-placeholder sentinel is a record-less
+			// pseudo-hash marking a frozen output. It must stay in the result set
+			// so callers' frozen-child checks fire, but must never be recursed
+			// into: a Get would return NOT_FOUND and the ghost tolerance would
+			// silently swallow it, defeating frozen-tx rejection during conflict
+			// resolution.
+			if child.Equal(subtree.CoinbasePlaceholderHashValue) {
+				return
+			}
+
+			nextLevel = append(nextLevel, child)
+		}
+
 		for i, txMeta := range results {
 			if txMeta == nil {
 				// tolerated ghost descendant — exclude it from the result set
@@ -1080,47 +1122,17 @@ func GetConflictingChildren(ctx context.Context, s Store, hash chainhash.Hash) (
 				continue
 			}
 
-			if txMeta.ConflictingChildren != nil {
-				for _, child := range txMeta.ConflictingChildren {
-					if _, ok := visited[child]; !ok {
-						visited[child] = struct{}{}
-
-						// The frozen / coinbase-placeholder sentinel is a record-less
-						// pseudo-hash marking a frozen output. It must stay in the
-						// result set so callers' frozen-child checks fire, but must
-						// never be recursed into: a Get would return NOT_FOUND and the
-						// ghost tolerance would silently swallow it, defeating frozen-tx
-						// rejection during conflict resolution.
-						if child.Equal(subtree.CoinbasePlaceholderHashValue) {
-							continue
-						}
-
-						reapedByParent[child] = txMeta.DeletedChildren[child]
-						nextLevel = append(nextLevel, child)
-					}
-				}
+			for _, child := range txMeta.ConflictingChildren {
+				enqueue(child, txMeta)
 			}
 
-			if txMeta.SpendingDatas != nil {
-				for _, spendingData := range txMeta.SpendingDatas {
-					if spendingData != nil {
-						child := *spendingData.TxID
-						if _, ok := visited[child]; !ok {
-							visited[child] = struct{}{}
-
-							// Frozen output sentinel: keep it in the result for the
-							// caller's frozen check, but do not recurse (see above).
-							if child.Equal(subtree.CoinbasePlaceholderHashValue) {
-								continue
-							}
-
-							reapedByParent[child] = txMeta.DeletedChildren[child]
-							nextLevel = append(nextLevel, child)
-						}
-					}
+			for _, spendingData := range txMeta.SpendingDatas {
+				if spendingData != nil {
+					enqueue(*spendingData.TxID, txMeta)
 				}
 			}
 		}
+
 		currentLevel = nextLevel
 	}
 
@@ -1195,22 +1207,30 @@ func getCounterConflictingTxHashesAndGhostSpends(ctx context.Context, s Store, t
 	// descendant walk is by far the expensive part and its result does not depend
 	// on which input reached the spender, so memoise it per unique spender: one
 	// walk instead of one per input (issue 1391).
-	type spenderWalk struct {
-		children []chainhash.Hash
-		err      error
-	}
-
-	spenderWalks := make(map[chainhash.Hash]spenderWalk, len(txMeta.Tx.Inputs))
+	//
+	// Successes only. Caching a failure would replay it for every later input
+	// sharing the spender, and the ghost probe below is deliberately not
+	// memoised — so a spender that was briefly unreadable on the first input and
+	// is readable by the second would hit a cached NOT_FOUND, pass the probe, and
+	// fail the whole call closed on a stale error. Re-walking on error preserves
+	// the per-input independence the ghost tolerance (#1325) was built on, and
+	// costs nothing in the case the memo exists for: a large cone that reads
+	// successfully is walked exactly once.
+	spenderWalks := make(map[chainhash.Hash][]chainhash.Hash, len(txMeta.Tx.Inputs))
 
 	walkSpender := func(spendingTxID chainhash.Hash) ([]chainhash.Hash, error) {
 		if cached, ok := spenderWalks[spendingTxID]; ok {
-			return cached.children, cached.err
+			return cached, nil
 		}
 
 		children, err := s.GetConflictingChildren(ctx, spendingTxID)
-		spenderWalks[spendingTxID] = spenderWalk{children: children, err: err}
+		if err != nil {
+			return nil, err
+		}
 
-		return children, err
+		spenderWalks[spendingTxID] = children
+
+		return children, nil
 	}
 
 	for _, input := range txMeta.Tx.Inputs {

@@ -20,10 +20,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// countingUtxoStore wraps a real utxo.Store and counts Get calls. It overrides
-// GetConflictingChildren to run the package-level walk against itself, so the
-// walk's per-node Get reads are observed by the counter instead of going to the
-// underlying store directly.
+// countingUtxoStore wraps a real utxo.Store and counts per-transaction reads. It
+// overrides GetConflictingChildren to run the package-level walk against itself,
+// so the walk's per-node reads are observed by the counter instead of going to
+// the underlying store directly.
+//
+// Both Get and GetMeta are counted: blessing issues one GetMeta per member of
+// the counter-conflicting set, so a counter watching Get alone would be blind to
+// a regression that reintroduced the O(N^2) blow-up on that side.
 type countingUtxoStore struct {
 	utxo.Store
 	gets atomic.Int64
@@ -33,6 +37,12 @@ func (c *countingUtxoStore) Get(ctx context.Context, hash *chainhash.Hash, f ...
 	c.gets.Add(1)
 
 	return c.Store.Get(ctx, hash, f...)
+}
+
+func (c *countingUtxoStore) GetMeta(ctx context.Context, hash *chainhash.Hash, data *meta.Data) error {
+	c.gets.Add(1)
+
+	return c.Store.GetMeta(ctx, hash, data)
 }
 
 func (c *countingUtxoStore) GetConflictingChildren(ctx context.Context, txHash chainhash.Hash) ([]chainhash.Hash, error) {

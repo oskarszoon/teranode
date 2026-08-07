@@ -68,6 +68,12 @@ import (
 // demote it (#1391), so its size is the leading indicator of that condition.
 const conflictingConeWarnThreshold = 1000
 
+// conflictingWalkWarnDuration is the wall-clock spent in the counter-conflicting
+// walk above which it is worth a log line regardless of outcome. The cone-size
+// check above cannot fire once the walk is slow enough to be cancelled, which is
+// exactly the #1391 regime, so duration is the signal that survives it.
+const conflictingWalkWarnDuration = 10 * time.Second
+
 // missingTx represents a transaction that needs to be retrieved and its position in the subtree.
 //
 // This structure pairs a transaction with its index in the original subtree transaction list,
@@ -473,7 +479,19 @@ func (u *Server) blessMissingTransaction(ctx context.Context, blockHash chainhas
 func (u *Server) checkCounterConflictingOnCurrentChain(ctx context.Context, txHash chainhash.Hash, blockIds map[uint32]bool) error {
 	// the tx is conflicting, check whether the counter-conflicting transactions have already been mined on our chain
 	// first get the parent transactions and check if they were spent
+	walkStart := time.Now()
 	counterConflictingTxHashes, err := utxo.GetCounterConflictingTxHashes(ctx, u.utxoStore, txHash)
+	walkElapsed := time.Since(walkStart)
+
+	// Warn on elapsed time before inspecting the result, and on both outcomes.
+	// A set-size check alone is unreachable in the regime it exists for: in the
+	// wedge the walk is cancelled rather than returning, so the error branch
+	// below fires and the size is never known (#1391). Duration is the signal
+	// that survives cancellation.
+	if walkElapsed > conflictingWalkWarnDuration {
+		u.logger.Warnf("[checkCounterConflictingOnCurrentChain][%s] counter-conflicting walk took %s (err=%v)", txHash.String(), walkElapsed, err)
+	}
+
 	if err != nil {
 		return errors.NewProcessingError("[checkCounterConflictingOnCurrentChain][%s] failed to get counter conflicting tx hashes", txHash.String(), err)
 	}
