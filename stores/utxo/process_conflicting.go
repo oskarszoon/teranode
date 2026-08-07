@@ -992,7 +992,10 @@ func GetAndLockChildren(ctx context.Context, s Store, hash chainhash.Hash) ([]ch
 
 			if txMeta.SpendingDatas != nil {
 				for _, spendingData := range txMeta.SpendingDatas {
-					if spendingData != nil {
+					// same nil-TxID guard as the conflicting walk: dereferencing a
+					// nil TxID here panics an errgroup goroutine and takes the
+					// process down
+					if spendingData != nil && spendingData.TxID != nil {
 						child := *spendingData.TxID
 						if _, ok := visited[child]; ok {
 							continue
@@ -1142,7 +1145,13 @@ func GetConflictingChildren(ctx context.Context, s Store, hash chainhash.Hash) (
 			}
 
 			for _, spendingData := range txMeta.SpendingDatas {
-				if spendingData != nil {
+				// TxID is guarded as well as the slot: SpendingData.Clone handles a
+				// nil TxID and the counter walk below checks both, so the codebase
+				// treats it as reachable. Dereferencing it here would panic inside
+				// an errgroup goroutine — an unrecovered panic that takes the
+				// process down, not just the block. Skipping matches the counter
+				// walk's handling of the same shape.
+				if spendingData != nil && spendingData.TxID != nil {
 					enqueue(*spendingData.TxID, txMeta)
 				}
 			}
