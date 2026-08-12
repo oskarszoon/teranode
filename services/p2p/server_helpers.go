@@ -57,6 +57,10 @@ func (s *Server) handleBlockTopic(ctx context.Context, m []byte, fromID string) 
 		return
 	}
 
+	// ClientName is free-form peer-controlled text that is relayed to WebSocket
+	// clients and stored in the peer registry; bound it before either happens.
+	blockMessage.ClientName = sanitizePeerDisplayString(blockMessage.ClientName, maxPeerDisplayStringLen)
+
 	// Drop messages from banned peers before any registration, WebSocket
 	// forwarding, or further processing. Own messages skip the registry
 	// round-trip; they return at the isOwnMessage check below.
@@ -188,6 +192,10 @@ func (s *Server) handleSubtreeTopic(_ context.Context, m []byte, fromID string) 
 		s.addProtocolViolation(fromID)
 		return
 	}
+
+	// ClientName is free-form peer-controlled text that is relayed to WebSocket
+	// clients and stored in the peer registry; bound it before either happens.
+	subtreeMessage.ClientName = sanitizePeerDisplayString(subtreeMessage.ClientName, maxPeerDisplayStringLen)
 
 	// Drop messages from banned peers before any registration, WebSocket
 	// forwarding, or further processing. Own messages skip the registry
