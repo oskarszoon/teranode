@@ -39,7 +39,17 @@ func Test_NewFiniteStateMachine(t *testing.T) {
 		err = fsm.Event(ctx, blockchain_api.FSMEventType_CATCHUPBLOCKS.String())
 		require.NoError(t, err)
 		require.Equal(t, "CATCHINGBLOCKS", fsm.Current())
-		require.False(t, fsm.Can(blockchain_api.FSMEventType_STOP.String()))
+		require.True(t, fsm.Can(blockchain_api.FSMEventType_RUN.String()))
+		// STOP leaves CATCHINGBLOCKS so an operator can reach IDLE, which is what
+		// cmd/rewindblockchain gates on, without routing through RUNNING.
+		require.True(t, fsm.Can(blockchain_api.FSMEventType_STOP.String()))
+		require.False(t, fsm.Can(blockchain_api.FSMEventType_CATCHUPBLOCKS.String()))
+	})
+
+	t.Run("Transition from Catch up Blocks to Idle", func(t *testing.T) {
+		err = fsm.Event(ctx, blockchain_api.FSMEventType_STOP.String())
+		require.NoError(t, err)
+		require.Equal(t, "IDLE", fsm.Current())
 	})
 }
 

@@ -54,8 +54,12 @@ The diagram below represents the relationships between the states and events in 
 The FSM handles the following state **transitions**:
 
 - **Run**: Transitions to _Running_ from _Idle_ or _CatchingBlocks_
-- **CatchupBlocks**: Transitions to _CatchingBlocks_ from _Running_ or _Idle_
-- **Stop**: Transitions to _Idle_ from _Running_
+- **CatchupBlocks**: Transitions to _CatchingBlocks_ from _Running_
+- **Stop**: Transitions to _Idle_ from _Running_ or _CatchingBlocks_
+
+_Idle_ is a resting state: only **Run** leaves it. A node that an operator has
+put into _Idle_ therefore stays there until it is explicitly started, rather
+than being pulled back into catch-up by an incoming block announcement.
 
 Teranode provides a visualizer tool to generate and visualize the state machine diagram. To run the visualizer, use the command `go run services/blockchain/fsm_visualizer/main.go`. The generated `docs/state-machine.diagram.md` can be visualized using <https://mermaid.live/>.
 
@@ -131,7 +135,19 @@ Services wait for the FSM to leave `Idle` before starting their operations — a
 non-Idle state, including `CatchingBlocks`, releases them (see section 3.5). As
 such, the node should see no activity for as long as the FSM stays in `Idle`.
 
-The node can also return back to the `Idle` state from `Running`, however this can only be triggered by a manual / external request.
+The node can also return back to the `Idle` state from either `Running` or
+`CatchingBlocks`, however this can only be triggered by a manual / external
+request.
+
+Returning to `Idle` is not the same as the node having booted into it. The list
+above describes a node that has not yet started: services block on the
+transition out of `Idle` once, at startup, and do not re-suspend if a running
+node is later set back to `Idle`. A running node returned to `Idle` will not
+pick up new work — no new catchup can be started from `Idle`, and the sync
+coordinator only triggers syncs from `Running` — but a catchup already in
+flight drains to completion rather than being cancelled. `Idle` is primarily a
+precondition for operator tooling that requires the node to be quiet (notably
+`teranode-cli rewindblockchain`), not a live pause switch.
 
 #### 3.3.2. FSM: Running State
 
@@ -222,7 +238,15 @@ The gRPC `CatchUpBlocks` method triggers the FSM to transition to the `CatchingB
 
 The gRPC `Idle` method sends a `Stop` event to the FSM, which triggers a transition to the `Idle` state. This event is used to stop the node from participating in the network and halt all operations.
 
-This method is not currently used.
+`Stop` is accepted from both `Running` and `CatchingBlocks`. The
+`CatchingBlocks` source matters operationally: a node spends its entire initial
+block download in that state, and `Idle` is what `teranode-cli rewindblockchain`
+gates on, so without it the only route to `Idle` would be through `Running` —
+which briefly enables live subtree validation and block-assembly transaction
+feeding on a node that is not caught up.
+
+See the caveats in the `Idle` state section above for what `Stop` does and does
+not halt.
 
 ### 3.5. Waiting on State Machine Transitions
 

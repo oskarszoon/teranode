@@ -3709,34 +3709,83 @@ func Test_IsFullyReady(t *testing.T) {
 	}
 }
 
-// Test_Idle tests the Idle gRPC method
+// Test_Idle tests the Idle gRPC method from each state that should reach IDLE.
+//
+// CATCHINGBLOCKS is the important case: on a fresh node the whole initial block
+// download happens in that state, and IDLE is what cmd/rewindblockchain gates
+// on, so an operator must be able to get there in one step.
 func Test_Idle(t *testing.T) {
-	ctx := setup(t)
-
 	tests := []struct {
-		name        string
-		expectError bool
+		name       string
+		startState blockchain_api.FSMStateType
 	}{
 		{
-			name:        "idle request",
-			expectError: true, // Fresh node starts in CATCHINGBLOCKS; STOP event has no CATCHINGBLOCKS->IDLE edge
+			name:       "from IDLE is idempotent",
+			startState: blockchain_api.FSMStateType_IDLE,
+		},
+		{
+			name:       "from RUNNING",
+			startState: blockchain_api.FSMStateType_RUNNING,
+		},
+		{
+			name:       "from CATCHINGBLOCKS",
+			startState: blockchain_api.FSMStateType_CATCHINGBLOCKS,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			request := &emptypb.Empty{}
+			ctx := setup(t)
+			ctx.server.finiteStateMachine.SetState(tt.startState.String())
 
-			response, err := ctx.server.Idle(context.Background(), request)
-
-			if tt.expectError {
-				require.Error(t, err)
-				require.Nil(t, response)
-				return
-			}
+			response, err := ctx.server.Idle(context.Background(), &emptypb.Empty{})
 
 			require.NoError(t, err)
 			require.NotNil(t, response)
+			require.Equal(t, blockchain_api.FSMStateType_IDLE.String(), ctx.server.finiteStateMachine.Current())
+		})
+	}
+}
+
+// Test_SendFSMEvent_FromCatchingBlocks pins which events may leave
+// CATCHINGBLOCKS. RUN is catchup completing; STOP is the operator asking the
+// node to go idle. Anything else is still refused before the FSM sees it.
+func Test_SendFSMEvent_FromCatchingBlocks(t *testing.T) {
+	tests := []struct {
+		name      string
+		event     blockchain_api.FSMEventType
+		wantState string
+		wantErr   bool
+	}{
+		{
+			name:      "STOP is accepted",
+			event:     blockchain_api.FSMEventType_STOP,
+			wantState: blockchain_api.FSMStateType_IDLE.String(),
+		},
+		{
+			name:      "CATCHUPBLOCKS is refused",
+			event:     blockchain_api.FSMEventType_CATCHUPBLOCKS,
+			wantState: blockchain_api.FSMStateType_CATCHINGBLOCKS.String(),
+			wantErr:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := setup(t)
+			ctx.server.finiteStateMachine.SetState(blockchain_api.FSMStateType_CATCHINGBLOCKS.String())
+
+			_, err := ctx.server.SendFSMEvent(context.Background(), &blockchain_api.SendFSMEventRequest{
+				Event: tt.event,
+			})
+
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+
+			require.Equal(t, tt.wantState, ctx.server.finiteStateMachine.Current())
 		})
 	}
 }

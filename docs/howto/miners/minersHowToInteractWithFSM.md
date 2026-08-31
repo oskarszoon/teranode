@@ -93,11 +93,17 @@ The following states are valid for all environments:
 
 ### When a transition is refused
 
-Two rules constrain which transitions are accepted, and both surface as errors
+A few rules constrain which transitions are accepted, and all surface as errors
 rather than silent no-ops:
 
-- **Only RUN may leave CATCHINGBLOCKS.** A node that is catching up cannot be
-  moved to IDLE; it must finish catching up first.
+- **Only RUN and STOP may leave CATCHINGBLOCKS.** RUN is catch-up completing;
+  STOP is `setfsmstate --fsmstate=idle`, which is accepted because IDLE is the
+  precondition the rewind tooling checks. STOP does not cancel a catch-up that
+  is already in flight — it drains — so IDLE is a marker that the node has been
+  told to stop, not a guarantee that it has gone quiet. Any other event is
+  refused.
+- **Only RUN may leave IDLE.** IDLE is a resting state, so a node an operator
+  has idled is not pulled back into catch-up by an incoming block.
 - **RUN is refused while the chain tip is below the network's highest hard-coded
   checkpoint.** Mainnet and testnet both have checkpoints; regtest has none. A
   node that is still doing its initial sync will therefore reject

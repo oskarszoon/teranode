@@ -2832,11 +2832,28 @@ func (b *Blockchain) SendFSMEvent(ctx context.Context, eventReq *blockchain_api.
 
 	priorState := b.finiteStateMachine.Current()
 
-	// Prevent manual transitions from CATCHINGBLOCKS state
-	// The state should only exit CATCHINGBLOCKS programmatically when catchup completes
+	// Restrict transitions out of CATCHINGBLOCKS to the two that are meaningful:
+	//
+	//   - RUN  - catchup completed and the node is promoting itself to RUNNING.
+	//   - STOP - an operator asking the node to go idle, which is the state
+	//            cmd/rewindblockchain gates on. A node that needs a rewind while
+	//            nominally catching blocks is usually wedged rather than making
+	//            progress, so requiring it to pass through RUNNING first - briefly
+	//            enabling live subtree validation and block-assembly tx feeding on
+	//            a node that is not caught up - is the wrong shape for the request.
+	//
+	// STOP does not cancel an in-flight catchup: a running catchup drains to
+	// completion. That is safe for the FSM because restoreFSMState (see
+	// services/blockvalidation/catchup.go) only sends RUN when the state is still
+	// CATCHINGBLOCKS, so a draining catchup cannot pull the node back out of IDLE;
+	// and a *new* catchup is refused because CATCHUPBLOCKS has no IDLE source,
+	// which setFSMCatchingBlocks already handles without penalising the peer.
+	// IDLE is therefore not a general quiesce - other services gate on it only at
+	// startup - so an operator rewinding a node that is genuinely still validating
+	// blocks must stop the node rather than rely on IDLE alone.
 	if priorState == blockchain_api.FSMStateType_CATCHINGBLOCKS.String() {
-		// Only allow RUN event (catchup completion) to exit CATCHINGBLOCKS
-		if eventReq.Event != blockchain_api.FSMEventType_RUN {
+		if eventReq.Event != blockchain_api.FSMEventType_RUN &&
+			eventReq.Event != blockchain_api.FSMEventType_STOP {
 			errMsg := "cannot manually transition from CATCHINGBLOCKS state - catchup must complete first"
 			b.logger.Warnf("[Blockchain Server] %s (attempted event: %v)", errMsg, eventReq.Event)
 			return nil, errors.NewInvalidArgumentError(errMsg)
@@ -2858,6 +2875,16 @@ func (b *Blockchain) SendFSMEvent(ctx context.Context, eventReq *blockchain_api.
 	// no tip yet and tx relay is suppressed while FSM != RUNNING. Automatic boot
 	// no longer uses IDLE -> RUNNING; fresh nodes boot into CATCHINGBLOCKS (see
 	// Init) and only reach RUNNING by completing catchup above the checkpoint.
+	//
+	// Known and accepted: now that STOP can also leave CATCHINGBLOCKS, an
+	// operator mid-IBD can reach RUNNING below the highest checkpoint by going
+	// CATCHINGBLOCKS -> IDLE -> RUNNING, using the operator-override exemption
+	// twice. Closing that would mean keying the exemption on tip height rather
+	// than prior state, which would also refuse RUN to a node legitimately
+	// persisted in IDLE mid-IBD. It takes two deliberate teranode-cli
+	// invocations from an operator who already has strictly more dangerous
+	// options (e.g. rewindblockchain --force-not-idle), so it is documented
+	// rather than blocked.
 	if eventReq.Event == blockchain_api.FSMEventType_RUN &&
 		priorState != blockchain_api.FSMStateType_IDLE.String() {
 		if err := b.guardRunBelowHighestCheckpoint(ctx); err != nil {

@@ -16,9 +16,11 @@ func TestAvailableEventsForState(t *testing.T) {
 		{
 			name:  "IDLE",
 			state: blockchain_api.FSMStateType_IDLE.String(),
+			// Only RUN. IDLE is a resting state: CATCHUPBLOCKS has no IDLE source,
+			// so an idled node cannot be pulled back into catchup by a block
+			// announcement.
 			expect: []string{
 				blockchain_api.FSMEventType_RUN.String(),
-				blockchain_api.FSMEventType_CATCHUPBLOCKS.String(),
 			},
 		},
 		{
@@ -34,6 +36,7 @@ func TestAvailableEventsForState(t *testing.T) {
 			state: blockchain_api.FSMStateType_CATCHINGBLOCKS.String(),
 			expect: []string{
 				blockchain_api.FSMEventType_RUN.String(),
+				blockchain_api.FSMEventType_STOP.String(),
 			},
 		},
 		{

@@ -23,17 +23,38 @@ var FSMTransitions = fsm.Events{
 		Dst: blockchain_api.FSMStateType_RUNNING.String(),
 	},
 	{
+		// IDLE is deliberately not a source. IDLE is an operator's "stop doing
+		// work" request and the precondition cmd/rewindblockchain gates on, so it
+		// has to be a resting state: with STOP now leaving CATCHINGBLOCKS, an IDLE
+		// source here would let the next block announcement pull an idled node
+		// straight back into catchup (addBlockToPriorityQueue feeds catchupCh
+		// without consulting the FSM), silently reverting the operator's request.
+		// Only RUN leaves IDLE. This does not affect a fresh node starting catchup
+		// at boot: Init puts it in CATCHINGBLOCKS with SetState, not via this
+		// event.
 		Name: blockchain_api.FSMEventType_CATCHUPBLOCKS.String(),
 		Src: []string{
-			blockchain_api.FSMStateType_IDLE.String(),
 			blockchain_api.FSMStateType_RUNNING.String(),
 		},
 		Dst: blockchain_api.FSMStateType_CATCHINGBLOCKS.String(),
 	},
 	{
+		// STOP is the operator's "stop what you are doing and go idle" request.
+		// CATCHINGBLOCKS is a source because IDLE is what the destructive-recovery
+		// tooling gates on (cmd/rewindblockchain preflight), and on v0.16 a node
+		// spends its whole initial block download in CATCHINGBLOCKS. Without this
+		// edge the only route to IDLE is via RUNNING, which briefly switches on
+		// live subtree validation and block-assembly tx feeding on a node that is
+		// not caught up - exactly what routing catchup through CATCHINGBLOCKS
+		// avoids.
+		//
+		// This does not cancel an in-flight catchup; see the note on the
+		// CATCHINGBLOCKS guard in Server.SendFSMEvent. IDLE is kept stable by
+		// CATCHUPBLOCKS above having no IDLE source.
 		Name: blockchain_api.FSMEventType_STOP.String(),
 		Src: []string{
 			blockchain_api.FSMStateType_RUNNING.String(),
+			blockchain_api.FSMStateType_CATCHINGBLOCKS.String(),
 		},
 		Dst: blockchain_api.FSMStateType_IDLE.String(),
 	},
