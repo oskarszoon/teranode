@@ -236,7 +236,7 @@ The gRPC `CatchUpBlocks` method triggers the FSM to transition to the `CatchingB
 
 #### 3.4.3. FSM Event: Stop
 
-The gRPC `Idle` method sends a `Stop` event to the FSM, which triggers a transition to the `Idle` state. This event is used to stop the node from participating in the network and halt all operations.
+The gRPC `Idle` method sends a `Stop` event to the FSM, which triggers a transition to the `Idle` state. It marks the node as having been told to stop taking on new work: no new catch-up can start from `Idle`, and the sync coordinator drives sync only from `Running` and `CatchingBlocks`. It does not halt work already under way — a catch-up in flight drains to completion, and the other services check for `Idle` only at startup, so they do not re-suspend when a running node returns to it.
 
 `Stop` is accepted from both `Running` and `CatchingBlocks`. The
 `CatchingBlocks` source matters operationally: a node spends its entire initial

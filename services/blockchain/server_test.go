@@ -3747,6 +3747,53 @@ func Test_Idle(t *testing.T) {
 	}
 }
 
+// Test_SendFSMEvent_RunCheckpointGate pins both sides of the checkpoint gate.
+// setup(t) uses mainnet params against an empty store, so the tip is below the
+// highest checkpoint in every case here.
+//
+// RUN from CATCHINGBLOCKS is refused: that prior state implies a "caught up"
+// claim. RUN from IDLE is an operator override and stays exempt - it is
+// accepted, and logs that the gate was bypassed rather than doing so silently.
+func Test_SendFSMEvent_RunCheckpointGate(t *testing.T) {
+	tests := []struct {
+		name       string
+		startState blockchain_api.FSMStateType
+		wantState  string
+		wantErr    bool
+	}{
+		{
+			name:       "refused from CATCHINGBLOCKS",
+			startState: blockchain_api.FSMStateType_CATCHINGBLOCKS,
+			wantState:  blockchain_api.FSMStateType_CATCHINGBLOCKS.String(),
+			wantErr:    true,
+		},
+		{
+			name:       "accepted from IDLE as an operator override",
+			startState: blockchain_api.FSMStateType_IDLE,
+			wantState:  blockchain_api.FSMStateType_RUNNING.String(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := setup(t)
+			ctx.server.finiteStateMachine.SetState(tt.startState.String())
+
+			_, err := ctx.server.SendFSMEvent(context.Background(), &blockchain_api.SendFSMEventRequest{
+				Event: blockchain_api.FSMEventType_RUN,
+			})
+
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+
+			require.Equal(t, tt.wantState, ctx.server.finiteStateMachine.Current())
+		})
+	}
+}
+
 // Test_SendFSMEvent_FromCatchingBlocks pins which events may leave
 // CATCHINGBLOCKS. RUN is catchup completing; STOP is the operator asking the
 // node to go idle. Anything else is still refused before the FSM sees it.

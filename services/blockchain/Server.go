@@ -2854,7 +2854,7 @@ func (b *Blockchain) SendFSMEvent(ctx context.Context, eventReq *blockchain_api.
 	if priorState == blockchain_api.FSMStateType_CATCHINGBLOCKS.String() {
 		if eventReq.Event != blockchain_api.FSMEventType_RUN &&
 			eventReq.Event != blockchain_api.FSMEventType_STOP {
-			errMsg := "cannot manually transition from CATCHINGBLOCKS state - catchup must complete first"
+			errMsg := "only RUN and STOP may leave CATCHINGBLOCKS - RUN requires catchup to complete, STOP takes the node to IDLE"
 			b.logger.Warnf("[Blockchain Server] %s (attempted event: %v)", errMsg, eventReq.Event)
 			return nil, errors.NewInvalidArgumentError(errMsg)
 		}
@@ -2885,11 +2885,20 @@ func (b *Blockchain) SendFSMEvent(ctx context.Context, eventReq *blockchain_api.
 	// invocations from an operator who already has strictly more dangerous
 	// options (e.g. rewindblockchain --force-not-idle), so it is documented
 	// rather than blocked.
-	if eventReq.Event == blockchain_api.FSMEventType_RUN &&
-		priorState != blockchain_api.FSMStateType_IDLE.String() {
+	//
+	// The exemption is still evaluated, so taking it leaves a trace. This gate
+	// is a safety mechanism, not a security boundary, and an operator who
+	// overrides a safety mechanism should be able to see that they did: the
+	// exempt path logs at Warn instead of rejecting. Boot no longer uses
+	// IDLE -> RUNNING, so this cannot fire on a routine start.
+	if eventReq.Event == blockchain_api.FSMEventType_RUN {
 		if err := b.guardRunBelowHighestCheckpoint(ctx); err != nil {
-			b.logger.Warnf("[Blockchain Server] RUN rejected: %s", err.Error())
-			return nil, errors.WrapGRPC(err)
+			if priorState != blockchain_api.FSMStateType_IDLE.String() {
+				b.logger.Warnf("[Blockchain Server] RUN rejected: %s", err.Error())
+				return nil, errors.WrapGRPC(err)
+			}
+
+			b.logger.Warnf("[Blockchain Server] RUN accepted from IDLE despite the checkpoint gate (operator override): %s", err.Error())
 		}
 	}
 
