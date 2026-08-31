@@ -373,14 +373,56 @@ func (b *Blockchain) HealthGRPC(ctx context.Context, _ *emptypb.Empty) (*blockch
 	}, errors.WrapGRPC(err)
 }
 
+// fsmBootState resolves the FSM state a fresh node — one with no persisted
+// state["fsm_state"] — should boot into.
+//
+// blockchain_initializeNodeInState lets a deployment override the default. The
+// motivating case is a seeded node: cmd/seeder writes the UTXO set, headers and
+// state["BlockAssembler"] straight into the stores but deliberately never writes
+// state["fsm_state"], so the first start after a seed takes the fresh-node path.
+// Booting such a node into IDLE gives the operator a window to confirm the
+// snapshot landed correctly — tip height/hash, BlockAssembler checkpoint, store
+// connectivity, right network for the snapshot — before the node consumes any
+// network or mutates that state. settings.conf defaults the operator and
+// docker.m contexts to IDLE for that reason; dev and test contexts keep
+// CATCHINGBLOCKS so local iteration and CI start syncing without a manual step.
+//
+// An empty value keeps the CATCHINGBLOCKS default. An unrecognised value is a
+// startup error rather than a silent fallback to the default.
+func (b *Blockchain) fsmBootState() (string, error) {
+	defaultState := blockchain_api.FSMStateType_CATCHINGBLOCKS.String()
+
+	if b.settings == nil {
+		return defaultState, nil
+	}
+
+	configured := b.settings.BlockChain.InitializeNodeInState
+	if configured == "" {
+		return defaultState, nil
+	}
+
+	if _, ok := blockchain_api.FSMStateType_value[configured]; !ok {
+		return "", errors.NewConfigurationError(
+			"invalid blockchain_initializeNodeInState %q: valid states are %s, %s, %s",
+			configured,
+			blockchain_api.FSMStateType_IDLE.String(),
+			blockchain_api.FSMStateType_RUNNING.String(),
+			blockchain_api.FSMStateType_CATCHINGBLOCKS.String(),
+		)
+	}
+
+	return configured, nil
+}
+
 // Init initializes the blockchain service.
 //
 // This method sets up the finite state machine (FSM) that governs the service's
 // operational states. It handles three initialization scenarios:
 //
-// 1. Test mode: Uses a predefined state for testing, bypassing normal state persistence
-// 2. New deployment: Initializes a default state when no previous state exists in storage
-// 3. Normal operation: Restores the previously persisted state from storage
+//  1. Test mode: Uses a predefined state for testing, bypassing normal state persistence
+//  2. New deployment: No previous state in storage, so the boot state comes from
+//     blockchain_initializeNodeInState (see fsmBootState), defaulting to CATCHINGBLOCKS
+//  3. Normal operation: Restores the previously persisted state from storage
 //
 // The method ensures that the service state is persisted to survive service restarts
 // and updates metrics to reflect the current operational state. The FSM provides a
@@ -394,6 +436,18 @@ func (b *Blockchain) HealthGRPC(ctx context.Context, _ *emptypb.Empty) (*blockch
 // - Error if initialization fails, nil on success
 func (b *Blockchain) Init(ctx context.Context) error {
 	b.finiteStateMachine = b.NewFiniteStateMachine()
+
+	// Resolve and validate the configured fresh-node boot state up front, before
+	// any store access. Validation is unconditional on purpose: even when a
+	// persisted state or the local-test override means the value will not be
+	// used, a typo should fail this start rather than lie dormant until the next
+	// fresh boot — which, for a node that was just reseeded, is the worst
+	// possible moment to discover it. Init's error aborts startup via
+	// ServiceManager.AddService.
+	bootState, bootStateErr := b.fsmBootState()
+	if bootStateErr != nil {
+		return bootStateErr
+	}
 
 	// check if we are in local testing mode with a defined target state for the FSM
 	if b.localTestStartState != "" {
@@ -415,20 +469,31 @@ func (b *Blockchain) Init(ctx context.Context) error {
 
 	if stateStr == "" { // no persisted state: this is a fresh node
 		// A fresh node has no chain (height 0) and is therefore behind the
-		// network. Boot it directly into CATCHINGBLOCKS (catch-up mode) rather
-		// than IDLE, so downstream services that block on FSM != IDLE start
-		// immediately and the node proactively catches up. We deliberately do
-		// NOT boot into RUNNING: RUNNING switches on live subtree validation /
-		// block-assembly tx feeding before the node is caught up. Promotion to
-		// RUNNING happens only when a catchup completes above the highest
-		// checkpoint (catchup.restoreFSMState + guardRunBelowHighestCheckpoint).
+		// network. The default is to boot directly into CATCHINGBLOCKS (catch-up
+		// mode) rather than IDLE, so downstream services that block on
+		// FSM != IDLE start immediately and the node proactively catches up.
 		// This restores the boot-into-sync behaviour the removed
 		// IDLE->LEGACYSYNCING edge used to provide.
-		b.finiteStateMachine.SetState(blockchain_api.FSMStateType_CATCHINGBLOCKS.String())
-		b.logger.Infof("[Blockchain][Init] fresh node, booting FSM into %v (catch-up mode)", b.finiteStateMachine.Current())
+		//
+		// blockchain_initializeNodeInState overrides that default — see
+		// fsmBootState for why a seeded node wants IDLE. Whichever state we pick
+		// is persisted, so an operator who restarts services part-way through
+		// verifying a seed does not find the node has moved on to catching up.
+		//
+		// Booting into RUNNING is permitted but warned about: SetState bypasses
+		// the checkpoint gate that SendFSMEvent applies to the RUN event, so it
+		// switches on live subtree validation and block-assembly tx feeding
+		// without proof the node is caught up. That is defensible only on a node
+		// seeded at or above the network's highest checkpoint.
+		if bootState == blockchain_api.FSMStateType_RUNNING.String() {
+			b.logger.Warnf("[Blockchain][Init] blockchain_initializeNodeInState=RUNNING boots this fresh node straight into RUNNING, bypassing the checkpoint gate on the RUN event; only safe on a node seeded at or above the highest checkpoint")
+		}
+
+		b.finiteStateMachine.SetState(bootState)
+		b.logger.Infof("[Blockchain][Init] fresh node, booting FSM into %v", b.finiteStateMachine.Current())
 
 		if err = b.store.SetFSMState(ctx, b.finiteStateMachine.Current()); err != nil {
-			b.logger.Errorf("[Blockchain][Init] Error persisting initial CATCHINGBLOCKS state: %v", err)
+			b.logger.Errorf("[Blockchain][Init] Error persisting initial %s state: %v", bootState, err)
 		}
 	} else { // if there is a state stored, set the FSM to that state
 		// Migration: the LEGACYSYNCING state was removed. A node persisted in it
@@ -2817,7 +2882,14 @@ func (b *Blockchain) IsFullyReady(ctx context.Context) (bool, error) {
 	return isReady, nil
 }
 
-// SendFSMEvent sends an event to the finite state machine.
+// SendFSMEvent sends an event to the finite state machine and returns the state
+// actually reached.
+//
+// The returned state is not always the one the event names: a RUN from IDLE on a
+// node whose tip is below the network's highest checkpoint is routed to
+// CATCHINGBLOCKS instead of RUNNING (see the gate below). Callers that care about
+// the outcome must read the response rather than infer it from the event, which
+// is what teranode-cli setfsmstate and the asset FSM handler do.
 func (b *Blockchain) SendFSMEvent(ctx context.Context, eventReq *blockchain_api.SendFSMEventRequest) (*blockchain_api.GetFSMStateResponse, error) {
 	// Serialise FSM transitions. SendFSMEvent performs a read-modify-write across
 	// the FSM (prior-state checks -> Event -> stateChangeTimestamp update) that
@@ -2852,17 +2924,40 @@ func (b *Blockchain) SendFSMEvent(ctx context.Context, eventReq *blockchain_api.
 	// service relay tx invs that post-Genesis peers ban on sight
 	// (`bad-txns-vout-p2sh BAN THRESHOLD EXCEEDED`).
 	//
-	// The gate only applies when the prior state already implies a "caught up"
-	// claim (CATCHINGBLOCKS -> RUNNING). IDLE -> RUNNING is an operator override
-	// (e.g. teranodecli setfsmstate running) and stays exempt: a fresh node has
-	// no tip yet and tx relay is suppressed while FSM != RUNNING. Automatic boot
-	// no longer uses IDLE -> RUNNING; fresh nodes boot into CATCHINGBLOCKS (see
-	// Init) and only reach RUNNING by completing catchup above the checkpoint.
-	if eventReq.Event == blockchain_api.FSMEventType_RUN &&
-		priorState != blockchain_api.FSMStateType_IDLE.String() {
-		if err := b.guardRunBelowHighestCheckpoint(ctx); err != nil {
-			b.logger.Warnf("[Blockchain Server] RUN rejected: %s", err.Error())
-			return nil, errors.WrapGRPC(err)
+	// The rule applies to every RUN, whatever the source state. It used to exempt
+	// IDLE -> RUNNING, on the grounds that IDLE was unreachable at boot so a
+	// fresh node could never take the exempt path. That premise no longer holds:
+	// the operator and docker.m contexts boot into IDLE (see fsmBootState) so an
+	// operator can verify a seed before the node touches the network, which puts
+	// a height-0 node back in IDLE with `setfsmstate running` one keystroke away.
+	// The safety property therefore has to live in this gate rather than in the
+	// choice of boot state.
+	//
+	// From IDLE a below-checkpoint RUN is rerouted to CATCHUPBLOCKS rather than
+	// rejected. "Run" from an operator means "put this node into service", and on
+	// a node that is not caught up the route there is through catch-up; rejecting
+	// would leave the operator to translate the error into a second command. The
+	// reroute is not silent: the response carries the state actually reached, and
+	// teranode-cli setfsmstate re-reads and prints it.
+	//
+	// From CATCHINGBLOCKS the same RUN is still rejected: the node is already
+	// catching up, so rerouting would be a no-op and the error is the useful
+	// signal that it has not got there yet.
+	if eventReq.Event == blockchain_api.FSMEventType_RUN {
+		belowCheckpoint, guardErr := b.guardRunBelowHighestCheckpoint(ctx)
+		if guardErr != nil {
+			// Only a confirmed below-checkpoint verdict is rerouteable. If the tip
+			// could not be read at all, reject: an operator who asked for RUNNING
+			// should see the store error, not a node that silently went to
+			// catch-up.
+			if !belowCheckpoint || priorState != blockchain_api.FSMStateType_IDLE.String() {
+				b.logger.Warnf("[Blockchain Server] RUN refused: %s", guardErr.Error())
+				return nil, errors.WrapGRPC(guardErr)
+			}
+
+			b.logger.Infof("[Blockchain Server] RUN from IDLE: %s, routing to CATCHINGBLOCKS instead of RUNNING", guardErr.Error())
+
+			eventReq = &blockchain_api.SendFSMEventRequest{Event: blockchain_api.FSMEventType_CATCHUPBLOCKS}
 		}
 	}
 
@@ -2910,35 +3005,47 @@ func (b *Blockchain) SendFSMEvent(ctx context.Context, eventReq *blockchain_api.
 
 // guardRunBelowHighestCheckpoint blocks the RUN transition when the local
 // chain tip has not yet reached the highest hard-coded checkpoint for the
-// active network. Returns nil when the chain has reached the checkpoint, the
-// network defines no checkpoints (regtest, brand-new networks), or the store
-// has no chain tip yet (returns a state error so the caller retries later).
-func (b *Blockchain) guardRunBelowHighestCheckpoint(ctx context.Context) error {
+// active network.
+//
+// The two return values separate "the tip is genuinely behind" from "we could
+// not tell", because the caller treats them differently: a below-checkpoint
+// verdict from IDLE is rerouted to catch-up, while an inability to read the tip
+// is propagated so the operator sees the store problem rather than a node that
+// quietly went to catch-up instead of running.
+//
+//   - (false, nil)  the chain has reached the checkpoint, or the network defines
+//     no checkpoints at all (regtest, brand-new networks)
+//   - (true, err)   the tip is below the highest checkpoint; err says by how much
+//   - (false, err)  the tip could not be determined; do not infer anything from it
+func (b *Blockchain) guardRunBelowHighestCheckpoint(ctx context.Context) (bool, error) {
 	if b.settings == nil || b.settings.ChainCfgParams == nil {
-		return nil
+		return false, nil
 	}
 
 	highest := HighestCheckpointHeight(b.settings.ChainCfgParams.Checkpoints)
 	if highest == 0 {
-		return nil
+		return false, nil
 	}
 
 	_, meta, err := b.store.GetBestBlockHeader(ctx)
 	if err != nil {
-		return errors.NewStateError("cannot read best block header to evaluate RUN gate", err)
+		return false, errors.NewStateError("cannot read best block header to evaluate RUN gate", err)
 	}
 	if meta == nil {
-		return errors.NewStateError("best block header meta unavailable; refusing RUN")
+		return false, errors.NewStateError("best block header meta unavailable, cannot evaluate RUN gate")
 	}
 
 	if meta.Height < highest {
-		return errors.NewStateError(
-			"refusing RUN: chain tip height %d is below highest checkpoint %d for %s",
+		// State the condition, not the verdict: the caller decides whether this
+		// means "reject" (from CATCHINGBLOCKS) or "route via catch-up" (from IDLE),
+		// and says so in its own words.
+		return true, errors.NewStateError(
+			"chain tip height %d is below highest checkpoint %d for %s",
 			meta.Height, highest, b.settings.ChainCfgParams.Name,
 		)
 	}
 
-	return nil
+	return false, nil
 }
 
 // HighestCheckpointHeight returns the largest Height in the supplied
@@ -2950,6 +3057,16 @@ func HighestCheckpointHeight(checkpoints []chaincfg.Checkpoint) uint32 {
 }
 
 // Run transitions the blockchain service to the running state.
+//
+// On a network with checkpoints, a node whose chain tip is still below the
+// highest checkpoint does not reach RUNNING: from IDLE the request is routed to
+// CATCHINGBLOCKS instead, and from CATCHINGBLOCKS it is rejected.
+//
+// This RPC cannot report that. It returns *emptypb.Empty, and Client.Run returns
+// only an error, so a reroute looks exactly like success: the caller gets a nil
+// error and no way to tell which state it landed in. Call GetFSMCurrentState
+// afterwards if the outcome matters, or use SendFSMEvent, which returns the state
+// actually reached.
 func (b *Blockchain) Run(ctx context.Context, _ *emptypb.Empty) (*emptypb.Empty, error) {
 	// check whether the FSM is already in the RUNNING state
 	if b.finiteStateMachine.Is(blockchain_api.FSMStateType_RUNNING.String()) {
@@ -2966,7 +3083,7 @@ func (b *Blockchain) Run(ctx context.Context, _ *emptypb.Empty) (*emptypb.Empty,
 		return nil, err
 	}
 
-	return nil, nil
+	return &emptypb.Empty{}, nil
 }
 
 // CatchUpBlocks transitions the service to catch up missing blocks.
@@ -2986,7 +3103,7 @@ func (b *Blockchain) CatchUpBlocks(ctx context.Context, _ *emptypb.Empty) (*empt
 		return nil, err
 	}
 
-	return nil, nil
+	return &emptypb.Empty{}, nil
 }
 
 // ReportPeerFailure handles reports of peer download failures and broadcasts to subscribers.

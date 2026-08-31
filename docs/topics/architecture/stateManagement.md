@@ -63,7 +63,12 @@ Teranode provides a visualizer tool to generate and visualize the state machine 
 
 ### 3.1. State Machine Initialization
 
-As part of its own initialization, the Blockchain service restores the FSM to the state it last persisted. A node with no persisted state (a fresh node) starts in **CatchingBlocks** so that it begins downloading blocks immediately rather than waiting to be moved out of **Idle**; it is promoted to **Running** only once catch-up completes above the network's highest checkpoint.
+As part of its own initialization, the Blockchain service restores the FSM to the state it last persisted. A node with no persisted state is a fresh node, and its boot state is set by `blockchain_initializeNodeInState`:
+
+- **Unset** (dev, test, CI and the e2e compose stacks) — the node starts in **CatchingBlocks** so that it begins downloading blocks immediately rather than waiting to be moved out of **Idle**. It is promoted to **Running** only once catch-up completes above the network's highest checkpoint.
+- **IDLE** (the `operator` and `docker.m` contexts, i.e. production deployments) — the node starts quiescent. `cmd/seeder` writes the UTXO set, headers and the BlockAssembler checkpoint but deliberately never writes the FSM state, so the first start after a seed is a fresh-node start; booting into **Idle** gives the operator a window to verify the snapshot before the node consumes network or mutates that state.
+
+The value is validated on every start, whether or not it will be used, so a typo fails startup rather than lying dormant until the next fresh boot. Whichever state is chosen is persisted, so restarting services part-way through a verification does not move the node on.
 
 ### 3.2. Accessing the State Machine
 
@@ -105,9 +110,9 @@ The Blockchain service also exposes the following gRPC methods to interact with 
 
 #### 3.3.1. FSM: Idle State
 
-A node reaches `Idle` either by being stopped from `Running`, or by having
-persisted `Idle` before a restart. A fresh node no longer starts here — it starts
-in `CatchingBlocks` (see section 3.1). In this state:
+A node reaches `Idle` by being stopped from `Running`, by having persisted `Idle`
+before a restart, or by booting fresh under a context that configures it —
+production deployments do (see section 3.1). In this state:
 
 - No operations are permitted
 - All services are inactive
@@ -157,9 +162,11 @@ The Block Assembler will only mine blocks when the node is in the `Running` stat
 #### 3.3.3. FSM: Catching Blocks State
 
 The `CatchingBlocks` state represents the node catching up on blocks. It is entered
-either by BlockValidation, when a running node finds it has fallen behind the
-network, or at startup, because a fresh node with no persisted state boots
-straight into it (see section 3.1). In this state:
+by BlockValidation when a running node finds it has fallen behind the network; at
+startup, when a fresh node's configured boot state is `CatchingBlocks` (the
+default — see section 3.1); or from `Idle` when a RUN request arrives on a node
+whose tip is still below the network's highest checkpoint, in which case the
+request is routed here instead of to `Running`. In this state:
 
 Allowed Operations in Catching Blocks State:
 

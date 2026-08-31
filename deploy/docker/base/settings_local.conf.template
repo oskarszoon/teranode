@@ -40,6 +40,42 @@
 # listen_mode.docker.m = full
 
 # ==============================================================================
+# FRESH-NODE BOOT STATE
+# ==============================================================================
+#
+# The FSM state a node boots into when its blockchain store has no persisted
+# state yet. Only applies to a fresh node — once a state has been persisted it is
+# restored on every start and this setting is ignored.
+#
+# This deployment defaults to IDLE (set in settings.conf for the docker.m
+# context). IDLE means the node comes up quiescent: no peers dialled, no blocks
+# fetched, no mutation of on-disk state. That is deliberate, because ./seed.sh
+# writes a multi-GB UTXO snapshot straight into the stores without writing an FSM
+# state, so the first ./start.sh after a seed is a fresh-node start. IDLE gives
+# you a window to confirm the snapshot landed before the node acts on it:
+#
+#   ./status.sh                              # services healthy, stores reachable
+#   ./cli.sh getfsmstate                     # expect IDLE
+#   # check: seeded tip height/hash match the snapshot you meant to load,
+#   #        BlockAssembler checkpoint points where you expect,
+#   #        .env names the network the snapshot belongs to
+#   ./cli.sh setfsmstate --fsmstate running   # release the node
+#
+# On mainnet and testnet, "running" is routed through catch-up while the tip is
+# below the network's highest checkpoint, so getfsmstate will then report
+# CATCHINGBLOCKS. That is expected; RUNNING follows once the node has caught up.
+# There is no transition back to IDLE once it is catching up, so verify first.
+#
+# Set CATCHINGBLOCKS to skip the verification window and have the node start
+# syncing on its own at boot — appropriate for an unattended non-seeded node.
+#
+# Values: IDLE, CATCHINGBLOCKS, RUNNING. An invalid value fails startup.
+# RUNNING boots straight into live validation and mining without the checkpoint
+# check; only use it on a node seeded at or above the highest checkpoint.
+#
+# blockchain_initializeNodeInState.docker.m = CATCHINGBLOCKS
+
+# ==============================================================================
 # PUBLIC NETWORK ENDPOINTS
 # ==============================================================================
 #

@@ -146,14 +146,52 @@ then start normally:
 
 Do not restore data from one network into a configuration for another network.
 
-## FSM State
+## Verify a Seed Before the Node Starts Catching Up
 
-`./start.sh` performs the normal FSM transition. If a startup race leaves the
-node in `INIT`, set the state manually:
+The quickstart stack runs the `docker.m` settings context, which boots a fresh
+node into `IDLE`. A node with no persisted FSM state — which is what `./seed.sh`
+leaves behind, since the seeder writes the UTXO set, headers and the
+BlockAssembler checkpoint but deliberately not the FSM state — therefore comes up
+quiescent. Nothing dials peers, fetches blocks or mutates the seeded state until
+you say so.
+
+Use that window to confirm the seed landed as intended:
 
 ```bash
-./cli.sh setfsmstate --fsmstate RUNNING
+./status.sh                                 # services healthy and connected to their stores
+./cli.sh getfsmstate                        # expect IDLE
+```
+
+Check, before moving on:
+
+- the seeded tip height and hash match the snapshot you meant to load
+- the BlockAssembler checkpoint points where you expect
+- every service is up and talking to Aerospike / PostgreSQL / Kafka
+- `.env` names the same network the snapshot belongs to — loading a testnet
+  snapshot into a mainnet configuration is a real mistake to make, and this is
+  the last cheap moment to catch it
+
+Then release the node:
+
+```bash
+./cli.sh setfsmstate --fsmstate running
 ./cli.sh getfsmstate
+```
+
+On a checkpointed network (mainnet, testnet) `running` is routed through
+catch-up when the seeded tip is still below the network's highest checkpoint, so
+`getfsmstate` will report `CATCHINGBLOCKS`. That is expected — the node reaches
+`RUNNING` once it has caught up. A snapshot at or above the checkpoint goes
+straight to `RUNNING`.
+
+There is no way back to `IDLE` once the node is catching up, so do the
+verification above before running this command, not after.
+
+To skip the verification window and have the stack start catching up
+immediately, set this in `settings_local.conf`:
+
+```ini
+blockchain_initializeNodeInState.docker.m = CATCHINGBLOCKS
 ```
 
 ## Troubleshooting Sync

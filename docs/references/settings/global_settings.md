@@ -122,7 +122,7 @@ This hierarchy exists because file-level operations are the foundation of blob s
 | Setting | Type | Default | Environment Variable | Usage |
 |---------|------|---------|---------------------|-------|
 | UseCgoVerifier | bool | true | use_cgo_verifier | **CRITICAL** - Use CGO-based signature verification |
-| LocalTestStartFromState | string | "" | local_test_start_from_state | **TESTING ONLY** - Initial test state |
+| LocalTestStartFromState | string | "" | local_test_start_from_state | **TESTING ONLY** - FSM state name (not a file path) forced at startup, overriding both the persisted state and blockchain_initializeNodeInState |
 
 ## Configuration Dependencies
 

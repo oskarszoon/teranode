@@ -418,7 +418,7 @@ The daemon uses a variety of configuration options to control service behavior a
 
 | Setting | Description | Default | Impact |
 |---------|-------------|---------|--------|
-| `LocalTestStartFromState` | Starting state for local testing blockchain FSM | - | Can be set via `-localTestStartFromState` flag |
+| `LocalTestStartFromState` | **TESTING ONLY** - FSM state name forced at startup, overriding both the persisted state and `blockchain_initializeNodeInState` | - | Can be set via `-localTestStartFromState` flag, which takes precedence over the setting |
 | `ChainCfgParams` | Bitcoin network parameters (mainnet, testnet, regtest) | mainnet | Determines consensus rules and network magic |
 
 Consult the individual service documentation for service-specific configuration options. The settings listed here are particularly important for daemon initialization and service communication.

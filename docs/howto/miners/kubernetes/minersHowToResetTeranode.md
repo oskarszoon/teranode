@@ -156,7 +156,7 @@ kubectl get pods -n teranode-operator
 
 ### Set FSM State
 
-Teranode starts in IDLE state. You need to transition to the appropriate state:
+A Kubernetes deployment runs the `operator` context, so Teranode starts in IDLE state after a reset. You need to transition to the appropriate state:
 
 ```bash
 # Via teranode-cli

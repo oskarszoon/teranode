@@ -56,12 +56,21 @@ This is the standard synchronization method where Teranode downloads the complet
 
 ### Step 1: Initialize Sync Process
 
-Upon startup, Teranode begins in IDLE state. You must explicitly set the state to `running` to begin synchronization.
+A Kubernetes deployment runs the `operator` settings context, which boots a node
+with no persisted FSM state into `IDLE`. Nothing is synchronized until you move
+it on:
 
 ```bash
 # Set FSM state to begin syncing
 kubectl exec -it $(kubectl get pods -n teranode-operator -l app=blockchain -o jsonpath='{.items[0].metadata.name}') -n teranode-operator -- teranode-cli setfsmstate --fsmstate running
 ```
+
+On mainnet and testnet, `running` is routed through catch-up while the chain tip
+is below the network's highest checkpoint, so the reported state will be
+`CATCHINGBLOCKS`. That is expected — the node reaches `RUNNING` once it has
+caught up. To have the node start catching up on its own at boot with no manual
+step, set `blockchain_initializeNodeInState.operator = CATCHINGBLOCKS` in the
+operator config.
 
 ### Step 2: Peer Discovery and Block Download
 
@@ -361,6 +370,35 @@ kubectl wait --for=condition=ready pod -l app=blockchain -n teranode-operator --
 # Verify all pods are running
 kubectl get pods -n teranode-operator
 ```
+
+#### Step 6: Verify the Seed Before Releasing the Node
+
+The seeder writes the UTXO set, headers and the BlockAssembler checkpoint, but
+deliberately not the FSM state. Under the `operator` context that means the node
+comes up in `IDLE`: no peers dialled, no blocks fetched, no mutation of the state
+you just wrote.
+
+```bash
+kubectl exec -it $(kubectl get pods -n teranode-operator -l app=blockchain -o jsonpath='{.items[0].metadata.name}') -n teranode-operator -- teranode-cli getfsmstate
+```
+
+Confirm, while the node is still quiescent:
+
+- the seeded tip height and hash match the snapshot you meant to load
+- the BlockAssembler checkpoint points where you expect
+- every pod is ready and connected to Aerospike, PostgreSQL and Kafka
+- the configmap names the same network the snapshot belongs to — loading a
+  testnet snapshot into a mainnet configuration is a real mistake to make, and
+  this is the last cheap moment to catch it
+
+Then release the node:
+
+```bash
+kubectl exec -it $(kubectl get pods -n teranode-operator -l app=blockchain -o jsonpath='{.items[0].metadata.name}') -n teranode-operator -- teranode-cli setfsmstate --fsmstate running
+```
+
+There is no transition back to `IDLE` once the node is catching up, so do this
+verification before running the command, not after.
 
 ### Expected Timeline
 

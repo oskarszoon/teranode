@@ -1,6 +1,19 @@
 # How to Manage Teranode States
 
-This guide explains how to change and monitor Teranode's state. Note that a fresh Teranode instance starts in CATCHINGBLOCKS state and begins catching up on its own; it reaches RUNNING once catch-up completes above the network's highest checkpoint. A restarted instance resumes whatever state it last persisted.
+This guide explains how to change and monitor Teranode's state.
+
+The state a fresh instance boots into depends on its settings context:
+
+| Context | Fresh-node boot state | Why |
+|---------|----------------------|-----|
+| `operator` (and its sub-contexts), `docker.m` | `IDLE` | Production deployments come up quiescent so you can verify a seed before the node consumes network or mutates state. |
+| everything else (`dev`, `test`, `docker`, `docker.ci`, e2e stacks) | `CATCHINGBLOCKS` | Local iteration and CI start catching up with no manual step. |
+
+This is controlled by `blockchain_initializeNodeInState`, which accepts `IDLE`,
+`RUNNING` or `CATCHINGBLOCKS`; an empty value means `CATCHINGBLOCKS` and an
+unrecognised value fails startup. Override it in `settings_local.conf` for your
+context. A restarted instance resumes whatever state it last persisted and
+ignores the setting entirely.
 
 ## Prerequisites
 
@@ -98,21 +111,36 @@ rather than silent no-ops:
 
 - **Only RUN may leave CATCHINGBLOCKS.** A node that is catching up cannot be
   moved to IDLE; it must finish catching up first.
-- **RUN is refused while the chain tip is below the network's highest hard-coded
-  checkpoint.** Mainnet and testnet both have checkpoints; regtest has none. A
-  node that is still doing its initial sync will therefore reject
-  `setfsmstate running`, and the error names both your tip height and the
-  checkpoint it must reach. This is expected — the node is already catching up
-  on its own and will move to RUNNING once it has caught up.
+- **RUN never reaches RUNNING while the chain tip is below the network's highest
+  hard-coded checkpoint.** Mainnet and testnet both have checkpoints; regtest has
+  none. What happens instead depends on where the node is:
+    - **From IDLE**, `setfsmstate running` is routed to CATCHINGBLOCKS. "Run"
+      means "put this node into service", and on a node that is not caught up the
+      route there is through catch-up. The command reports the state it actually
+      reached, so you will see `CATCHINGBLOCKS` rather than `RUNNING` — that is
+      the reroute, not a failure. A node seeded at or above the checkpoint goes
+      straight to RUNNING instead.
+    - **From CATCHINGBLOCKS**, the same RUN is refused with an error naming both
+      your tip height and the checkpoint it must reach. The node is already
+      catching up and will move to RUNNING once it gets there.
 
-> **Behaviour change:** a fresh node now boots into CATCHINGBLOCKS rather than
-> IDLE, and the checkpoint rule above exempts only IDLE. A brand-new mainnet or
-> testnet node could previously be forced straight to RUNNING with
-> `setfsmstate running`; it now returns the checkpoint error instead, until its
-> tip reaches the checkpoint. Nothing in this repository relied on that
-> shortcut, but out-of-tree boot tooling that forces RUNNING on a fresh node
-> will now get an error where it previously succeeded. Regtest has no
-> checkpoints and is unaffected.
+Why the rule exists: going to RUNNING mid-initial-sync lets the mempool and
+validator operate under pre-Genesis output rules, and lets the legacy service
+relay tx invs that post-Genesis peers ban on sight
+(`bad-txns-vout-p2sh BAN THRESHOLD EXCEEDED`).
+
+> **Behaviour change:** the checkpoint rule used to exempt `IDLE -> RUNNING`
+> entirely, on the reasoning that a fresh node was never in IDLE. Production
+> contexts now boot into IDLE, so the rule applies to every RUN and the IDLE case
+> is rerouted as described above. Out-of-tree boot tooling that forces RUNNING on
+> a fresh mainnet or testnet node will now land it in CATCHINGBLOCKS instead of
+> RUNNING. Regtest has no checkpoints and is unaffected — `setfsmstate running`
+> still goes straight to RUNNING there.
+>
+> **Getting back to IDLE:** there is no `CATCHINGBLOCKS -> IDLE` transition. Once
+> a node is catching up, the only way out is RUN. If you need a quiescent node in
+> order to inspect it, boot it that way with `blockchain_initializeNodeInState`
+> rather than trying to quiesce it after the fact.
 
 ## Validation
 
@@ -166,12 +194,12 @@ kubectl port-forward -n teranode-operator service/blockchain 18087:18087
 grpcurl -plaintext localhost:18087 blockchain_api.BlockchainAPI.GetFSMCurrentState
 ```
 
-Expected output (a fresh node reports `CATCHINGBLOCKS`; a restarted node reports
-whatever state it last persisted):
+Expected output. A Kubernetes deployment runs the `operator` context, so a fresh
+node reports `IDLE`; a restarted node reports whatever state it last persisted:
 
 ```json
 {
-  "state": "CATCHINGBLOCKS"
+  "state": "IDLE"
 }
 ```
 

@@ -147,3 +147,36 @@ func TestWriteBlockAssemblerState_MissingHeader(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, exists)
 }
+
+// TestSeedLeavesFSMStateUnset pins the invariant that
+// blockchain_initializeNodeInState depends on: the seeder writes the
+// BlockAssembler checkpoint but deliberately never writes state["fsm_state"], so
+// the first start after a seed takes the blockchain service's fresh-node branch
+// and honours the configured boot state.
+//
+// If a SetFSMState call is ever added to cmd/seeder, a seeded store becomes
+// self-describing and silently overrides the operator's configured boot state —
+// a persisted FSM state wins over the setting by design. This test is the guard
+// against that happening by accident.
+func TestSeedLeavesFSMStateUnset(t *testing.T) {
+	ctx := context.Background()
+	store := newTestBlockchainStore(t)
+
+	fsmState, err := store.GetFSMState(ctx)
+	require.NoError(t, err)
+	require.Empty(t, fsmState, "fresh store must not have an FSM state")
+
+	block := storeBlockAboveGenesis(t, ctx, store)
+	require.NoError(t, writeBlockAssemblerState(ctx, ulogger.TestLogger{}, store, &utxoSetTip{hash: *block.Hash(), height: 1}))
+
+	// The BlockAssembler checkpoint landed...
+	exists, err := blockAssemblerStateExists(ctx, store)
+	require.NoError(t, err)
+	require.True(t, exists)
+
+	// ...and the FSM state is still unset, which is what makes the node take the
+	// fresh-node path on its next start.
+	fsmState, err = store.GetFSMState(ctx)
+	require.NoError(t, err)
+	require.Empty(t, fsmState, "seeding must not write an FSM state")
+}

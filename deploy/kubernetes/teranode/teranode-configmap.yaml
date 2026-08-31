@@ -23,6 +23,20 @@ data:
   # the protected gRPC admin RPCs (setban/clearbanned, connect/disconnect peer,
   # alert-driven bans, reset reputation), which cross service boundaries. Without it
   # those admin RPCs fail Unauthenticated; use a strong random value (32+ chars).
+  #
+  # Fresh-node boot state. settings.conf defaults the "operator" context to IDLE,
+  # so a node with no persisted FSM state comes up quiescent: no peers dialled,
+  # no blocks fetched, no mutation of on-disk state. That is deliberate — the
+  # seeder writes the UTXO set, headers and the BlockAssembler checkpoint but not
+  # the FSM state, so the first start after a seed is a fresh-node start, and IDLE
+  # gives you a window to verify the snapshot before the node acts on it. Release
+  # it with "teranode-cli setfsmstate --fsmstate running"; on a checkpointed
+  # network that routes through catch-up until the tip reaches the checkpoint.
+  # Uncomment to skip the verification window and start catching up at boot
+  # instead (appropriate for an unattended non-seeded node). Keys set here are
+  # read as environment variables, which override settings.conf entirely.
+  # blockchain_initializeNodeInState: "CATCHINGBLOCKS"
+
   # recommended settings to tweak based on your deployment
   # KAFKA_PARTITIONS_HIGH: "512"
   # txMetaCacheMaxMB: "32768"
