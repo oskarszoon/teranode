@@ -351,13 +351,16 @@ from `RUNNING`, so a node stuck catching blocks no longer has to be moved via
 `running` first.
 
 Be aware of what `IDLE` does and does not guarantee. It stops the node picking
-up new work — no new catchup can start from `IDLE`, and the sync coordinator
-only triggers syncs from `RUNNING` — but it does **not** cancel a catchup that
-is already in flight, and it does not suspend the rest of the pipeline: the
-other services check the FSM for `IDLE` only at startup, so they do not
-re-suspend when a running node returns to it. `IDLE` is the state the rewind
-tooling gates on, not a general quiesce. If the node is genuinely still
-validating blocks, stop it rather than relying on `IDLE` alone.
+up new work: no new catchup can start from `IDLE`, and the sync coordinator
+drives sync from `RUNNING` and `CATCHINGBLOCKS` but never from `IDLE`.
+
+It does **not** stop work already under way. A catchup in flight drains to
+completion rather than being cancelled — which is why you may still see block
+validation activity after the state reads `IDLE` — and the rest of the pipeline
+is unaffected: the other services check the FSM for `IDLE` only at startup, so
+they do not re-suspend when a running node returns to it. `IDLE` is the state
+the rewind tooling gates on, not a general quiesce. If the node is genuinely
+still validating blocks, stop it rather than relying on `IDLE` alone.
 
 A step-by-step operator runbook is not published yet. Until it is, do not run
 this against a production node without working through those preconditions
