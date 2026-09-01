@@ -49,8 +49,9 @@ var FSMTransitions = fsm.Events{
 		// avoids.
 		//
 		// This does not cancel an in-flight catchup; see the note on the
-		// CATCHINGBLOCKS guard in Server.SendFSMEvent. IDLE is kept stable by
-		// CATCHUPBLOCKS above having no IDLE source.
+		// CATCHINGBLOCKS guard in Server.SendFSMEvent, which also records the one
+		// race that can undo an operator's STOP. IDLE is kept stable against *new*
+		// catchups by CATCHUPBLOCKS above having no IDLE source.
 		Name: blockchain_api.FSMEventType_STOP.String(),
 		Src: []string{
 			blockchain_api.FSMStateType_RUNNING.String(),

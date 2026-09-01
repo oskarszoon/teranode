@@ -144,8 +144,10 @@ above describes a node that has not yet started: services block on the
 transition out of `Idle` once, at startup, and do not re-suspend if a running
 node is later set back to `Idle`. A running node returned to `Idle` will not
 pick up new work — no new catchup can be started from `Idle`, and the sync
-coordinator only triggers syncs from `Running` — but a catchup already in
-flight drains to completion rather than being cancelled. `Idle` is primarily a
+coordinator drives sync from `Running` and `CatchingBlocks` but never from
+`Idle` — but a catchup already in flight drains to completion rather than being
+cancelled. If that catchup completes after the node was idled, it may promote
+the node back to `Running`; see the note in §3.4.3. `Idle` is primarily a
 precondition for operator tooling that requires the node to be quiet (notably
 `teranode-cli rewindblockchain`), not a live pause switch.
 
@@ -247,6 +249,14 @@ feeding on a node that is not caught up.
 
 See the caveats in the `Idle` state section above for what `Stop` does and does
 not halt.
+
+One race is worth knowing about if you are idling a node for a rewind. Block
+validation restores the FSM after catch-up by reading the current state and then
+sending `Run` as two separate calls. A `Stop` that lands between those two steps
+leaves the `Run` executing from `Idle`, which is accepted, so a catch-up
+finishing at that exact moment can promote the node back to `Running`. The
+window is one instant at catch-up completion. Re-check the state after idling a
+node, and before starting anything destructive.
 
 ### 3.5. Waiting on State Machine Transitions
 

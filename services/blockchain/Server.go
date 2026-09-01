@@ -2843,11 +2843,22 @@ func (b *Blockchain) SendFSMEvent(ctx context.Context, eventReq *blockchain_api.
 	//            a node that is not caught up - is the wrong shape for the request.
 	//
 	// STOP does not cancel an in-flight catchup: a running catchup drains to
-	// completion. That is safe for the FSM because restoreFSMState (see
-	// services/blockvalidation/catchup.go) only sends RUN when the state is still
-	// CATCHINGBLOCKS, so a draining catchup cannot pull the node back out of IDLE;
-	// and a *new* catchup is refused because CATCHUPBLOCKS has no IDLE source,
-	// which setFSMCatchingBlocks already handles without penalising the peer.
+	// completion. A *new* catchup is refused because CATCHUPBLOCKS has no IDLE
+	// source, which setFSMCatchingBlocks already handles without penalising the
+	// peer. A draining one mostly cannot pull the node back out of IDLE either,
+	// because restoreFSMState (services/blockvalidation/catchup.go) only sends RUN
+	// when it reads the state as CATCHINGBLOCKS.
+	//
+	// That last guarantee is not airtight, and the gap is worth knowing about.
+	// restoreFSMState reads the state and fires RUN in two separate client calls;
+	// fsmMu makes each SendFSMEvent atomic but does not span the pair. An operator
+	// STOP landing between the read and the RUN leaves the RUN executing with
+	// prior state IDLE, which the checkpoint exemption below accepts - so a
+	// catchup completing at exactly that moment can promote an idled node to
+	// RUNNING, and below the checkpoint at that. The window is one instant at
+	// catchup completion, and closing it needs a compare-and-swap transition the
+	// FSM API does not currently offer, so it is recorded rather than fixed. An
+	// operator who idled a node for a rewind should confirm the state stuck.
 	// IDLE is therefore not a general quiesce - other services gate on it only at
 	// startup - so an operator rewinding a node that is genuinely still validating
 	// blocks must stop the node rather than rely on IDLE alone.
