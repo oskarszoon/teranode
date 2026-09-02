@@ -473,6 +473,7 @@ message KafkaInvalidSubtreeTopicMessage {
   string subtreeHash = 1;
   string peerUrl = 2;
   string reason = 3;
+  string peer_id = 4;  // ID of the peer whose DataHub served the invalid bytes (authoritative attribution)
 }
 ```
 
@@ -501,13 +502,21 @@ message KafkaInvalidSubtreeTopicMessage {
 - Required: Yes
 - Example: `"Subtree contains invalid transaction merkle proof"`
 
+#### peer_id
+
+- Type: string
+- Description: P2P peer ID of the peer whose DataHub (peerUrl) served the invalid bytes. Used by the P2P service as the authoritative identity to charge for the failure; when empty, the peer is resolved from peerUrl instead
+- Required: No (may be empty when the reporter only knows the URL)
+- Example: `"12D3KooWEyoppNCUx8Yx4gzbGGgLo1UhpGzs9udWvsFsyrzrPwLf"`
+
 ### Example
 
 ```json
 {
   "subtreeHash": "a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456",
   "peerUrl": "http://peer1.example.com:8080",
-  "reason": "Subtree contains invalid transaction merkle proof"
+  "reason": "Subtree contains invalid transaction merkle proof",
+  "peer_id": "12D3KooWEyoppNCUx8Yx4gzbGGgLo1UhpGzs9udWvsFsyrzrPwLf"
 }
 ```
 
@@ -520,6 +529,7 @@ message KafkaInvalidSubtreeTopicMessage {
 invalidSubtreeMessage := &kafkamessage.KafkaInvalidSubtreeTopicMessage{
     SubtreeHash: subtreeHash.String(),
     PeerUrl:     "http://peer1.example.com:8080",
+    PeerId:      "12D3KooWEyoppNCUx8Yx4gzbGGgLo1UhpGzs9udWvsFsyrzrPwLf",
     Reason:      "Subtree validation failed: invalid merkle proof",
 }
 
@@ -557,10 +567,11 @@ func handleInvalidSubtreeMessage(msg *kafka.Message) error {
 
     subtreeHash := invalidSubtreeMessage.SubtreeHash
     peerUrl := invalidSubtreeMessage.PeerUrl
+    peerId := invalidSubtreeMessage.PeerId
     reason := invalidSubtreeMessage.Reason
 
     // Process the invalid subtree notification...
-    log.Printf("Subtree %s from peer %s marked as invalid: %s", subtreeHash, peerUrl, reason)
+    log.Printf("Subtree %s served by peer %s (url %s) marked as invalid: %s", subtreeHash, peerId, peerUrl, reason)
     return nil
 }
 ```
@@ -571,6 +582,7 @@ func handleInvalidSubtreeMessage(msg *kafka.Message) error {
 - Empty or malformed subtreeHash: Hash is not a valid hexadecimal string representation of a subtree hash
 - Invalid peerUrl: URL is empty or not properly formatted
 - Empty reason: Reason field is empty or not provided
+- No serving identity: at least one of peer_id or peerUrl must identify the serving peer; otherwise the P2P consumer logs the report and drops it without charging anyone
 
 ---
 
