@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
+	"github.com/bsv-blockchain/go-chaincfg"
 	p2pMessageBus "github.com/bsv-blockchain/go-p2p-message-bus"
 	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/model"
@@ -1028,27 +1029,9 @@ func (s *Server) Start(ctx context.Context, readyCh chan<- struct{}) error {
 	// Start node status publisher
 	go s.publishNodeStatus(ctx)
 
-	apiKey := s.settings.GRPCAdminAPIKey
-	if util.ValidateAdminAPIKey(s.logger, "P2P", apiKey, s.settings.P2P.GRPCListenAddress, s.settings.SecurityLevelGRPC) {
-		// Configured key is a well-known placeholder; ignore it and fall back to
-		// the random-key path below rather than trusting a world-readable value.
-		apiKey = ""
-	}
-
-	if apiKey == "" {
-		// Generate a random API key if not provided
-		apiKey, err = generateRandomKey()
-		if err != nil {
-			return errors.NewServiceError("error generating random API key", err)
-		}
-
-		s.logger.Warnf("[P2P] grpc_admin_api_key is not set; a random key was generated so admin RPCs (ban, unban, clear bans, ban score, reputation reset, connect/disconnect peer) are unreachable until a key is configured")
-	}
-
-	// Create auth options
-	authOptions := &util.AuthOptions{
-		APIKey:           apiKey,
-		ProtectedMethods: adminProtectedMethods(),
+	authOptions, err := s.grpcAuthOptions()
+	if err != nil {
+		return err
 	}
 
 	// this will block
@@ -1215,15 +1198,140 @@ func (s *Server) disconnectPreExistingBannedPeers(ctx context.Context) {
 	s.disconnectPeersOnBanList(ctx, "banned before startup")
 }
 
-// adminProtectedMethods returns the full gRPC method paths of every
-// state-mutating admin RPC on the PeerService; the auth interceptor requires
-// the admin API key for these. Read-only queries and internal data-plane
-// reporting RPCs (catchup metrics, valid block/subtree reports, bytes
-// downloaded) stay unauthenticated because other services call them without
-// admin credentials. Any new mutating admin RPC must be added here; the
-// classification is enforced by TestAdminProtectedMethodsCoverAllRPCs.
-func adminProtectedMethods() map[string]bool {
+// grpcAuthOptions builds the auth configuration for the PeerService listener.
+// Placeholder handling lives in util.ValidateAdminAPIKey, shared with the legacy
+// service: a placeholder is ignored so the random-key path below applies.
+//
+// Two policies are layered on top of that shared behaviour, because on this
+// service the key does more than guard admin RPCs - it also gates the ten
+// data-plane reporters that block and subtree validation call, and those set the
+// validated-work and delivery signals sync-peer selection runs on:
+//
+//   - A weak-but-real key is fatal on a network-reachable listener. The shared
+//     helper only warns, but a short key is accepted as genuine, so guessing it
+//     yields exactly the capability this authentication exists to deny.
+//   - No usable key at all is logged at Error, not Warn. It is fail-closed and
+//     therefore safe, but it silently strands sync-peer selection, so it must not
+//     look like routine startup noise.
+func (s *Server) grpcAuthOptions() (*util.AuthOptions, error) {
+	listenAddress := s.settings.P2P.GRPCListenAddress
+
+	apiKey := s.settings.GRPCAdminAPIKey
+	if err := s.rejectWeakAdminAPIKey(listenAddress, apiKey); err != nil {
+		return nil, err
+	}
+
+	if util.ValidateAdminAPIKey(s.logger, "P2P", apiKey, listenAddress, s.settings.SecurityLevelGRPC) {
+		// Configured key is a well-known placeholder; ignore it and fall back to
+		// the random-key path below rather than trusting a world-readable value.
+		apiKey = ""
+	}
+
+	s.warnIfUnreachableBind(listenAddress, s.settings.P2P.GRPCAddress)
+
+	if apiKey == "" {
+		var err error
+
+		apiKey, err = generateRandomKey()
+		if err != nil {
+			return nil, errors.NewServiceError("error generating random API key", err)
+		}
+
+		s.logger.Errorf("[P2P] grpc_admin_api_key is not set or is a placeholder, so a random key was generated and every state-mutating PeerService RPC will reject callers: block and subtree validation cannot report validated chain progress or block delivery, so no peer ever becomes a proven sync candidate and catchup stays in the budget-gated probe tier - set a strong key (%d+ chars) on every service in this deployment", util.MinAdminAPIKeyLength())
+	}
+
+	return &util.AuthOptions{
+		APIKey:           apiKey,
+		ProtectedMethods: authProtectedMethods(),
+	}, nil
+}
+
+// rejectWeakAdminAPIKey refuses to start when a real but short key guards a
+// listener something other than this host can reach without verified transport
+// security. A placeholder is handled elsewhere (ignored, so it fails closed); a
+// short key is worse, because it is accepted as the real key, so brute-forcing it
+// grants the ability to forge validated chain progress for a Sybil peer and flag
+// honest peers malicious.
+//
+// regtest is exempt so local, CI and docker development stacks keep working.
+func (s *Server) rejectWeakAdminAPIKey(listenAddress, apiKey string) error {
+	if !util.IsWeakAdminAPIKey(apiKey) || addressIsLoopbackOnly(listenAddress) {
+		return nil
+	}
+
+	// Only regtest is exempt, and only when the network is positively identified:
+	// an unset ChainCfgParams is an unknown network, and a security guard that
+	// treats "unknown" as "development" fails open. Verified TLS would keep the
+	// key off the wire, but it would still be guessable, so it earns no exemption
+	// either.
+	network := "unknown network (chain parameters unset)"
+	if s.settings.ChainCfgParams != nil {
+		if s.settings.ChainCfgParams.Name == chaincfg.RegressionNetParams.Name {
+			s.logger.Warnf("[P2P] grpc_admin_api_key is shorter than %d characters on a non-loopback listener (%s); this is tolerated on regtest only", util.MinAdminAPIKeyLength(), listenAddress)
+
+			return nil
+		}
+
+		network = s.settings.ChainCfgParams.Name
+	}
+
+	return errors.NewConfigurationError("[P2P] refusing to start on %s: grpc_admin_api_key is shorter than %d characters while the gRPC listener (%s) is reachable beyond loopback, so it can be brute-forced to forge peer reputation and validated chain progress - use a strong random secret (32+ chars), or bind p2p_grpcListenAddress to loopback", network, util.MinAdminAPIKeyLength(), listenAddress)
+}
+
+// warnIfUnreachableBind flags the mirror-image misconfiguration: other services
+// are told to dial a routable address while the listener only accepts loopback,
+// so every call fails with connection-refused. That matters because the failure
+// is otherwise silent - selectBestPeersForCatchup and the reporters only warn,
+// and no health check covers the p2p client, so the node simply stops finding
+// catchup peers while its port healthcheck stays green.
+//
+// This one warns rather than refusing to start: a sidecar-mesh topology can
+// legitimately present a routable service address while the app itself listens
+// on loopback, so a hard failure here could break a valid deployment.
+func (s *Server) warnIfUnreachableBind(listenAddress, clientAddress string) {
+	if clientAddress == "" || !addressIsLoopbackOnly(listenAddress) || addressIsLoopbackOnly(clientAddress) {
+		return
+	}
+
+	s.logger.Errorf("[P2P] p2p_grpcAddress (%s) is routable but p2p_grpcListenAddress (%s) only accepts loopback, so block and subtree validation cannot reach this service: widen the bind, or point the client address at loopback", clientAddress, listenAddress)
+}
+
+// addressIsLoopbackOnly reports whether an address can only be reached from the
+// local host. Anything it cannot parse as host:port is treated as routable, so
+// the check never fires on an address shape it does not understand.
+func addressIsLoopbackOnly(address string) bool {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return false
+	}
+
+	if host == "localhost" {
+		return true
+	}
+
+	ip := net.ParseIP(host)
+
+	return ip != nil && ip.IsLoopback()
+}
+
+// authProtectedMethods returns the full gRPC method paths of every
+// state-mutating RPC on the PeerService; the auth interceptor requires the API
+// key for these. Only read-only queries stay unauthenticated.
+//
+// The data-plane reporters are in here too, not just the operator-facing admin
+// RPCs. They mutate peer reputation and validated-chain-progress state from a
+// caller-supplied peer ID, and a peer ID is cheap to mint offline, so leaving
+// them open let anyone who could reach the gRPC port forge chain progress for a
+// Sybil and flag every honest peer malicious - which decides sync-peer
+// selection. They are called by block/subtree validation inside the deployment,
+// which already presents grpc_admin_api_key via p2p.NewClient, so protecting
+// them costs those callers nothing.
+//
+// Any new mutating RPC must be added here; the classification is enforced by
+// TestAuthProtectedMethodsCoverAllRPCs and TestPublicRPCsDoNotMutateRegistry.
+func authProtectedMethods() map[string]bool {
 	return map[string]bool{
+		// Operator-facing admin RPCs.
 		"/p2p_api.PeerService/BanPeer":         true,
 		"/p2p_api.PeerService/UnbanPeer":       true,
 		"/p2p_api.PeerService/ClearBanned":     true,
@@ -1231,6 +1339,18 @@ func adminProtectedMethods() map[string]bool {
 		"/p2p_api.PeerService/ResetReputation": true,
 		"/p2p_api.PeerService/ConnectPeer":     true,
 		"/p2p_api.PeerService/DisconnectPeer":  true,
+
+		// Internal data-plane reporters (block/subtree validation).
+		"/p2p_api.PeerService/RecordCatchupAttempt":         true,
+		"/p2p_api.PeerService/RecordCatchupSuccess":         true,
+		"/p2p_api.PeerService/RecordCatchupFailure":         true,
+		"/p2p_api.PeerService/RecordCatchupMalicious":       true,
+		"/p2p_api.PeerService/UpdateCatchupError":           true,
+		"/p2p_api.PeerService/ReportValidSubtree":           true,
+		"/p2p_api.PeerService/ReportValidBlock":             true,
+		"/p2p_api.PeerService/ReportValidBlockHeaders":      true,
+		"/p2p_api.PeerService/ReportValidatedChainProgress": true,
+		"/p2p_api.PeerService/RecordBytesDownloaded":        true,
 	}
 }
 
