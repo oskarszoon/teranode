@@ -252,6 +252,8 @@ The invalid block message is defined in protobuf as `KafkaInvalidBlockTopicMessa
 message KafkaInvalidBlockTopicMessage {
   string blockHash = 1;
   string reason = 2;
+  string peer_id = 3;
+  string peer_url = 4;
 }
 ```
 
@@ -272,12 +274,26 @@ message KafkaInvalidBlockTopicMessage {
 - Required: Yes
 - Example: `"Block contains invalid transaction"`
 
+#### peer_id
+
+- Type: string
+- Description: P2P identity of the peer that announced the block, when block validation knows it. This is the primary ban attribution: unlike the P2P service's bounded peer map, it cannot be evicted by announcement floods.
+- Required: No (empty when the block's provenance is unknown, e.g. blocks invalidated during mined-status updates)
+
+#### peer_url
+
+- Type: string
+- Description: DataHub URL the block was fetched from, used as a last-resort attribution fallback (resolved to a peer via the peer registry).
+- Required: No
+
 ### Example
 
 ```json
 {
   "blockHash": "00000000000000000007abd8d2a16a69c1c45a1c3b0d1a6b2e0c8b4e8f9a1b2c3",
-  "reason": "Block contains invalid transaction"
+  "reason": "Block contains invalid transaction",
+  "peer_id": "12D3KooWEyoppNCUx8Yx66oV9fJnriXwCcXwDDUA2kj6vnc6iDEp",
+  "peer_url": "http://198.51.100.7:8090"
 }
 ```
 
@@ -286,10 +302,13 @@ message KafkaInvalidBlockTopicMessage {
 #### Sending Messages
 
 ```go
-// Create invalid block message
+// Create invalid block message. Include the block's provenance when known:
+// PeerId is the primary ban attribution, PeerUrl the last-resort fallback.
 invalidBlockMessage := &kafkamessage.KafkaInvalidBlockTopicMessage{
     BlockHash: blockHash.String(),
     Reason:    "Block validation failed: invalid merkle root",
+    PeerId:    announcingPeerID, // may be empty when provenance is unknown
+    PeerUrl:   dataHubURL,       // may be empty
 }
 
 // Serialize to protobuf
@@ -327,8 +346,14 @@ func handleInvalidBlockMessage(msg *kafka.Message) error {
     blockHash := invalidBlockMessage.BlockHash
     reason := invalidBlockMessage.Reason
 
+    // Resolve ban attribution, strongest source first: the peer ID carried in
+    // the message, then any locally stored announcement record, then the
+    // DataHub URL resolved via the peer registry.
+    peerID := invalidBlockMessage.GetPeerId()
+    peerURL := invalidBlockMessage.GetPeerUrl()
+
     // Process the invalid block notification...
-    log.Printf("Block %s marked as invalid: %s", blockHash, reason)
+    log.Printf("Block %s marked as invalid: %s (peer %q, url %q)", blockHash, reason, peerID, peerURL)
     return nil
 }
 ```

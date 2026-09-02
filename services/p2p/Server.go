@@ -162,6 +162,7 @@ type Server struct {
 	topicPrefix                       string                         // Chain identifier prefix for topic validation
 	blockPeerMap                      cappedPeerMap                  // Which peer sent each block (canonical hash -> peerMapEntry); insert-capped, issue 1409
 	subtreePeerMap                    cappedPeerMap                  // Which peer ANNOUNCED each subtree via gossip, not necessarily who served its bytes (canonical hash -> peerMapEntry); insert-capped, issue 1409
+	reportedInvalidBlocks             cappedPeerMap                  // Invalid blocks already scored (canonical hash -> scoring record); dedupes at-least-once Kafka redelivery so one invalid block is scored once per TTL, not once per delivery
 	startTime                         time.Time                      // Server start time for uptime calculation
 	peerRegistry                      blockchain.PeerRegistryClientI // gRPC client for the centralized peer registry hosted by the blockchain service
 	peerSelector                      *PeerSelector                  // Stateless peer selection logic
@@ -735,6 +736,7 @@ func (s *Server) applyPeerMapLimits(tSettings *settings.Settings) {
 
 	s.blockPeerMap.setMaxSize(maxSize)
 	s.subtreePeerMap.setMaxSize(maxSize)
+	s.reportedInvalidBlocks.setMaxSize(maxSize)
 }
 
 // announcePeerMapLimits logs the two ways a configured value differs from what
@@ -2511,6 +2513,7 @@ func (s *Server) Stop(ctx context.Context) error {
 	// Clear the peer maps to free memory
 	s.blockPeerMap.Clear()
 	s.subtreePeerMap.Clear()
+	s.reportedInvalidBlocks.Clear()
 	s.logger.Infof("[Stop] cleared peer maps")
 
 	if len(errs) > 0 {
@@ -2832,14 +2835,24 @@ func (s *Server) ResetReputation(ctx context.Context, req *p2p_api.ResetReputati
 // Parameters:
 //   - ctx: Context for the operation
 //   - blockHash: Hash of the invalid block
+//   - peerURL: DataHub URL the block was fetched from, used as attribution
+//     fallback when the peer map entry has been evicted; may be empty
 //   - reason: Reason for the block being invalid
 //
 // Returns an error if the peer cannot be found or the ban score cannot be added.
-func (s *Server) ReportInvalidBlock(ctx context.Context, blockHash string, reason string) error {
-	// Look up the peer ID that sent this block
+func (s *Server) ReportInvalidBlock(ctx context.Context, blockHash string, peerURL string, reason string) error {
+	// Look up the peer ID that sent this block. The map is bounded and its
+	// entries evictable under announcement pressure, so fall back to resolving
+	// the DataHub URL, mirroring ReportInvalidSubtree — without it a washed-out
+	// entry silently voids the ban.
 	peerID, err := s.getPeerFromMap(&s.blockPeerMap, blockHash, "block")
 	if err != nil {
-		return err
+		if peerURL != "" {
+			peerID = s.getPeerIDFromDataHubURL(peerURL)
+		}
+		if peerID == "" {
+			return err
+		}
 	}
 
 	// Add ban score to the peer
