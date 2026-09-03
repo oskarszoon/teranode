@@ -308,7 +308,7 @@ func (sm *SyncManager) waitForPreviousBlockMined(ctx context.Context, prevBlockH
 
 func (sm *SyncManager) ProcessBlock(ctx context.Context, teranodeBlock *model.Block) (err error) {
 	ctx, _, deferFn := tracing.Tracer("netsync").Start(ctx, "SyncManager:processBlock",
-		tracing.WithLogMessage(
+		tracing.WithDebugLogMessage(
 			sm.logger,
 			"[SyncManager:processBlock][%s %d] processing block",
 			teranodeBlock.Hash().String(),
@@ -360,7 +360,7 @@ type blockIdent struct {
 
 func (sm *SyncManager) prepareSubtrees(ctx context.Context, block *bsvutil.Block) (subtrees []*chainhash.Hash, subtreeSlices []*subtreepkg.Subtree, blockID uint32, err error) {
 	ctx, _, deferFn := tracing.Tracer("netsync").Start(ctx, "prepareSubtrees",
-		tracing.WithLogMessage(
+		tracing.WithDebugLogMessage(
 			sm.logger,
 			"[prepareSubtrees][%s] processing subtree for block height %d, tx count %d",
 			block.Hash().String(),
@@ -644,7 +644,7 @@ func (sm *SyncManager) needsParentMinedWait(height uint32) bool {
 
 func (sm *SyncManager) checkSubtreeFromBlock(ctx context.Context, bi blockIdent, subtree *subtreepkg.Subtree) error {
 	ctx, _, deferFn := tracing.Tracer("netsync").Start(ctx, "checkSubtreeFromBlock",
-		tracing.WithLogMessage(sm.logger, "[checkSubtreeFromBlock][%s] checking subtree for block %s height %d", subtree.RootHash().String(), bi.hash.String(), bi.height),
+		tracing.WithDebugLogMessage(sm.logger, "[checkSubtreeFromBlock][%s] checking subtree for block %s height %d", subtree.RootHash().String(), bi.hash.String(), bi.height),
 	)
 
 	defer deferFn()
@@ -659,7 +659,7 @@ func (sm *SyncManager) checkSubtreeFromBlock(ctx context.Context, bi blockIdent,
 func (sm *SyncManager) writeSubtree(ctx context.Context, bi blockIdent, subtree *subtreepkg.Subtree,
 	subtreeData *subtreepkg.Data, subtreeMetaData *subtreepkg.Meta, quickValidationMode bool) error {
 	ctx, _, deferFn := tracing.Tracer("netsync").Start(ctx, "writeSubtree",
-		tracing.WithLogMessage(sm.logger, "[writeSubtree][%s] writing subtree for block %s height %d", subtree.RootHash().String(), bi.hash.String(), bi.height),
+		tracing.WithDebugLogMessage(sm.logger, "[writeSubtree][%s] writing subtree for block %s height %d", subtree.RootHash().String(), bi.hash.String(), bi.height),
 	)
 
 	subtreeFileExtension := fileformat.FileTypeSubtreeToCheck
@@ -839,7 +839,7 @@ func (sm *SyncManager) ValidateTransactionsLegacyMode(ctx context.Context, txMap
 	bi blockIdent, blockID uint32) (err error) {
 	ctx, _, deferFn := tracing.Tracer("netsync").Start(ctx, "validateTransactionsLegacyMode",
 		tracing.WithHistogram(prometheusLegacyNetsyncValidateTransactionsLegacyMode),
-		tracing.WithLogMessage(sm.logger, "[validateTransactionsLegacyMode] called for block %s, height %d", bi.hash, bi.height),
+		tracing.WithDebugLogMessage(sm.logger, "[validateTransactionsLegacyMode] called for block %s, height %d", bi.hash, bi.height),
 	)
 
 	defer func() {
@@ -1124,7 +1124,7 @@ func candidateParentMedianTimeFromHeaders(parentHash *chainhash.Hash, headers []
 // block is valid.
 func (sm *SyncManager) createUtxos(ctx context.Context, txMap *txmap.SyncedMap[chainhash.Hash, *TxMapWrapper], bi blockIdent, blockID uint32, outpointOnly bool) (err error) {
 	_, _, deferFn := tracing.Tracer("netsync").Start(ctx, "createUtxos",
-		tracing.WithLogMessage(sm.logger, "[createUtxos] called for block %s / height %d", bi.hash, bi.height),
+		tracing.WithDebugLogMessage(sm.logger, "[createUtxos] called for block %s / height %d", bi.hash, bi.height),
 		tracing.WithHistogram(prometheusLegacyNetsyncCreateUtxos),
 	)
 
@@ -1274,7 +1274,7 @@ func (sm *SyncManager) reuseBlockIDFromUTXO(ctx context.Context, bi blockIdent, 
 func (sm *SyncManager) PreValidateTransactions(ctx context.Context, txMap *txmap.SyncedMap[chainhash.Hash, *TxMapWrapper],
 	blockHash chainhash.Hash, blockHeight uint32, candidateBlockTime uint32, candidateParentMedianTime uint32, outpointOnly bool, failClosed bool) (err error) {
 	_, _, deferFn := tracing.Tracer("netsync").Start(ctx, "PreValidateTransactions",
-		tracing.WithLogMessage(sm.logger, "[PreValidateTransactions] called for block %s / height %d", blockHash, blockHeight),
+		tracing.WithDebugLogMessage(sm.logger, "[PreValidateTransactions] called for block %s / height %d", blockHash, blockHeight),
 		tracing.WithHistogram(prometheusLegacyNetsyncPreValidateTransactions),
 	)
 
@@ -1477,7 +1477,7 @@ func classifyAndCountPrewarmError(logger ulogger.Logger, err error) {
 // The levels indicate the number of parents in the block.
 func (sm *SyncManager) validateTransactions(ctx context.Context, maxLevel uint32, blockTxsPerLevel map[uint32][]*bt.Tx, bi blockIdent) (err error) {
 	_, _, deferFn := tracing.Tracer("netsync").Start(ctx, "validateTransactions",
-		tracing.WithLogMessage(sm.logger, "[validateTransactions] called for block %s / height %d", bi.hash, bi.height),
+		tracing.WithDebugLogMessage(sm.logger, "[validateTransactions] called for block %s / height %d", bi.hash, bi.height),
 		tracing.WithHistogram(prometheusLegacyNetsyncValidateTransactions),
 	)
 
@@ -1558,7 +1558,7 @@ func (sm *SyncManager) validateTransactions(ctx context.Context, maxLevel uint32
 
 func (sm *SyncManager) extendTransactions(ctx context.Context, bi blockIdent, txOrder []chainhash.Hash, txMap *txmap.SyncedMap[chainhash.Hash, *TxMapWrapper], outpointOnly bool) (err error) {
 	_, _, deferFn := tracing.Tracer("netsync").Start(ctx, "extendTransactions",
-		tracing.WithLogMessage(sm.logger, "[extendTransactions] called for block %s / height %d", bi.hash, bi.height),
+		tracing.WithDebugLogMessage(sm.logger, "[extendTransactions] called for block %s / height %d", bi.hash, bi.height),
 		tracing.WithHistogram(prometheusLegacyNetsyncExtendTransactions),
 	)
 
@@ -1765,7 +1765,7 @@ func (sm *SyncManager) extendPerTxFallback(ctx context.Context, txs []*bt.Tx) er
 func (sm *SyncManager) createSubtrees(ctx context.Context, bi blockIdent, txOrder []chainhash.Hash, txMap *txmap.SyncedMap[chainhash.Hash, *TxMapWrapper],
 	subtreeSlices []*subtreepkg.Subtree, subtreeDatas []*subtreepkg.Data, subtreeMetas []*subtreepkg.Meta, outpointOnly bool) (err error) {
 	_, _, deferFn := tracing.Tracer("netsync").Start(ctx, "createSubtrees",
-		tracing.WithLogMessage(sm.logger, "[createSubtrees] called for block %s / height %d", bi.hash, bi.height),
+		tracing.WithDebugLogMessage(sm.logger, "[createSubtrees] called for block %s / height %d", bi.hash, bi.height),
 	)
 
 	defer func() {
