@@ -105,8 +105,9 @@ rather than silent no-ops:
 - **RUN and CATCHUPBLOCKS may both leave IDLE, and they are not equivalent.**
   CATCHUPBLOCKS resumes downloading with the checkpoint rule below still in
   force, so the node cannot go live until its tip has caught up. RUN goes live
-  immediately and is exempt from that rule. Prefer CATCHUPBLOCKS to resume a
-  node idled part-way through its initial sync. Incoming blocks cannot use the
+  immediately. Use CATCHUPBLOCKS to resume a node idled part-way through its
+  initial sync: RUN is refused there, because the checkpoint rule exempts only a
+  node with no chain tip at all, not one with a partial chain. Incoming blocks cannot use the
   IDLE to CATCHINGBLOCKS edge to revive an idled node on their own: block
   validation drops catch-up work while the state reads IDLE. That check is
   best-effort — if it cannot read the state it lets the catch-up through — so it
@@ -119,7 +120,8 @@ rather than silent no-ops:
   on its own and will move to RUNNING once it has caught up.
 
 > **Behaviour change:** a fresh node now boots into CATCHINGBLOCKS rather than
-> IDLE, and the checkpoint rule above exempts only IDLE. A brand-new mainnet or
+> IDLE, and the checkpoint rule above exempts only a node with no chain tip yet.
+> A brand-new mainnet or
 > testnet node could previously be forced straight to RUNNING with
 > `setfsmstate running`; it now returns the checkpoint error instead, until its
 > tip reaches the checkpoint. Nothing in this repository relied on that

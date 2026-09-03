@@ -223,11 +223,18 @@ func TestInit_MigratesPersistedLegacySyncingToCatchingBlocks(t *testing.T) {
 }
 
 // TestSendFSMEvent_RunGate_SourceState pins the source-state semantics of
-// the RUN gate added in PR #844 and fixed here: IDLE → RUNNING is the boot
-// path and must succeed even when the local tip sits below the highest
-// checkpoint (a fresh node has tip 0 and nothing else can move the FSM
-// forward), while CATCHINGBLOCKS → RUNNING claims "I'm caught up" and must
-// still be rejected when the tip is below the checkpoint.
+// the RUN gate added in PR #844: CATCHINGBLOCKS → RUNNING claims "I'm caught
+// up" and must be rejected when the tip is below the checkpoint, while a node
+// with no chain of its own must still be able to reach RUNNING so downstream
+// services start syncing.
+//
+// The exemption is narrower than it was. #844 keyed it on the source state
+// alone, which was safe while a node mid-IBD could not reach IDLE at all. Now
+// that STOP can leave CATCHINGBLOCKS, keying on IDLE would make the gate a
+// two-step bypass - idle a node at height 400k, run it, and it is RUNNING far
+// below the checkpoint - so it is keyed on having no tip yet. A node with a
+// partial chain loses nothing: it resumes with CATCHUPBLOCKS, which keeps the
+// gate in force.
 func TestSendFSMEvent_RunGate_SourceState(t *testing.T) {
 	ctx := context.Background()
 	highest := HighestCheckpointHeight(chaincfg.MainNetParams.Checkpoints)
@@ -249,11 +256,15 @@ func TestSendFSMEvent_RunGate_SourceState(t *testing.T) {
 			wantState:  blockchain_api.FSMStateType_RUNNING,
 		},
 		{
-			name:       "IDLE with tip 100 still below checkpoint succeeds",
+			// Changed from #844, deliberately: a partial chain is no longer
+			// exempt, because IDLE is now reachable mid-IBD and this would
+			// otherwise be a two-step way around the checkpoint.
+			name:       "IDLE with a partial chain below checkpoint rejects",
 			startState: blockchain_api.FSMStateType_IDLE,
 			tipHeight:  100,
-			wantErr:    false,
-			wantState:  blockchain_api.FSMStateType_RUNNING,
+			wantErr:    true,
+			wantState:  blockchain_api.FSMStateType_IDLE,
+			wantSubstr: "refusing RUN",
 		},
 		{
 			name:       "CATCHINGBLOCKS below checkpoint rejects",
@@ -307,11 +318,13 @@ func TestSendFSMEvent_RunGate_SourceState(t *testing.T) {
 	}
 }
 
-// TestRunGate_IdleOverrideScope pins what the IDLE operator override does and
-// does not waive. It waives a chain tip known to be below the highest
-// checkpoint, because that is a deliberate operator choice. It must not waive a
-// failure to evaluate the gate at all: a store that cannot be read leaves the
-// height unknown, and unknown is not the same as high enough.
+// TestRunGate_IdleOverrideScope pins what the RUN-from-IDLE exemption covers.
+// It is keyed on having no chain tip yet, not on being in IDLE: a node with a
+// partial chain resumes with CATCHUPBLOCKS, which keeps the gate in force, so
+// exempting it would only open a two-step bypass (idle, then run) around the
+// checkpoint. It must also never waive a failure to evaluate the gate at all -
+// an unreadable store leaves the height unknown, and unknown is not the same as
+// high enough.
 func TestRunGate_IdleOverrideScope(t *testing.T) {
 	ctx := context.Background()
 	highest := HighestCheckpointHeight(chaincfg.MainNetParams.Checkpoints)
@@ -330,8 +343,28 @@ func TestRunGate_IdleOverrideScope(t *testing.T) {
 		return b
 	}
 
-	t.Run("tip below the checkpoint is waived", func(t *testing.T) {
+	t.Run("no chain tip yet is waived", func(t *testing.T) {
+		b := newIdleServer(t, &model.BlockHeaderMeta{Height: 0}, nil)
+
+		_, err := b.SendFSMEvent(ctx, &blockchain_api.SendFSMEventRequest{Event: blockchain_api.FSMEventType_RUN})
+
+		require.NoError(t, err)
+		require.Equal(t, blockchain_api.FSMStateType_RUNNING.String(), b.finiteStateMachine.Current())
+	})
+
+	t.Run("partial chain below the checkpoint is not waived", func(t *testing.T) {
+		// The two-step bypass: idle a node mid-IBD, then run it. Refused, so the
+		// operator has to resume with CATCHUPBLOCKS instead.
 		b := newIdleServer(t, &model.BlockHeaderMeta{Height: highest - 1}, nil)
+
+		_, err := b.SendFSMEvent(ctx, &blockchain_api.SendFSMEventRequest{Event: blockchain_api.FSMEventType_RUN})
+
+		require.Error(t, err)
+		require.Equal(t, blockchain_api.FSMStateType_IDLE.String(), b.finiteStateMachine.Current())
+	})
+
+	t.Run("tip at or above the checkpoint runs normally", func(t *testing.T) {
+		b := newIdleServer(t, &model.BlockHeaderMeta{Height: highest}, nil)
 
 		_, err := b.SendFSMEvent(ctx, &blockchain_api.SendFSMEventRequest{Event: blockchain_api.FSMEventType_RUN})
 

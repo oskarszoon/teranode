@@ -494,14 +494,19 @@ func (u *Server) CheckBlockSubtrees(ctx context.Context, request *subtreevalidat
 	// it for both the per-batch processTransactionsInLevels pass and the
 	// validateSubtree closure below. Querying it twice (once per pipeline) could
 	// straddle an FSM transition and give the two pipelines divergent
-	// WithAddTXToBlockAssembly settings for the same block. While catching up
-	// blocks, transactions must NOT be added to block assembly.
+	// WithAddTXToBlockAssembly settings for the same block.
+	//
+	// The test is "are we RUNNING", not "are we not CATCHINGBLOCKS". Only a
+	// caught-up node should be feeding its template: bulk-history txs from a
+	// block we are still syncing do not belong there. Spelling it negatively
+	// silently opted IDLE in, which matters now that an operator can STOP a node
+	// mid-catchup and leave the remaining blocks of that catchup to drain.
 	currentState, err := u.blockchainClient.GetFSMCurrentState(ctx)
 	if err != nil {
 		return nil, errors.WrapGRPC(errors.NewProcessingError("[CheckBlockSubtrees] Failed to get FSM current state", err))
 	}
 
-	addTXToBlockAssembly := *currentState != blockchain.FSMStateCATCHINGBLOCKS
+	addTXToBlockAssembly := *currentState == blockchain.FSMStateRUNNING
 
 	// BATCHED SUBTREE LOADING: Get blockIds once before batching
 	blockHeaderIDs, err := u.blockchainClient.GetBlockHeaderIDs(ctx, block.Header.HashPrevBlock, uint64(u.settings.GetUtxoStoreBlockHeightRetention()*2))

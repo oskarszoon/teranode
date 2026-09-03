@@ -3768,7 +3768,10 @@ func Test_SendFSMEvent_RunCheckpointGate(t *testing.T) {
 			wantErr:    true,
 		},
 		{
-			name:       "accepted from IDLE as an operator override",
+			// setup(t) has only genesis, so this is the no-tip-yet exemption. A
+			// partial chain below the checkpoint is refused even from IDLE; see
+			// TestRunGate_IdleOverrideScope.
+			name:       "accepted from IDLE with no chain tip yet",
 			startState: blockchain_api.FSMStateType_IDLE,
 			wantState:  blockchain_api.FSMStateType_RUNNING.String(),
 		},

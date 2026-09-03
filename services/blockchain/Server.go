@@ -2892,42 +2892,39 @@ func (b *Blockchain) SendFSMEvent(ctx context.Context, eventReq *blockchain_api.
 	// no longer uses IDLE -> RUNNING; fresh nodes boot into CATCHINGBLOCKS (see
 	// Init) and only reach RUNNING by completing catchup above the checkpoint.
 	//
-	// Known and accepted: now that STOP can also leave CATCHINGBLOCKS, an
-	// operator mid-IBD can reach RUNNING below the highest checkpoint by going
-	// CATCHINGBLOCKS -> IDLE -> RUNNING, using the operator-override exemption
-	// twice. Closing that would mean keying the exemption on tip height rather
-	// than prior state, which would also refuse RUN to a node legitimately
-	// persisted in IDLE mid-IBD. It takes two deliberate teranode-cli
-	// invocations from an operator who already has strictly more dangerous
-	// options (e.g. rewindblockchain --force-not-idle), so it is documented
-	// rather than blocked.
+	// The exemption is keyed on having no chain tip at all, not merely on being
+	// in IDLE. Keying it on IDLE alone would have made this gate a two-step
+	// bypass once STOP could leave CATCHINGBLOCKS: idle a node at mainnet height
+	// 400k, then RUN it, and it reaches RUNNING far below checkpoint 938000. A
+	// node with a partial chain does not need that exemption, because it can
+	// resume with CATCHUPBLOCKS, which keeps this gate in force - so the narrow
+	// key costs nothing and closes the bypass.
 	//
-	// The exemption is still evaluated, so taking it leaves a trace. This gate
-	// is a safety mechanism, not a security boundary, and an operator who
-	// overrides a safety mechanism should be able to see that they did: the
-	// exempt path logs at Warn instead of rejecting. Boot no longer uses
-	// IDLE -> RUNNING, so this cannot fire on a routine start.
-	//
-	// The exemption covers only a tip known to be below the checkpoint. A gate
-	// that could not be evaluated at all - store unreadable, no tip meta - is
-	// refused from every prior state including IDLE, because not knowing the
-	// height is not the same as knowing it is high enough.
+	// A gate that could not be evaluated at all - store unreadable, no tip meta -
+	// is refused from every prior state including IDLE: an exemption may waive a
+	// known tip, never an unknown one. Both the exempt and rejected paths log at
+	// Warn, so an operator can see which applied.
 	if eventReq.Event == blockchain_api.FSMEventType_RUN {
-		belowCheckpoint, err := b.evaluateRunCheckpointGate(ctx)
+		belowCheckpoint, tipHeight, err := b.evaluateRunCheckpointGate(ctx)
 		switch {
 		case err == nil:
 			// Gate satisfied.
 		case !belowCheckpoint:
 			// The gate could not be evaluated at all. Refuse from every prior
-			// state, IDLE included: the override waives a known-too-low tip, not
-			// an unknown one.
+			// state, IDLE included: an exemption may waive a known tip, never an
+			// unknown one.
 			b.logger.Warnf("[Blockchain Server] RUN rejected, checkpoint gate could not be evaluated: %s", err.Error())
 			return nil, errors.WrapGRPC(err)
-		case priorState != blockchain_api.FSMStateType_IDLE.String():
+		case priorState == blockchain_api.FSMStateType_IDLE.String() && tipHeight == 0:
+			// The no-tip-yet exemption, and nothing wider. A node with no chain of
+			// its own has to be able to reach RUNNING for downstream services to
+			// start syncing, and tx relay is suppressed while FSM != RUNNING, so
+			// this is safe. A node with a partial chain is not covered: it should
+			// resume with CATCHUPBLOCKS, which keeps this gate in force.
+			b.logger.Warnf("[Blockchain Server] RUN accepted from IDLE at height 0 (no chain tip yet): %s", err.Error())
+		default:
 			b.logger.Warnf("[Blockchain Server] RUN rejected: %s", err.Error())
 			return nil, errors.WrapGRPC(err)
-		default:
-			b.logger.Warnf("[Blockchain Server] RUN accepted from IDLE despite the checkpoint gate (operator override): %s", err.Error())
 		}
 	}
 
@@ -2979,7 +2976,7 @@ func (b *Blockchain) SendFSMEvent(ctx context.Context, eventReq *blockchain_api.
 // network defines no checkpoints (regtest, brand-new networks), or the store
 // has no chain tip yet (returns a state error so the caller retries later).
 func (b *Blockchain) guardRunBelowHighestCheckpoint(ctx context.Context) error {
-	_, err := b.evaluateRunCheckpointGate(ctx)
+	_, _, err := b.evaluateRunCheckpointGate(ctx)
 	return err
 }
 
@@ -2989,33 +2986,33 @@ func (b *Blockchain) guardRunBelowHighestCheckpoint(ctx context.Context) error {
 // IDLE operator override is allowed to waive. Every other error is a failure to
 // *evaluate* the gate (store unreadable, no tip meta), which nothing may waive:
 // not knowing the height is not the same as knowing it is high enough.
-func (b *Blockchain) evaluateRunCheckpointGate(ctx context.Context) (belowCheckpoint bool, err error) {
+func (b *Blockchain) evaluateRunCheckpointGate(ctx context.Context) (belowCheckpoint bool, tipHeight uint32, err error) {
 	if b.settings == nil || b.settings.ChainCfgParams == nil {
-		return false, nil
+		return false, 0, nil
 	}
 
 	highest := HighestCheckpointHeight(b.settings.ChainCfgParams.Checkpoints)
 	if highest == 0 {
-		return false, nil
+		return false, 0, nil
 	}
 
 	_, meta, err := b.store.GetBestBlockHeader(ctx)
 	if err != nil {
-		return false, errors.NewStateError("cannot read best block header to evaluate RUN gate", err)
+		return false, 0, errors.NewStateError("cannot read best block header to evaluate RUN gate", err)
 	}
 
 	if meta == nil {
-		return false, errors.NewStateError("best block header meta unavailable; refusing RUN")
+		return false, 0, errors.NewStateError("best block header meta unavailable; refusing RUN")
 	}
 
 	if meta.Height < highest {
-		return true, errors.NewStateError(
+		return true, meta.Height, errors.NewStateError(
 			"refusing RUN: chain tip height %d is below highest checkpoint %d for %s",
 			meta.Height, highest, b.settings.ChainCfgParams.Name,
 		)
 	}
 
-	return false, nil
+	return false, meta.Height, nil
 }
 
 // HighestCheckpointHeight returns the largest Height in the supplied

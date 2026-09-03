@@ -158,7 +158,15 @@ func (s *Server) prunerProcessor(ctx context.Context) {
 				continue
 			}
 
-			// Check FSM state - skip during CATCHINGBLOCKS if configured
+			// Check FSM state - prune only while RUNNING if configured.
+			//
+			// The test is for RUNNING rather than against CATCHINGBLOCKS. The race
+			// this setting exists to prevent is block validation marking txs mined
+			// faster than the pruner can preserve their parents, and that race is
+			// live for as long as a catchup is, not for as long as the FSM happens
+			// to report CATCHINGBLOCKS. An operator can now STOP a node mid-catchup
+			// and leave the remaining blocks to drain, so a node in IDLE may still
+			// be validating; skipping unless RUNNING keeps the guarantee intact.
 			if s.settings.Pruner.SkipDuringCatchup {
 				fsmState, err := s.blockchainClient.GetFSMCurrentState(ctx)
 				if err != nil {
@@ -166,8 +174,8 @@ func (s *Server) prunerProcessor(ctx context.Context) {
 					prunerSkipped.WithLabelValues("fsm_error").Inc()
 					continue
 				}
-				if fsmState != nil && *fsmState == blockchain.FSMStateCATCHINGBLOCKS {
-					s.logger.Debugf("[pruner][%s:%d] skipping during catchup", blockHashStr, blockHeight)
+				if fsmState != nil && *fsmState != blockchain.FSMStateRUNNING {
+					s.logger.Debugf("[pruner][%s:%d] skipping, node is %s not RUNNING", blockHashStr, blockHeight, fsmState.String())
 					prunerSkipped.WithLabelValues("catchup_mode").Inc()
 					continue
 				}

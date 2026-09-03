@@ -372,11 +372,12 @@ ticker, so your `idle` can be undone on the next tick with no race involved.
 Always re-read the state after idling a node, and again immediately before
 running anything destructive.
 
-To resume a node you idled part-way through its initial sync, prefer
-`setfsmstate --fsmstate=catchingblocks` over `running`. Catching up keeps the
-checkpoint gate in force, so the node will not go live until its tip has caught
-up; `running` is exempt from that gate and puts a not-yet-synced node straight
-into live validation and block-assembly transaction feeding.
+To resume a node you idled part-way through its initial sync, use
+`setfsmstate --fsmstate=catchingblocks`. Catching up keeps the checkpoint gate
+in force, so the node will not go live until its tip has caught up.
+`setfsmstate --fsmstate=running` is refused on such a node: the gate exempts
+only a node with no chain tip at all, so that a genuinely fresh node can start,
+and not one that is part-way through its sync.
 
 A step-by-step operator runbook is not published yet. Until it is, do not run
 this against a production node without working through those preconditions

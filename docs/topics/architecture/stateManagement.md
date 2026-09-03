@@ -60,8 +60,9 @@ The FSM handles the following state **transitions**:
 An operator leaving _Idle_ has two routes, and they are not equivalent.
 **CatchupBlocks** resumes downloading and leaves the checkpoint gate in force,
 so the node cannot go live until its tip has caught up. **Run** goes live
-immediately and is exempt from that gate. Prefer **CatchupBlocks** to resume a
-node that was idled part-way through its initial sync.
+immediately. Use **CatchupBlocks** to resume a node that was idled part-way
+through its initial sync — **Run** will be refused, because the checkpoint gate
+exempts only a node with no chain tip at all, not one with a partial chain.
 
 Block announcements are stopped from using the _Idle_ to _CatchingBlocks_ edge
 to revive an idled node: block validation drops incoming catch-up work while the
