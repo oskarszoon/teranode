@@ -362,10 +362,21 @@ they do not re-suspend when a running node returns to it. `IDLE` is the state
 the rewind tooling gates on, not a general quiesce. If the node is genuinely
 still validating blocks, stop it rather than relying on `IDLE` alone.
 
-There is also a narrow race at catch-up completion: block validation restores
-the FSM with a read followed by a separate `Run`, so a `setfsmstate idle` landing
-between those two steps can be undone by the `Run`. Always re-read the state
-after idling a node, and again immediately before running anything destructive.
+`IDLE` can also be undone from underneath you. There is a narrow race at
+catch-up completion — block validation restores the FSM with a read followed by a
+separate `Run`, so a `setfsmstate idle` landing between those steps is lost — and
+on a node running the legacy sync service there is a much wider window: legacy
+sends `RUN` from three places that never check for `IDLE`, one of them on a
+ticker, so your `idle` can be undone on the next tick with no race involved.
+
+Always re-read the state after idling a node, and again immediately before
+running anything destructive.
+
+To resume a node you idled part-way through its initial sync, prefer
+`setfsmstate --fsmstate=catchingblocks` over `running`. Catching up keeps the
+checkpoint gate in force, so the node will not go live until its tip has caught
+up; `running` is exempt from that gate and puts a not-yet-synced node straight
+into live validation and block-assembly transaction feeding.
 
 A step-by-step operator runbook is not published yet. Until it is, do not run
 this against a production node without working through those preconditions

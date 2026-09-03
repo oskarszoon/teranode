@@ -1820,6 +1820,25 @@ func (u *Server) processCatchupChItem(ctx context.Context, c processBlockCatchup
 		return
 	}
 
+	// Do not revive a node an operator has idled. IDLE is the precondition
+	// cmd/rewindblockchain checks before doing destructive work, so a block
+	// announcement arriving mid-rewind must not walk the node back into catchup
+	// behind the operator's back. The FSM still permits IDLE -> CATCHINGBLOCKS so
+	// the operator retains a resume path that stays under the checkpoint gate;
+	// it is this automatic path, not the transition itself, that has to defer.
+	//
+	// Best-effort: on a failed state read we carry on rather than stall catchup,
+	// since the read failing is far more likely than the node being idled.
+	if state, err := u.blockchainClient.GetFSMCurrentState(ctx); err != nil {
+		u.logger.Warnf("[catchup] could not read FSM state before catchup for block %s, proceeding: %v", c.block.Hash().String(), err)
+	} else if state != nil && *state == blockchain.FSMStateIDLE {
+		u.logger.Infof("[catchup] Node is IDLE, dropping catchup request for block %s from peer %s", c.block.Hash().String(), c.peerID)
+		u.processBlockNotify.Delete(*c.block.Hash())
+		u.catchupAlternatives.Delete(*c.block.Hash())
+
+		return
+	}
+
 	// Check if peer is bad or malicious before attempting catchup
 	if u.isPeerBad(c.peerID) || u.isPeerMalicious(ctx, c.peerID) {
 		u.logger.Warnf("[catchup][%s] peer %s (%s) is marked as bad or malicious, trying alternative peers", c.block.Hash().String(), c.peerID, c.baseURL)

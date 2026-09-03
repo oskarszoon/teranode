@@ -54,12 +54,19 @@ The diagram below represents the relationships between the states and events in 
 The FSM handles the following state **transitions**:
 
 - **Run**: Transitions to _Running_ from _Idle_ or _CatchingBlocks_
-- **CatchupBlocks**: Transitions to _CatchingBlocks_ from _Running_
+- **CatchupBlocks**: Transitions to _CatchingBlocks_ from _Running_ or _Idle_
 - **Stop**: Transitions to _Idle_ from _Running_ or _CatchingBlocks_
 
-_Idle_ is a resting state: only **Run** leaves it. A node that an operator has
-put into _Idle_ therefore stays there until it is explicitly started, rather
-than being pulled back into catch-up by an incoming block announcement.
+An operator leaving _Idle_ has two routes, and they are not equivalent.
+**CatchupBlocks** resumes downloading and leaves the checkpoint gate in force,
+so the node cannot go live until its tip has caught up. **Run** goes live
+immediately and is exempt from that gate. Prefer **CatchupBlocks** to resume a
+node that was idled part-way through its initial sync.
+
+Block announcements cannot use the _Idle_ to _CatchingBlocks_ edge to revive an
+idled node: block validation drops incoming catch-up work while the FSM reads
+_Idle_ (`processCatchupChItem`). The restriction is on that automatic path
+rather than on the transition, so the operator keeps the safe resume route.
 
 Teranode provides a visualizer tool to generate and visualize the state machine diagram. To run the visualizer, use the command `go run services/blockchain/fsm_visualizer/main.go`. The generated `docs/state-machine.diagram.md` can be visualized using <https://mermaid.live/>.
 
@@ -143,11 +150,13 @@ Returning to `Idle` is not the same as the node having booted into it. The list
 above describes a node that has not yet started: services block on the
 transition out of `Idle` once, at startup, and do not re-suspend if a running
 node is later set back to `Idle`. A running node returned to `Idle` will not
-pick up new work — no new catchup can be started from `Idle`, and the sync
-coordinator drives sync from `Running` and `CatchingBlocks` but never from
-`Idle` — but a catchup already in flight drains to completion rather than being
-cancelled. If that catchup completes after the node was idled, it may promote
-the node back to `Running`; see the note in §3.4.3. `Idle` is primarily a
+pick up new work on the Teranode path — incoming catch-up work is dropped while
+the FSM reads `Idle`, and the sync coordinator drives sync from `Running` and
+`CatchingBlocks` but never from `Idle` — but a catchup already in flight drains
+to completion rather than being cancelled. If that catchup completes after the
+node was idled, it may promote the node back to `Running`. A node running the
+legacy sync service has a further, larger exception. Both are covered in
+§3.4.3. `Idle` is primarily a
 precondition for operator tooling that requires the node to be quiet (notably
 `teranode-cli rewindblockchain`), not a live pause switch.
 
@@ -250,13 +259,30 @@ feeding on a node that is not caught up.
 See the caveats in the `Idle` state section above for what `Stop` does and does
 not halt.
 
-One race is worth knowing about if you are idling a node for a rewind. Block
-validation restores the FSM after catch-up by reading the current state and then
-sending `Run` as two separate calls. A `Stop` that lands between those two steps
-leaves the `Run` executing from `Idle`, which is accepted, so a catch-up
-finishing at that exact moment can promote the node back to `Running`. The
-window is one instant at catch-up completion. Re-check the state after idling a
-node, and before starting anything destructive.
+`Idle` is not a state the node is guaranteed to hold, and this matters if you
+are idling a node in order to rewind it. Two things can take it back out.
+
+The narrow one is a race at catch-up completion. Block validation restores the
+FSM by reading the current state and then sending `Run` as two separate calls, so
+a `Stop` landing between those steps leaves the `Run` executing from `Idle`,
+which is accepted. The window is one instant.
+
+The larger one applies to nodes running the legacy sync service, and is not a
+race at all. `services/legacy/netsync/manager.go` sends `Run` from three places
+without checking for `Idle` first: `startSync`, which is reached from a ticker
+and fires whenever the chosen sync peer reports the same height as the node;
+`handleBlockMsg`, on every accepted block once the node considers itself current;
+and the `blockHandler` loop, which fires precisely because the state is not
+`Running`. On such a node an operator's `Stop` is undone on the next tick, with
+no race needed.
+
+Both paths reach `SendFSMEvent` with prior state `Idle`, so on a node below the
+highest checkpoint they take the exempt branch and log `RUN accepted from IDLE
+despite the checkpoint gate (operator override)` with no operator involved. Read
+that line with the call site in mind rather than assuming a human acted.
+
+So: re-read the state after idling a node, and again immediately before starting
+anything destructive.
 
 ### 3.5. Waiting on State Machine Transitions
 

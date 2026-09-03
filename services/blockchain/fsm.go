@@ -23,17 +23,22 @@ var FSMTransitions = fsm.Events{
 		Dst: blockchain_api.FSMStateType_RUNNING.String(),
 	},
 	{
-		// IDLE is deliberately not a source. IDLE is an operator's "stop doing
-		// work" request and the precondition cmd/rewindblockchain gates on, so it
-		// has to be a resting state: with STOP now leaving CATCHINGBLOCKS, an IDLE
-		// source here would let the next block announcement pull an idled node
-		// straight back into catchup (addBlockToPriorityQueue feeds catchupCh
-		// without consulting the FSM), silently reverting the operator's request.
-		// Only RUN leaves IDLE. This does not affect a fresh node starting catchup
-		// at boot: Init puts it in CATCHINGBLOCKS with SetState, not via this
-		// event.
+		// IDLE stays a source so an operator who idled a partially-synced node can
+		// resume it by catching up rather than by going straight to RUNNING. That
+		// matters because RUN from IDLE is exempt from the checkpoint gate (see
+		// Server.SendFSMEvent): if this were the only way out of IDLE, resuming an
+		// idled node would mean enabling live subtree validation and block-assembly
+		// tx feeding below the checkpoint, which is exactly what routing catchup
+		// through CATCHINGBLOCKS exists to avoid.
+		//
+		// Keeping this edge does not let a block announcement quietly revive an
+		// idled node. That is enforced at the caller instead, in
+		// processCatchupChItem, which drops the item while the FSM reads IDLE. The
+		// FSM stays permissive about the transition; the automatic path is the one
+		// that has to be polite about it.
 		Name: blockchain_api.FSMEventType_CATCHUPBLOCKS.String(),
 		Src: []string{
+			blockchain_api.FSMStateType_IDLE.String(),
 			blockchain_api.FSMStateType_RUNNING.String(),
 		},
 		Dst: blockchain_api.FSMStateType_CATCHINGBLOCKS.String(),
@@ -48,10 +53,9 @@ var FSMTransitions = fsm.Events{
 		// not caught up - exactly what routing catchup through CATCHINGBLOCKS
 		// avoids.
 		//
-		// This does not cancel an in-flight catchup; see the note on the
-		// CATCHINGBLOCKS guard in Server.SendFSMEvent, which also records the one
-		// race that can undo an operator's STOP. IDLE is kept stable against *new*
-		// catchups by CATCHUPBLOCKS above having no IDLE source.
+		// This does not cancel an in-flight catchup, and IDLE is not a state the
+		// node is guaranteed to hold: see the note on the CATCHINGBLOCKS guard in
+		// Server.SendFSMEvent for what can still take it out of IDLE.
 		Name: blockchain_api.FSMEventType_STOP.String(),
 		Src: []string{
 			blockchain_api.FSMStateType_RUNNING.String(),

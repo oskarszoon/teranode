@@ -178,6 +178,11 @@ func TestProcessCatchupChItem(t *testing.T) {
 		mockBC := &blockchain.Mock{}
 		mockBC.On("ReportPeerFailure", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
 
+		// processCatchupChItem drops the item while the node is IDLE; these cases
+		// are about the retry/attempt bookkeeping, so report a running node.
+		runningState := blockchain.FSMStateRUNNING
+		mockBC.On("GetFSMCurrentState", mock.Anything).Return(&runningState, nil).Maybe()
+
 		calls := 0
 		u := &Server{
 			settings:            tSettings,
@@ -201,6 +206,43 @@ func TestProcessCatchupChItem(t *testing.T) {
 	item := func(b *model.Block) processBlockCatchup {
 		return processBlockCatchup{block: b, peerID: "", baseURL: ""}
 	}
+
+	t.Run("idle node is not revived by a block announcement", func(t *testing.T) {
+		// cmd/rewindblockchain gates on IDLE, so an announcement arriving while an
+		// operator has the node parked must not walk it back into catchup. The FSM
+		// still allows IDLE -> CATCHINGBLOCKS for the operator's own resume; it is
+		// this automatic path that has to defer.
+		u, calls := newServer(3, nil)
+		idle := blockchain.FSMStateIDLE
+		mockBC := &blockchain.Mock{}
+		mockBC.On("GetFSMCurrentState", mock.Anything).Return(&idle, nil)
+		u.blockchainClient = mockBC
+
+		b := testBlock()
+		u.processBlockNotify.Set(*b.Hash(), true, ttlcache.DefaultTTL)
+
+		u.processCatchupChItem(ctx, item(b))
+
+		require.Equal(t, 0, *calls, "catchup must not run while the node is IDLE")
+		require.Nil(t, u.processBlockNotify.Get(*b.Hash()), "guard should be cleared so the block can be retried once resumed")
+	})
+
+	t.Run("a failed state read does not stall catchup", func(t *testing.T) {
+		// The read failing is far more likely than the node being idled, so the
+		// gate is best-effort rather than fail-closed.
+		u, calls := newServer(3, nil)
+		mockBC := &blockchain.Mock{}
+		mockBC.On("GetFSMCurrentState", mock.Anything).Return(nil, errors.NewServiceError("blockchain unavailable"))
+		mockBC.On("ReportPeerFailure", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
+		u.blockchainClient = mockBC
+
+		b := testBlock()
+		u.processBlockNotify.Set(*b.Hash(), true, ttlcache.DefaultTTL)
+
+		u.processCatchupChItem(ctx, item(b))
+
+		require.Equal(t, 1, *calls, "catchup should proceed when the state cannot be read")
+	})
 
 	t.Run("success clears guards and resets counter", func(t *testing.T) {
 		u, calls := newServer(3, nil)
@@ -490,6 +532,11 @@ func TestCatchupCap_BoundsReentry(t *testing.T) {
 
 		mockBC := &blockchain.Mock{}
 		mockBC.On("ReportPeerFailure", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
+
+		// processCatchupChItem drops the item while the node is IDLE; this case is
+		// about the re-entry cap, so report a running node.
+		runningState := blockchain.FSMStateRUNNING
+		mockBC.On("GetFSMCurrentState", mock.Anything).Return(&runningState, nil).Maybe()
 
 		calls := 0
 		u := &Server{

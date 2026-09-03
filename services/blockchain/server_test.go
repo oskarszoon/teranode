@@ -3837,6 +3837,43 @@ func Test_SendFSMEvent_FromCatchingBlocks(t *testing.T) {
 	}
 }
 
+// Test_SendFSMEvent_FromIdle pins the events an operator can use to leave IDLE.
+// CATCHUPBLOCKS matters: it is the resume path that stays under the checkpoint
+// gate, so an operator does not have to take the exempt RUN to restart a node
+// they idled part-way through its initial sync.
+func Test_SendFSMEvent_FromIdle(t *testing.T) {
+	tests := []struct {
+		name      string
+		event     blockchain_api.FSMEventType
+		wantState string
+	}{
+		{
+			name:      "CATCHUPBLOCKS resumes catching up",
+			event:     blockchain_api.FSMEventType_CATCHUPBLOCKS,
+			wantState: blockchain_api.FSMStateType_CATCHINGBLOCKS.String(),
+		},
+		{
+			name:      "RUN goes live",
+			event:     blockchain_api.FSMEventType_RUN,
+			wantState: blockchain_api.FSMStateType_RUNNING.String(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := setup(t)
+			ctx.server.finiteStateMachine.SetState(blockchain_api.FSMStateType_IDLE.String())
+
+			_, err := ctx.server.SendFSMEvent(context.Background(), &blockchain_api.SendFSMEventRequest{
+				Event: tt.event,
+			})
+
+			require.NoError(t, err)
+			require.Equal(t, tt.wantState, ctx.server.finiteStateMachine.Current())
+		})
+	}
+}
+
 // Test_WaitUntilFSMTransitionFromIdleState tests the WaitUntilFSMTransitionFromIdleState gRPC method
 func Test_WaitUntilFSMTransitionFromIdleState(t *testing.T) {
 	ctx := setup(t)
