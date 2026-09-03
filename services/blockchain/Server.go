@@ -2907,13 +2907,26 @@ func (b *Blockchain) SendFSMEvent(ctx context.Context, eventReq *blockchain_api.
 	// overrides a safety mechanism should be able to see that they did: the
 	// exempt path logs at Warn instead of rejecting. Boot no longer uses
 	// IDLE -> RUNNING, so this cannot fire on a routine start.
+	//
+	// The exemption covers only a tip known to be below the checkpoint. A gate
+	// that could not be evaluated at all - store unreadable, no tip meta - is
+	// refused from every prior state including IDLE, because not knowing the
+	// height is not the same as knowing it is high enough.
 	if eventReq.Event == blockchain_api.FSMEventType_RUN {
-		if err := b.guardRunBelowHighestCheckpoint(ctx); err != nil {
-			if priorState != blockchain_api.FSMStateType_IDLE.String() {
-				b.logger.Warnf("[Blockchain Server] RUN rejected: %s", err.Error())
-				return nil, errors.WrapGRPC(err)
-			}
-
+		belowCheckpoint, err := b.evaluateRunCheckpointGate(ctx)
+		switch {
+		case err == nil:
+			// Gate satisfied.
+		case !belowCheckpoint:
+			// The gate could not be evaluated at all. Refuse from every prior
+			// state, IDLE included: the override waives a known-too-low tip, not
+			// an unknown one.
+			b.logger.Warnf("[Blockchain Server] RUN rejected, checkpoint gate could not be evaluated: %s", err.Error())
+			return nil, errors.WrapGRPC(err)
+		case priorState != blockchain_api.FSMStateType_IDLE.String():
+			b.logger.Warnf("[Blockchain Server] RUN rejected: %s", err.Error())
+			return nil, errors.WrapGRPC(err)
+		default:
 			b.logger.Warnf("[Blockchain Server] RUN accepted from IDLE despite the checkpoint gate (operator override): %s", err.Error())
 		}
 	}
@@ -2966,31 +2979,43 @@ func (b *Blockchain) SendFSMEvent(ctx context.Context, eventReq *blockchain_api.
 // network defines no checkpoints (regtest, brand-new networks), or the store
 // has no chain tip yet (returns a state error so the caller retries later).
 func (b *Blockchain) guardRunBelowHighestCheckpoint(ctx context.Context) error {
+	_, err := b.evaluateRunCheckpointGate(ctx)
+	return err
+}
+
+// evaluateRunCheckpointGate reports why RUN is being refused, separating the
+// two cases the caller must treat differently. belowCheckpoint is true only for
+// a chain tip genuinely short of the highest checkpoint - the condition the
+// IDLE operator override is allowed to waive. Every other error is a failure to
+// *evaluate* the gate (store unreadable, no tip meta), which nothing may waive:
+// not knowing the height is not the same as knowing it is high enough.
+func (b *Blockchain) evaluateRunCheckpointGate(ctx context.Context) (belowCheckpoint bool, err error) {
 	if b.settings == nil || b.settings.ChainCfgParams == nil {
-		return nil
+		return false, nil
 	}
 
 	highest := HighestCheckpointHeight(b.settings.ChainCfgParams.Checkpoints)
 	if highest == 0 {
-		return nil
+		return false, nil
 	}
 
 	_, meta, err := b.store.GetBestBlockHeader(ctx)
 	if err != nil {
-		return errors.NewStateError("cannot read best block header to evaluate RUN gate", err)
+		return false, errors.NewStateError("cannot read best block header to evaluate RUN gate", err)
 	}
+
 	if meta == nil {
-		return errors.NewStateError("best block header meta unavailable; refusing RUN")
+		return false, errors.NewStateError("best block header meta unavailable; refusing RUN")
 	}
 
 	if meta.Height < highest {
-		return errors.NewStateError(
+		return true, errors.NewStateError(
 			"refusing RUN: chain tip height %d is below highest checkpoint %d for %s",
 			meta.Height, highest, b.settings.ChainCfgParams.Name,
 		)
 	}
 
-	return nil
+	return false, nil
 }
 
 // HighestCheckpointHeight returns the largest Height in the supplied

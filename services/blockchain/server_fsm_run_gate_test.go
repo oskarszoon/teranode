@@ -306,3 +306,54 @@ func TestSendFSMEvent_RunGate_SourceState(t *testing.T) {
 		})
 	}
 }
+
+// TestRunGate_IdleOverrideScope pins what the IDLE operator override does and
+// does not waive. It waives a chain tip known to be below the highest
+// checkpoint, because that is a deliberate operator choice. It must not waive a
+// failure to evaluate the gate at all: a store that cannot be read leaves the
+// height unknown, and unknown is not the same as high enough.
+func TestRunGate_IdleOverrideScope(t *testing.T) {
+	ctx := context.Background()
+	highest := HighestCheckpointHeight(chaincfg.MainNetParams.Checkpoints)
+	require.Greater(t, highest, uint32(0), "mainnet must have at least one checkpoint")
+
+	newIdleServer := func(t *testing.T, meta *model.BlockHeaderMeta, storeErr error) *Blockchain {
+		t.Helper()
+
+		store := &fsmGateStore{}
+		store.On("GetBestBlockHeader", mock.Anything).Return(&model.BlockHeader{}, meta, storeErr)
+
+		b := newTestBlockchainForGate(t, &chaincfg.MainNetParams, store)
+		b.finiteStateMachine = b.NewFiniteStateMachine()
+		b.finiteStateMachine.SetState(blockchain_api.FSMStateType_IDLE.String())
+
+		return b
+	}
+
+	t.Run("tip below the checkpoint is waived", func(t *testing.T) {
+		b := newIdleServer(t, &model.BlockHeaderMeta{Height: highest - 1}, nil)
+
+		_, err := b.SendFSMEvent(ctx, &blockchain_api.SendFSMEventRequest{Event: blockchain_api.FSMEventType_RUN})
+
+		require.NoError(t, err)
+		require.Equal(t, blockchain_api.FSMStateType_RUNNING.String(), b.finiteStateMachine.Current())
+	})
+
+	t.Run("unreadable store is not waived", func(t *testing.T) {
+		b := newIdleServer(t, nil, errors.NewStorageError("store unavailable"))
+
+		_, err := b.SendFSMEvent(ctx, &blockchain_api.SendFSMEventRequest{Event: blockchain_api.FSMEventType_RUN})
+
+		require.Error(t, err)
+		require.Equal(t, blockchain_api.FSMStateType_IDLE.String(), b.finiteStateMachine.Current())
+	})
+
+	t.Run("missing tip meta is not waived", func(t *testing.T) {
+		b := newIdleServer(t, nil, nil)
+
+		_, err := b.SendFSMEvent(ctx, &blockchain_api.SendFSMEventRequest{Event: blockchain_api.FSMEventType_RUN})
+
+		require.Error(t, err)
+		require.Equal(t, blockchain_api.FSMStateType_IDLE.String(), b.finiteStateMachine.Current())
+	})
+}
