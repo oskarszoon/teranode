@@ -157,9 +157,11 @@ The Block Assembler will only mine blocks when the node is in the `Running` stat
 #### 3.3.3. FSM: Catching Blocks State
 
 The `CatchingBlocks` state represents the node catching up on blocks. It is entered
-either by BlockValidation, when a running node finds it has fallen behind the
-network, or at startup, because a fresh node with no persisted state boots
-straight into it (see section 3.1). In this state:
+by BlockValidation when a running node finds it has fallen behind the network; at
+startup, because a fresh node with no persisted state boots straight into it (see
+section 3.1); or from `Idle`, when a RUN request arrives on a node whose tip is
+still below the network's highest checkpoint, in which case the request is routed
+here instead of to `Running`. In this state:
 
 Allowed Operations in Catching Blocks State:
 
