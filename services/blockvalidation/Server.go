@@ -1373,7 +1373,7 @@ func (u *Server) ValidateBlock(ctx context.Context, request *blockvalidation_api
 
 	ctx, _, deferFn := tracing.Tracer("blockvalidation").Start(ctx, "ValidateBlock",
 		tracing.WithParentStat(u.stats),
-		tracing.WithDebugLogMessage(u.logger, "[Server:ValidateBlock][%s] validate block called for height %d", block.Hash().String(), request.Height),
+		tracing.WithLogMessage(u.logger, "[Server:ValidateBlock][%s] validate block called for height %d", block.Hash().String(), request.Height),
 	)
 	defer deferFn()
 

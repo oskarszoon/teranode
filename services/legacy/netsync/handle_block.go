@@ -119,6 +119,12 @@ func (sm *SyncManager) HandleBlockDirect(ctx context.Context, peer *peer.Peer, b
 	}
 
 	ctx, _, deferFn := tracing.Tracer("netsync").Start(ctx, "HandleBlockDirect",
+		// This span's INFO level is load-bearing. HandleBlockDirect has a named
+		// (err error) return and passes it to deferFn, and an INFO span with a
+		// non-nil error logs at ERROR (util/tracing/tracing.go, logTraceMessage).
+		// The per-phase spans below it are at DEBUG, where that escalation only
+		// happens if the logger is already at DEBUG — so at production
+		// logLevel=INFO this is the only span that surfaces their failures.
 		tracing.WithLogMessage(
 			sm.logger,
 			"[HandleBlockDirect][%s %d] %d txs, peer %s",
@@ -1274,7 +1280,7 @@ func (sm *SyncManager) reuseBlockIDFromUTXO(ctx context.Context, bi blockIdent, 
 func (sm *SyncManager) PreValidateTransactions(ctx context.Context, txMap *txmap.SyncedMap[chainhash.Hash, *TxMapWrapper],
 	blockHash chainhash.Hash, blockHeight uint32, candidateBlockTime uint32, candidateParentMedianTime uint32, outpointOnly bool, failClosed bool) (err error) {
 	_, _, deferFn := tracing.Tracer("netsync").Start(ctx, "PreValidateTransactions",
-		tracing.WithDebugLogMessage(sm.logger, "[PreValidateTransactions] called for block %s / height %d", blockHash, blockHeight),
+		tracing.WithLogMessage(sm.logger, "[PreValidateTransactions] called for block %s / height %d", blockHash, blockHeight),
 		tracing.WithHistogram(prometheusLegacyNetsyncPreValidateTransactions),
 	)
 
