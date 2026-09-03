@@ -2878,7 +2878,8 @@ func (b *Blockchain) SendFSMEvent(ctx context.Context, eventReq *blockchain_api.
 
 	// Refuse to transition to RUNNING while the local chain tip is still below
 	// the network's highest hard-coded checkpoint. Pre-checkpoint heights are
-	// guaranteed to be deep history (mainnet's highest is block 938000), so a
+	// guaranteed to be deep history (see HighestCheckpointHeight over
+	// settings.ChainCfgParams.Checkpoints for the live value), so a
 	// node sitting below them is mid-IBD even if a catchup worker thinks it
 	// has finished its current chunk. Going to RUNNING in that state lets the
 	// mempool/validator operate under pre-Genesis output rules and the legacy
@@ -2895,7 +2896,8 @@ func (b *Blockchain) SendFSMEvent(ctx context.Context, eventReq *blockchain_api.
 	// The exemption is keyed on having no chain tip at all, not merely on being
 	// in IDLE. Keying it on IDLE alone would have made this gate a two-step
 	// bypass once STOP could leave CATCHINGBLOCKS: idle a node at mainnet height
-	// 400k, then RUN it, and it reaches RUNNING far below checkpoint 938000. A
+	// 400k, then RUN it, and it reaches RUNNING far below the highest
+	// checkpoint. A
 	// node with a partial chain does not need that exemption, because it can
 	// resume with CATCHUPBLOCKS, which keeps this gate in force - so the narrow
 	// key costs nothing and closes the bypass.

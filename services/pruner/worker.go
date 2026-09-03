@@ -122,10 +122,14 @@ func (s *Server) waitForBlockMinedStatus(ctx context.Context, blockHash *chainha
 // Records are only deleted if they've passed the retention window and are not preserved.
 //
 // CATCHUP SKIP MODE:
-// When SkipDuringCatchup is enabled (default: false), the pruner skips all operations
-// during FSMStateCATCHINGBLOCKS state. This prevents race conditions where block
-// validation marks transactions as mined faster than the pruner can preserve their parents.
-// Once the node transitions to FSMStateRUNNING, the pruner resumes normal operation.
+// When SkipDuringCatchup is enabled (default: false), the pruner runs only while the
+// node is in FSMStateRUNNING and skips all operations in every other state. This
+// prevents race conditions where block validation marks transactions as mined faster
+// than the pruner can preserve their parents. The test is for RUNNING rather than
+// against FSMStateCATCHINGBLOCKS because that race lasts as long as a catchup does,
+// not as long as the FSM happens to report CATCHINGBLOCKS: an operator can stop a node
+// mid-catchup and leave the remaining blocks to drain, so a node in FSMStateIDLE may
+// still be validating.
 //
 // SAFETY CHECKS:
 // Block assembly state is checked before pruning to ensure it's safe to proceed. This prevents
