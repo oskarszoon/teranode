@@ -2758,7 +2758,7 @@ func (stp *SubtreeProcessor) removeTxFromSubtrees(ctx context.Context, hash chai
 	_, _, deferFn := tracing.Tracer("subtreeprocessor").Start(ctx, "removeTxFromSubtrees",
 		tracing.WithParentStat(stp.stats),
 		tracing.WithHistogram(prometheusSubtreeProcessorRemoveTx),
-		tracing.WithLogMessage(stp.logger, "[SubtreeProcessor][removeTxFromSubtrees][%s] removing transaction from subtrees", hash),
+		tracing.WithDebugLogMessage(stp.logger, "[SubtreeProcessor][removeTxFromSubtrees][%s] removing transaction from subtrees", hash),
 	)
 
 	defer deferFn()
@@ -4112,7 +4112,7 @@ func (stp *SubtreeProcessor) moveBackBlockBulkBuild(ctx context.Context, block *
 	conflictingHashes []chainhash.Hash) ([][]subtreepkg.Node, []chainhash.Hash, error) {
 
 	_, _, deferFn := tracing.Tracer("subtreeprocessor").Start(ctx, "moveBackBlockBulkBuild",
-		tracing.WithLogMessage(stp.logger, "[moveBackBlock:BulkBuild][%s] with %d subtrees", block.String(), len(block.Subtrees)),
+		tracing.WithDebugLogMessage(stp.logger, "[moveBackBlock:BulkBuild][%s] with %d subtrees", block.String(), len(block.Subtrees)),
 	)
 	defer deferFn()
 
@@ -4283,7 +4283,7 @@ func (stp *SubtreeProcessor) removeCoinbaseUtxos(ctx context.Context, block *mod
 
 func (stp *SubtreeProcessor) moveBackBlockGetSubtrees(ctx context.Context, block *model.Block) ([][]subtreepkg.Node, [][]subtreepkg.TxInpoints, []chainhash.Hash, error) {
 	_, _, deferFn := tracing.Tracer("subtreeprocessor").Start(ctx, "moveBackBlockGetSubtrees",
-		tracing.WithLogMessage(stp.logger, "[moveBackBlock:GetSubtrees][%s] with %d subtrees: get subtrees", block.String(), len(block.Subtrees)),
+		tracing.WithDebugLogMessage(stp.logger, "[moveBackBlock:GetSubtrees][%s] with %d subtrees: get subtrees", block.String(), len(block.Subtrees)),
 	)
 	defer deferFn()
 
@@ -4418,7 +4418,7 @@ func (stp *SubtreeProcessor) processBlockSubtrees(block *model.Block) (map[chain
 func (stp *SubtreeProcessor) createTransactionMapIfNeeded(ctx context.Context, block *model.Block, blockSubtreesMap map[chainhash.Hash]int) (*SplitSwissMap, []chainhash.Hash, error) {
 	_, _, deferFn := tracing.Tracer("subtreeprocessor").Start(ctx, "createTransactionMapIfNeeded",
 		tracing.WithParentStat(stp.stats),
-		tracing.WithLogMessage(stp.logger, "[moveForwardBlock][%s] processing subtrees into transaction map", block.String()),
+		tracing.WithDebugLogMessage(stp.logger, "[moveForwardBlock][%s] processing subtrees into transaction map", block.String()),
 	)
 
 	defer deferFn()
@@ -4618,7 +4618,7 @@ func (stp *SubtreeProcessor) processRemainderTransactionsAndDequeue(ctx context.
 
 		_, _, deferFn := tracing.Tracer("subtreeprocessor").Start(ctx, "processRemainderTransactionsAndDequeue",
 			tracing.WithParentStat(stp.stats),
-			tracing.WithLogMessage(stp.logger, "[moveForwardBlock][%s] processing %d remainder tx hashes into subtrees", params.Block.String(), remainderCount),
+			tracing.WithDebugLogMessage(stp.logger, "[moveForwardBlock][%s] processing %d remainder tx hashes into subtrees", params.Block.String(), remainderCount),
 		)
 
 		defer deferFn()
