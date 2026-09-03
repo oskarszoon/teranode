@@ -1267,7 +1267,7 @@ func (b *Blockchain) GetBlocks(ctx context.Context, req *blockchain_api.GetBlock
 	ctx, _, deferFn := tracing.Tracer("blockchain").Start(ctx, "GetBlocks",
 		tracing.WithParentStat(b.stats),
 		tracing.WithHistogram(prometheusBlockchainGetBlockHeaders),
-		tracing.WithLogMessage(b.logger, "[GetBlocks] called for %s", util.ReverseAndHexEncodeSlice(req.Hash)),
+		tracing.WithDebugLogMessage(b.logger, "[GetBlocks] called for %s", util.ReverseAndHexEncodeSlice(req.Hash)),
 	)
 	defer deferFn()
 
@@ -1302,7 +1302,7 @@ func (b *Blockchain) GetBlockByHeight(ctx context.Context, request *blockchain_a
 	ctx, _, deferFn := tracing.Tracer("blockchain").Start(ctx, "GetBlockByHeight",
 		tracing.WithParentStat(b.stats),
 		tracing.WithHistogram(prometheusBlockchainGetBlock),
-		tracing.WithLogMessage(b.logger, "[GetBlockByHeight] called for %d", request.Height),
+		tracing.WithDebugLogMessage(b.logger, "[GetBlockByHeight] called for %d", request.Height),
 	)
 	defer deferFn()
 
@@ -1338,7 +1338,7 @@ func (b *Blockchain) GetBlockByID(ctx context.Context, request *blockchain_api.G
 	ctx, _, deferFn := tracing.Tracer("blockchain").Start(ctx, "GetBlockByHeight",
 		tracing.WithParentStat(b.stats),
 		tracing.WithHistogram(prometheusBlockchainGetBlock),
-		tracing.WithLogMessage(b.logger, "[GetBlockByID] called for %d", request.Id),
+		tracing.WithDebugLogMessage(b.logger, "[GetBlockByID] called for %d", request.Id),
 	)
 	defer deferFn()
 
@@ -1373,7 +1373,7 @@ func (b *Blockchain) GetBlockByID(ctx context.Context, request *blockchain_api.G
 func (b *Blockchain) GetNextBlockID(ctx context.Context, _ *emptypb.Empty) (*blockchain_api.GetNextBlockIDResponse, error) {
 	ctx, _, deferFn := tracing.Tracer("blockchain").Start(ctx, "GetNextBlockID",
 		tracing.WithParentStat(b.stats),
-		tracing.WithLogMessage(b.logger, "[GetNextBlockID] called"),
+		tracing.WithDebugLogMessage(b.logger, "[GetNextBlockID] called"),
 	)
 	defer deferFn()
 
@@ -1391,7 +1391,7 @@ func (b *Blockchain) GetNextBlockID(ctx context.Context, _ *emptypb.Empty) (*blo
 func (b *Blockchain) AssignBlockID(ctx context.Context, req *blockchain_api.AssignBlockIDRequest) (*blockchain_api.AssignBlockIDResponse, error) {
 	ctx, _, deferFn := tracing.Tracer("blockchain").Start(ctx, "AssignBlockID",
 		tracing.WithParentStat(b.stats),
-		tracing.WithLogMessage(b.logger, "[AssignBlockID] called"),
+		tracing.WithDebugLogMessage(b.logger, "[AssignBlockID] called"),
 	)
 	defer deferFn()
 
@@ -2555,7 +2555,7 @@ func (b *Blockchain) SendNotification(ctx context.Context, req *blockchain_api.N
 	_, _, deferFn := tracing.Tracer("blockchain").Start(ctx, "RevalidateBlock",
 		tracing.WithParentStat(b.stats),
 		tracing.WithHistogram(prometheusBlockchainSendNotification),
-		tracing.WithLogMessage(b.logger, "[SendNotification] called for %s notification type %s", util.ReverseAndHexEncodeSlice(req.Hash), req.Type.String()),
+		tracing.WithDebugLogMessage(b.logger, "[SendNotification] called for %s notification type %s", util.ReverseAndHexEncodeSlice(req.Hash), req.Type.String()),
 	)
 	defer deferFn()
 
