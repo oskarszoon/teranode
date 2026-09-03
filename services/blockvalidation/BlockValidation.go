@@ -1255,7 +1255,7 @@ func (u *BlockValidation) tryClaimBlockForSetMined(blockHash *chainhash.Hash) bo
 func (u *BlockValidation) setTxMinedStatus(ctx context.Context, blockHash *chainhash.Hash, unsetMined ...bool) (err error) {
 	ctx, _, deferFn := tracing.Tracer("blockvalidation").Start(ctx, "setTxMined",
 		tracing.WithParentStat(u.stats),
-		tracing.WithLogMessage(u.logger, "[setTxMined][%s] setting tx mined", blockHash.String()),
+		tracing.WithDebugLogMessage(u.logger, "[setTxMined][%s] setting tx mined", blockHash.String()),
 	)
 	defer deferFn()
 
@@ -2772,7 +2772,7 @@ func (u *BlockValidation) quickValidateOutpointOnly(block *model.Block) bool {
 // Returns an error if the update fails.
 func (u *BlockValidation) updateSubtreesDAH(ctx context.Context, block *model.Block) (err error) {
 	ctx, _, deferFn := tracing.Tracer("blockvalidation").Start(ctx, "BlockValidation:updateSubtreesDAH",
-		tracing.WithLogMessage(u.logger, "[updateSubtreesDAH][%s] updating subtrees DAH", block.Hash().String()),
+		tracing.WithDebugLogMessage(u.logger, "[updateSubtreesDAH][%s] updating subtrees DAH", block.Hash().String()),
 	)
 
 	defer deferFn()
