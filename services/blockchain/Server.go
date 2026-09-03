@@ -2822,9 +2822,15 @@ func (b *Blockchain) IsFullyReady(ctx context.Context) (bool, error) {
 //
 // The returned state is not always the one the event names: a RUN from IDLE on a
 // node whose tip is below the network's highest checkpoint is routed to
-// CATCHINGBLOCKS instead of RUNNING (see the gate below). Callers that care about
-// the outcome must read the response rather than infer it from the event, which
-// is what teranode-cli setfsmstate and the asset FSM handler do.
+// CATCHINGBLOCKS instead of RUNNING (see the gate below). So the outcome must be
+// observed, never inferred from the event.
+//
+// Note that the Go client discards this response — Client.SendFSMEvent returns
+// only an error (Client.go) — so in-tree callers observe the outcome by
+// re-reading GetFSMCurrentState afterwards, which is what teranode-cli
+// setfsmstate (cmd/setfsmstate/set_fsm_state.go) and the asset FSM handler
+// (services/asset/httpimpl/fsm_handler.go) both do. A caller speaking to the RPC
+// directly can read the response instead.
 func (b *Blockchain) SendFSMEvent(ctx context.Context, eventReq *blockchain_api.SendFSMEventRequest) (*blockchain_api.GetFSMStateResponse, error) {
 	// Serialise FSM transitions. SendFSMEvent performs a read-modify-write across
 	// the FSM (prior-state checks -> Event -> stateChangeTimestamp update) that
@@ -2869,12 +2875,13 @@ func (b *Blockchain) SendFSMEvent(ctx context.Context, eventReq *blockchain_api.
 	// both reach the exempt path with a tip below the checkpoint. The property
 	// belongs in this gate rather than in the choice of boot state.
 	//
-	// From IDLE a below-checkpoint RUN is rerouted to CATCHUPBLOCKS rather than
-	// rejected. "Run" from an operator means "put this node into service", and on
-	// a node that is not caught up the route there is through catch-up; rejecting
-	// would leave the operator to translate the error into a second command. The
-	// reroute is not silent: the response carries the state actually reached, and
-	// teranode-cli setfsmstate re-reads and prints it.
+	// From IDLE a below-checkpoint RUN is routed to CATCHINGBLOCKS rather than
+	// rejected, by substituting the CATCHUPBLOCKS event below. "Run" from an
+	// operator means "put this node into service", and on a node that is not
+	// caught up the route there is through catch-up; rejecting would leave the
+	// operator to translate the error into a second command. The reroute is not
+	// silent: the response carries the state actually reached, and teranode-cli
+	// setfsmstate re-reads the state and prints it.
 	//
 	// From CATCHINGBLOCKS the same RUN is still rejected: the node is already
 	// catching up, so rerouting would be a no-op and the error is the useful
@@ -3001,8 +3008,7 @@ func HighestCheckpointHeight(checkpoints []chaincfg.Checkpoint) uint32 {
 // This RPC cannot report that. It returns *emptypb.Empty, and Client.Run returns
 // only an error, so a reroute looks exactly like success: the caller gets a nil
 // error and no way to tell which state it landed in. Call GetFSMCurrentState
-// afterwards if the outcome matters, or use SendFSMEvent, which returns the state
-// actually reached.
+// afterwards if the outcome matters.
 func (b *Blockchain) Run(ctx context.Context, _ *emptypb.Empty) (*emptypb.Empty, error) {
 	// check whether the FSM is already in the RUNNING state
 	if b.finiteStateMachine.Is(blockchain_api.FSMStateType_RUNNING.String()) {
