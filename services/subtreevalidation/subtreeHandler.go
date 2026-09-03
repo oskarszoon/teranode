@@ -117,7 +117,7 @@ func (u *Server) subtreesHandler(ctx context.Context, hash *chainhash.Hash, base
 	ctx, _, deferFn := tracing.Tracer("subtreevalidation").Start(ctx, "subtreesHandler",
 		tracing.WithParentStat(u.stats),
 		tracing.WithHistogram(prometheusSubtreeValidationValidateSubtreeHandler),
-		tracing.WithLogMessage(u.logger, "[subtreesHandler] Received subtree message for %s from %s", hash.String(), baseURL.String()),
+		tracing.WithDebugLogMessage(u.logger, "[subtreesHandler] Received subtree message for %s from %s", hash.String(), baseURL.String()),
 	)
 	defer deferFn()
 
