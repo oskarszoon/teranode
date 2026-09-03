@@ -2927,7 +2927,8 @@ func (b *Blockchain) SendFSMEvent(ctx context.Context, eventReq *blockchain_api.
 			// start syncing, and tx relay is suppressed while FSM != RUNNING, so
 			// this is safe. A node with a partial chain is not covered: it should
 			// resume with CATCHUPBLOCKS, which keeps this gate in force.
-			b.logger.Warnf("[Blockchain Server] RUN accepted from IDLE at height 0 (no chain tip yet): %s", err.Error())
+			b.logger.Warnf("[Blockchain Server] RUN accepted from IDLE: node has no chain tip yet (height %d), waiving the %s checkpoint gate at height %d",
+				tipHeight, b.settings.ChainCfgParams.Name, HighestCheckpointHeight(b.settings.ChainCfgParams.Checkpoints))
 		default:
 			b.logger.Warnf("[Blockchain Server] RUN rejected: %s", err.Error())
 			return nil, errors.WrapGRPC(err)

@@ -178,9 +178,22 @@ func (s *Server) prunerProcessor(ctx context.Context) {
 					prunerSkipped.WithLabelValues("fsm_error").Inc()
 					continue
 				}
-				if fsmState != nil && *fsmState != blockchain.FSMStateRUNNING {
+				// Fail closed on an unknown state. The read above returned no error,
+				// but a nil state is still "we do not know we are RUNNING", and this
+				// guard exists to keep the pruner off a node that might be
+				// validating. Skipping costs a cycle; guessing wrong reopens the
+				// parent-preservation race.
+				if fsmState == nil {
+					s.logger.Warnf("[pruner][%s:%d] skipping, FSM state unknown", blockHashStr, blockHeight)
+					prunerSkipped.WithLabelValues("fsm_error").Inc()
+
+					continue
+				}
+
+				if *fsmState != blockchain.FSMStateRUNNING {
 					s.logger.Debugf("[pruner][%s:%d] skipping, node is %s not RUNNING", blockHashStr, blockHeight, fsmState.String())
 					prunerSkipped.WithLabelValues("catchup_mode").Inc()
+
 					continue
 				}
 			}
