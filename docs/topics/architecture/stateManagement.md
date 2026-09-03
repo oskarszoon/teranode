@@ -47,7 +47,7 @@ The FSM responds to the following **events**:
 - **CatchupBlocks**
 - **Stop**
 
-The diagram below represents the relationships between the states and events in the FSM (as defined in `services/blockchain/fsm.go`):
+The diagram below represents the relationships between the states and events in the FSM (as defined in `services/blockchain/fsm.go`). Its start arrow shows the state a node actually boots in, which `Init` sets with `SetState` rather than by firing an event; the state machine's own constructor default is `Idle`, which is why the generated `docs/state-machine.diagram.md` starts there instead:
 
 ![Finite state machine diagram](img/fsmDiagram.svg){ width="500" }
 
@@ -63,10 +63,16 @@ so the node cannot go live until its tip has caught up. **Run** goes live
 immediately and is exempt from that gate. Prefer **CatchupBlocks** to resume a
 node that was idled part-way through its initial sync.
 
-Block announcements cannot use the _Idle_ to _CatchingBlocks_ edge to revive an
-idled node: block validation drops incoming catch-up work while the FSM reads
-_Idle_ (`processCatchupChItem`). The restriction is on that automatic path
-rather than on the transition, so the operator keeps the safe resume route.
+Block announcements are stopped from using the _Idle_ to _CatchingBlocks_ edge
+to revive an idled node: block validation drops incoming catch-up work while the
+FSM reads _Idle_ (`processCatchupChItem`). The restriction is on that automatic
+path rather than on the transition, so the operator keeps the safe resume route.
+
+That check is best-effort by design. If the state read itself fails it lets the
+catch-up proceed rather than stalling sync, on the grounds that a failed read is
+far likelier than the node having been idled. So it makes an accidental revival
+unlikely, not impossible — which is one more reason to re-read the state before
+starting anything destructive.
 
 Teranode provides a visualizer tool to generate and visualize the state machine diagram. To run the visualizer, use the command `go run services/blockchain/fsm_visualizer/main.go`. The generated `docs/state-machine.diagram.md` can be visualized using <https://mermaid.live/>.
 
