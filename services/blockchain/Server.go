@@ -2876,31 +2876,29 @@ func (b *Blockchain) SendFSMEvent(ctx context.Context, eventReq *blockchain_api.
 		}
 	}
 
-	// Refuse to transition to RUNNING while the local chain tip is still below
-	// the network's highest hard-coded checkpoint. Pre-checkpoint heights are
-	// guaranteed to be deep history (see HighestCheckpointHeight over
-	// settings.ChainCfgParams.Checkpoints for the live value), so a
-	// node sitting below them is mid-IBD even if a catchup worker thinks it
-	// has finished its current chunk. Going to RUNNING in that state lets the
-	// mempool/validator operate under pre-Genesis output rules and the legacy
-	// service relay tx invs that post-Genesis peers ban on sight
-	// (`bad-txns-vout-p2sh BAN THRESHOLD EXCEEDED`).
+	// Refuse to transition to RUNNING while the local chain tip is still below the
+	// network's highest hard-coded checkpoint (see HighestCheckpointHeight over
+	// settings.ChainCfgParams.Checkpoints for the live value). Pre-checkpoint
+	// heights are guaranteed to be deep history, so a node sitting below them is
+	// mid-IBD even if a catchup worker thinks it has finished its current chunk.
+	// Going to RUNNING in that state lets the mempool/validator operate under
+	// pre-Genesis output rules and the legacy service relay tx invs that
+	// post-Genesis peers ban on sight (`bad-txns-vout-p2sh BAN THRESHOLD
+	// EXCEEDED`).
 	//
-	// The gate only applies when the prior state already implies a "caught up"
-	// claim (CATCHINGBLOCKS -> RUNNING). IDLE -> RUNNING is an operator override
-	// (e.g. teranodecli setfsmstate running) and stays exempt: a fresh node has
-	// no tip yet and tx relay is suppressed while FSM != RUNNING. Automatic boot
-	// no longer uses IDLE -> RUNNING; fresh nodes boot into CATCHINGBLOCKS (see
-	// Init) and only reach RUNNING by completing catchup above the checkpoint.
+	// One exemption: a node with no chain tip at all. It has to be able to reach
+	// RUNNING for downstream services to start syncing, and tx relay is suppressed
+	// while FSM != RUNNING, so letting it through is safe. Automatic boot does not
+	// rely on this - fresh nodes boot into CATCHINGBLOCKS (see Init) and reach
+	// RUNNING by completing catchup above the checkpoint.
 	//
-	// The exemption is keyed on having no chain tip at all, not merely on being
-	// in IDLE. Keying it on IDLE alone would have made this gate a two-step
-	// bypass once STOP could leave CATCHINGBLOCKS: idle a node at mainnet height
-	// 400k, then RUN it, and it reaches RUNNING far below the highest
-	// checkpoint. A
-	// node with a partial chain does not need that exemption, because it can
-	// resume with CATCHUPBLOCKS, which keeps this gate in force - so the narrow
-	// key costs nothing and closes the bypass.
+	// The exemption is keyed on having no tip rather than on prior state IDLE.
+	// Keying it on IDLE was safe while a node mid-IBD could not reach IDLE at all,
+	// but once STOP could leave CATCHINGBLOCKS it became a two-step bypass: idle a
+	// node at mainnet height 400k, RUN it, and it lands in RUNNING far below the
+	// highest checkpoint. A node with a partial chain does not need the exemption,
+	// because it resumes with CATCHUPBLOCKS, which keeps this gate in force - so
+	// the narrow key costs nothing and closes the bypass.
 	//
 	// A gate that could not be evaluated at all - store unreadable, no tip meta -
 	// is refused from every prior state including IDLE: an exemption may waive a
