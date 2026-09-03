@@ -194,7 +194,7 @@ func blockIDToUint32(id uint64, blockHash string) (uint32, error) {
 func (u *BlockValidation) quickValidateBlock(ctx context.Context, block *model.Block, peerID, baseURL string) error {
 	ctx, _, deferFn := tracing.Tracer("blockvalidation").Start(ctx, "quickValidateBlock",
 		tracing.WithParentStat(u.stats),
-		tracing.WithLogMessage(u.logger, "[quickValidateBlock][%s] performing quick validation for checkpointed block at height %d", block.Hash().String(), block.Height),
+		tracing.WithDebugLogMessage(u.logger, "[quickValidateBlock][%s] performing quick validation for checkpointed block at height %d", block.Hash().String(), block.Height),
 	)
 	defer deferFn()
 
@@ -266,7 +266,7 @@ func (u *BlockValidation) quickValidateBlock(ctx context.Context, block *model.B
 func (u *BlockValidation) quickValidateBlockAsync(ctx context.Context, block *model.Block, peerID, baseURL string, writeJobsChan chan<- *SubtreeWriteJob) error {
 	ctx, _, deferFn := tracing.Tracer("blockvalidation").Start(ctx, "quickValidateBlockAsync",
 		tracing.WithParentStat(u.stats),
-		tracing.WithLogMessage(u.logger, "[quickValidateBlockAsync][%s] performing async quick validation for checkpointed block at height %d", block.Hash().String(), block.Height),
+		tracing.WithDebugLogMessage(u.logger, "[quickValidateBlockAsync][%s] performing async quick validation for checkpointed block at height %d", block.Hash().String(), block.Height),
 	)
 	defer deferFn()
 
@@ -379,7 +379,7 @@ type subtreeResult struct {
 func (u *BlockValidation) processBlockSubtrees(ctx context.Context, block *model.Block, outpointOnly bool) (uint64, error) {
 	ctx, _, deferFn := tracing.Tracer("blockvalidation").Start(ctx, "processBlockSubtrees",
 		tracing.WithParentStat(u.stats),
-		tracing.WithLogMessage(u.logger, "[processBlockSubtrees][%s] processing %d subtrees in batches of %d", block.Hash().String(), len(block.Subtrees), u.settings.BlockValidation.SubtreeBatchSize),
+		tracing.WithDebugLogMessage(u.logger, "[processBlockSubtrees][%s] processing %d subtrees in batches of %d", block.Hash().String(), len(block.Subtrees), u.settings.BlockValidation.SubtreeBatchSize),
 	)
 	defer deferFn()
 
