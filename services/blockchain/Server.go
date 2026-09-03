@@ -2858,12 +2858,18 @@ func (b *Blockchain) SendFSMEvent(ctx context.Context, eventReq *blockchain_api.
 	// handleBlockMsg and blockHandler without checking for IDLE, and startSync is
 	// driven by a ticker, so an operator's STOP is undone on the next tick.
 	//
-	// Both reach here with prior state IDLE and so take the exempt branch below,
-	// logging an "operator override" with no operator involved. Closing this
-	// properly needs either a compare-and-swap transition the FSM API does not
-	// offer or an IDLE check in legacy; neither belongs in this change, so it is
-	// recorded here and in the operator docs, which tell you to re-read the state
-	// before starting anything destructive.
+	// Neither can walk a node past the checkpoint gate, though. Both arrive with
+	// prior state IDLE, and the exemption below needs prior state IDLE *and* no
+	// chain tip: a node mid-download has a partial chain, so such a RUN is
+	// refused. What they can still do is promote an idled node that is already
+	// at or above the checkpoint - which is the node an operator is most likely
+	// to be idling for a rewind. RUNNING is a legitimate state for that node, so
+	// the gate has no opinion; the loss is the operator's STOP, not the gate.
+	//
+	// Closing that needs either a compare-and-swap transition the FSM API does
+	// not offer or an IDLE check in legacy; neither belongs in this change, so it
+	// is recorded here and in the operator docs, which tell you to re-read the
+	// state before starting anything destructive.
 	// IDLE is therefore not a general quiesce - other services gate on it only at
 	// startup - so an operator rewinding a node that is genuinely still validating
 	// blocks must stop the node rather than rely on IDLE alone.

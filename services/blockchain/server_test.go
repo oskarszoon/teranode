@@ -3752,8 +3752,10 @@ func Test_Idle(t *testing.T) {
 // highest checkpoint in every case here.
 //
 // RUN from CATCHINGBLOCKS is refused: that prior state implies a "caught up"
-// claim. RUN from IDLE is an operator override and stays exempt - it is
-// accepted, and logs that the gate was bypassed rather than doing so silently.
+// claim. RUN from IDLE is accepted here only because setup(t) has nothing but
+// genesis, which is the no-tip-yet exemption; a partial chain below the
+// checkpoint is refused from IDLE too, which TestRunGate_IdleOverrideScope
+// covers.
 func Test_SendFSMEvent_RunCheckpointGate(t *testing.T) {
 	tests := []struct {
 		name       string

@@ -283,10 +283,11 @@ and the `blockHandler` loop, which fires precisely because the state is not
 `Running`. On such a node an operator's `Stop` is undone on the next tick, with
 no race needed.
 
-Both paths reach `SendFSMEvent` with prior state `Idle`, so on a node below the
-highest checkpoint they take the exempt branch and log `RUN accepted from IDLE
-despite the checkpoint gate (operator override)` with no operator involved. Read
-that line with the call site in mind rather than assuming a human acted.
+Neither can carry a node past the checkpoint gate. Both arrive with prior state
+`Idle`, and the exemption requires `Idle` *and* no chain tip at all, so a `Run`
+against a partially-synced node is refused. What they can still undo is a `Stop`
+on a node already at or above the checkpoint — which is exactly the node you are
+most likely to be idling in order to rewind it.
 
 So: re-read the state after idling a node, and again immediately before starting
 anything destructive.
