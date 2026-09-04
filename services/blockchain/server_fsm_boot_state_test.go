@@ -284,7 +284,10 @@ func TestInit_FSMStateReadFailureAbortsStartup(t *testing.T) {
 
 	err := b.Init(context.Background())
 	require.Error(t, err)
+	require.ErrorContains(t, err, "failed to get persisted FSM state")
 	require.ErrorContains(t, err, "forced FSM state read failure")
+	require.NotContains(t, err.Error(), "%v")
+	require.NotContains(t, err.Error(), "%!")
 }
 
 func TestInit_InitialFSMStateWriteFailureAbortsStartup(t *testing.T) {
@@ -296,7 +299,10 @@ func TestInit_InitialFSMStateWriteFailureAbortsStartup(t *testing.T) {
 
 	err := b.Init(context.Background())
 	require.Error(t, err)
+	require.ErrorContains(t, err, "failed to persist initial IDLE state")
 	require.ErrorContains(t, err, "forced FSM state write failure")
+	require.NotContains(t, err.Error(), "%v")
+	require.NotContains(t, err.Error(), "%!")
 }
 
 func TestInit_UnsafePersistedRunningMigrationWriteFailureAbortsStartup(t *testing.T) {
@@ -312,7 +318,10 @@ func TestInit_UnsafePersistedRunningMigrationWriteFailureAbortsStartup(t *testin
 
 	err := b.Init(ctx)
 	require.Error(t, err)
+	require.ErrorContains(t, err, "failed to persist safe FSM state after RUNNING gate rejection")
 	require.ErrorContains(t, err, "forced FSM migration write failure")
+	require.NotContains(t, err.Error(), "%v")
+	require.NotContains(t, err.Error(), "%!")
 
 	persisted, getErr := store.GetFSMState(ctx)
 	require.NoError(t, getErr)
