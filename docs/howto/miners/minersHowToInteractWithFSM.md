@@ -7,6 +7,11 @@ an operator a safe inspection window. Other contexts keep the automatic
 `blockchain_initializeNodeInState`; it accepts `IDLE`, `CATCHINGBLOCKS`, or
 `RUNNING`, and invalid values fail startup.
 
+After inspecting a fresh production deployment, start synchronization from
+`IDLE` with `teranode-cli setfsmstate --fsmstate catchingblocks`. A direct
+`RUNNING` request is refused below the highest checkpoint; catch-up promotes the
+node automatically once it reaches that checkpoint.
+
 The setting applies only when no FSM state is persisted. Restarts normally
 restore the persisted state. A persisted `RUNNING` state that no longer passes
 the active network's checkpoint gate is safely persisted and resumed as
