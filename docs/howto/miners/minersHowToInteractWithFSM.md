@@ -102,7 +102,8 @@ rather than silent no-ops:
   checkpoint.** Mainnet and testnet both have checkpoints; regtest has none. The
   error names both your tip height and the checkpoint it must reach. From IDLE,
   the node remains parked so you can inspect or rewind it; use
-  `setfsmstate catchingblocks` when you deliberately want to start synchronization.
+  `setfsmstate --fsmstate catchingblocks` when you deliberately want to start
+  synchronization.
   A node already in CATCHINGBLOCKS remains there and will move to RUNNING once it
   catches up.
 
@@ -119,7 +120,7 @@ relay tx invs that post-Genesis peers ban on sight
 > case is refused as described above. Out-of-tree boot tooling that forces
 > RUNNING on a below-checkpoint mainnet or testnet node will now receive an error
 > and leave the FSM unchanged. Regtest has no checkpoints and is unaffected —
-> `setfsmstate running` still goes straight to RUNNING there.
+> `setfsmstate --fsmstate running` still goes straight to RUNNING there.
 >
 > **There is no longer a manual route to RUNNING below the checkpoint.** From
 > IDLE, explicitly enter CATCHINGBLOCKS to start synchronization. From

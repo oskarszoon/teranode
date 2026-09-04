@@ -2948,7 +2948,7 @@ func (b *Blockchain) guardRunBelowHighestCheckpoint(ctx context.Context) error {
 
 	if meta.Height < highest {
 		return errors.NewStateError(
-			"refusing RUN: chain tip height %d is below highest checkpoint %d for %s; use setfsmstate catchingblocks to start synchronization",
+			"refusing RUN: chain tip height %d is below highest checkpoint %d for %s; use setfsmstate --fsmstate catchingblocks to start synchronization",
 			meta.Height, highest, b.settings.ChainCfgParams.Name,
 		)
 	}
@@ -2968,7 +2968,8 @@ func HighestCheckpointHeight(checkpoints []chaincfg.Checkpoint) uint32 {
 //
 // On a network with checkpoints, a node whose chain tip is still below the
 // highest checkpoint remains in its current state and receives an error. An
-// operator in IDLE can explicitly enter CATCHINGBLOCKS with CATCHUPBLOCKS.
+// operator in IDLE can explicitly enter CATCHINGBLOCKS through the CatchUpBlocks
+// RPC or with setfsmstate --fsmstate catchingblocks.
 func (b *Blockchain) Run(ctx context.Context, _ *emptypb.Empty) (*emptypb.Empty, error) {
 	// check whether the FSM is already in the RUNNING state
 	if b.finiteStateMachine.Is(blockchain_api.FSMStateType_RUNNING.String()) {

@@ -338,8 +338,9 @@ func TestSendFSMEvent_RunGate_SourceState(t *testing.T) {
 // hard-coded checkpoints are untouched by the gate change. regtest is the case
 // that matters: the guard short-circuits on highest == 0 before it reads the
 // chain tip, so RUN from IDLE still goes straight to RUNNING and local dev keeps
-// working with a single setfsmstate running (block assembly refuses to hand out
-// a mining candidate outside RUNNING, so dev needs to get there).
+// working with a single setfsmstate --fsmstate running command (block assembly
+// refuses to hand out a mining candidate outside RUNNING, so dev needs to get
+// there).
 func TestSendFSMEvent_RunFromIdle_NoCheckpoints(t *testing.T) {
 	ctx := context.Background()
 	require.Zero(t, HighestCheckpointHeight(chaincfg.RegressionNetParams.Checkpoints))
@@ -384,7 +385,7 @@ func TestRunFromIdle_BelowCheckpointRejectsAndPreservesIdle(t *testing.T) {
 	_, err := b.Run(ctx, nil)
 	require.Error(t, err)
 	require.ErrorContains(t, err, "below highest checkpoint")
-	require.ErrorContains(t, err, "setfsmstate catchingblocks")
+	require.ErrorContains(t, err, "setfsmstate --fsmstate catchingblocks")
 	require.Equal(t, blockchain_api.FSMStateType_IDLE.String(), b.finiteStateMachine.Current())
 
 	persisted, perr := store.GetFSMState(ctx)
