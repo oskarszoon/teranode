@@ -379,8 +379,11 @@ func (b *Blockchain) HealthGRPC(ctx context.Context, _ *emptypb.Empty) (*blockch
 // operational states. It handles three initialization scenarios:
 //
 // 1. Test mode: Uses a predefined state for testing, bypassing normal state persistence
-// 2. New deployment: Initializes a default state when no previous state exists in storage
+// 2. New deployment: Uses the configured boot state, defaulting to CATCHINGBLOCKS
 // 3. Normal operation: Restores the previously persisted state from storage
+//
+// Starting in RUNNING is checkpoint-gated. An unsafe configured RUNNING state aborts
+// initialization, while an unsafe persisted RUNNING state resumes in CATCHINGBLOCKS.
 //
 // The method ensures that the service state is persisted to survive service restarts
 // and updates metrics to reflect the current operational state. The FSM provides a
@@ -415,7 +418,7 @@ func (b *Blockchain) Init(ctx context.Context) error {
 	// Set the FSM to the latest persisted state
 	stateStr, err := b.store.GetFSMState(ctx)
 	if err != nil {
-		return errors.NewStorageError("[Blockchain][Init] failed to get persisted FSM state: %v", err)
+		return errors.NewStorageError("[Blockchain][Init] failed to get persisted FSM state", err)
 	}
 
 	if stateStr == "" { // no persisted state: this is a fresh node
@@ -429,7 +432,7 @@ func (b *Blockchain) Init(ctx context.Context) error {
 		b.logger.Infof("[Blockchain][Init] fresh node, booting FSM into %v", bootState)
 
 		if err = b.store.SetFSMState(ctx, bootState); err != nil {
-			return errors.NewStorageError("[Blockchain][Init] failed to persist initial %s state: %v", bootState, err)
+			return errors.NewStorageError("[Blockchain][Init] failed to persist initial %s state", bootState, err)
 		}
 	} else { // if there is a state stored, set the FSM to that state
 		// Migration: the LEGACYSYNCING state was removed. A node persisted in it
@@ -451,7 +454,7 @@ func (b *Blockchain) Init(ctx context.Context) error {
 				stateStr = blockchain_api.FSMStateType_CATCHINGBLOCKS.String()
 
 				if setErr := b.store.SetFSMState(ctx, stateStr); setErr != nil {
-					return errors.NewStorageError("[Blockchain][Init] failed to persist safe FSM state after RUNNING gate rejection: %v", setErr)
+					return errors.NewStorageError("[Blockchain][Init] failed to persist safe FSM state after RUNNING gate rejection", setErr)
 				}
 			}
 		}
