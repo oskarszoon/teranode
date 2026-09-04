@@ -407,28 +407,29 @@ func (b *Blockchain) Init(ctx context.Context) error {
 		return nil
 	}
 
+	bootState, err := b.fsmBootState()
+	if err != nil {
+		return err
+	}
+
 	// Set the FSM to the latest persisted state
 	stateStr, err := b.store.GetFSMState(ctx)
 	if err != nil {
-		b.logger.Errorf("[Blockchain][Init] Error getting FSM state: %v", err)
+		return errors.NewStorageError("[Blockchain][Init] failed to get persisted FSM state: %v", err)
 	}
 
 	if stateStr == "" { // no persisted state: this is a fresh node
-		// A fresh node has no chain (height 0) and is therefore behind the
-		// network. Boot it directly into CATCHINGBLOCKS (catch-up mode) rather
-		// than IDLE, so downstream services that block on FSM != IDLE start
-		// immediately and the node proactively catches up. We deliberately do
-		// NOT boot into RUNNING: RUNNING switches on live subtree validation /
-		// block-assembly tx feeding before the node is caught up. Promotion to
-		// RUNNING happens only when a catchup completes above the highest
-		// checkpoint (catchup.restoreFSMState + guardRunBelowHighestCheckpoint).
-		// This restores the boot-into-sync behaviour the removed
-		// IDLE->LEGACYSYNCING edge used to provide.
-		b.finiteStateMachine.SetState(blockchain_api.FSMStateType_CATCHINGBLOCKS.String())
-		b.logger.Infof("[Blockchain][Init] fresh node, booting FSM into %v (catch-up mode)", b.finiteStateMachine.Current())
+		if bootState == blockchain_api.FSMStateType_RUNNING.String() {
+			if err = b.guardRunBelowHighestCheckpoint(ctx); err != nil {
+				return err
+			}
+		}
 
-		if err = b.store.SetFSMState(ctx, b.finiteStateMachine.Current()); err != nil {
-			b.logger.Errorf("[Blockchain][Init] Error persisting initial CATCHINGBLOCKS state: %v", err)
+		b.finiteStateMachine.SetState(bootState)
+		b.logger.Infof("[Blockchain][Init] fresh node, booting FSM into %v", bootState)
+
+		if err = b.store.SetFSMState(ctx, bootState); err != nil {
+			return errors.NewStorageError("[Blockchain][Init] failed to persist initial %s state: %v", bootState, err)
 		}
 	} else { // if there is a state stored, set the FSM to that state
 		// Migration: the LEGACYSYNCING state was removed. A node persisted in it
@@ -444,6 +445,17 @@ func (b *Blockchain) Init(ctx context.Context) error {
 			}
 		}
 
+		if stateStr == blockchain_api.FSMStateType_RUNNING.String() {
+			if gateErr := b.guardRunBelowHighestCheckpoint(ctx); gateErr != nil {
+				b.logger.Warnf("[Blockchain][Init] persisted RUNNING state is unsafe: %v; resuming in CATCHINGBLOCKS", gateErr)
+				stateStr = blockchain_api.FSMStateType_CATCHINGBLOCKS.String()
+
+				if setErr := b.store.SetFSMState(ctx, stateStr); setErr != nil {
+					return errors.NewStorageError("[Blockchain][Init] failed to persist safe FSM state after RUNNING gate rejection: %v", setErr)
+				}
+			}
+		}
+
 		b.logger.Infof("[Blockchain][Init] Blockchain db has previous FSM state: %v, setting FSM's current state to it.", stateStr)
 		b.finiteStateMachine.SetState(stateStr)
 	}
@@ -451,6 +463,29 @@ func (b *Blockchain) Init(ctx context.Context) error {
 	prometheusBlockchainFSMCurrentState.Set(float64(blockchain_api.FSMStateType_value[b.finiteStateMachine.Current()]))
 
 	return nil
+}
+
+func (b *Blockchain) fsmBootState() (string, error) {
+	configured := ""
+	if b.settings != nil {
+		configured = strings.TrimSpace(b.settings.BlockChain.InitializeNodeInState)
+	}
+
+	if configured == "" {
+		return blockchain_api.FSMStateType_CATCHINGBLOCKS.String(), nil
+	}
+
+	switch configured {
+	case blockchain_api.FSMStateType_IDLE.String(),
+		blockchain_api.FSMStateType_CATCHINGBLOCKS.String(),
+		blockchain_api.FSMStateType_RUNNING.String():
+		return configured, nil
+	default:
+		return "", errors.NewConfigurationError(
+			"invalid blockchain_initializeNodeInState %q: expected IDLE, CATCHINGBLOCKS, or RUNNING",
+			configured,
+		)
+	}
 }
 
 // Start begins the blockchain service operations.
