@@ -175,6 +175,22 @@ func TestInit_LocalTestStartStateOverridesConfiguredBootState(t *testing.T) {
 	require.Equal(t, "IDLE", persisted)
 }
 
+func TestInit_LocalTestStartStateWriteFailureAbortsStartup(t *testing.T) {
+	b, store := newBootStateBlockchain(t, "INVALID", &chaincfg.RegressionNetParams)
+	b.localTestStartState = "IDLE"
+	b.store = &bootStateFaultStore{
+		Store:          store,
+		setFSMStateErr: errors.NewError("forced local test FSM state write failure"),
+	}
+
+	err := b.Init(context.Background())
+	require.Error(t, err)
+	require.ErrorContains(t, err, "failed to persist local test FSM state")
+	require.ErrorContains(t, err, "forced local test FSM state write failure")
+	require.NotContains(t, err.Error(), "%v")
+	require.NotContains(t, err.Error(), "%!")
+}
+
 func TestInit_PersistedStateOverridesConfiguredBootState(t *testing.T) {
 	ctx := context.Background()
 	b, store := newBootStateBlockchain(t, "CATCHINGBLOCKS", &chaincfg.RegressionNetParams)
@@ -326,4 +342,25 @@ func TestInit_UnsafePersistedRunningMigrationWriteFailureAbortsStartup(t *testin
 	persisted, getErr := store.GetFSMState(ctx)
 	require.NoError(t, getErr)
 	require.Equal(t, "RUNNING", persisted)
+}
+
+func TestInit_LegacySyncingMigrationWriteFailureAbortsStartup(t *testing.T) {
+	ctx := context.Background()
+	b, store := newBootStateBlockchain(t, "IDLE", &chaincfg.RegressionNetParams)
+	require.NoError(t, store.SetFSMState(ctx, "LEGACYSYNCING"))
+	b.store = &bootStateFaultStore{
+		Store:          store,
+		setFSMStateErr: errors.NewError("forced legacy FSM migration write failure"),
+	}
+
+	err := b.Init(ctx)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "failed to persist migrated FSM state")
+	require.ErrorContains(t, err, "forced legacy FSM migration write failure")
+	require.NotContains(t, err.Error(), "%v")
+	require.NotContains(t, err.Error(), "%!")
+
+	persisted, getErr := store.GetFSMState(ctx)
+	require.NoError(t, getErr)
+	require.Equal(t, "LEGACYSYNCING", persisted)
 }

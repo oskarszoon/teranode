@@ -378,7 +378,7 @@ func (b *Blockchain) HealthGRPC(ctx context.Context, _ *emptypb.Empty) (*blockch
 // This method sets up the finite state machine (FSM) that governs the service's
 // operational states. It handles three initialization scenarios:
 //
-// 1. Test mode: Uses a predefined state for testing, bypassing normal state persistence
+// 1. Test mode: Uses a predefined state, bypassing configured and persisted state selection
 // 2. New deployment: Uses the configured boot state, defaulting to CATCHINGBLOCKS
 // 3. Normal operation: Restores the previously persisted state from storage
 //
@@ -402,9 +402,8 @@ func (b *Blockchain) Init(ctx context.Context) error {
 	if b.localTestStartState != "" {
 		b.finiteStateMachine.SetState(b.localTestStartState)
 
-		err := b.store.SetFSMState(ctx, b.finiteStateMachine.Current())
-		if err != nil {
-			b.logger.Errorf("[Blockchain][Init] Error setting FSM state in blockchain store: %v", err)
+		if err := b.store.SetFSMState(ctx, b.finiteStateMachine.Current()); err != nil {
+			return errors.NewStorageError("[Blockchain][Init] failed to persist local test FSM state", err)
 		}
 
 		return nil
@@ -444,7 +443,7 @@ func (b *Blockchain) Init(ctx context.Context) error {
 			stateStr = blockchain_api.FSMStateType_CATCHINGBLOCKS.String()
 
 			if setErr := b.store.SetFSMState(ctx, stateStr); setErr != nil {
-				b.logger.Errorf("[Blockchain][Init] error persisting migrated FSM state: %v", setErr)
+				return errors.NewStorageError("[Blockchain][Init] failed to persist migrated FSM state", setErr)
 			}
 		}
 
