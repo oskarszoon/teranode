@@ -383,7 +383,8 @@ func TestRunFromIdle_BelowCheckpointRejectsAndPreservesIdle(t *testing.T) {
 
 	_, err := b.Run(ctx, nil)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "below highest checkpoint")
+	require.ErrorContains(t, err, "below highest checkpoint")
+	require.ErrorContains(t, err, "setfsmstate catchingblocks")
 	require.Equal(t, blockchain_api.FSMStateType_IDLE.String(), b.finiteStateMachine.Current())
 
 	persisted, perr := store.GetFSMState(ctx)

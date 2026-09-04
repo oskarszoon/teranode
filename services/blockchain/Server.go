@@ -2948,7 +2948,7 @@ func (b *Blockchain) guardRunBelowHighestCheckpoint(ctx context.Context) error {
 
 	if meta.Height < highest {
 		return errors.NewStateError(
-			"refusing RUN: chain tip height %d is below highest checkpoint %d for %s; use CATCHUPBLOCKS to start synchronization",
+			"refusing RUN: chain tip height %d is below highest checkpoint %d for %s; use setfsmstate catchingblocks to start synchronization",
 			meta.Height, highest, b.settings.ChainCfgParams.Name,
 		)
 	}
