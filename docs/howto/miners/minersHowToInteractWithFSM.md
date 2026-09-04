@@ -98,18 +98,13 @@ rather than silent no-ops:
 
 - **Only RUN may leave CATCHINGBLOCKS.** A node that is catching up cannot be
   moved to IDLE; it must finish catching up first.
-- **RUN never reaches RUNNING while the chain tip is below the network's highest
-  hard-coded checkpoint.** Mainnet and testnet both have checkpoints; regtest has
-  none. What happens instead depends on where the node is:
-    - **From CATCHINGBLOCKS**, RUN is refused with an error naming both your tip
-      height and the checkpoint it must reach. This is expected — the node is
-      already catching up on its own and will move to RUNNING once it gets there.
-    - **From IDLE**, `setfsmstate running` is routed to CATCHINGBLOCKS instead of
-      being refused. "Run" means "put this node into service", and on a node that
-      is not caught up the route there is through catch-up. The command reports
-      the state it actually reached, so you will see `CATCHINGBLOCKS` rather than
-      `RUNNING` — that is the reroute, not a failure. A node already at or above
-      the checkpoint goes straight to RUNNING.
+- **RUN is refused while the chain tip is below the network's highest hard-coded
+  checkpoint.** Mainnet and testnet both have checkpoints; regtest has none. The
+  error names both your tip height and the checkpoint it must reach. From IDLE,
+  the node remains parked so you can inspect or rewind it; use
+  `setfsmstate catchingblocks` when you deliberately want to start synchronization.
+  A node already in CATCHINGBLOCKS remains there and will move to RUNNING once it
+  catches up.
 
 Why the rule exists: going to RUNNING mid-initial-sync lets the mempool and
 validator operate under pre-Genesis output rules, and lets the legacy service
@@ -121,15 +116,16 @@ relay tx invs that post-Genesis peers ban on sight
 > could never be in IDLE below the checkpoint. That is not exhaustive — a node
 > stopped from RUNNING, or one whose store was persisted in IDLE by an older
 > version, both land there — so the rule now applies to every RUN and the IDLE
-> case is rerouted as described above. Out-of-tree boot tooling that forces
-> RUNNING on a below-checkpoint mainnet or testnet node will now land it in
-> CATCHINGBLOCKS instead of RUNNING. Regtest has no checkpoints and is
-> unaffected — `setfsmstate running` still goes straight to RUNNING there.
+> case is refused as described above. Out-of-tree boot tooling that forces
+> RUNNING on a below-checkpoint mainnet or testnet node will now receive an error
+> and leave the FSM unchanged. Regtest has no checkpoints and is unaffected —
+> `setfsmstate running` still goes straight to RUNNING there.
 >
 > **There is no longer a manual route to RUNNING below the checkpoint.** From
-> IDLE the request reroutes; from CATCHINGBLOCKS it is refused. If you are
-> looking for an override to force a below-checkpoint node into RUNNING, it no
-> longer exists — that was the hole this rule closes. Let the node catch up.
+> IDLE, explicitly enter CATCHINGBLOCKS to start synchronization. From
+> CATCHINGBLOCKS, RUN is refused until catchup completes. If you are looking for
+> an override to force a below-checkpoint node into RUNNING, it no longer exists
+> — that was the hole this rule closes. Let the node catch up.
 >
 > **Getting back to IDLE:** there is no `CATCHINGBLOCKS -> IDLE` transition. Once
 > a node is catching up, the only way out is RUN.

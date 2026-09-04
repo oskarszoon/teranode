@@ -532,7 +532,7 @@ Sends an event to the finite state machine.
 func (b *Blockchain) Run(ctx context.Context, _ *emptypb.Empty) (*emptypb.Empty, error)
 ```
 
-Transitions the FSM to the RUNNING state. On a network with checkpoints, a node whose chain tip is below the highest checkpoint does not reach RUNNING: from `IDLE` the request is routed to `CATCHINGBLOCKS`, and from `CATCHINGBLOCKS` it is rejected. This RPC returns only an error, so a reroute is indistinguishable from success — call `GetFSMCurrentState` afterwards if the outcome matters.
+Transitions the FSM to the RUNNING state. On a network with checkpoints, a node whose chain tip is below the highest checkpoint receives an error and remains in its current state. An operator in `IDLE` can explicitly enter `CATCHINGBLOCKS` to start synchronization.
 
 ### CatchUpBlocks
 

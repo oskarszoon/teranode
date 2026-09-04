@@ -171,7 +171,7 @@ func TestGuardRunBelowHighestCheckpoint(t *testing.T) {
 
 			b := newTestBlockchainForGate(t, tt.params, store)
 
-			_, err := b.guardRunBelowHighestCheckpoint(ctx)
+			err := b.guardRunBelowHighestCheckpoint(ctx)
 			if tt.wantErr {
 				require.Error(t, err)
 				if tt.wantSubstr != "" {
@@ -190,13 +190,13 @@ func TestGuardRunBelowHighestCheckpoint(t *testing.T) {
 func TestGuardRunBelowHighestCheckpoint_NilSettings(t *testing.T) {
 	t.Run("nil settings", func(t *testing.T) {
 		b := &Blockchain{logger: ulogger.TestLogger{}}
-		_, guardErr := b.guardRunBelowHighestCheckpoint(context.Background())
+		guardErr := b.guardRunBelowHighestCheckpoint(context.Background())
 		require.NoError(t, guardErr)
 	})
 
 	t.Run("nil ChainCfgParams", func(t *testing.T) {
 		b := &Blockchain{logger: ulogger.TestLogger{}, settings: &settings.Settings{}}
-		_, guardErr := b.guardRunBelowHighestCheckpoint(context.Background())
+		guardErr := b.guardRunBelowHighestCheckpoint(context.Background())
 		require.NoError(t, guardErr)
 	})
 }
@@ -225,12 +225,10 @@ func TestInit_MigratesPersistedLegacySyncingToCatchingBlocks(t *testing.T) {
 }
 
 // TestSendFSMEvent_RunGate_SourceState pins the source-state semantics of
-// the RUN gate: the checkpoint rule applies to every RUN regardless of source
-// state, and the source state decides what happens when it fails. From IDLE a
-// below-checkpoint RUN is rerouted to CATCHINGBLOCKS — "run" means "put this
-// node into service", and the route there is through catch-up. From
-// CATCHINGBLOCKS the same RUN claims "I'm caught up" and is rejected outright.
-// At or above the checkpoint, RUN reaches RUNNING from either source.
+// the RUN gate: the checkpoint rule applies to every valid RUN regardless of
+// source state. Below the checkpoint, RUN is rejected and the FSM remains in
+// its source state. At or above the checkpoint, RUN reaches RUNNING from IDLE
+// or CATCHINGBLOCKS.
 //
 // The IDLE cases used to expect RUNNING, on the reasoning that a fresh node
 // boots into CATCHINGBLOCKS so the exemption could never be reached. That made a
@@ -251,18 +249,20 @@ func TestSendFSMEvent_RunGate_SourceState(t *testing.T) {
 		wantSubstr string
 	}{
 		{
-			name:       "fresh boot IDLE with tip 0 below checkpoint routes to CATCHINGBLOCKS",
+			name:       "fresh boot IDLE with tip 0 below checkpoint rejects",
 			startState: blockchain_api.FSMStateType_IDLE,
 			tipHeight:  0,
-			wantErr:    false,
-			wantState:  blockchain_api.FSMStateType_CATCHINGBLOCKS,
+			wantErr:    true,
+			wantState:  blockchain_api.FSMStateType_IDLE,
+			wantSubstr: "below highest checkpoint",
 		},
 		{
-			name:       "IDLE with tip 100 still below checkpoint routes to CATCHINGBLOCKS",
+			name:       "IDLE with tip 100 still below checkpoint rejects",
 			startState: blockchain_api.FSMStateType_IDLE,
 			tipHeight:  100,
-			wantErr:    false,
-			wantState:  blockchain_api.FSMStateType_CATCHINGBLOCKS,
+			wantErr:    true,
+			wantState:  blockchain_api.FSMStateType_IDLE,
+			wantSubstr: "below highest checkpoint",
 		},
 		{
 			// A node that is genuinely caught up must still reach RUNNING
@@ -362,10 +362,11 @@ func TestSendFSMEvent_RunFromIdle_NoCheckpoints(t *testing.T) {
 	store.AssertNotCalled(t, "GetBestBlockHeader", mock.Anything)
 }
 
-// TestSendFSMEvent_RunFromIdle_RerouteIsReportedToCaller pins that the reroute
-// is visible rather than silent: the response carries the state actually
-// reached, which is what teranode-cli setfsmstate prints back to the operator.
-func TestSendFSMEvent_RunFromIdle_RerouteIsReportedToCaller(t *testing.T) {
+// TestRunFromIdle_BelowCheckpointRejectsAndPreservesIdle protects the Run RPC
+// contract: a nil error means the node reached RUNNING. A below-checkpoint node
+// must therefore reject RUN and remain durably parked in IDLE rather than
+// silently entering the irreversible CATCHINGBLOCKS state.
+func TestRunFromIdle_BelowCheckpointRejectsAndPreservesIdle(t *testing.T) {
 	ctx := context.Background()
 	highest := HighestCheckpointHeight(chaincfg.MainNetParams.Checkpoints)
 	require.Greater(t, highest, uint32(0))
@@ -378,37 +379,48 @@ func TestSendFSMEvent_RunFromIdle_RerouteIsReportedToCaller(t *testing.T) {
 	b.settings.BlockChain.FSMStateChangeDelay = 0
 	b.finiteStateMachine = b.NewFiniteStateMachine()
 	b.finiteStateMachine.SetState(blockchain_api.FSMStateType_IDLE.String())
+	require.NoError(t, store.SetFSMState(ctx, blockchain_api.FSMStateType_IDLE.String()))
 
-	resp, err := b.SendFSMEvent(ctx, &blockchain_api.SendFSMEventRequest{
-		Event: blockchain_api.FSMEventType_RUN,
-	})
-	require.NoError(t, err)
-	require.Equal(t, blockchain_api.FSMStateType_CATCHINGBLOCKS, resp.State,
-		"caller must be told it landed in CATCHINGBLOCKS, not RUNNING")
+	_, err := b.Run(ctx, nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "below highest checkpoint")
+	require.Equal(t, blockchain_api.FSMStateType_IDLE.String(), b.finiteStateMachine.Current())
 
-	require.Equal(t, blockchain_api.FSMStateType_CATCHINGBLOCKS.String(), b.finiteStateMachine.Current())
-
-	// The durable half of the safety property: the rerouted state must reach the
-	// store, so a restart resumes catching up rather than the RUNNING the operator
-	// asked for. Asserting on b.finiteStateMachine above cannot show this — it is
-	// the same object resp.State was read from, so a SetFSMState that never fired,
-	// or fired with the wrong state, would still leave the test green. That failure
-	// would be quiet in production too: SendFSMEvent only logs a SetFSMState error
-	// rather than returning it.
 	persisted, perr := store.GetFSMState(ctx)
 	require.NoError(t, perr)
-	require.Equal(t, blockchain_api.FSMStateType_CATCHINGBLOCKS.String(), persisted,
-		"rerouted state must be persisted, not just set in memory")
+	require.Equal(t, blockchain_api.FSMStateType_IDLE.String(), persisted,
+		"rejected RUN must not change the persisted state")
 
 	store.AssertExpectations(t)
 }
 
-// TestSendFSMEvent_RunFromIdle_StoreErrorIsNotRerouted pins that only a
-// confirmed below-checkpoint verdict is rerouted. If the chain tip cannot be
-// read at all, an operator who asked for RUNNING must see the store error rather
-// than a node that quietly went to catch-up instead — the two look identical
-// from the outside otherwise.
-func TestSendFSMEvent_RunFromIdle_StoreErrorIsNotRerouted(t *testing.T) {
+// TestSendFSMEvent_InvalidRunSkipsCheckpointRead protects error ordering for
+// direct SendFSMEvent callers. RUN is not a valid event from RUNNING, so the FSM
+// error must be returned without consulting the chain tip while holding fsmMu.
+func TestSendFSMEvent_InvalidRunSkipsCheckpointRead(t *testing.T) {
+	ctx := context.Background()
+	store := &fsmGateStore{}
+	hdr := &model.BlockHeader{HashPrevBlock: &chainhash.Hash{}, HashMerkleRoot: &chainhash.Hash{}}
+	store.On("GetBestBlockHeader", mock.Anything).Return(hdr, &model.BlockHeaderMeta{Height: 0}, nil).Maybe()
+
+	b := newTestBlockchainForGate(t, &chaincfg.MainNetParams, store)
+	b.settings.BlockChain.FSMStateChangeDelay = 0
+	b.finiteStateMachine = b.NewFiniteStateMachine()
+	b.finiteStateMachine.SetState(blockchain_api.FSMStateType_RUNNING.String())
+
+	_, err := b.SendFSMEvent(ctx, &blockchain_api.SendFSMEventRequest{
+		Event: blockchain_api.FSMEventType_RUN,
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "FSM event RUN rejected in state RUNNING")
+	require.Equal(t, blockchain_api.FSMStateType_RUNNING.String(), b.finiteStateMachine.Current())
+	store.AssertNotCalled(t, "GetBestBlockHeader", mock.Anything)
+}
+
+// TestSendFSMEvent_RunFromIdle_StoreErrorRejects pins fail-closed behavior when
+// the chain tip cannot be read. The operator must see the store error and the
+// node must remain in IDLE.
+func TestSendFSMEvent_RunFromIdle_StoreErrorRejects(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
