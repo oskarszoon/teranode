@@ -168,7 +168,7 @@ func (s *Server) prunerProcessor(ctx context.Context) {
 				}
 				if fsmState == nil || *fsmState != blockchain.FSMStateRUNNING {
 					s.logger.Debugf("[pruner][%s:%d] skipping while blockchain FSM is not RUNNING", blockHashStr, blockHeight)
-					prunerSkipped.WithLabelValues("catchup_mode").Inc()
+					prunerSkipped.WithLabelValues("fsm_not_running").Inc()
 					continue
 				}
 			}
