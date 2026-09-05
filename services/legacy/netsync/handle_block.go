@@ -1771,7 +1771,7 @@ func (sm *SyncManager) extendPerTxFallback(ctx context.Context, txs []*bt.Tx) er
 func (sm *SyncManager) createSubtrees(ctx context.Context, bi blockIdent, txOrder []chainhash.Hash, txMap *txmap.SyncedMap[chainhash.Hash, *TxMapWrapper],
 	subtreeSlices []*subtreepkg.Subtree, subtreeDatas []*subtreepkg.Data, subtreeMetas []*subtreepkg.Meta, outpointOnly bool) (err error) {
 	_, _, deferFn := tracing.Tracer("netsync").Start(ctx, "createSubtrees",
-		tracing.WithDebugLogMessage(sm.logger, "[createSubtrees] called for block %s / height %d", bi.hash, bi.height),
+		tracing.WithLogMessage(sm.logger, "[createSubtrees] called for block %s / height %d", bi.hash, bi.height),
 	)
 
 	defer func() {

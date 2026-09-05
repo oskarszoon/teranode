@@ -1326,7 +1326,7 @@ func (b *Blockchain) GetBlockByID(ctx context.Context, request *blockchain_api.G
 func (b *Blockchain) GetNextBlockID(ctx context.Context, _ *emptypb.Empty) (*blockchain_api.GetNextBlockIDResponse, error) {
 	ctx, _, deferFn := tracing.Tracer("blockchain").Start(ctx, "GetNextBlockID",
 		tracing.WithParentStat(b.stats),
-		tracing.WithDebugLogMessage(b.logger, "[GetNextBlockID] called"),
+		tracing.WithLogMessage(b.logger, "[GetNextBlockID] called"),
 	)
 	defer deferFn()
 
@@ -1344,7 +1344,7 @@ func (b *Blockchain) GetNextBlockID(ctx context.Context, _ *emptypb.Empty) (*blo
 func (b *Blockchain) AssignBlockID(ctx context.Context, req *blockchain_api.AssignBlockIDRequest) (*blockchain_api.AssignBlockIDResponse, error) {
 	ctx, _, deferFn := tracing.Tracer("blockchain").Start(ctx, "AssignBlockID",
 		tracing.WithParentStat(b.stats),
-		tracing.WithDebugLogMessage(b.logger, "[AssignBlockID] called"),
+		tracing.WithLogMessage(b.logger, "[AssignBlockID] called"),
 	)
 	defer deferFn()
 
