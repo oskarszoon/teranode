@@ -327,7 +327,7 @@ func NewSettings(alternativeContext ...string) *Settings {
 			StoreURL:              getURL("blockchain_store", "sqlite:///blockchain", alternativeContext...),
 			FSMStateRestore:       getBool("fsm_state_restore", false, alternativeContext...),
 			FSMStateChangeDelay:   getDuration("fsm_state_change_delay", 0, alternativeContext...),
-			StoreDBTimeoutMillis:  getInt("blockchain_store_dbTimeoutMillis", 5000, alternativeContext...),
+			StoreDBTimeoutMillis:  getInt("blockchain_store_dbTimeoutMillis", DefaultBlockchainStoreDBTimeoutMillis, alternativeContext...),
 			InitializeNodeInState: strings.TrimSpace(getString("blockchain_initializeNodeInState", "", alternativeContext...)),
 			PostgresPool:          getPostgresPoolSettings("blockchain", alternativeContext...),
 			UseInMemoryChainCheck: getBool("blockchain_use_in_memory_chain_check", false, alternativeContext...),
