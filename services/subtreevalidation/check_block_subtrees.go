@@ -494,14 +494,14 @@ func (u *Server) CheckBlockSubtrees(ctx context.Context, request *subtreevalidat
 	// it for both the per-batch processTransactionsInLevels pass and the
 	// validateSubtree closure below. Querying it twice (once per pipeline) could
 	// straddle an FSM transition and give the two pipelines divergent
-	// WithAddTXToBlockAssembly settings for the same block. While catching up
-	// blocks, transactions must NOT be added to block assembly.
+	// WithAddTXToBlockAssembly settings for the same block. Only known RUNNING
+	// state permits admission; catchup writes may still finish after entering IDLE.
 	currentState, err := u.blockchainClient.GetFSMCurrentState(ctx)
 	if err != nil {
 		return nil, errors.WrapGRPC(errors.NewProcessingError("[CheckBlockSubtrees] Failed to get FSM current state", err))
 	}
 
-	addTXToBlockAssembly := *currentState != blockchain.FSMStateCATCHINGBLOCKS
+	addTXToBlockAssembly := currentState != nil && *currentState == blockchain.FSMStateRUNNING
 
 	// BATCHED SUBTREE LOADING: Get blockIds once before batching
 	blockHeaderIDs, err := u.blockchainClient.GetBlockHeaderIDs(ctx, block.Header.HashPrevBlock, uint64(u.settings.GetUtxoStoreBlockHeightRetention()*2))
@@ -637,8 +637,8 @@ func (u *Server) CheckBlockSubtrees(ctx context.Context, request *subtreevalidat
 	//       state the floater block is invalidated/rolled back (including the
 	//       optimistically-added block), in CATCHINGBLOCKS it
 	//       stays incomplete and is retried (preserving #1031);
-	//   (c) block-assembly contamination — FSM-gated off in
-	//       CATCHINGBLOCKS (both this closure and
+	//   (c) block-assembly contamination — FSM-gated off unless RUNNING
+	//       is positively known (both this closure and
 	//       processTransactionsInLevels gate on the same addTXToBlockAssembly
 	//       captured once above);
 	//       in RUNNING the substitution is byte-identical to the everyday
