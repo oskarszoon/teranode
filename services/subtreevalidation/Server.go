@@ -718,10 +718,15 @@ func (u *Server) CheckSubtreeFromBlock(ctx context.Context, request *subtreevali
 // This method is called internally by CheckSubtreeFromBlock after acquiring the
 // appropriate locks to prevent duplicate processing.
 func (u *Server) checkSubtreeFromBlock(ctx context.Context, request *subtreevalidation_api.CheckSubtreeFromBlockRequest) (ok bool, err error) {
+	// INFO, not DEBUG: this span passes its error to deferFn, and an INFO span
+	// with a non-nil error logs at ERROR (util/tracing, logTraceMessage). The
+	// only production caller is cross-process over gRPC, so demoting this to
+	// DEBUG would leave a failing subtreevalidation replica logging nothing at
+	// all about its own failure.
 	ctx, _, deferFn := tracing.Tracer("subtreevalidation").Start(ctx, "checkSubtree",
 		tracing.WithParentStat(u.stats),
 		tracing.WithHistogram(prometheusSubtreeValidationCheckSubtree),
-		tracing.WithDebugLogMessage(u.logger, "[checkSubtree] called for subtree %s (block %s / height %d)", util.ReverseAndHexEncodeSlice(request.Hash), util.ReverseAndHexEncodeSlice(request.BlockHash), request.BlockHeight),
+		tracing.WithLogMessage(u.logger, "[checkSubtree] called for subtree %s (block %s / height %d)", util.ReverseAndHexEncodeSlice(request.Hash), util.ReverseAndHexEncodeSlice(request.BlockHash), request.BlockHeight),
 	)
 	defer func() {
 		deferFn(err)
