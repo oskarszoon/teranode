@@ -52,6 +52,11 @@ func (u *Server) subtreeMessageHandler(ctx context.Context) func(msg *kafka.Kafk
 		default:
 		}
 
+		// In BlocksOnly mode, skip processing peer-announced subtrees (only process subtrees from blocks)
+		if u.settings.SubtreeValidation.BlocksOnly {
+			return nil
+		}
+
 		state, err := u.blockchainClient.GetFSMCurrentState(gCtx)
 		if err != nil {
 			return errors.NewProcessingError("[subtreeMessageHandler] failed to get FSM current state", err)
@@ -63,11 +68,6 @@ func (u *Server) subtreeMessageHandler(ctx context.Context) func(msg *kafka.Kafk
 		// Ordinary peer validation may continue in IDLE, but only known
 		// RUNNING state permits feeding its transactions into block assembly.
 		addToAssembly := state != nil && *state == blockchain.FSMStateRUNNING
-
-		// In BlocksOnly mode, skip processing peer-announced subtrees (only process subtrees from blocks)
-		if u.settings.SubtreeValidation.BlocksOnly {
-			return nil
-		}
 
 		var kafkaMsg kafkamessage.KafkaSubtreeTopicMessage
 		if err := proto.Unmarshal(msg.Value, &kafkaMsg); err != nil {
