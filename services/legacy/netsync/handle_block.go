@@ -133,9 +133,10 @@ func (sm *SyncManager) HandleBlockDirect(ctx context.Context, peer *peer.Peer, b
 		// This span's INFO level is load-bearing. HandleBlockDirect has a named
 		// (err error) return and passes it to deferFn, and an INFO span with a
 		// non-nil error logs at ERROR (util/tracing/tracing.go, logTraceMessage).
-		// The per-phase spans below it are at DEBUG, where that escalation only
-		// happens if the logger is already at DEBUG — so at production
-		// logLevel=INFO this is the only span that surfaces their failures.
+		// Several per-phase spans below it are at DEBUG, where that escalation
+		// only happens if the logger is already at DEBUG, so at production
+		// logLevel=INFO their failures surface only here. Phases that kept INFO
+		// (PreValidateTransactions, createSubtrees) escalate on their own.
 		tracing.WithLogMessage(
 			sm.logger,
 			"[HandleBlockDirect][%s %d] %d txs, peer %s",
