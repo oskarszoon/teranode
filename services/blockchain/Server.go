@@ -2734,6 +2734,10 @@ func (b *Blockchain) GetBlocksSubtreesNotSet(ctx context.Context, _ *emptypb.Emp
 //   - *blockchain_api.GetFSMStateResponse: Response containing the current FSM state
 //   - error: Any error encountered during state retrieval (typically nil)
 func (b *Blockchain) GetFSMCurrentState(_ context.Context, _ *emptypb.Empty) (*blockchain_api.GetFSMStateResponse, error) {
+	// An uncached active snapshot admits one work unit. Serialize it with STOP
+	// persistence so reads cannot authorize new work during an accepted pause.
+	b.fsmMu.Lock()
+	defer b.fsmMu.Unlock()
 	startTime := time.Now()
 	defer func() {
 		prometheusBlockchainGetFSMCurrentState.Observe(float64(time.Since(startTime).Microseconds()) / 1_000_000)
@@ -2823,6 +2827,12 @@ func (b *Blockchain) IsFullyReady(ctx context.Context) (bool, error) {
 // may nevertheless have committed before returning an error; explicitly retry
 // the failed event to reconcile it before relying on state across a restart.
 func (b *Blockchain) SendFSMEvent(ctx context.Context, eventReq *blockchain_api.SendFSMEventRequest) (*blockchain_api.GetFSMStateResponse, error) {
+	return b.sendFSMEvent(ctx, eventReq, false)
+}
+
+// sendFSMEvent serializes explicit operator events and automatic admission.
+// Only explicit operator requests may leave IDLE.
+func (b *Blockchain) sendFSMEvent(ctx context.Context, eventReq *blockchain_api.SendFSMEventRequest, automatic bool) (*blockchain_api.GetFSMStateResponse, error) {
 	// Serialise FSM transitions. SendFSMEvent performs a read-modify-write across
 	// the FSM (prior-state checks -> Event -> stateChangeTimestamp update) that
 	// must be atomic; concurrent callers (e.g. Run and CatchUpBlocks arriving as
@@ -2831,21 +2841,27 @@ func (b *Blockchain) SendFSMEvent(ctx context.Context, eventReq *blockchain_api.
 	// SendFSMEvent, so holding this lock does not cause recursive locking.
 	b.fsmMu.Lock()
 	defer b.fsmMu.Unlock()
+	return b.sendFSMEventLocked(ctx, eventReq, automatic)
+}
 
-	b.logger.Infof("[Blockchain Server] Received FSM event req: %v, will send event to the FSM", eventReq)
-
+// sendFSMEventLocked requires fsmMu. Keeping compatibility RPC no-ops under
+// this lock prevents them from racing an opposite operator transition.
+func (b *Blockchain) sendFSMEventLocked(ctx context.Context, eventReq *blockchain_api.SendFSMEventRequest, automatic bool) (*blockchain_api.GetFSMStateResponse, error) {
 	priorState := b.finiteStateMachine.Current()
 
-	// Prevent manual transitions from CATCHINGBLOCKS state
-	// The state should only exit CATCHINGBLOCKS programmatically when catchup completes
-	if priorState == blockchain_api.FSMStateType_CATCHINGBLOCKS.String() {
-		// Only allow RUN event (catchup completion) to exit CATCHINGBLOCKS
-		if eventReq.Event != blockchain_api.FSMEventType_RUN {
-			errMsg := "cannot manually transition from CATCHINGBLOCKS state - catchup must complete first"
-			b.logger.Warnf("[Blockchain Server] %s (attempted event: %v)", errMsg, eventReq.Event)
-			return nil, errors.NewInvalidArgumentError(errMsg)
+	if automatic {
+		if priorState == blockchain_api.FSMStateType_IDLE.String() {
+			return nil, errors.WrapGRPC(errors.NewStateError("automatic FSM transition refused while IDLE; use setfsmstate --fsmstate catchingblocks to resume"))
+		}
+		// Already-active admission is serialized with STOP too. Checking outside
+		// fsmMu could grant the next unit while STOP is persisting its pause.
+		if (eventReq.Event == blockchain_api.FSMEventType_RUN && priorState == blockchain_api.FSMStateType_RUNNING.String()) ||
+			(eventReq.Event == blockchain_api.FSMEventType_CATCHUPBLOCKS && priorState == blockchain_api.FSMStateType_CATCHINGBLOCKS.String()) {
+			return &blockchain_api.GetFSMStateResponse{State: blockchain_api.FSMStateType(blockchain_api.FSMStateType_value[priorState])}, nil
 		}
 	}
+
+	b.logger.Infof("[Blockchain Server] Received FSM event req: %v, will send event to the FSM", eventReq)
 
 	// Refuse a valid transition to RUNNING while the local chain tip is still below
 	// the network's highest hard-coded checkpoint. Pre-checkpoint heights are
@@ -2980,48 +2996,25 @@ func HighestCheckpointHeight(checkpoints []chaincfg.Checkpoint) uint32 {
 	return model.HighestCheckpointHeight(checkpoints)
 }
 
-// Run transitions the blockchain service to the running state.
-//
-// On a network with checkpoints, a node whose chain tip is still below the
-// highest checkpoint remains in its current state and receives an error. An
-// operator in IDLE can explicitly enter CATCHINGBLOCKS through the CatchUpBlocks
-// RPC or with setfsmstate --fsmstate catchingblocks.
+// Run requests automatic promotion to RUNNING. It cannot leave operator IDLE,
+// and checkpoint admission still fails closed. Explicit operator requests use
+// SendFSMEvent instead.
 func (b *Blockchain) Run(ctx context.Context, _ *emptypb.Empty) (*emptypb.Empty, error) {
-	// check whether the FSM is already in the RUNNING state
-	if b.finiteStateMachine.Is(blockchain_api.FSMStateType_RUNNING.String()) {
-		return &emptypb.Empty{}, nil
-	}
-
-	req := &blockchain_api.SendFSMEventRequest{
-		Event: blockchain_api.FSMEventType_RUN,
-	}
-
-	_, err := b.SendFSMEvent(ctx, req)
+	_, err := b.sendFSMEvent(ctx, &blockchain_api.SendFSMEventRequest{Event: blockchain_api.FSMEventType_RUN}, true)
 	if err != nil {
-		// unable to send the event, no need to update the state.
 		return nil, err
 	}
-
 	return &emptypb.Empty{}, nil
 }
 
-// CatchUpBlocks transitions the service to catch up missing blocks.
+// CatchUpBlocks requests an automatic transition under the same lock as STOP.
+// IDLE requires explicit operator CATCHUPBLOCKS through SendFSMEvent. Work
+// admission uses a state-neutral GetFSMCurrentState snapshot instead.
 func (b *Blockchain) CatchUpBlocks(ctx context.Context, _ *emptypb.Empty) (*emptypb.Empty, error) {
-	// check whether the FSM is already in the CATCHINGBLOCKS state
-	if b.finiteStateMachine.Is(blockchain_api.FSMStateType_CATCHINGBLOCKS.String()) {
-		return &emptypb.Empty{}, nil
-	}
-
-	req := &blockchain_api.SendFSMEventRequest{
-		Event: blockchain_api.FSMEventType_CATCHUPBLOCKS,
-	}
-
-	_, err := b.SendFSMEvent(ctx, req)
+	_, err := b.sendFSMEvent(ctx, &blockchain_api.SendFSMEventRequest{Event: blockchain_api.FSMEventType_CATCHUPBLOCKS}, true)
 	if err != nil {
-		// unable to send the event, no need to update the state.
 		return nil, err
 	}
-
 	return &emptypb.Empty{}, nil
 }
 
@@ -3051,6 +3044,8 @@ func (b *Blockchain) ReportPeerFailure(ctx context.Context, req *blockchain_api.
 }
 
 func (b *Blockchain) Idle(ctx context.Context, _ *emptypb.Empty) (*emptypb.Empty, error) {
+	b.fsmMu.Lock()
+	defer b.fsmMu.Unlock()
 	// check whether the FSM is already in the Idle state
 	if b.finiteStateMachine.Is(blockchain_api.FSMStateType_IDLE.String()) {
 		return &emptypb.Empty{}, nil
@@ -3060,7 +3055,7 @@ func (b *Blockchain) Idle(ctx context.Context, _ *emptypb.Empty) (*emptypb.Empty
 		Event: blockchain_api.FSMEventType_STOP,
 	}
 
-	_, err := b.SendFSMEvent(ctx, req)
+	_, err := b.sendFSMEventLocked(ctx, req, false)
 	if err != nil {
 		// unable to send the event, no need to update the state.
 		return nil, err
