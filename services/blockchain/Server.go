@@ -2932,7 +2932,7 @@ func (b *Blockchain) SendFSMEvent(ctx context.Context, eventReq *blockchain_api.
 func (b *Blockchain) fsmStoreContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	timeout := time.Duration(b.settings.BlockChain.StoreDBTimeoutMillis) * time.Millisecond
 	if timeout <= 0 {
-		timeout = 5 * time.Second
+		timeout = time.Duration(settings.DefaultBlockchainStoreDBTimeoutMillis) * time.Millisecond
 	}
 	return context.WithTimeout(ctx, timeout)
 }
