@@ -1135,7 +1135,7 @@ func (b *Block) checkBlockRewardAndFees(params *chaincfg.Params, storeSupportsOu
 // - error: if a duplicate transaction is found or if there is an error adding the transaction to the txMap
 func (b *Block) checkDuplicateTransactions(ctx context.Context, logger ulogger.Logger, checkDuplicateTransactionsConcurrency int, diskMapDirs []string) error {
 	_, _, deferFn := tracing.Tracer("block").Start(ctx, "checkDuplicateTransactions",
-		tracing.WithDebugLogMessage(logger, "[checkDuplicateTransactions][%s] called", b.String()),
+		tracing.WithLogMessage(logger, "[checkDuplicateTransactions][%s] called", b.String()),
 	)
 	defer deferFn()
 
@@ -1328,7 +1328,7 @@ type validationDependencies struct {
 
 func (b *Block) validOrderAndBlessed(ctx context.Context, logger ulogger.Logger, deps *validationDependencies, validOrderAndBlessedConcurrency int, diskMapDirs []string, parentSpendsCapacityMultiplier uint64) error {
 	ctx, _, deferFn := tracing.Tracer("block").Start(ctx, "validOrderAndBlessed",
-		tracing.WithDebugLogMessage(logger, "[validOrderAndBlessed][%s] called", b.String()),
+		tracing.WithLogMessage(logger, "[validOrderAndBlessed][%s] called", b.String()),
 	)
 	defer deferFn()
 
