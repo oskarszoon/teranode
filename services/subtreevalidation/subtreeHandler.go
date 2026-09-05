@@ -96,6 +96,7 @@ func (u *Server) subtreeMessageHandler(ctx context.Context) func(msg *kafka.Kafk
 			}
 
 			if errors.Is(err, errors.ErrSubtreeExists) {
+				prometheusSubtreeAlreadyExistsSkipped.Inc()
 				u.logger.Debugf("[subtreeMessageHandler] Subtree already exists - skipping")
 				return nil
 			}

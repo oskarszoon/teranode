@@ -35,9 +35,20 @@ import (
 )
 
 const (
-	// txNotFoundInTxMapMsg is the error message used when a transaction hash
-	// cannot be located in the block's txMap.
-	txNotFoundInTxMapMsg = "transaction %s not found in txMap"
+	// txNotFoundInTxMapExtendMsg is the error message used when a transaction hash
+	// cannot be located in the block's txMap while extending transactions.
+	// errors.Error.Error() does not print the captured file/line, so the phase
+	// name is baked into the message itself to let an operator tell this apart
+	// from the createUtxos and PreValidateTransactions variants below.
+	txNotFoundInTxMapExtendMsg = "transaction %s not found in txMap during extend"
+
+	// txNotFoundInTxMapCreateUtxosMsg is the error message used when a transaction
+	// hash cannot be located in the block's txMap while creating utxos.
+	txNotFoundInTxMapCreateUtxosMsg = "transaction %s not found in txMap during createUtxos"
+
+	// txNotFoundInTxMapPreValidateMsg is the error message used when a transaction
+	// hash cannot be located in the block's txMap during PreValidateTransactions.
+	txNotFoundInTxMapPreValidateMsg = "transaction %s not found in txMap during PreValidateTransactions"
 )
 
 func (sm *SyncManager) HandleBlockDirect(ctx context.Context, peer *peer.Peer, blockHash chainhash.Hash, msgBlock *wire.MsgBlock) (err error) {
@@ -1179,7 +1190,7 @@ func (sm *SyncManager) createUtxos(ctx context.Context, txMap *txmap.SyncedMap[c
 		g.Go(func() error {
 			txWrapper, ok := txMap.Get(txHash)
 			if !ok {
-				return errors.NewProcessingError(txNotFoundInTxMapMsg, txHash.String())
+				return errors.NewProcessingError(txNotFoundInTxMapCreateUtxosMsg, txHash.String())
 			}
 
 			createOpts := append(baseOpts[:len(baseOpts):len(baseOpts)],
@@ -1354,7 +1365,7 @@ func (sm *SyncManager) PreValidateTransactions(ctx context.Context, txMap *txmap
 				if !ok {
 					// Not found in txMap — non-recoverable, fail immediately
 					mu.Lock()
-					hardFail = errors.NewProcessingError(txNotFoundInTxMapMsg, txHash.String())
+					hardFail = errors.NewProcessingError(txNotFoundInTxMapPreValidateMsg, txHash.String())
 					mu.Unlock()
 					return nil
 				}
@@ -1604,7 +1615,7 @@ func (sm *SyncManager) extendTransactions(ctx context.Context, bi blockIdent, tx
 		// the coinbase transaction is not part of the txMap
 		txWrapper, found := txMap.Get(txHash)
 		if !found {
-			return errors.NewTxError(txNotFoundInTxMapMsg, txHash.String())
+			return errors.NewTxError(txNotFoundInTxMapExtendMsg, txHash.String())
 		}
 
 		tx := txWrapper.Tx
