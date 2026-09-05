@@ -3,6 +3,7 @@ package subtreevalidation
 import (
 	"context"
 	"net/url"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -23,6 +24,16 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+type subtreeMessageFSMClient struct {
+	*assemblyFSMClient
+	reads atomic.Int32
+}
+
+func (c *subtreeMessageFSMClient) GetFSMCurrentState(ctx context.Context) (*blockchain.FSMStateType, error) {
+	c.reads.Add(1)
+	return c.assemblyFSMClient.GetFSMCurrentState(ctx)
+}
+
 // Exercise the Kafka entry point: its options must reach the validator even
 // though ordinary peer validation bypasses both block-subtree handlers.
 func TestSubtreeMessageHandlerAssemblyRequiresRunning(t *testing.T) {
@@ -33,13 +44,15 @@ func TestSubtreeMessageHandlerAssemblyRequiresRunning(t *testing.T) {
 		err          error
 		wantValidate bool
 		wantAssembly bool
+		blocksOnly   bool
 	}{
-		{"running", state(blockchain.FSMStateRUNNING), nil, true, true},
-		{"idle", state(blockchain.FSMStateIDLE), nil, true, false},
-		{"unknown", state(blockchain.FSMStateType(99)), nil, true, false},
-		{"missing", nil, nil, true, false},
-		{"catchup", state(blockchain.FSMStateCATCHINGBLOCKS), nil, false, false},
-		{"read error", nil, errors.NewProcessingError("FSM unavailable"), false, false},
+		{"running", state(blockchain.FSMStateRUNNING), nil, true, true, false},
+		{"idle", state(blockchain.FSMStateIDLE), nil, true, false, false},
+		{"unknown", state(blockchain.FSMStateType(99)), nil, true, false, false},
+		{"missing", nil, nil, true, false, false},
+		{"catchup", state(blockchain.FSMStateCATCHINGBLOCKS), nil, false, false, false},
+		{"read error", nil, errors.NewProcessingError("FSM unavailable"), false, false, false},
+		{"blocks only skips failing FSM read", nil, errors.NewProcessingError("FSM unavailable"), false, false, true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			InitPrometheusMetrics()
@@ -47,7 +60,7 @@ func TestSubtreeMessageHandlerAssemblyRequiresRunning(t *testing.T) {
 			logger := ulogger.TestLogger{}
 			tSettings := test.CreateBaseTestSettings(t)
 			tSettings.SubtreeValidation.QuorumPath = t.TempDir()
-			tSettings.SubtreeValidation.BlocksOnly = false
+			tSettings.SubtreeValidation.BlocksOnly = tt.blocksOnly
 			storeURL, err := url.Parse("sqlitememory:///")
 			require.NoError(t, err)
 			chainStore, err := blockchainstore.NewStore(logger, storeURL, tSettings)
@@ -59,7 +72,7 @@ func TestSubtreeMessageHandlerAssemblyRequiresRunning(t *testing.T) {
 			subtreeStore, txStore := blobmemory.New(), blobmemory.New()
 			localClient, err := blockchain.NewLocalClient(logger, tSettings, chainStore, subtreeStore, utxoStore)
 			require.NoError(t, err)
-			client := &assemblyFSMClient{ClientI: localClient, state: tt.state, err: tt.err}
+			client := &subtreeMessageFSMClient{assemblyFSMClient: &assemblyFSMClient{ClientI: localClient, state: tt.state, err: tt.err}}
 			recorder := newRecordingValidatorClient(&validator.MockValidator{UtxoStore: utxoStore})
 			consumer := &kafka.KafkaConsumerGroup{}
 			server, err := New(ctx, logger, tSettings, subtreeStore, txStore, utxoStore, recorder, client, consumer, consumer, nil, nil)
@@ -86,7 +99,10 @@ func TestSubtreeMessageHandlerAssemblyRequiresRunning(t *testing.T) {
 			require.NoError(t, err)
 
 			err = server.subtreeMessageHandler(ctx)(&kafka.KafkaMessage{Value: payload})
-			if tt.err != nil {
+			if tt.blocksOnly {
+				require.NoError(t, err, "BlocksOnly must not depend on FSM availability")
+				require.Zero(t, client.reads.Load(), "BlocksOnly must not read FSM state")
+			} else if tt.err != nil {
 				require.ErrorIs(t, err, tt.err)
 			} else {
 				require.NoError(t, err)
@@ -94,7 +110,7 @@ func TestSubtreeMessageHandlerAssemblyRequiresRunning(t *testing.T) {
 			if !tt.wantValidate {
 				require.Never(t, func() bool {
 					return len(recorder.recordedOptions(*child.TxIDChainHash())) != 0
-				}, 100*time.Millisecond, time.Millisecond, "catchup and read errors must not start peer validation")
+				}, 100*time.Millisecond, 10*time.Millisecond, "skipped messages must not start peer validation")
 				return
 			}
 
@@ -103,7 +119,7 @@ func TestSubtreeMessageHandlerAssemblyRequiresRunning(t *testing.T) {
 			require.Eventually(t, func() bool {
 				exists, existsErr := subtreeStore.Exists(ctx, st.RootHash()[:], fileformat.FileTypeSubtree)
 				return existsErr == nil && exists
-			}, 5*time.Second, time.Millisecond)
+			}, 5*time.Second, 10*time.Millisecond)
 			recorded := recorder.recordedOptions(*child.TxIDChainHash())
 			require.NotEmpty(t, recorded)
 			for _, opts := range recorded {
