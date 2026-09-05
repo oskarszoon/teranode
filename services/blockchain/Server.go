@@ -2898,8 +2898,8 @@ func (b *Blockchain) SendFSMEvent(ctx context.Context, eventReq *blockchain_api.
 
 	// set the state in persistent storage
 	storeCtx, cancel := b.fsmStoreContext(transitionCtx)
-	defer cancel()
 	err = b.store.SetFSMState(storeCtx, state)
+	cancel()
 	// check if there was an error setting the state
 	if err != nil {
 		b.logger.Errorf("[Blockchain Server] Error setting the state in blockchain db: %v", err)

@@ -58,6 +58,48 @@ func TestSendFSMEvent_AcceptedCancellationDoesNotWedge(t *testing.T) {
 	require.Equal(t, blockchain_api.FSMStateType_IDLE, resp.State)
 }
 
+type fsmHardeningWriteStore struct {
+	blockchainstore.Store
+	contexts chan context.Context
+}
+
+func (s *fsmHardeningWriteStore) SetFSMState(ctx context.Context, state string) error {
+	s.contexts <- ctx
+	return s.Store.SetFSMState(ctx, state)
+}
+
+func TestSendFSMEvent_ReleasesStoreContextBeforeResponseDelay(t *testing.T) {
+	b := newFSMHardeningBlockchain(t)
+	b.settings.BlockChain.FSMStateChangeDelay = time.Second
+	b.stateChangeTimestamp = time.Now()
+	contexts := make(chan context.Context, 1)
+	b.store = &fsmHardeningWriteStore{Store: b.store, contexts: contexts}
+	done := make(chan error, 1)
+	go func() {
+		_, err := b.SendFSMEvent(context.Background(), &blockchain_api.SendFSMEventRequest{Event: blockchain_api.FSMEventType_RUN})
+		done <- err
+	}()
+	t.Cleanup(func() {
+		select {
+		case err := <-done:
+			require.NoError(t, err)
+		case <-time.After(3 * time.Second):
+			t.Error("FSM request did not finish")
+		}
+	})
+	select {
+	case storeCtx := <-contexts:
+		select {
+		case <-storeCtx.Done():
+			require.ErrorIs(t, storeCtx.Err(), context.Canceled)
+		case <-time.After(500 * time.Millisecond):
+			t.Fatal("store context remained alive during the response delay")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("FSM request did not reach persistence")
+	}
+}
+
 func TestSendFSMEvent_InTransitionReturnsStateError(t *testing.T) {
 	b := newFSMHardeningBlockchain(t)
 	ctx, cancel := context.WithCancel(context.Background())
