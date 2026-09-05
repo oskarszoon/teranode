@@ -78,15 +78,19 @@ func TestPrunerSkipDuringCatchupRequiresRunning(t *testing.T) {
 				blockAssemblyClient: assembly,
 				pruneNotify:         make(chan pruneSignal, 1), blobNotify: make(chan pruneSignal, 1),
 			}
-			skipsBefore := getCounterValue(t, prunerSkipped, "catchup_mode") + getCounterValue(t, prunerSkipped, "fsm_error")
+			skipReason := "fsm_not_running"
+			if tt.err != nil {
+				skipReason = "fsm_error"
+			}
+			skipsBefore := getCounterValue(t, prunerSkipped, skipReason)
 			done := make(chan struct{})
 			go func() { defer close(done); server.prunerProcessor(ctx) }()
 			t.Cleanup(func() { cancel(); <-done })
 			server.pruneNotify <- pruneSignal{blockHeight: 2}
 			require.Eventually(t, func() bool {
 				return server.lastProcessedHeight.Load() == 2 ||
-					getCounterValue(t, prunerSkipped, "catchup_mode")+getCounterValue(t, prunerSkipped, "fsm_error") > skipsBefore
-			}, time.Second, time.Millisecond)
+					getCounterValue(t, prunerSkipped, skipReason) > skipsBefore
+			}, time.Second, 10*time.Millisecond)
 			if tt.wantPrune {
 				require.Equal(t, uint32(2), server.lastProcessedHeight.Load())
 				require.Len(t, server.blobNotify, 1)
