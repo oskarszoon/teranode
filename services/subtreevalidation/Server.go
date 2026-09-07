@@ -60,7 +60,8 @@ type Server struct {
 	subtreevalidation_api.UnimplementedSubtreeValidationAPIServer
 
 	// logger handles all logging operations for the service
-	logger ulogger.Logger
+	logger                         ulogger.Logger
+	assemblySuppressionLastWarning atomic.Int64
 
 	// settings contains the configuration parameters for the service
 	// including connection details, timeouts, and operational modes
@@ -835,7 +836,7 @@ func (u *Server) checkSubtreeFromBlock(ctx context.Context, request *subtreevali
 	if request.BaseUrl == "legacy" {
 		assemblyPath = "check_subtree_legacy"
 	}
-	addToAssembly := allowAssemblyForObservedFSM(currentState, assemblyPath)
+	addToAssembly := u.allowAssemblyForObservedFSM(currentState, assemblyPath)
 
 	// Check if the base URL is "legacy", which indicates that the subtree is coming from a block from the legacy service.
 	if request.BaseUrl == "legacy" {

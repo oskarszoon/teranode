@@ -643,3 +643,8 @@ Background goroutine that listens for blockchain events and updates the service'
 - [Subtree Validation Settings](../settings/services/subtreevalidation_settings.md)
 - [Subtree Validation Protobuf Reference](../protobuf_docs/subtreevalidationProto.md)
 - [Prometheus Metrics](../prometheusMetrics.md)
+
+Suppressed assembly feeding also emits a warning at most once per minute per
+service instance, including the observed state and entry path. The counter still
+records every gate observation during warning rate limiting. A warning does not
+prove an operator pause: check blockchain connectivity and authoritative state.

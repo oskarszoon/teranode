@@ -445,7 +445,7 @@ func (u *Server) CheckBlockSubtrees(ctx context.Context, request *subtreevalidat
 		return nil, errors.WrapGRPC(errors.NewProcessingError("[CheckBlockSubtrees] Failed to get FSM current state", err))
 	}
 
-	addTXToBlockAssembly := allowAssemblyForObservedFSM(currentState, "check_block_subtrees")
+	addTXToBlockAssembly := u.allowAssemblyForObservedFSM(currentState, "check_block_subtrees")
 
 	// BATCHED SUBTREE LOADING: Get blockIds once before batching
 	blockHeaderIDs, err := u.blockchainClient.GetBlockHeaderIDs(ctx, block.Header.HashPrevBlock, uint64(u.settings.GetUtxoStoreBlockHeightRetention()*2))

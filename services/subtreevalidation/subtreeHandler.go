@@ -64,7 +64,7 @@ func (u *Server) subtreeMessageHandler(ctx context.Context) func(msg *kafka.Kafk
 
 		// Ordinary peer validation may continue in IDLE, but only known
 		// RUNNING state permits feeding its transactions into block assembly.
-		addToAssembly := allowAssemblyForObservedFSM(state, "kafka_subtree")
+		addToAssembly := u.allowAssemblyForObservedFSM(state, "kafka_subtree")
 		if state != nil && *state == blockchain.FSMStateCATCHINGBLOCKS {
 			return nil
 		}
