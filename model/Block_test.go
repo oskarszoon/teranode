@@ -590,15 +590,15 @@ func TestBlock_CheckHeaderContextual(t *testing.T) {
 
 		now := uint32(time.Now().Unix()) // nolint:gosec
 
-		// 11 previous headers all stamped "now"; their median is "now".
-		currentChain := make([]*BlockHeader, 11)
-		for i := range currentChain {
-			currentChain[i] = &BlockHeader{Timestamp: now}
-		}
+		// 11 properly linked previous headers stamped now-10..now; their median is now-5.
+		// The chain must be anchored at the block's parent for the median window to be
+		// evaluated (issue #1467), so the block is anchored on the chain's tip.
+		currentChain := buildLinkedChain(t, 11, now-10)
 
 		// Block timestamp equal to the median violates the strictly-after rule, while staying
 		// well inside the 2-hours-in-the-future bound so the earlier check passes.
-		block := buildBlock(t, now)
+		block := buildBlock(t, now-5)
+		block.Header.HashPrevBlock = currentChain[len(currentChain)-1].Hash()
 
 		err := block.CheckHeaderContextual(currentChain, tSettings, logger)
 		require.Error(t, err)
@@ -1303,10 +1303,12 @@ func TestReadTransactionAllocationSafe_Parity(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			want := new(bt.Tx)
-			_, err := want.ReadFrom(bytes.NewReader(raw))
-			require.NoError(t, err)
-
+			_, wantErr := want.ReadFrom(bytes.NewReader(raw))
 			got, err := readTransactionAllocationSafe(bytes.NewReader(raw), int64(bt.MaxArenaAlloc))
+			if wantErr != nil {
+				require.Error(t, err, "the allocation scanner must reject encodings rejected by go-bt")
+				return
+			}
 			require.NoError(t, err)
 			require.Equal(t, want.Bytes(), got.Bytes())
 		})
@@ -1376,6 +1378,12 @@ func TestNewBlockFromBytes_LargeCoinbaseDecodes(t *testing.T) {
 
 	got, err := NewBlockFromBytes(blockBytes)
 	require.NoError(t, err, "trusted decode path must accept a consensus-valid large coinbase")
+	require.Equal(t, extraOutputs+1, got.CoinbaseTx.OutputCount())
+	got, err = NewBlockFromReader(bytes.NewReader(blockBytes))
+	require.NoError(t, err, "trusted streaming decode must also accept the large coinbase")
+	require.Equal(t, extraOutputs+1, got.CoinbaseTx.OutputCount())
+	got, err = NewBlockFromReaderWithDeclaredSizeLimit(bytes.NewReader(blockBytes), block.SizeInBytes, int64(block.SizeInBytes))
+	require.NoError(t, err, "a coinbase within the accepted block budget must decode on transport too")
 	require.Equal(t, extraOutputs+1, got.CoinbaseTx.OutputCount())
 }
 
@@ -1507,20 +1515,15 @@ func TestBlock_ValidWithOneTransaction(t *testing.T) {
 	utxoStore, err := sql.New(ctx, logger, settings, utxoStoreURL)
 	require.NoError(t, err)
 
-	currentChain := make([]*BlockHeader, 11)
+	// The parent chain must be anchored at the block's parent (issue 1467); the fixture
+	// block is regtest block 1, so its parent chain is the regtest genesis header.
+	currentChain := regtestGenesisParentChain(t, blockHeader)
 	currentChainIDs := make([]uint32, 11)
 
 	for i := 0; i < 11; i++ {
-		currentChain[i] = &BlockHeader{
-			HashPrevBlock:  &chainhash.Hash{},
-			HashMerkleRoot: &chainhash.Hash{},
-			// set the last 11 block header timestamps to be less than the current timestamps
-			Timestamp: 1231469665 - uint32(i), // nolint:gosec
-		}
 		currentChainIDs[i] = uint32(i) // nolint:gosec
 	}
 
-	currentChain[0].HashPrevBlock = &chainhash.Hash{}
 	oldBlockIDs := txmap.NewSyncedMap[chainhash.Hash, []uint32]()
 	v, err := b.Valid(context.Background(), ulogger.TestLogger{}, subtreeStore, utxoStore, oldBlockIDs, currentChain, currentChainIDs, settings, nil)
 	require.NoError(t, err)
@@ -1549,9 +1552,11 @@ func TestBlockValid_AcceptsP2SHCoinbaseOutput(t *testing.T) {
 
 		// The pin must hold at a POST-Genesis height: a (wrong) Genesis-gated
 		// P2SH rejection added to Block.Valid would not fire at height 0.
-		// Regression params: GenesisActivationHeight=10000, BIP0034Height is
-		// unreachable (BIP34 coinbase-height check stays off), BIP65/66 floors
-		// require header version 4 at this height.
+		// Regression params: BIP0034Height is unreachable, so the BIP34
+		// coinbase-height check stays off. The header built below is version 4,
+		// which clears the BIP65/66 floors whether or not this height has
+		// reached them — so the pin does not depend on where those floors sit
+		// relative to Genesis.
 		height := tSettings.ChainCfgParams.GenesisActivationHeight + 1
 
 		// The coinbase may claim at most fees+subsidy at this height (all outputs count).
@@ -1565,9 +1570,14 @@ func TestBlockValid_AcceptsP2SHCoinbaseOutput(t *testing.T) {
 		bits, err := NewNBitFromString("207fffff")
 		require.NoError(t, err)
 
+		// A linked parent chain stamped in the past; the block's header must be anchored
+		// on its tip because CheckHeaderContextual evaluates the median-time-past window
+		// against the headers adjacent to the block's parent (issue 1467).
+		parentChain := buildLinkedChain(t, 11, uint32(time.Now().Unix())-100) // nolint:gosec
+
 		blockHeader := &BlockHeader{
 			Version:        4,
-			HashPrevBlock:  &chainhash.Hash{},
+			HashPrevBlock:  parentChain[len(parentChain)-1].Hash(),
 			HashMerkleRoot: coinbase.TxIDChainHash(),
 			Timestamp:      uint32(time.Now().Unix()), // nolint:gosec
 			Bits:           *bits,
@@ -1598,21 +1608,14 @@ func TestBlockValid_AcceptsP2SHCoinbaseOutput(t *testing.T) {
 		utxoStore, err := sql.New(context.Background(), ulogger.TestLogger{}, tSettings, utxoStoreURL)
 		require.NoError(t, err)
 
-		currentChain := make([]*BlockHeader, 11)
 		currentChainIDs := make([]uint32, 11)
-
 		for i := 0; i < 11; i++ {
-			currentChain[i] = &BlockHeader{
-				HashPrevBlock:  &chainhash.Hash{},
-				HashMerkleRoot: &chainhash.Hash{},
-				Timestamp:      blockHeader.Timestamp - 100 - uint32(i), // nolint:gosec
-			}
 			currentChainIDs[i] = uint32(i) // nolint:gosec
 		}
 
 		oldBlockIDs := txmap.NewSyncedMap[chainhash.Hash, []uint32]()
 
-		return b.Valid(context.Background(), ulogger.TestLogger{}, subtreeStore, utxoStore, oldBlockIDs, currentChain, currentChainIDs, tSettings, nil)
+		return b.Valid(context.Background(), ulogger.TestLogger{}, subtreeStore, utxoStore, oldBlockIDs, parentChain, currentChainIDs, tSettings, nil)
 	}
 
 	t.Run("control: unmodified coinbase is accepted", func(t *testing.T) {
@@ -1649,7 +1652,10 @@ func TestGetAndValidateSubtrees(t *testing.T) {
 	coinbase, err := bt.NewTxFromString(CoinbaseHex)
 	require.NoError(t, err)
 
-	subtreeHash, _ := chainhash.NewHashFromStr("9daba5e5c8ecdb80e811ef93558e960a6ffed0c481182bd47ac381547361ff25")
+	// The mock store serves one canned subtree file whatever key it is asked for,
+	// so the key here has to be that file's own root or GetAndValidateSubtrees
+	// rejects it for not matching its key.
+	subtreeHash, _ := chainhash.NewHashFromStr("dba198cc711d2b7d90d0be80db04c37f9d1bd537bcfeaf813b57877d0cbb8ba9")
 
 	b, err := NewBlock(blockHeader,
 		coinbase,
@@ -1756,17 +1762,12 @@ func TestBlock_Valid_DupTxDetected_NilSubtreeStore(t *testing.T) {
 	// Pre-populate SubtreeSlices so Valid can reach checkDuplicateTransactions without a subtree store.
 	b.SubtreeSlices = []*subtreepkg.Subtree{subtree}
 
-	currentChain := make([]*BlockHeader, 11)
+	// Anchored at the fixture block's real parent, the regtest genesis (issue 1467).
+	currentChain := regtestGenesisParentChain(t, blockHeader)
 	currentChainIDs := make([]uint32, 11)
 	for i := 0; i < 11; i++ {
-		currentChain[i] = &BlockHeader{
-			HashPrevBlock:  &chainhash.Hash{},
-			HashMerkleRoot: &chainhash.Hash{},
-			Timestamp:      1231469665 - uint32(i), // nolint:gosec
-		}
 		currentChainIDs[i] = uint32(i) // nolint:gosec
 	}
-	currentChain[0].HashPrevBlock = &chainhash.Hash{}
 
 	oldBlockIDs := txmap.NewSyncedMap[chainhash.Hash, []uint32]()
 
@@ -5799,17 +5800,12 @@ func TestBlock_Valid_DupTxDetected_DiskMapDirs(t *testing.T) {
 			// CVE-2012-2459 test pattern above).
 			b.SubtreeSlices = []*subtreepkg.Subtree{subtree}
 
-			currentChain := make([]*BlockHeader, 11)
+			// Anchored at the fixture block's real parent, the regtest genesis (issue 1467).
+			currentChain := regtestGenesisParentChain(t, blockHeader)
 			currentChainIDs := make([]uint32, 11)
 			for i := 0; i < 11; i++ {
-				currentChain[i] = &BlockHeader{
-					HashPrevBlock:  &chainhash.Hash{},
-					HashMerkleRoot: &chainhash.Hash{},
-					Timestamp:      1231469665 - uint32(i), // nolint:gosec
-				}
 				currentChainIDs[i] = uint32(i) // nolint:gosec
 			}
-			currentChain[0].HashPrevBlock = &chainhash.Hash{}
 
 			oldBlockIDs := txmap.NewSyncedMap[chainhash.Hash, []uint32]()
 

@@ -311,9 +311,14 @@ func peersAtHeightThreshold(candidates []*p2p.PeerInfo, maxHeight uint32) []*p2p
 	if maxHeight > 0 {
 		threshold = maxHeight - 1
 	}
+	return peersAtOrAboveHeight(candidates, threshold)
+}
+
+// peersAtOrAboveHeight excludes peers that cannot yet hold the requested block.
+func peersAtOrAboveHeight(candidates []*p2p.PeerInfo, height uint32) []*p2p.PeerInfo {
 	out := make([]*p2p.PeerInfo, 0, len(candidates))
 	for _, peer := range candidates {
-		if peer.Height >= threshold {
+		if peer != nil && peer.Height >= height {
 			out = append(out, peer)
 		}
 	}
@@ -395,8 +400,9 @@ func filterMaxHeightPeers(peers []*p2p.PeerInfo, excludePeerID string) []*p2p.Pe
 	return prunedOnly
 }
 
-// catchupAltPeers fetches the peer set ONCE per block and returns (a) the non-pruned
-// max-height alternatives with NO peer excluded (callers filter per assigned peer) and
+// catchupAltPeers fetches the peer set for the block's snapshot, which caches successful
+// lookups and retries transient failures. It returns (a) max-height alternatives with
+// pruned peers last and no peer excluded (callers filter per assigned peer) and
 // (b) whether primaryPeerID is itself pruned (so subtree distribution can drop a pruned
 // primary from the round-robin seed). Replaces the previous per-subtree GetPeersAtMaxHeight
 // gRPC (up to ~SubtreeFetchConcurrency calls per block on primary failure).
@@ -430,12 +436,13 @@ func catchupAltPeers(ctx context.Context, logger ulogger.Logger, p2pClient P2PCl
 }
 
 type catchupPeerSnapshot struct {
-	once          sync.Once
+	mu            sync.Mutex
+	loaded        bool
+	errorOnce     sync.Once
 	load          func() ([]*p2p.PeerInfo, bool, error)
 	onError       func(error)
 	peers         []*p2p.PeerInfo
 	primaryPruned bool
-	err           error
 }
 
 func newCatchupPeerSnapshot(
@@ -459,11 +466,23 @@ func (s *catchupPeerSnapshot) get() ([]*p2p.PeerInfo, bool, error) {
 	if s == nil {
 		return nil, false, nil
 	}
-	s.once.Do(func() {
-		s.peers, s.primaryPruned, s.err = s.load()
-		if s.err != nil && s.onError != nil {
-			s.onError(s.err)
-		}
-	})
-	return s.peers, s.primaryPruned, s.err
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.loaded {
+		return s.peers, s.primaryPruned, nil
+	}
+
+	peers, primaryPruned, err := s.load()
+	if err != nil {
+		// A local RPC outage must not disable failover for the whole block.
+		// Serialize discovery and report the outage once, but let a later caller retry.
+		s.errorOnce.Do(func() {
+			if s.onError != nil {
+				s.onError(err)
+			}
+		})
+		return nil, false, err
+	}
+	s.peers, s.primaryPruned, s.loaded = peers, primaryPruned, true
+	return s.peers, s.primaryPruned, nil
 }

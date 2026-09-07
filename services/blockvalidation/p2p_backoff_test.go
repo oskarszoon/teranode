@@ -154,7 +154,7 @@ func TestCatchupPeerSnapshot_IsLazyAndLoadsOnce(t *testing.T) {
 	require.Equal(t, int32(1), calls.Load())
 }
 
-func TestCatchupPeerSnapshot_ReportsCachedErrorOnce(t *testing.T) {
+func TestCatchupPeerSnapshot_RetriesErrorsAndReportsOnce(t *testing.T) {
 	var loads atomic.Int32
 	var reports atomic.Int32
 	snapshot := &catchupPeerSnapshot{
@@ -169,7 +169,7 @@ func TestCatchupPeerSnapshot_ReportsCachedErrorOnce(t *testing.T) {
 		_, _, err := snapshot.get()
 		require.Error(t, err)
 	}
-	require.Equal(t, int32(1), loads.Load())
+	require.Equal(t, int32(3), loads.Load())
 	require.Equal(t, int32(1), reports.Load())
 }
 
@@ -535,8 +535,8 @@ func TestReleaseCatchupLock_LocalErrorNotBlamedOnPeer(t *testing.T) {
 	suite.Server.releaseCatchupLock(cctx, &e)
 
 	require.NotNil(t, suite.Server.previousCatchupAttempt)
-	require.Equal(t, "local_error", suite.Server.previousCatchupAttempt.ErrorType,
-		"a local rate-wait/shutdown error must classify as local_error, not network_error (which would degrade the peer)")
+	require.Equal(t, "local_context_cancelled", suite.Server.previousCatchupAttempt.ErrorType,
+		"a local rate-wait/shutdown error must retain upstream cancellation attribution")
 }
 
 // TestFilterMaxHeightPeers_PrunedDeprioritizedNotExcluded proves pruned peers are no longer
