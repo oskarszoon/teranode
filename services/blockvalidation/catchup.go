@@ -1427,6 +1427,9 @@ func (u *Server) setFSMCatchingBlocks(ctx context.Context, catchupCtx *CatchupCo
 //   - ctx: Context for cancellation
 //   - catchupCtx: Catchup context for logging
 func (u *Server) restoreFSMState(ctx context.Context, catchupCtx *CatchupContext) {
+	if ctx.Err() != nil {
+		return // Normal shutdown has no promotion to attempt.
+	}
 	var err error
 	attempts := 0
 	for attempts < catchupPromotionAttempts {
@@ -1455,7 +1458,16 @@ func (u *Server) restoreFSMState(ctx context.Context, catchupCtx *CatchupContext
 			break
 		}
 	}
-	u.logger.Warnf("[catchup][%s] RUN promotion not confirmed after %d attempts; node may remain CATCHINGBLOCKS with mining disabled; inspect FSM and store health before retrying RUN: %v", catchupCtx.blockUpTo.Hash().String(), attempts, err)
+	if ctx.Err() != nil {
+		return // Cancellation during backoff is also normal shutdown.
+	}
+	// This message match only selects log severity. State admission and retry
+	// classification remain controlled by the authority and typed errors.
+	if errors.Is(err, errors.ErrStateError) && strings.Contains(err.Error(), "automatic RUN refused from IDLE") {
+		u.logger.Infof("[catchup][%s] Automatic RUN declined while operator IDLE after %d attempts; explicit operator action is required: %v", catchupCtx.blockUpTo.Hash().String(), attempts, err)
+		return
+	}
+	u.logger.Warnf("[catchup][%s] RUNNING not durably confirmed after %d attempts; inspect FSM state, mining readiness and store health before retrying RUN: %v", catchupCtx.blockUpTo.Hash().String(), attempts, err)
 }
 
 func retryableFSMPromotionError(err error) bool {

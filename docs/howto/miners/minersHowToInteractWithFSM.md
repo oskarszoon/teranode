@@ -21,6 +21,14 @@ persisted `RUNNING` state with a successfully read tip below the active network'
 highest checkpoint is durably migrated to `CATCHINGBLOCKS`. Tip-read failures or
 missing metadata abort startup and leave the persisted state unchanged.
 
+Automatic `Run` requests from catchup or legacy sync cannot leave operator
+`IDLE`. In particular, legacy synchronization reaching the tip no longer reverses
+an operator STOP through automatic RUN. To leave IDLE deliberately, use
+`teranode-cli setfsmstate --fsmstate catchingblocks` to start synchronization, or
+explicitly request `running` when checkpoint-safe. IDLE does
+not prove that already admitted work has drained; rewind still requires service
+shutdown.
+
 ## Prerequisites
 
 - Access to a running Teranode instance

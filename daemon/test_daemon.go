@@ -37,6 +37,7 @@ import (
 	"github.com/bsv-blockchain/teranode/services/blockassembly"
 	"github.com/bsv-blockchain/teranode/services/blockassembly/blockassembly_api"
 	"github.com/bsv-blockchain/teranode/services/blockchain"
+	"github.com/bsv-blockchain/teranode/services/blockchain/blockchain_api"
 	"github.com/bsv-blockchain/teranode/services/blockvalidation"
 	"github.com/bsv-blockchain/teranode/services/p2p"
 	"github.com/bsv-blockchain/teranode/services/propagation"
@@ -149,6 +150,19 @@ func (je *JSONError) Error() string {
 
 // testDaemonCounter is used to generate unique context names for each TestDaemon
 var testDaemonCounter uint64
+
+// setTestDaemonRunning expresses explicit test setup. Automatic Run alone
+// intentionally refuses IDLE and cannot perform this operator action.
+func setTestDaemonRunning(ctx context.Context, client blockchain.ClientI) error {
+	err := client.SendFSMEvent(ctx, blockchain_api.FSMEventType_RUN)
+	if !errors.Is(err, errors.ErrStateError) {
+		return err
+	}
+	// Explicit RUN is invalid if another promotion already reached RUNNING.
+	// Confirm through the authority rather than a cached state read; this also
+	// reconciles uncertain persistence and still refuses a concurrent STOP.
+	return client.Run(ctx, "test/setup-confirm-running")
+}
 
 // NewTestDaemon creates a new TestDaemon instance with the provided options.
 func NewTestDaemon(t *testing.T, opts TestOptions) *TestDaemon {
@@ -598,7 +612,7 @@ func NewTestDaemon(t *testing.T, opts TestOptions) *TestDaemon {
 	if opts.FSMState.String() != "" {
 		switch opts.FSMState {
 		case blockchain.FSMStateRUNNING:
-			err = blockchainClient.Run(ctx, "test")
+			err = setTestDaemonRunning(ctx, blockchainClient)
 			require.NoError(t, err)
 		case blockchain.FSMStateCATCHINGBLOCKS:
 			err = blockchainClient.CatchUpBlocks(ctx)
