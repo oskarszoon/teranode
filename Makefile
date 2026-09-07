@@ -515,7 +515,7 @@ TRACING_INFO_MAX := 62
 
 .PHONY: lint-tracing-info
 lint-tracing-info:
-	@count=$$(grep -rn "tracing\.WithLogMessage(" --include='*.go' . | wc -l | tr -d ' '); \
+	@count=$$(git grep -c "tracing\.WithLogMessage(" -- '*.go' | awk -F: '{s+=$$NF} END {print s+0}'); \
 	if [ "$$count" -gt "$(TRACING_INFO_MAX)" ]; then \
 		echo "tracing.WithLogMessage sites: $$count (max $(TRACING_INFO_MAX))"; \
 		echo "Each is two INFO lines per operation. Use tracing.WithDebugLogMessage on"; \
