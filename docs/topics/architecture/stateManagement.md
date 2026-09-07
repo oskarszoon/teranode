@@ -76,6 +76,8 @@ gate; below-checkpoint configured **Running** aborts startup without fallback.
 A persisted **Running** state with a successfully read tip below the checkpoint
 is persisted and resumed as **CatchingBlocks** instead. A tip-read failure or
 missing tip metadata aborts startup and leaves the persisted state unchanged.
+Unrecognized persisted state names likewise abort without writes; only the
+known retired `LEGACYSYNCING` name is migrated automatically.
 
 ### 3.2. Accessing the State Machine
 

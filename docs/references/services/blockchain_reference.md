@@ -86,7 +86,8 @@ Fresh or persisted `RUNNING` is checked against the active network's highest
 checkpoint. Below-checkpoint configured `RUNNING` fails without fallback;
 persisted `RUNNING` with a successfully read tip below the checkpoint is durably
 migrated to `CATCHINGBLOCKS`. Tip-read failures or missing metadata abort startup
-without changing the persisted state.
+without changing the persisted state. Unrecognized persisted state names also
+abort startup without writes; `LEGACYSYNCING` retains its explicit migration.
 
 ### Start
 

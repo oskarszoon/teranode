@@ -448,6 +448,10 @@ func (b *Blockchain) Init(ctx context.Context) error {
 			}
 		}
 
+		if _, valid := blockchain_api.FSMStateType_value[stateStr]; !valid {
+			return errors.NewStateError("unrecognized persisted FSM state %q; repair stored state before restarting", stateStr)
+		}
+
 		if stateStr == blockchain_api.FSMStateType_RUNNING.String() {
 			if belowCheckpoint, gateErr := b.evaluateRunCheckpoint(ctx); gateErr != nil {
 				if !belowCheckpoint {

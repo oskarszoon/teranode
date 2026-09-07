@@ -317,6 +317,27 @@ func TestInit_PersistedRunningHonorsCheckpointGate(t *testing.T) {
 	}
 }
 
+func TestInit_UnknownPersistedStateAbortsWithoutRewriting(t *testing.T) {
+	for _, state := range []string{"INIT", "RUNNIG", "idle", "FUTURE_STATE"} {
+		t.Run(state, func(t *testing.T) {
+			ctx := context.Background()
+			b, store := newBootStateBlockchain(t, "IDLE", &chaincfg.RegressionNetParams)
+			require.NoError(t, store.SetFSMState(ctx, state))
+			fault := &bootStateFaultStore{Store: store}
+			b.store = fault
+
+			err := b.Init(ctx)
+			require.ErrorContains(t, err, "unrecognized persisted FSM state")
+			require.ErrorContains(t, err, state)
+			require.Zero(t, fault.setFSMStateCalls)
+			require.NotEqual(t, state, b.finiteStateMachine.Current())
+			persisted, getErr := store.GetFSMState(ctx)
+			require.NoError(t, getErr)
+			require.Equal(t, state, persisted)
+		})
+	}
+}
+
 func TestInit_PersistedRunningCheckpointReadFailurePreservesState(t *testing.T) {
 	for _, tt := range []struct {
 		name        string
