@@ -378,9 +378,13 @@ func (b *Blockchain) HealthGRPC(ctx context.Context, _ *emptypb.Empty) (*blockch
 // This method sets up the finite state machine (FSM) that governs the service's
 // operational states. It handles three initialization scenarios:
 //
-// 1. Test mode: Uses a predefined state for testing, bypassing normal state persistence
-// 2. New deployment: Initializes a default state when no previous state exists in storage
+// 1. Test mode: Uses a predefined state, bypassing configured and persisted state selection
+// 2. New deployment: Uses the configured boot state, defaulting to CATCHINGBLOCKS
 // 3. Normal operation: Restores the previously persisted state from storage
+//
+// Starting in RUNNING is checkpoint-gated. An unsafe configured RUNNING state aborts
+// initialization, while persisted RUNNING with a known below-checkpoint tip resumes
+// in CATCHINGBLOCKS. An unreadable tip aborts without rewriting persisted state.
 //
 // The method ensures that the service state is persisted to survive service restarts
 // and updates metrics to reflect the current operational state. The FSM provides a
@@ -399,9 +403,8 @@ func (b *Blockchain) Init(ctx context.Context) error {
 	if b.localTestStartState != "" {
 		b.finiteStateMachine.SetState(b.localTestStartState)
 
-		err := b.store.SetFSMState(ctx, b.finiteStateMachine.Current())
-		if err != nil {
-			b.logger.Errorf("[Blockchain][Init] Error setting FSM state in blockchain store: %v", err)
+		if err := b.store.SetFSMState(ctx, b.finiteStateMachine.Current()); err != nil {
+			return errors.NewStorageError("[Blockchain][Init] failed to persist local test FSM state", err)
 		}
 
 		return nil
@@ -410,25 +413,26 @@ func (b *Blockchain) Init(ctx context.Context) error {
 	// Set the FSM to the latest persisted state
 	stateStr, err := b.store.GetFSMState(ctx)
 	if err != nil {
-		b.logger.Errorf("[Blockchain][Init] Error getting FSM state: %v", err)
+		return errors.NewStorageError("[Blockchain][Init] failed to get persisted FSM state", err)
 	}
 
 	if stateStr == "" { // no persisted state: this is a fresh node
-		// A fresh node has no chain (height 0) and is therefore behind the
-		// network. Boot it directly into CATCHINGBLOCKS (catch-up mode) rather
-		// than IDLE, so downstream services that block on FSM != IDLE start
-		// immediately and the node proactively catches up. We deliberately do
-		// NOT boot into RUNNING: RUNNING switches on live subtree validation /
-		// block-assembly tx feeding before the node is caught up. Promotion to
-		// RUNNING happens only when a catchup completes above the highest
-		// checkpoint (catchup.restoreFSMState + guardRunBelowHighestCheckpoint).
-		// This restores the boot-into-sync behaviour the removed
-		// IDLE->LEGACYSYNCING edge used to provide.
-		b.finiteStateMachine.SetState(blockchain_api.FSMStateType_CATCHINGBLOCKS.String())
-		b.logger.Infof("[Blockchain][Init] fresh node, booting FSM into %v (catch-up mode)", b.finiteStateMachine.Current())
+		bootState, err := b.fsmBootState()
+		if err != nil {
+			return err
+		}
 
-		if err = b.store.SetFSMState(ctx, b.finiteStateMachine.Current()); err != nil {
-			b.logger.Errorf("[Blockchain][Init] Error persisting initial CATCHINGBLOCKS state: %v", err)
+		if bootState == blockchain_api.FSMStateType_RUNNING.String() {
+			if err = b.guardRunBelowHighestCheckpoint(ctx); err != nil {
+				return err
+			}
+		}
+
+		b.finiteStateMachine.SetState(bootState)
+		b.logger.Infof("[Blockchain][Init] fresh node, booting FSM into %v", bootState)
+
+		if err = b.store.SetFSMState(ctx, bootState); err != nil {
+			return errors.NewStorageError("[Blockchain][Init] failed to persist initial %s state", bootState, err)
 		}
 	} else { // if there is a state stored, set the FSM to that state
 		// Migration: the LEGACYSYNCING state was removed. A node persisted in it
@@ -440,7 +444,26 @@ func (b *Blockchain) Init(ctx context.Context) error {
 			stateStr = blockchain_api.FSMStateType_CATCHINGBLOCKS.String()
 
 			if setErr := b.store.SetFSMState(ctx, stateStr); setErr != nil {
-				b.logger.Errorf("[Blockchain][Init] error persisting migrated FSM state: %v", setErr)
+				return errors.NewStorageError("[Blockchain][Init] failed to persist migrated FSM state", setErr)
+			}
+		}
+
+		if _, valid := blockchain_api.FSMStateType_value[stateStr]; !valid {
+			return errors.NewStateError("unrecognized persisted FSM state %q; repair stored state before restarting", stateStr)
+		}
+
+		if stateStr == blockchain_api.FSMStateType_RUNNING.String() {
+			if belowCheckpoint, gateErr := b.evaluateRunCheckpoint(ctx); gateErr != nil {
+				if !belowCheckpoint {
+					return gateErr
+				}
+
+				b.logger.Warnf("[Blockchain][Init] persisted RUNNING state is unsafe: %v; resuming in CATCHINGBLOCKS", gateErr)
+				stateStr = blockchain_api.FSMStateType_CATCHINGBLOCKS.String()
+
+				if setErr := b.store.SetFSMState(ctx, stateStr); setErr != nil {
+					return errors.NewStorageError("[Blockchain][Init] failed to persist safe FSM state after RUNNING gate rejection", setErr)
+				}
 			}
 		}
 
@@ -451,6 +474,29 @@ func (b *Blockchain) Init(ctx context.Context) error {
 	prometheusBlockchainFSMCurrentState.Set(float64(blockchain_api.FSMStateType_value[b.finiteStateMachine.Current()]))
 
 	return nil
+}
+
+func (b *Blockchain) fsmBootState() (string, error) {
+	configured := ""
+	if b.settings != nil {
+		configured = strings.TrimSpace(b.settings.BlockChain.InitializeNodeInState)
+	}
+
+	if configured == "" {
+		return blockchain_api.FSMStateType_CATCHINGBLOCKS.String(), nil
+	}
+
+	switch configured {
+	case blockchain_api.FSMStateType_IDLE.String(),
+		blockchain_api.FSMStateType_CATCHINGBLOCKS.String(),
+		blockchain_api.FSMStateType_RUNNING.String():
+		return configured, nil
+	default:
+		return "", errors.NewConfigurationError(
+			"invalid blockchain_initializeNodeInState %q: expected IDLE, CATCHINGBLOCKS, or RUNNING",
+			configured,
+		)
+	}
 }
 
 // Start begins the blockchain service operations.
@@ -2929,31 +2975,39 @@ func (b *Blockchain) SendFSMEvent(ctx context.Context, eventReq *blockchain_api.
 // no checkpoints. Store failures, missing tip metadata, and a tip below the
 // checkpoint all fail closed.
 func (b *Blockchain) guardRunBelowHighestCheckpoint(ctx context.Context) error {
+	_, err := b.evaluateRunCheckpoint(ctx)
+	return err
+}
+
+// evaluateRunCheckpoint returns the RUN gate error and whether it reflects a
+// successfully observed below-checkpoint tip. Read failures and missing metadata
+// return false with an error: callers must not treat uncertainty as a low tip.
+func (b *Blockchain) evaluateRunCheckpoint(ctx context.Context) (belowCheckpoint bool, gateErr error) {
 	if b.settings == nil || b.settings.ChainCfgParams == nil {
-		return nil
+		return false, nil
 	}
 
 	highest := HighestCheckpointHeight(b.settings.ChainCfgParams.Checkpoints)
 	if highest == 0 {
-		return nil
+		return false, nil
 	}
 
 	_, meta, err := b.store.GetBestBlockHeader(ctx)
 	if err != nil {
-		return errors.NewStateError("cannot read best block header to evaluate RUN gate", err)
+		return false, errors.NewStateError("cannot read best block header to evaluate RUN gate", err)
 	}
 	if meta == nil {
-		return errors.NewStateError("best block header meta unavailable, cannot evaluate RUN gate")
+		return false, errors.NewStateError("best block header meta unavailable, cannot evaluate RUN gate")
 	}
 
 	if meta.Height < highest {
-		return errors.NewStateError(
+		return true, errors.NewStateError(
 			"refusing RUN: chain tip height %d is below highest checkpoint %d for %s; use setfsmstate --fsmstate catchingblocks to start synchronization",
 			meta.Height, highest, b.settings.ChainCfgParams.Name,
 		)
 	}
 
-	return nil
+	return false, nil
 }
 
 // HighestCheckpointHeight returns the largest Height in the supplied
