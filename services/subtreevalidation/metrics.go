@@ -6,6 +6,7 @@ package subtreevalidation
 import (
 	"sync"
 
+	"github.com/bsv-blockchain/teranode/services/blockchain"
 	"github.com/bsv-blockchain/teranode/util"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -94,6 +95,10 @@ var (
 	// need a signal so they can detect malformed-message bursts that would otherwise be invisible.
 	// Reason labels: nil_message, too_short, unmarshal_failure, bad_hash, bad_url.
 	prometheusSubtreeKafkaMalformed *prometheus.CounterVec
+
+	// Counts FSM observations that suppress assembly feeding, not transactions or
+	// confirmed pauses. Paths and observed states are bounded at the call sites.
+	prometheusAssemblyFeedingSuppressed *prometheus.CounterVec
 )
 
 var (
@@ -212,6 +217,16 @@ func _initPrometheusMetrics() {
 		},
 	)
 
+	prometheusAssemblyFeedingSuppressed = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "teranode",
+			Subsystem: "subtreevalidation",
+			Name:      "assembly_feeding_suppressed_total",
+			Help:      "FSM observations suppressing assembly feeding, including skipped Kafka catchup messages; observed state is cached and does not confirm a durable pause",
+		},
+		[]string{"path", "observed_state"},
+	)
+
 	prometheusSubtreeKafkaMalformed = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: "teranode",
@@ -221,4 +236,29 @@ func _initPrometheusMetrics() {
 		},
 		[]string{"reason"},
 	)
+}
+
+// allowAssemblyForObservedFSM records suppression at an admission boundary.
+// GetFSMCurrentState can return synthetic IDLE after notification-stream loss:
+// this metric exposes that fail-closed window, not an authoritative pause state.
+// Cache recovery re-enables feeding; transactions validated during that window
+// rely on normal unmined-transaction reloads to reach assembly.
+// Paths are fixed labels supplied only by the four internal entry paths.
+func allowAssemblyForObservedFSM(state *blockchain.FSMStateType, path string) bool {
+	if state != nil && *state == blockchain.FSMStateRUNNING {
+		return true
+	}
+	observedState := "missing"
+	if state != nil {
+		switch *state {
+		case blockchain.FSMStateIDLE:
+			observedState = "idle"
+		case blockchain.FSMStateCATCHINGBLOCKS:
+			observedState = "catchingblocks"
+		default:
+			observedState = "unknown"
+		}
+	}
+	prometheusAssemblyFeedingSuppressed.WithLabelValues(path, observedState).Inc()
+	return false
 }

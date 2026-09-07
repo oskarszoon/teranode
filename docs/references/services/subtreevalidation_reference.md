@@ -4,6 +4,22 @@
 
 The `Server` type implements the core functionality for subtree validation in a blockchain system. It handles subtree and transaction metadata processing, interacts with various data stores, and manages Kafka consumers for distributed processing. The service is a critical component in validating transaction subtrees for inclusion in the blockchain.
 
+## Assembly feeding observations
+
+`teranode_subtreevalidation_assembly_feeding_suppressed_total{path,observed_state}`
+counts FSM observations that suppress assembly feeding, once per handler admission
+check. It includes Kafka messages skipped during catchup; it does not count
+transactions or confirm that the node is durably paused. Paths are
+`check_subtree_legacy`, `check_subtree_peer`, `check_block_subtrees`, and
+`kafka_subtree`. Observed states are `idle`, `catchingblocks`, `unknown`, and
+`missing`; RUNNING observations do not increment the counter.
+
+The blockchain client can report a synthetic IDLE after its notification stream
+breaks. Feeding remains disabled until a RUNNING observation returns after cache
+recovery. Transactions validated during that window rely on normal unmined
+transaction reloads to enter assembly. The counter exposes this window without
+changing the conservative cached-state guard.
+
 ## Types
 
 ### Server

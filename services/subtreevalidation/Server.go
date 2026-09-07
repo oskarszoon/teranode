@@ -822,6 +822,21 @@ func (u *Server) checkSubtreeFromBlock(ctx context.Context, request *subtreevali
 		}
 	}
 
+	currentState, err := u.blockchainClient.GetFSMCurrentState(ctx)
+	if err != nil {
+		return false, errors.NewProcessingError("[CheckSubtree] Failed to get FSM current state", err)
+	}
+
+	// Only known RUNNING state permits either entry path to feed block
+	// assembly. Admitted catchup writes may finish in IDLE; their bulk-history
+	// transactions must not enter the template. RUNNING retains reorg
+	// resilience for transactions from legacy-bridge tip blocks.
+	assemblyPath := "check_subtree_peer"
+	if request.BaseUrl == "legacy" {
+		assemblyPath = "check_subtree_legacy"
+	}
+	addToAssembly := allowAssemblyForObservedFSM(currentState, assemblyPath)
+
 	// Check if the base URL is "legacy", which indicates that the subtree is coming from a block from the legacy service.
 	if request.BaseUrl == "legacy" {
 		// read from legacy store
@@ -906,19 +921,7 @@ func (u *Server) checkSubtreeFromBlock(ctx context.Context, request *subtreevali
 			validator.WithIgnoreLocked(true),
 			validator.WithCandidateParentMedianTime(candidateParentMedianTime),
 			validator.WithUnconfirmedParentsAtCandidateHeight(true),
-		}
-
-		currentState, err := u.blockchainClient.GetFSMCurrentState(ctx)
-		if err != nil {
-			return false, errors.NewProcessingError("[CheckSubtree] Failed to get FSM current state", err)
-		}
-
-		// Only known RUNNING state permits feeding block assembly. Admitted
-		// catchup writes may finish in IDLE; their bulk-history transactions
-		// must not enter the template. RUNNING retains reorg resilience for
-		// transactions from legacy-bridge tip blocks.
-		if currentState == nil || *currentState != blockchain.FSMStateRUNNING {
-			validatorOptions = append(validatorOptions, validator.WithAddTXToBlockAssembly(false))
+			validator.WithAddTXToBlockAssembly(addToAssembly),
 		}
 
 		// Call the validateSubtreeInternal method
@@ -960,6 +963,7 @@ func (u *Server) checkSubtreeFromBlock(ctx context.Context, request *subtreevali
 		validator.WithCreateConflicting(true),
 		validator.WithIgnoreLocked(true),
 		validator.WithCandidateParentMedianTime(candidateParentMedianTime),
+		validator.WithAddTXToBlockAssembly(addToAssembly),
 	); err != nil {
 		return false, errors.NewProcessingError("[CheckSubtree] Failed to validate subtree %s", hash.String(), err)
 	}

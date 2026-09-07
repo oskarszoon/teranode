@@ -108,6 +108,26 @@ func (s *Server) waitForBlockMinedStatus(ctx context.Context, blockHash *chainha
 	return true
 }
 
+// isFSMReadyForPruning checks the optional FSM admission guard. This is an
+// observation, not a lock: transitions after admission do not cancel the cycle.
+func (s *Server) isFSMReadyForPruning(ctx context.Context, blockHash string, height uint32) bool {
+	if !s.settings.Pruner.SkipDuringCatchup {
+		return true
+	}
+	state, err := s.blockchainClient.GetFSMCurrentState(ctx)
+	if err != nil {
+		s.logger.Warnf("Failed to get FSM state, skipping pruner: %v", err)
+		prunerSkipped.WithLabelValues("fsm_error").Inc()
+		return false
+	}
+	if state == nil || *state != blockchain.FSMStateRUNNING {
+		s.logger.Debugf("[pruner][%s:%d] skipping while blockchain FSM is not RUNNING", blockHash, height)
+		prunerSkipped.WithLabelValues("fsm_not_running").Inc()
+		return false
+	}
+	return true
+}
+
 // prunerProcessor processes pruning operations triggered by notification signals.
 // It reads the latest target height from an atomic variable (set by the notification handler),
 // then performs a two-phase pruning operation:
@@ -158,19 +178,8 @@ func (s *Server) prunerProcessor(ctx context.Context) {
 				continue
 			}
 
-			// Require positive RUNNING confirmation when the catchup guard is enabled.
-			if s.settings.Pruner.SkipDuringCatchup {
-				fsmState, err := s.blockchainClient.GetFSMCurrentState(ctx)
-				if err != nil {
-					s.logger.Warnf("Failed to get FSM state, skipping pruner: %v", err)
-					prunerSkipped.WithLabelValues("fsm_error").Inc()
-					continue
-				}
-				if fsmState == nil || *fsmState != blockchain.FSMStateRUNNING {
-					s.logger.Debugf("[pruner][%s:%d] skipping while blockchain FSM is not RUNNING", blockHashStr, blockHeight)
-					prunerSkipped.WithLabelValues("fsm_not_running").Inc()
-					continue
-				}
+			if !s.isFSMReadyForPruning(ctx, blockHashStr, blockHeight) {
+				continue
 			}
 
 			// Wait for block to have mined_set=true before pruning.
@@ -189,6 +198,12 @@ func (s *Server) prunerProcessor(ctx context.Context) {
 
 			// Safety check before pruning
 			if !s.checkBlockAssemblySafeForPruner(ctx, "pruner", blockHeight) {
+				continue
+			}
+
+			// Both readiness waits may outlive a pause. Recheck before admitting
+			// blob deletion or Phase 1; work already admitted may still drain.
+			if !s.isFSMReadyForPruning(ctx, blockHashStr, blockHeight) {
 				continue
 			}
 

@@ -20,6 +20,7 @@ import (
 	"github.com/bsv-blockchain/teranode/util/kafka"
 	kafkamessage "github.com/bsv-blockchain/teranode/util/kafka/kafka_message"
 	"github.com/bsv-blockchain/teranode/util/test"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 )
@@ -56,6 +57,11 @@ func TestSubtreeMessageHandlerAssemblyRequiresRunning(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			InitPrometheusMetrics()
+			observedState := tt.name
+			if observedState == "catchup" {
+				observedState = "catchingblocks"
+			}
+			suppressedBefore := testutil.ToFloat64(prometheusAssemblyFeedingSuppressed.WithLabelValues("kafka_subtree", observedState))
 			ctx := t.Context()
 			logger := ulogger.TestLogger{}
 			tSettings := test.CreateBaseTestSettings(t)
@@ -106,6 +112,13 @@ func TestSubtreeMessageHandlerAssemblyRequiresRunning(t *testing.T) {
 				require.ErrorIs(t, err, tt.err)
 			} else {
 				require.NoError(t, err)
+			}
+			if tt.err == nil {
+				wantSuppressed := float64(1)
+				if tt.wantAssembly {
+					wantSuppressed = 0
+				}
+				require.Equal(t, suppressedBefore+wantSuppressed, testutil.ToFloat64(prometheusAssemblyFeedingSuppressed.WithLabelValues("kafka_subtree", observedState)))
 			}
 			if !tt.wantValidate {
 				require.Never(t, func() bool {

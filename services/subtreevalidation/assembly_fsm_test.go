@@ -20,6 +20,7 @@ import (
 	"github.com/bsv-blockchain/teranode/ulogger"
 	"github.com/bsv-blockchain/teranode/util/kafka"
 	"github.com/bsv-blockchain/teranode/util/test"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -36,7 +37,7 @@ func (c *assemblyFSMClient) GetFSMCurrentState(context.Context) (*blockchain.FSM
 
 func TestBlockSubtreeAssemblyRequiresRunning(t *testing.T) {
 	state := func(s blockchain.FSMStateType) *blockchain.FSMStateType { return &s }
-	for _, path := range []string{"legacy", "block"} {
+	for _, path := range []string{"legacy", "peer", "block"} {
 		t.Run(path, func(t *testing.T) {
 			for _, tt := range []struct {
 				name         string
@@ -53,9 +54,16 @@ func TestBlockSubtreeAssemblyRequiresRunning(t *testing.T) {
 			} {
 				t.Run(tt.name, func(t *testing.T) {
 					InitPrometheusMetrics()
+					metricPath := map[string]string{"legacy": "check_subtree_legacy", "peer": "check_subtree_peer", "block": "check_block_subtrees"}[path]
+					observedState := tt.name
+					if observedState == "catchup" {
+						observedState = "catchingblocks"
+					}
+					suppressedBefore := testutil.ToFloat64(prometheusAssemblyFeedingSuppressed.WithLabelValues(metricPath, observedState))
 					ctx := context.Background()
 					logger := ulogger.TestLogger{}
 					tSettings := test.CreateBaseTestSettings(t)
+					tSettings.SubtreeValidation.QuorumPath = t.TempDir()
 					storeURL, err := url.Parse("sqlitememory:///")
 					require.NoError(t, err)
 					chainStore, err := blockchainstore.NewStore(logger, storeURL, tSettings)
@@ -83,10 +91,14 @@ func TestBlockSubtreeAssemblyRequiresRunning(t *testing.T) {
 					serialized, err := st.Serialize()
 					require.NoError(t, err)
 					require.NoError(t, subtreeStore.Set(ctx, st.RootHash()[:], fileformat.FileTypeSubtreeToCheck, serialized))
-					if path == "legacy" {
+					if path != "block" {
+						baseURL := "legacy"
+						if path == "peer" {
+							baseURL = "http://peer.invalid"
+						}
 						require.NoError(t, subtreeStore.Set(ctx, st.RootHash()[:], fileformat.FileTypeSubtreeData, child.ExtendedBytes()))
 						_, err = server.CheckSubtreeFromBlock(ctx, &subtreevalidation_api.CheckSubtreeFromBlockRequest{
-							Hash: st.RootHash()[:], BaseUrl: "legacy", BlockHeight: 100,
+							Hash: st.RootHash()[:], BaseUrl: baseURL, BlockHeight: 100,
 							BlockHash: make([]byte, 32), PreviousBlockHash: tSettings.ChainCfgParams.GenesisHash[:],
 						})
 					} else {
@@ -106,11 +118,16 @@ func TestBlockSubtreeAssemblyRequiresRunning(t *testing.T) {
 						return
 					}
 					require.NoError(t, err)
+					wantSuppressed := float64(1)
+					if tt.wantAssembly {
+						wantSuppressed = 0
+					}
+					require.Equal(t, suppressedBefore+wantSuppressed, testutil.ToFloat64(prometheusAssemblyFeedingSuppressed.WithLabelValues(metricPath, observedState)))
 					recorded := recorder.recordedOptions(*child.TxIDChainHash())
 					require.NotEmpty(t, recorded, "admitted block transactions must still validate")
 					for _, opts := range recorded {
 						require.Equal(t, tt.wantAssembly, opts.AddTXToBlockAssembly)
-						require.True(t, opts.UnconfirmedParentsAtCandidateHeight, "pause must preserve consensus validation options")
+						require.Equal(t, path != "peer", opts.UnconfirmedParentsAtCandidateHeight, "pause must preserve each path's consensus validation options")
 					}
 				})
 			}
