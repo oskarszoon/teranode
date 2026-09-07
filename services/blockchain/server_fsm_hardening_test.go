@@ -67,6 +67,7 @@ func TestSendFSMEvent_InTransitionReturnsStateError(t *testing.T) {
 	_, err := b.SendFSMEvent(context.Background(), &blockchain_api.SendFSMEventRequest{Event: blockchain_api.FSMEventType_RUN})
 	require.Error(t, err)
 	require.Equal(t, errors.ERR_STATE_ERROR, errors.UnwrapGRPC(err).Code())
+	require.ErrorContains(t, err, "pending transition has not retired; restart required")
 }
 
 // Only the checkpoint read is fault-injected; persistence uses real SQLite.
@@ -92,6 +93,8 @@ func TestSendFSMEvent_CheckpointTimeoutReleasesTransitionLock(t *testing.T) {
 	}}
 	_, err := b.SendFSMEvent(ctx, &blockchain_api.SendFSMEventRequest{Event: blockchain_api.FSMEventType_RUN})
 	require.Error(t, err)
+	require.ErrorContains(t, err, "blockchain_store_dbTimeoutMillis")
+	require.True(t, errors.Is(errors.UnwrapGRPC(err), context.DeadlineExceeded))
 	require.NoError(t, ctx.Err(), "the server's DB timeout must expire before the caller deadline")
 	require.Equal(t, "IDLE", b.finiteStateMachine.Current())
 	state, err := b.store.GetFSMState(context.Background())

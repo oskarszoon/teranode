@@ -534,7 +534,7 @@ Waits for the FSM to transition from the IDLE state.
 func (b *Blockchain) SendFSMEvent(ctx context.Context, eventReq *blockchain_api.SendFSMEventRequest) (*blockchain_api.GetFSMStateResponse, error)
 ```
 
-Sends an event to the finite state machine.
+Sends an explicit operator event to the finite state machine. Accepted transitions persist their destination before memory, notifications, or metrics change. Failed writes return an error; the database may nevertheless have committed, so retry the event or request a convenience target to reconcile before relying on restart state. No compensating rollback is attempted.
 
 ### Run
 
@@ -542,7 +542,11 @@ Sends an event to the finite state machine.
 func (b *Blockchain) Run(ctx context.Context, _ *emptypb.Empty) (*emptypb.Empty, error)
 ```
 
-Transitions the FSM to the RUNNING state. On a network with checkpoints, a node whose chain tip is below the highest checkpoint receives an error and remains in its current state. An operator in `IDLE` can explicitly enter `CATCHINGBLOCKS` to start synchronization.
+Automatically promotes `CATCHINGBLOCKS` to `RUNNING`. It refuses automatic promotion from operator `IDLE`, including catchup retries after a lost response. Explicit operator `SendFSMEvent(RUN)` can leave IDLE when checkpoint-safe; explicit `CATCHUPBLOCKS` starts synchronization. A tip below the highest checkpoint or an unreadable tip refuses promotion.
+
+The Run, CatchUpBlocks, and Idle convenience RPCs check authoritative state under the transition lock. An already-current target normally succeeds without writing, but after an uncertain persistence result it succeeds only after an acknowledged write of that target. Clients contact the server even when their cached state already matches. Reconciliation emits no new transition notification.
+
+Catchup completion makes at most three promotion attempts for transient failures, with cancellable one-second backoff. Exhaustion warns that the node may remain CATCHINGBLOCKS without mining. This does not retry permanent state rejections or override an operator STOP.
 
 ### CatchUpBlocks
 

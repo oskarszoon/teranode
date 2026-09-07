@@ -64,6 +64,8 @@ func AvailableEventsForState(state string) []string {
 // Persists accepted transitions before changing state, sending notifications,
 // and updating Prometheus metrics. Runtime events must use SendFSMEvent, which
 // serializes admission and detaches the transition from caller cancellation.
+// A nil receiver supports visualization only; firing events requires an
+// initialized Blockchain with settings and a store.
 func (b *Blockchain) NewFiniteStateMachine(opts ...func(*fsm.FSM)) *fsm.FSM {
 	// Define callbacks
 	callbacks := fsm.Callbacks{
@@ -74,8 +76,12 @@ func (b *Blockchain) NewFiniteStateMachine(opts ...func(*fsm.FSM)) *fsm.FSM {
 				// Cancel before looplab installs its pending transition or changes
 				// state, so an explicit retry remains possible. A failed write may
 				// have committed: never attempt an unsafe compensating rollback.
+				b.fsmPersistenceUncertain = true
+				b.logger.Errorf("[Blockchain][FiniteStateMachine] Failed to persist %s -> %s; in-memory state remains %s; database may already contain %s: %v", e.Src, e.Dst, e.Src, e.Dst, err)
 				e.Cancel(errors.NewStorageError("failed to persist FSM transition from %s to %s", e.Src, e.Dst, err))
+				return
 			}
+			b.fsmPersistenceUncertain = false
 		},
 		"enter_state": func(_ context.Context, e *fsm.Event) {
 			metadata := map[string]string{
