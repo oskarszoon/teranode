@@ -67,12 +67,15 @@ As part of initialization, the Blockchain service normally restores the FSM
 state it last persisted. A node with no persisted state uses
 `blockchain_initializeNodeInState`: an empty value means **CatchingBlocks**,
 while production `operator` and `docker.m` contexts default it to **Idle** so a
-seed can be inspected before catch-up. Invalid values abort startup.
+seed can be inspected before catch-up. Uppercase values are required. Validation
+applies only when no FSM state is persisted; invalid values then abort startup.
 
 The test-only local start-state override takes precedence. Otherwise, a
 configured fresh-node **Running** state must pass the active network's checkpoint
-gate. A persisted **Running** state that no longer passes that gate is persisted
-and resumed as **CatchingBlocks** instead.
+gate; below-checkpoint configured **Running** aborts startup without fallback.
+A persisted **Running** state with a successfully read tip below the checkpoint
+is persisted and resumed as **CatchingBlocks** instead. A tip-read failure or
+missing tip metadata aborts startup and leaves the persisted state unchanged.
 
 ### 3.2. Accessing the State Machine
 

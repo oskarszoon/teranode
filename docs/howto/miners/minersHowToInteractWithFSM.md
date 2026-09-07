@@ -5,7 +5,10 @@ deployments (`operator` and `docker.m` settings contexts) start in `IDLE`, givin
 an operator a safe inspection window. Other contexts keep the automatic
 `CATCHINGBLOCKS` default. Configure this with
 `blockchain_initializeNodeInState`; it accepts `IDLE`, `CATCHINGBLOCKS`, or
-`RUNNING`, and invalid values fail startup.
+`RUNNING` (uppercase). Invalid values fail startup only when no FSM state is
+persisted. On a checkpointed network, configured `RUNNING` requires a pre-seeded
+tip at or above the highest checkpoint; otherwise startup fails without fallback.
+Use `CATCHINGBLOCKS` to synchronize a fresh node.
 
 After inspecting a fresh production deployment, start synchronization from
 `IDLE` with `teranode-cli setfsmstate --fsmstate catchingblocks`. A direct
@@ -13,9 +16,10 @@ After inspecting a fresh production deployment, start synchronization from
 node automatically once it reaches that checkpoint.
 
 The setting applies only when no FSM state is persisted. Restarts normally
-restore the persisted state. A persisted `RUNNING` state that no longer passes
-the active network's checkpoint gate is safely persisted and resumed as
-`CATCHINGBLOCKS` instead.
+restore the persisted state without validating unused boot configuration. A
+persisted `RUNNING` state with a successfully read tip below the active network's
+highest checkpoint is durably migrated to `CATCHINGBLOCKS`. Tip-read failures or
+missing metadata abort startup and leave the persisted state unchanged.
 
 ## Prerequisites
 

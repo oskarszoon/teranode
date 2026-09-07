@@ -80,10 +80,13 @@ func (b *Blockchain) Init(ctx context.Context) error
 Initializes the blockchain service and its finite state machine (FSM). The
 test-only local override takes precedence; a fresh store uses
 `blockchain_initializeNodeInState` (empty means `CATCHINGBLOCKS`); and a restart
-normally restores its persisted state. Invalid configured states and storage
-failures abort startup. Fresh or persisted `RUNNING` is also checked against the
-active network's highest checkpoint; an unsafe configured `RUNNING` fails, while
-an unsafe persisted `RUNNING` safely resumes as `CATCHINGBLOCKS`.
+normally restores its persisted state without validating unused boot configuration.
+Invalid configured states abort fresh-node startup; storage failures abort startup.
+Fresh or persisted `RUNNING` is checked against the active network's highest
+checkpoint. Below-checkpoint configured `RUNNING` fails without fallback;
+persisted `RUNNING` with a successfully read tip below the checkpoint is durably
+migrated to `CATCHINGBLOCKS`. Tip-read failures or missing metadata abort startup
+without changing the persisted state.
 
 ### Start
 

@@ -23,8 +23,11 @@ const bootStateTestCoinbase = "0100000001000000000000000000000000000000000000000
 
 type bootStateFaultStore struct {
 	blockchainstore.Store
-	getFSMStateErr error
-	setFSMStateErr error
+	getFSMStateErr        error
+	setFSMStateErr        error
+	getBestBlockHeaderErr error
+	missingBestBlockMeta  bool
+	setFSMStateCalls      int
 }
 
 func (s *bootStateFaultStore) GetFSMState(ctx context.Context) (string, error) {
@@ -36,11 +39,22 @@ func (s *bootStateFaultStore) GetFSMState(ctx context.Context) (string, error) {
 }
 
 func (s *bootStateFaultStore) SetFSMState(ctx context.Context, state string) error {
+	s.setFSMStateCalls++
 	if s.setFSMStateErr != nil {
 		return s.setFSMStateErr
 	}
 
 	return s.Store.SetFSMState(ctx, state)
+}
+
+func (s *bootStateFaultStore) GetBestBlockHeader(ctx context.Context) (*model.BlockHeader, *model.BlockHeaderMeta, error) {
+	if s.getBestBlockHeaderErr != nil {
+		return nil, nil, s.getBestBlockHeaderErr
+	}
+	if s.missingBestBlockMeta {
+		return nil, nil, nil
+	}
+	return s.Store.GetBestBlockHeader(ctx)
 }
 
 func newBootStateBlockchain(t *testing.T, configured string, params *chaincfg.Params) (*Blockchain, blockchainstore.Store) {
@@ -144,14 +158,26 @@ func TestInit_InvalidConfiguredBootStateFails(t *testing.T) {
 	}
 }
 
-func TestInit_InvalidConfiguredBootStateFailsWithPersistedState(t *testing.T) {
-	ctx := context.Background()
-	b, store := newBootStateBlockchain(t, "INVALID", &chaincfg.RegressionNetParams)
-	require.NoError(t, store.SetFSMState(ctx, "IDLE"))
+func TestInit_PersistedStateIgnoresInvalidBootConfiguration(t *testing.T) {
+	for _, state := range []string{"IDLE", "CATCHINGBLOCKS", "RUNNING", "LEGACYSYNCING"} {
+		t.Run(state, func(t *testing.T) {
+			ctx := context.Background()
+			params := bootStateParamsWithCheckpoint(1)
+			b, store := newBootStateBlockchain(t, "INVALID", params)
+			storeBootStateTestBlock(t, store, params)
+			require.NoError(t, store.SetFSMState(ctx, state))
 
-	err := b.Init(ctx)
-	require.Error(t, err)
-	require.ErrorContains(t, err, "blockchain_initializeNodeInState")
+			require.NoError(t, b.Init(ctx))
+			want := state
+			if state == "LEGACYSYNCING" {
+				want = "CATCHINGBLOCKS"
+			}
+			require.Equal(t, want, b.finiteStateMachine.Current())
+			persisted, err := store.GetFSMState(ctx)
+			require.NoError(t, err)
+			require.Equal(t, want, persisted)
+		})
+	}
 }
 
 func TestFSMBootState_NilSettingsUsesAutomaticCatchup(t *testing.T) {
@@ -266,7 +292,7 @@ func TestInit_PersistedRunningHonorsCheckpointGate(t *testing.T) {
 		storeTip         bool
 		wantState        string
 	}{
-		{name: "missing tip resumes catchup", checkpointHeight: 1, wantState: "CATCHINGBLOCKS"},
+		{name: "genesis tip resumes catchup", checkpointHeight: 1, wantState: "CATCHINGBLOCKS"},
 		{name: "below checkpoint resumes catchup", checkpointHeight: 2, storeTip: true, wantState: "CATCHINGBLOCKS"},
 		{name: "at checkpoint remains running", checkpointHeight: 1, storeTip: true, wantState: "RUNNING"},
 	}
@@ -287,6 +313,48 @@ func TestInit_PersistedRunningHonorsCheckpointGate(t *testing.T) {
 			persisted, err := store.GetFSMState(ctx)
 			require.NoError(t, err)
 			require.Equal(t, tt.wantState, persisted)
+		})
+	}
+}
+
+func TestInit_PersistedRunningCheckpointReadFailurePreservesState(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		err         error
+		missingMeta bool
+	}{
+		{name: "store error", err: errors.NewStorageError("tip read failed")},
+		{name: "timeout", err: context.DeadlineExceeded},
+		{name: "cancellation", err: context.Canceled},
+		{name: "missing metadata", missingMeta: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			params := bootStateParamsWithCheckpoint(1)
+			b, store := newBootStateBlockchain(t, "IDLE", params)
+			storeBootStateTestBlock(t, store, params)
+			require.NoError(t, store.SetFSMState(ctx, "RUNNING"))
+			fault := &bootStateFaultStore{Store: store, getBestBlockHeaderErr: tt.err, missingBestBlockMeta: tt.missingMeta}
+			b.store = fault
+
+			err := b.Init(ctx)
+			require.Error(t, err)
+			if tt.err != nil {
+				require.ErrorContains(t, err, tt.err.Error())
+			} else {
+				require.ErrorContains(t, err, "meta unavailable")
+			}
+			require.NotEqual(t, "RUNNING", b.finiteStateMachine.Current())
+			require.Zero(t, fault.setFSMStateCalls, "an unavailable tip must not rewrite operator state")
+			persisted, getErr := store.GetFSMState(ctx)
+			require.NoError(t, getErr)
+			require.Equal(t, "RUNNING", persisted)
+
+			fault.getBestBlockHeaderErr = nil
+			fault.missingBestBlockMeta = false
+			require.NoError(t, b.Init(ctx), "retry after store recovery should restore RUNNING")
+			require.Equal(t, "RUNNING", b.finiteStateMachine.Current())
+			require.Zero(t, fault.setFSMStateCalls)
 		})
 	}
 }

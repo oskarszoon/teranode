@@ -383,7 +383,8 @@ func (b *Blockchain) HealthGRPC(ctx context.Context, _ *emptypb.Empty) (*blockch
 // 3. Normal operation: Restores the previously persisted state from storage
 //
 // Starting in RUNNING is checkpoint-gated. An unsafe configured RUNNING state aborts
-// initialization, while an unsafe persisted RUNNING state resumes in CATCHINGBLOCKS.
+// initialization, while persisted RUNNING with a known below-checkpoint tip resumes
+// in CATCHINGBLOCKS. An unreadable tip aborts without rewriting persisted state.
 //
 // The method ensures that the service state is persisted to survive service restarts
 // and updates metrics to reflect the current operational state. The FSM provides a
@@ -409,11 +410,6 @@ func (b *Blockchain) Init(ctx context.Context) error {
 		return nil
 	}
 
-	bootState, err := b.fsmBootState()
-	if err != nil {
-		return err
-	}
-
 	// Set the FSM to the latest persisted state
 	stateStr, err := b.store.GetFSMState(ctx)
 	if err != nil {
@@ -421,6 +417,11 @@ func (b *Blockchain) Init(ctx context.Context) error {
 	}
 
 	if stateStr == "" { // no persisted state: this is a fresh node
+		bootState, err := b.fsmBootState()
+		if err != nil {
+			return err
+		}
+
 		if bootState == blockchain_api.FSMStateType_RUNNING.String() {
 			if err = b.guardRunBelowHighestCheckpoint(ctx); err != nil {
 				return err
@@ -448,7 +449,11 @@ func (b *Blockchain) Init(ctx context.Context) error {
 		}
 
 		if stateStr == blockchain_api.FSMStateType_RUNNING.String() {
-			if gateErr := b.guardRunBelowHighestCheckpoint(ctx); gateErr != nil {
+			if belowCheckpoint, gateErr := b.evaluateRunCheckpoint(ctx); gateErr != nil {
+				if !belowCheckpoint {
+					return gateErr
+				}
+
 				b.logger.Warnf("[Blockchain][Init] persisted RUNNING state is unsafe: %v; resuming in CATCHINGBLOCKS", gateErr)
 				stateStr = blockchain_api.FSMStateType_CATCHINGBLOCKS.String()
 
@@ -2966,31 +2971,39 @@ func (b *Blockchain) SendFSMEvent(ctx context.Context, eventReq *blockchain_api.
 // no checkpoints. Store failures, missing tip metadata, and a tip below the
 // checkpoint all fail closed.
 func (b *Blockchain) guardRunBelowHighestCheckpoint(ctx context.Context) error {
+	_, err := b.evaluateRunCheckpoint(ctx)
+	return err
+}
+
+// evaluateRunCheckpoint returns the RUN gate error and whether it reflects a
+// successfully observed below-checkpoint tip. Read failures and missing metadata
+// return false with an error: callers must not treat uncertainty as a low tip.
+func (b *Blockchain) evaluateRunCheckpoint(ctx context.Context) (belowCheckpoint bool, gateErr error) {
 	if b.settings == nil || b.settings.ChainCfgParams == nil {
-		return nil
+		return false, nil
 	}
 
 	highest := HighestCheckpointHeight(b.settings.ChainCfgParams.Checkpoints)
 	if highest == 0 {
-		return nil
+		return false, nil
 	}
 
 	_, meta, err := b.store.GetBestBlockHeader(ctx)
 	if err != nil {
-		return errors.NewStateError("cannot read best block header to evaluate RUN gate", err)
+		return false, errors.NewStateError("cannot read best block header to evaluate RUN gate", err)
 	}
 	if meta == nil {
-		return errors.NewStateError("best block header meta unavailable, cannot evaluate RUN gate")
+		return false, errors.NewStateError("best block header meta unavailable, cannot evaluate RUN gate")
 	}
 
 	if meta.Height < highest {
-		return errors.NewStateError(
+		return true, errors.NewStateError(
 			"refusing RUN: chain tip height %d is below highest checkpoint %d for %s; use setfsmstate --fsmstate catchingblocks to start synchronization",
 			meta.Height, highest, b.settings.ChainCfgParams.Name,
 		)
 	}
 
-	return nil
+	return false, nil
 }
 
 // HighestCheckpointHeight returns the largest Height in the supplied
