@@ -164,6 +164,19 @@ func setTestDaemonRunning(ctx context.Context, client blockchain.ClientI) error 
 	return client.Run(ctx, "test/setup-confirm-running")
 }
 
+// setTestDaemonCatchingBlocks expresses explicit catchup setup, including from
+// IDLE. Automatic CatchUpBlocks alone intentionally preserves operator IDLE.
+func setTestDaemonCatchingBlocks(ctx context.Context, client blockchain.ClientI) error {
+	err := client.SendFSMEvent(ctx, blockchain_api.FSMEventType_CATCHUPBLOCKS)
+	if !errors.Is(err, errors.ErrStateError) && !errors.Is(err, errors.ErrInvalidArgument) {
+		return err
+	}
+	// Repeating the fixed CATCHUPBLOCKS event in CATCHINGBLOCKS is rejected by
+	// the server's manual-transition restriction as InvalidArgument. Confirm
+	// through the authority; it reconciles no-ops and still refuses a later STOP.
+	return client.CatchUpBlocks(ctx)
+}
+
 // NewTestDaemon creates a new TestDaemon instance with the provided options.
 func NewTestDaemon(t *testing.T, opts TestOptions) *TestDaemon {
 	// Test daemons run multiple nodes in-process on the same host, so peers advertise
@@ -615,7 +628,7 @@ func NewTestDaemon(t *testing.T, opts TestOptions) *TestDaemon {
 			err = setTestDaemonRunning(ctx, blockchainClient)
 			require.NoError(t, err)
 		case blockchain.FSMStateCATCHINGBLOCKS:
-			err = blockchainClient.CatchUpBlocks(ctx)
+			err = setTestDaemonCatchingBlocks(ctx, blockchainClient)
 			require.NoError(t, err)
 		}
 	}

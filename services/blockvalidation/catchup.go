@@ -480,6 +480,12 @@ func (u *Server) releaseCatchupLock(ctx *CatchupContext, err *error) {
 			// processing errors here would stop charging peers that deserve it.
 			errorType = "local_header_context_error"
 			isPeerError = false
+		case errors.Is(*err, errors.ErrStateError):
+			// An authoritative FSM refusal (including operator IDLE) is local,
+			// not an error to store against the peer. Earlier data-serving failures
+			// remain attributable through the failedPeers drain below.
+			errorType = "local_fsm_refusal"
+			isPeerError = false
 		case !isLocalCatchupFault(*err) && (errors.Is(*err, errors.ErrBlockInvalid) || errors.Is(*err, errors.ErrTxInvalid)):
 			// Gated on the same predicate validateBlocksOnChannel and
 			// processCatchupChItem use, rather than on the case ordering above it.

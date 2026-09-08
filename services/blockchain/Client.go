@@ -2018,7 +2018,8 @@ func (c *Client) Run(ctx context.Context, source string) error {
 	return nil
 }
 
-// CatchUpBlocks sends a catchup blocks FSM event to the blockchain service.
+// CatchUpBlocks requests automatic catchup from the blockchain authority.
+// Operator IDLE is refused; explicit operator resume uses SendFSMEvent(CATCHUPBLOCKS).
 // This method initiates a blockchain synchronization process by transitioning the
 // blockchain service's finite state machine to the CATCHING_BLOCKS state, which
 // triggers the service to synchronize with the network and catch up on any
@@ -2037,7 +2038,6 @@ func (c *Client) Run(ctx context.Context, source string) error {
 // This operation is typically used during:
 // - Service startup when the local chain may be behind
 // - Recovery from network partitions or connectivity issues
-// - Manual synchronization requests from operators
 // - Automated catch-up processes in distributed deployments
 //
 // The method communicates with the blockchain service via gRPC to send the

@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1917,7 +1918,13 @@ func (u *Server) processCatchupChItem(ctx context.Context, c processBlockCatchup
 
 		// FSM rejected the transition — not a peer issue
 		if errors.Is(err, errors.ErrStateError) {
-			u.logger.Warnf("[catchup] FSM rejected catchup for block %s (node not in RUNNING state), clearing markers", c.block.Hash().String())
+			// The message only selects log severity; the typed StateError
+			// controls handling. Do not infer authoritative state from the cache.
+			if strings.Contains(err.Error(), "automatic CATCHUPBLOCKS refused from IDLE") {
+				u.logger.Infof("[catchup] Catchup not started for block %s while operator IDLE; explicit operator resume is required, clearing markers for a later notification: %v", c.block.Hash().String(), err)
+			} else {
+				u.logger.Warnf("[catchup] FSM rejected catchup for block %s, clearing markers: %v", c.block.Hash().String(), err)
+			}
 			u.processBlockNotify.Delete(*c.block.Hash())
 			u.catchupAlternatives.Delete(*c.block.Hash())
 			return

@@ -546,7 +546,7 @@ Automatically promotes `CATCHINGBLOCKS` to `RUNNING`. It refuses automatic promo
 
 The Run, CatchUpBlocks, and Idle convenience RPCs check authoritative state under the transition lock. An already-current target normally succeeds without writing, but after an uncertain persistence result it succeeds only after an acknowledged write of that target. Clients contact the server even when their cached state already matches. Reconciliation emits no new transition notification.
 
-Catchup completion makes at most three promotion attempts for transient failures, with cancellable one-second backoff. Exhaustion warns that the node may remain CATCHINGBLOCKS without mining. This does not retry permanent state rejections or override an operator STOP.
+Catchup completion makes at most three promotion attempts for transient failures, with cancellable one-second backoff. Exhaustion warns that RUNNING was not durably confirmed and asks the operator to inspect FSM state, mining readiness and store health. This does not retry permanent state rejections or override an operator STOP.
 
 ### CatchUpBlocks
 
@@ -554,7 +554,9 @@ Catchup completion makes at most three promotion attempts for transient failures
 func (b *Blockchain) CatchUpBlocks(ctx context.Context, _ *emptypb.Empty) (*emptypb.Empty, error)
 ```
 
-Transitions the FSM to the CATCHINGBLOCKS state.
+Automatically transitions RUNNING to CATCHINGBLOCKS and reconciles an already-current CATCHINGBLOCKS state. It refuses operator IDLE under the same transition lock as STOP and RUN. An explicit operator `SendFSMEvent(CATCHUPBLOCKS)` can start synchronization from IDLE.
+
+An IDLE refusal prevents block validation from starting its fetch/validation workers or scheduling a completion RUN. The consumer logs the refusal and clears processing markers without charging a peer failure or consuming the per-block retry budget. Catchup attempt telemetry may already have been recorded before FSM admission. A later notification can retry after explicit resume; immediate replay is not guaranteed.
 
 ### Idle
 

@@ -3070,10 +3070,11 @@ func (b *Blockchain) sendFSMConvenienceEvent(ctx context.Context, event blockcha
 		}
 		return &emptypb.Empty{}, nil
 	}
-	// Automatic promotion must not undo an operator STOP, including between
-	// attempts after a transport error. Explicit operator RUN uses SendFSMEvent.
-	if event == blockchain_api.FSMEventType_RUN && current == blockchain_api.FSMStateType_IDLE.String() {
-		return nil, errors.WrapGRPC(errors.NewStateError("automatic RUN refused from IDLE; use SendFSMEvent for an explicit operator RUN"))
+	// Neither automatic entry into catchup nor promotion may undo an operator
+	// STOP. Explicit operator requests use SendFSMEvent to resume from IDLE.
+	if current == blockchain_api.FSMStateType_IDLE.String() &&
+		(event == blockchain_api.FSMEventType_RUN || event == blockchain_api.FSMEventType_CATCHUPBLOCKS) {
+		return nil, errors.WrapGRPC(errors.NewStateError("automatic %s refused from IDLE; use SendFSMEvent for an explicit operator %s", event.String(), event.String()))
 	}
 	if _, err := b.sendFSMEventLocked(ctx, &blockchain_api.SendFSMEventRequest{Event: event}); err != nil {
 		return nil, err
@@ -3087,7 +3088,8 @@ func (b *Blockchain) Run(ctx context.Context, _ *emptypb.Empty) (*emptypb.Empty,
 	return b.sendFSMConvenienceEvent(ctx, blockchain_api.FSMEventType_RUN, blockchain_api.FSMStateType_RUNNING)
 }
 
-// CatchUpBlocks transitions the service to catch up missing blocks.
+// CatchUpBlocks automatically starts catchup from RUNNING and preserves operator
+// IDLE. Explicit operator catchup from IDLE uses SendFSMEvent(CATCHUPBLOCKS).
 func (b *Blockchain) CatchUpBlocks(ctx context.Context, _ *emptypb.Empty) (*emptypb.Empty, error) {
 	return b.sendFSMConvenienceEvent(ctx, blockchain_api.FSMEventType_CATCHUPBLOCKS, blockchain_api.FSMStateType_CATCHINGBLOCKS)
 }
