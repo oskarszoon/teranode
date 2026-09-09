@@ -2451,7 +2451,7 @@ func (stp *SubtreeProcessor) processCompleteSubtree(skipNotification bool) (err 
 func (stp *SubtreeProcessor) completeSubtree(ctx context.Context, skipNotification, replay bool) (err error) {
 	currentSubtree := stp.currentSubtree.Load()
 
-	_, _, deferFn := tracing.Tracer("blockassembly").Start(context.Background(), "storeSubtree",
+	_, _, deferFn := tracing.Tracer("blockassembly").Start(ctx, "storeSubtree",
 		tracing.WithParentStat(stp.stats),
 		tracing.WithHistogram(prometheusBlockAssemblySubtreeCompleteHist),
 		tracing.WithDebugLogMessage(stp.logger, "[SubtreeProcessor][processCompleteSubtree][%s] processing complete subtree", currentSubtree.RootHash().String()),
