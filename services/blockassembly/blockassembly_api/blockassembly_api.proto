@@ -14,6 +14,11 @@ import "google/protobuf/timestamp.proto";
  * This service handles transaction management, mining operations, and block state management.
  */
 service BlockAssemblyAPI {
+  // Recovery APIs expose actual reset outcomes and complete bounded snapshots.
+  rpc RecoveryState (EmptyMessage) returns (RecoveryStateMessage) {}
+  rpc RecoveryReset (EmptyMessage) returns (RecoveryStateMessage) {}
+  rpc RecoveryTransactions (RecoveryTransactionsRequest) returns (stream RecoveryPage) {}
+
   // HealthGRPC checks the health status of the block assembly service.
   // Returns detailed health information including service status and timestamp.
   rpc HealthGRPC (EmptyMessage) returns (HealthResponse) {}
@@ -318,4 +323,23 @@ message GetCandidateBlockResponse {
   bytes coinbase_tx = 2;               // serialized coinbase transaction
   repeated bytes subtree_hashes = 3;   // subtree hashes for streaming transactions from the subtree store
   uint64 transaction_count = 4;        // total number of transactions including coinbase
+}
+
+// Recovery state is scoped to one service process and successful reset counter.
+message RecoveryStateMessage {
+ string process_id = 1;
+ string tip_hash = 2;
+ uint32 tip_height = 3;
+ uint64 reset_id = 4;
+ string candidate_id = 5; // canonical display hash of the actual mining job
+}
+message RecoveryTransactionsRequest { bool candidate = 1; }
+// First and final pages carry identical state and total count. Intermediate
+// pages contain at most 1024 non-coinbase TXIDs; count excludes coinbase.
+// A stream without a final page is incomplete.
+message RecoveryPage {
+ RecoveryStateMessage state = 1;
+ uint64 count = 2;
+ repeated string txids = 3;
+ bool complete = 4;
 }

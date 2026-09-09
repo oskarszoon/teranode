@@ -20,6 +20,9 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
+	BlockAssemblyAPI_RecoveryState_FullMethodName                    = "/blockassembly_api.BlockAssemblyAPI/RecoveryState"
+	BlockAssemblyAPI_RecoveryReset_FullMethodName                    = "/blockassembly_api.BlockAssemblyAPI/RecoveryReset"
+	BlockAssemblyAPI_RecoveryTransactions_FullMethodName             = "/blockassembly_api.BlockAssemblyAPI/RecoveryTransactions"
 	BlockAssemblyAPI_HealthGRPC_FullMethodName                       = "/blockassembly_api.BlockAssemblyAPI/HealthGRPC"
 	BlockAssemblyAPI_AddTx_FullMethodName                            = "/blockassembly_api.BlockAssemblyAPI/AddTx"
 	BlockAssemblyAPI_RemoveTx_FullMethodName                         = "/blockassembly_api.BlockAssemblyAPI/RemoveTx"
@@ -50,6 +53,10 @@ const (
 // Responsible for assembling new blocks and managing the blockchain's block creation process.
 // This service handles transaction management, mining operations, and block state management.
 type BlockAssemblyAPIClient interface {
+	// Recovery APIs expose actual reset outcomes and complete bounded snapshots.
+	RecoveryState(ctx context.Context, in *EmptyMessage, opts ...grpc.CallOption) (*RecoveryStateMessage, error)
+	RecoveryReset(ctx context.Context, in *EmptyMessage, opts ...grpc.CallOption) (*RecoveryStateMessage, error)
+	RecoveryTransactions(ctx context.Context, in *RecoveryTransactionsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[RecoveryPage], error)
 	// HealthGRPC checks the health status of the block assembly service.
 	// Returns detailed health information including service status and timestamp.
 	HealthGRPC(ctx context.Context, in *EmptyMessage, opts ...grpc.CallOption) (*HealthResponse, error)
@@ -131,6 +138,45 @@ type blockAssemblyAPIClient struct {
 func NewBlockAssemblyAPIClient(cc grpc.ClientConnInterface) BlockAssemblyAPIClient {
 	return &blockAssemblyAPIClient{cc}
 }
+
+func (c *blockAssemblyAPIClient) RecoveryState(ctx context.Context, in *EmptyMessage, opts ...grpc.CallOption) (*RecoveryStateMessage, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RecoveryStateMessage)
+	err := c.cc.Invoke(ctx, BlockAssemblyAPI_RecoveryState_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *blockAssemblyAPIClient) RecoveryReset(ctx context.Context, in *EmptyMessage, opts ...grpc.CallOption) (*RecoveryStateMessage, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RecoveryStateMessage)
+	err := c.cc.Invoke(ctx, BlockAssemblyAPI_RecoveryReset_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *blockAssemblyAPIClient) RecoveryTransactions(ctx context.Context, in *RecoveryTransactionsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[RecoveryPage], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &BlockAssemblyAPI_ServiceDesc.Streams[0], BlockAssemblyAPI_RecoveryTransactions_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[RecoveryTransactionsRequest, RecoveryPage]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type BlockAssemblyAPI_RecoveryTransactionsClient = grpc.ServerStreamingClient[RecoveryPage]
 
 func (c *blockAssemblyAPIClient) HealthGRPC(ctx context.Context, in *EmptyMessage, opts ...grpc.CallOption) (*HealthResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
@@ -331,6 +377,10 @@ func (c *blockAssemblyAPIClient) GetCandidateBlock(ctx context.Context, in *GetC
 // Responsible for assembling new blocks and managing the blockchain's block creation process.
 // This service handles transaction management, mining operations, and block state management.
 type BlockAssemblyAPIServer interface {
+	// Recovery APIs expose actual reset outcomes and complete bounded snapshots.
+	RecoveryState(context.Context, *EmptyMessage) (*RecoveryStateMessage, error)
+	RecoveryReset(context.Context, *EmptyMessage) (*RecoveryStateMessage, error)
+	RecoveryTransactions(*RecoveryTransactionsRequest, grpc.ServerStreamingServer[RecoveryPage]) error
 	// HealthGRPC checks the health status of the block assembly service.
 	// Returns detailed health information including service status and timestamp.
 	HealthGRPC(context.Context, *EmptyMessage) (*HealthResponse, error)
@@ -413,6 +463,15 @@ type BlockAssemblyAPIServer interface {
 // pointer dereference when methods are called.
 type UnimplementedBlockAssemblyAPIServer struct{}
 
+func (UnimplementedBlockAssemblyAPIServer) RecoveryState(context.Context, *EmptyMessage) (*RecoveryStateMessage, error) {
+	return nil, status.Error(codes.Unimplemented, "method RecoveryState not implemented")
+}
+func (UnimplementedBlockAssemblyAPIServer) RecoveryReset(context.Context, *EmptyMessage) (*RecoveryStateMessage, error) {
+	return nil, status.Error(codes.Unimplemented, "method RecoveryReset not implemented")
+}
+func (UnimplementedBlockAssemblyAPIServer) RecoveryTransactions(*RecoveryTransactionsRequest, grpc.ServerStreamingServer[RecoveryPage]) error {
+	return status.Error(codes.Unimplemented, "method RecoveryTransactions not implemented")
+}
 func (UnimplementedBlockAssemblyAPIServer) HealthGRPC(context.Context, *EmptyMessage) (*HealthResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method HealthGRPC not implemented")
 }
@@ -490,6 +549,53 @@ func RegisterBlockAssemblyAPIServer(s grpc.ServiceRegistrar, srv BlockAssemblyAP
 	}
 	s.RegisterService(&BlockAssemblyAPI_ServiceDesc, srv)
 }
+
+func _BlockAssemblyAPI_RecoveryState_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(EmptyMessage)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(BlockAssemblyAPIServer).RecoveryState(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: BlockAssemblyAPI_RecoveryState_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(BlockAssemblyAPIServer).RecoveryState(ctx, req.(*EmptyMessage))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _BlockAssemblyAPI_RecoveryReset_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(EmptyMessage)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(BlockAssemblyAPIServer).RecoveryReset(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: BlockAssemblyAPI_RecoveryReset_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(BlockAssemblyAPIServer).RecoveryReset(ctx, req.(*EmptyMessage))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _BlockAssemblyAPI_RecoveryTransactions_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(RecoveryTransactionsRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(BlockAssemblyAPIServer).RecoveryTransactions(m, &grpc.GenericServerStream[RecoveryTransactionsRequest, RecoveryPage]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type BlockAssemblyAPI_RecoveryTransactionsServer = grpc.ServerStreamingServer[RecoveryPage]
 
 func _BlockAssemblyAPI_HealthGRPC_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(EmptyMessage)
@@ -841,6 +947,14 @@ var BlockAssemblyAPI_ServiceDesc = grpc.ServiceDesc{
 	HandlerType: (*BlockAssemblyAPIServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
+			MethodName: "RecoveryState",
+			Handler:    _BlockAssemblyAPI_RecoveryState_Handler,
+		},
+		{
+			MethodName: "RecoveryReset",
+			Handler:    _BlockAssemblyAPI_RecoveryReset_Handler,
+		},
+		{
 			MethodName: "HealthGRPC",
 			Handler:    _BlockAssemblyAPI_HealthGRPC_Handler,
 		},
@@ -917,6 +1031,12 @@ var BlockAssemblyAPI_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _BlockAssemblyAPI_GetCandidateBlock_Handler,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "RecoveryTransactions",
+			Handler:       _BlockAssemblyAPI_RecoveryTransactions_Handler,
+			ServerStreams: true,
+		},
+	},
 	Metadata: "services/blockassembly/blockassembly_api/blockassembly_api.proto",
 }

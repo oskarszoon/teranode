@@ -193,6 +193,8 @@ type RemainderTransactionParams struct {
 //   - Providing transaction sets for block candidates
 
 type SubtreeProcessor struct {
+	recoveryCh chan recoveryRequest
+
 	// settings contains the configuration parameters for the processor
 	settings *settings.Settings
 
@@ -566,6 +568,7 @@ func NewSubtreeProcessor(_ context.Context, logger ulogger.Logger, tSettings *se
 		subtreeNodeCountsSize:        subtreeSampleSize,
 		getSubtreesChan:              make(chan chan []*subtreepkg.Subtree),
 		getIncompleteSubtreeDataChan: make(chan chan *PrecomputedMiningData),
+		recoveryCh:                   make(chan recoveryRequest),
 		getSubtreeHashesChan:         make(chan chan []chainhash.Hash),
 		getTransactionHashesChan:     make(chan chan []chainhash.Hash),
 		moveForwardBlockChan:         make(chan moveBlockRequest),
@@ -835,6 +838,9 @@ func (stp *SubtreeProcessor) Start(ctx context.Context) {
 							}
 						}
 					}
+
+				case req := <-stp.recoveryCh:
+					req.done <- stp.runHandlerWithRecover("recoverySnapshot", func() error { return stp.recoverySnapshot(req.ctx, req.visit) })
 
 				case getTransactionHashesChan := <-stp.getTransactionHashesChan:
 					stp.setCurrentRunningState(StateGetTransactionHashes)

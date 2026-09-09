@@ -5,8 +5,10 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"sort"
 	"strconv"
+	"time"
 
 	"github.com/bsv-blockchain/teranode/cmd/aerospikekafkaconnector"
 	"github.com/bsv-blockchain/teranode/cmd/aerospikereader"
@@ -20,6 +22,7 @@ import (
 	"github.com/bsv-blockchain/teranode/cmd/logs"
 	"github.com/bsv-blockchain/teranode/cmd/monitor"
 	"github.com/bsv-blockchain/teranode/cmd/reconsiderblock"
+	"github.com/bsv-blockchain/teranode/cmd/recoverreplayedtransactions"
 	"github.com/bsv-blockchain/teranode/cmd/resetblockassembly"
 	"github.com/bsv-blockchain/teranode/cmd/rewindblockchain/rewindblockchain"
 	"github.com/bsv-blockchain/teranode/cmd/seeder"
@@ -43,32 +46,33 @@ const (
 
 // commandHelp stores the command descriptions
 var commandHelp = map[string]string{
-	"filereader":              "File Reader",
-	"aerospikereader":         "Aerospike Reader",
-	"aerospikekafkaconnector": "Read Aerospike CDC from Kafka and filter by txID bin",
-	"bitcointoutxoset":        "Bitcoin to Utxoset",
-	"seeder":                  "Seeder",
-	"utxopersister":           "Utxo Persister",
-	"getfsmstate":             "Get the current FSM State",
-	"setfsmstate":             "Set the FSM State",
-	"settings":                "Settings",
-	"export-blocks":           "Export blockchain to CSV",
-	"import-blocks":           "Import blockchain from CSV",
-	"checkblocktemplate":      "Check block template",
-	"checkblock":              "Check block - fetches a block and validates it using the block validation service",
-	"reconsiderblock":         "Reconsider a block that was previously marked as invalid",
-	"resetblockassembly":      "Reset block assembly state",
-	"checkblockassembly":      "Check block assembly state by validating unmined transaction inputs (read-only)",
-	"fix-chainwork":           "Fix incorrect chainwork values in blockchain database",
-	"rewindblockchain":        "Rewind blockchain DB, UTXO store and subtree blobs to Block Assembly's persisted height (DESTRUCTIVE, node must be stopped)",
-	"validate-utxo-set":       "Validate UTXO set file",
-	"subtreebench":            "Benchmark SubtreeProcessor throughput with CPU and memory profiling",
-	"loadunminedbench":        "Benchmark loadUnminedTransactions with CPU and memory profiling",
-	"txmapbench":              "Benchmark CreateTransactionMap with CPU and memory profiling",
-	"remainderbench":          "Benchmark processRemainderTransactionsAndDequeue with CPU and memory profiling",
-	"monitor":                 "Live TUI dashboard for monitoring node status",
-	"logs":                    "Interactive log viewer with filtering and search",
-	"diagnose":                "Diagnose node health and validate configuration",
+	"filereader":                  "File Reader",
+	"aerospikereader":             "Aerospike Reader",
+	"aerospikekafkaconnector":     "Read Aerospike CDC from Kafka and filter by txID bin",
+	"bitcointoutxoset":            "Bitcoin to Utxoset",
+	"seeder":                      "Seeder",
+	"utxopersister":               "Utxo Persister",
+	"getfsmstate":                 "Get the current FSM State",
+	"setfsmstate":                 "Set the FSM State",
+	"settings":                    "Settings",
+	"export-blocks":               "Export blockchain to CSV",
+	"import-blocks":               "Import blockchain from CSV",
+	"checkblocktemplate":          "Check block template",
+	"checkblock":                  "Check block - fetches a block and validates it using the block validation service",
+	"reconsiderblock":             "Reconsider a block that was previously marked as invalid",
+	"resetblockassembly":          "Reset block assembly state",
+	"recoverreplayedtransactions": "Audit replayed confirmed transactions; guarded repair and recovery verification",
+	"checkblockassembly":          "Check block assembly state by validating unmined transaction inputs (read-only)",
+	"fix-chainwork":               "Fix incorrect chainwork values in blockchain database",
+	"rewindblockchain":            "Rewind blockchain DB, UTXO store and subtree blobs to Block Assembly's persisted height (DESTRUCTIVE, node must be stopped)",
+	"validate-utxo-set":           "Validate UTXO set file",
+	"subtreebench":                "Benchmark SubtreeProcessor throughput with CPU and memory profiling",
+	"loadunminedbench":            "Benchmark loadUnminedTransactions with CPU and memory profiling",
+	"txmapbench":                  "Benchmark CreateTransactionMap with CPU and memory profiling",
+	"remainderbench":              "Benchmark processRemainderTransactionsAndDequeue with CPU and memory profiling",
+	"monitor":                     "Live TUI dashboard for monitoring node status",
+	"logs":                        "Interactive log viewer with filtering and search",
+	"diagnose":                    "Diagnose node health and validate configuration",
 }
 
 var dangerousCommands = map[string]bool{}
@@ -158,6 +162,9 @@ func Start(args []string, version, commit string) {
 	tSettings := settings.NewSettings()
 
 	logger := ulogger.InitLogger("teranode-cli", tSettings)
+	if command == "recoverreplayedtransactions" {
+		logger = ulogger.New("teranode-cli", ulogger.WithLevel(tSettings.LogLevel), ulogger.WithWriter(os.Stderr))
+	}
 
 	util.InitGRPCResolver(logger, tSettings.GRPCResolver)
 
@@ -409,7 +416,7 @@ func Start(args []string, version, commit string) {
 			return reconsiderblock.ReconsiderBlock(logger, tSettings, args[0])
 		}
 	case "resetblockassembly":
-		fullReset := cmd.FlagSet.Bool("full-reset", false, "Perform a full reset, including clearing mempool and unmined transactions")
+		fullReset := cmd.FlagSet.Bool("full-reset", false, "Scan mined-metadata inconsistencies before reloading unmined transactions; does not purge the mempool or repair empty mined metadata")
 		validateInputs := cmd.FlagSet.Bool("validate-inputs", false, "Validate that each unmined tx's inputs are still spent by this tx (marks invalid ones as conflicting)")
 
 		cmd.Execute = func(args []string) error {
@@ -419,6 +426,31 @@ func Start(args []string, version, commit string) {
 			}
 
 			return nil
+		}
+	case "recoverreplayedtransactions":
+		mode := cmd.FlagSet.String("mode", "discover", "discover (read-only), apply, resume, verify, or export (JSONL)")
+		manifest := cmd.FlagSet.String("manifest", "", "Manifest SQLite path in a private (0700) recovery directory")
+		journal := cmd.FlagSet.String("journal", "", "Durable repair journal path; required for apply, resume, and verify")
+		rpc := cmd.FlagSet.String("rpc", "", "Explicit trusted BSV RPC URL; used for canonical evidence and current output state")
+		history := cmd.FlagSet.String("history-index", "", "Optional local canonical history index; create during discovery or reuse existing index")
+		historyStart := uint32Flag(cmd.FlagSet, "history-start", 0, "First canonical height to index; historical coverage gaps remain unresolved")
+		historyEnd := uint32Flag(cmd.FlagSet, "history-end", 0, "Last height to index (0 = agreed tip)")
+		maintenance := cmd.FlagSet.Bool("maintenance", false, "Acknowledge all writers sharing the UTXO store are stopped/isolated for apply or resume")
+		reset := cmd.FlagSet.Bool("reset", false, "In verify mode, run ordinary reset and await its actual completion")
+		timeout := cmd.FlagSet.Duration("timeout", 30*time.Minute, "Overall command timeout")
+		rate := cmd.FlagSet.Float64("rpc-rate", 5, "Maximum individual RPC requests per second")
+		concurrency := cmd.FlagSet.Int("concurrency", 4, "Maximum simultaneous RPC requests (1..64)")
+		cmd.Execute = func(args []string) error {
+			if len(args) != 0 {
+				return errors.NewInvalidArgumentError("recoverreplayedtransactions takes no positional arguments; use named flags")
+			}
+			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+			defer cancel()
+			return recoverreplayedtransactions.Run(ctx, logger, tSettings, recoverreplayedtransactions.Options{
+				Mode: *mode, Manifest: *manifest, Journal: *journal, RPC: *rpc, HistoryIndex: *history,
+				HistoryStart: *historyStart, HistoryEnd: *historyEnd, Maintenance: *maintenance, Reset: *reset,
+				Timeout: *timeout, RequestsPerSecond: *rate, Concurrency: *concurrency,
+			}, os.Stdout, os.Stderr)
 		}
 	case "checkblockassembly":
 		cmd.Execute = func(args []string) error {
@@ -554,6 +586,10 @@ func Start(args []string, version, commit string) {
 
 	// Execute the command
 	if err := cmd.Execute(cmd.FlagSet.Args()); err != nil {
+		if command == "recoverreplayedtransactions" {
+			fmt.Fprintf(os.Stderr, "Error executing command: %v\n", err)
+			os.Exit(recoverreplayedtransactions.ExitCode(err))
+		}
 		fmt.Printf("Error executing command: %v\n", err)
 		os.Exit(1)
 	}

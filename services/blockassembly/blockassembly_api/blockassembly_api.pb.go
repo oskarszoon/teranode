@@ -1283,6 +1283,198 @@ func (x *GetCandidateBlockResponse) GetTransactionCount() uint64 {
 	return 0
 }
 
+// Recovery state is scoped to one service process and successful reset counter.
+type RecoveryStateMessage struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ProcessId     string                 `protobuf:"bytes,1,opt,name=process_id,json=processId,proto3" json:"process_id,omitempty"`
+	TipHash       string                 `protobuf:"bytes,2,opt,name=tip_hash,json=tipHash,proto3" json:"tip_hash,omitempty"`
+	TipHeight     uint32                 `protobuf:"varint,3,opt,name=tip_height,json=tipHeight,proto3" json:"tip_height,omitempty"`
+	ResetId       uint64                 `protobuf:"varint,4,opt,name=reset_id,json=resetId,proto3" json:"reset_id,omitempty"`
+	CandidateId   string                 `protobuf:"bytes,5,opt,name=candidate_id,json=candidateId,proto3" json:"candidate_id,omitempty"` // canonical display hash of the actual mining job
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RecoveryStateMessage) Reset() {
+	*x = RecoveryStateMessage{}
+	mi := &file_services_blockassembly_blockassembly_api_blockassembly_api_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RecoveryStateMessage) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RecoveryStateMessage) ProtoMessage() {}
+
+func (x *RecoveryStateMessage) ProtoReflect() protoreflect.Message {
+	mi := &file_services_blockassembly_blockassembly_api_blockassembly_api_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RecoveryStateMessage.ProtoReflect.Descriptor instead.
+func (*RecoveryStateMessage) Descriptor() ([]byte, []int) {
+	return file_services_blockassembly_blockassembly_api_blockassembly_api_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *RecoveryStateMessage) GetProcessId() string {
+	if x != nil {
+		return x.ProcessId
+	}
+	return ""
+}
+
+func (x *RecoveryStateMessage) GetTipHash() string {
+	if x != nil {
+		return x.TipHash
+	}
+	return ""
+}
+
+func (x *RecoveryStateMessage) GetTipHeight() uint32 {
+	if x != nil {
+		return x.TipHeight
+	}
+	return 0
+}
+
+func (x *RecoveryStateMessage) GetResetId() uint64 {
+	if x != nil {
+		return x.ResetId
+	}
+	return 0
+}
+
+func (x *RecoveryStateMessage) GetCandidateId() string {
+	if x != nil {
+		return x.CandidateId
+	}
+	return ""
+}
+
+type RecoveryTransactionsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Candidate     bool                   `protobuf:"varint,1,opt,name=candidate,proto3" json:"candidate,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RecoveryTransactionsRequest) Reset() {
+	*x = RecoveryTransactionsRequest{}
+	mi := &file_services_blockassembly_blockassembly_api_blockassembly_api_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RecoveryTransactionsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RecoveryTransactionsRequest) ProtoMessage() {}
+
+func (x *RecoveryTransactionsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_services_blockassembly_blockassembly_api_blockassembly_api_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RecoveryTransactionsRequest.ProtoReflect.Descriptor instead.
+func (*RecoveryTransactionsRequest) Descriptor() ([]byte, []int) {
+	return file_services_blockassembly_blockassembly_api_blockassembly_api_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *RecoveryTransactionsRequest) GetCandidate() bool {
+	if x != nil {
+		return x.Candidate
+	}
+	return false
+}
+
+// First and final pages carry identical state and total count. Intermediate
+// pages contain at most 1024 non-coinbase TXIDs; count excludes coinbase.
+// A stream without a final page is incomplete.
+type RecoveryPage struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	State         *RecoveryStateMessage  `protobuf:"bytes,1,opt,name=state,proto3" json:"state,omitempty"`
+	Count         uint64                 `protobuf:"varint,2,opt,name=count,proto3" json:"count,omitempty"`
+	Txids         []string               `protobuf:"bytes,3,rep,name=txids,proto3" json:"txids,omitempty"`
+	Complete      bool                   `protobuf:"varint,4,opt,name=complete,proto3" json:"complete,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RecoveryPage) Reset() {
+	*x = RecoveryPage{}
+	mi := &file_services_blockassembly_blockassembly_api_blockassembly_api_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RecoveryPage) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RecoveryPage) ProtoMessage() {}
+
+func (x *RecoveryPage) ProtoReflect() protoreflect.Message {
+	mi := &file_services_blockassembly_blockassembly_api_blockassembly_api_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RecoveryPage.ProtoReflect.Descriptor instead.
+func (*RecoveryPage) Descriptor() ([]byte, []int) {
+	return file_services_blockassembly_blockassembly_api_blockassembly_api_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *RecoveryPage) GetState() *RecoveryStateMessage {
+	if x != nil {
+		return x.State
+	}
+	return nil
+}
+
+func (x *RecoveryPage) GetCount() uint64 {
+	if x != nil {
+		return x.Count
+	}
+	return 0
+}
+
+func (x *RecoveryPage) GetTxids() []string {
+	if x != nil {
+		return x.Txids
+	}
+	return nil
+}
+
+func (x *RecoveryPage) GetComplete() bool {
+	if x != nil {
+		return x.Complete
+	}
+	return false
+}
+
 var File_services_blockassembly_blockassembly_api_blockassembly_api_proto protoreflect.FileDescriptor
 
 const file_services_blockassembly_blockassembly_api_blockassembly_api_proto_rawDesc = "" +
@@ -1386,8 +1578,26 @@ const file_services_blockassembly_blockassembly_api_blockassembly_api_proto_rawD
 	"\vcoinbase_tx\x18\x02 \x01(\fR\n" +
 	"coinbaseTx\x12%\n" +
 	"\x0esubtree_hashes\x18\x03 \x03(\fR\rsubtreeHashes\x12+\n" +
-	"\x11transaction_count\x18\x04 \x01(\x04R\x10transactionCount2\xe4\x0e\n" +
-	"\x10BlockAssemblyAPI\x12R\n" +
+	"\x11transaction_count\x18\x04 \x01(\x04R\x10transactionCount\"\xad\x01\n" +
+	"\x14RecoveryStateMessage\x12\x1d\n" +
+	"\n" +
+	"process_id\x18\x01 \x01(\tR\tprocessId\x12\x19\n" +
+	"\btip_hash\x18\x02 \x01(\tR\atipHash\x12\x1d\n" +
+	"\n" +
+	"tip_height\x18\x03 \x01(\rR\ttipHeight\x12\x19\n" +
+	"\breset_id\x18\x04 \x01(\x04R\aresetId\x12!\n" +
+	"\fcandidate_id\x18\x05 \x01(\tR\vcandidateId\";\n" +
+	"\x1bRecoveryTransactionsRequest\x12\x1c\n" +
+	"\tcandidate\x18\x01 \x01(\bR\tcandidate\"\x95\x01\n" +
+	"\fRecoveryPage\x12=\n" +
+	"\x05state\x18\x01 \x01(\v2'.blockassembly_api.RecoveryStateMessageR\x05state\x12\x14\n" +
+	"\x05count\x18\x02 \x01(\x04R\x05count\x12\x14\n" +
+	"\x05txids\x18\x03 \x03(\tR\x05txids\x12\x1a\n" +
+	"\bcomplete\x18\x04 \x01(\bR\bcomplete2\x8b\x11\n" +
+	"\x10BlockAssemblyAPI\x12[\n" +
+	"\rRecoveryState\x12\x1f.blockassembly_api.EmptyMessage\x1a'.blockassembly_api.RecoveryStateMessage\"\x00\x12[\n" +
+	"\rRecoveryReset\x12\x1f.blockassembly_api.EmptyMessage\x1a'.blockassembly_api.RecoveryStateMessage\"\x00\x12k\n" +
+	"\x14RecoveryTransactions\x12..blockassembly_api.RecoveryTransactionsRequest\x1a\x1f.blockassembly_api.RecoveryPage\"\x000\x01\x12R\n" +
 	"\n" +
 	"HealthGRPC\x12\x1f.blockassembly_api.EmptyMessage\x1a!.blockassembly_api.HealthResponse\"\x00\x12L\n" +
 	"\x05AddTx\x12\x1f.blockassembly_api.AddTxRequest\x1a .blockassembly_api.AddTxResponse\"\x00\x12Q\n" +
@@ -1422,7 +1632,7 @@ func file_services_blockassembly_blockassembly_api_blockassembly_api_proto_rawDe
 	return file_services_blockassembly_blockassembly_api_blockassembly_api_proto_rawDescData
 }
 
-var file_services_blockassembly_blockassembly_api_blockassembly_api_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
+var file_services_blockassembly_blockassembly_api_blockassembly_api_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
 var file_services_blockassembly_blockassembly_api_blockassembly_api_proto_goTypes = []any{
 	(*EmptyMessage)(nil),                           // 0: blockassembly_api.EmptyMessage
 	(*HealthResponse)(nil),                         // 1: blockassembly_api.HealthResponse
@@ -1444,55 +1654,65 @@ var file_services_blockassembly_blockassembly_api_blockassembly_api_proto_goType
 	(*GetBlockAssemblyTxsResponse)(nil),            // 17: blockassembly_api.GetBlockAssemblyTxsResponse
 	(*GetCandidateBlockRequest)(nil),               // 18: blockassembly_api.GetCandidateBlockRequest
 	(*GetCandidateBlockResponse)(nil),              // 19: blockassembly_api.GetCandidateBlockResponse
-	(*timestamppb.Timestamp)(nil),                  // 20: google.protobuf.Timestamp
-	(*model.MiningCandidate)(nil),                  // 21: model.MiningCandidate
+	(*RecoveryStateMessage)(nil),                   // 20: blockassembly_api.RecoveryStateMessage
+	(*RecoveryTransactionsRequest)(nil),            // 21: blockassembly_api.RecoveryTransactionsRequest
+	(*RecoveryPage)(nil),                           // 22: blockassembly_api.RecoveryPage
+	(*timestamppb.Timestamp)(nil),                  // 23: google.protobuf.Timestamp
+	(*model.MiningCandidate)(nil),                  // 24: model.MiningCandidate
 }
 var file_services_blockassembly_blockassembly_api_blockassembly_api_proto_depIdxs = []int32{
-	20, // 0: blockassembly_api.HealthResponse.timestamp:type_name -> google.protobuf.Timestamp
+	23, // 0: blockassembly_api.HealthResponse.timestamp:type_name -> google.protobuf.Timestamp
 	3,  // 1: blockassembly_api.AddTxBatchRequest.txRequests:type_name -> blockassembly_api.AddTxRequest
-	0,  // 2: blockassembly_api.BlockAssemblyAPI.HealthGRPC:input_type -> blockassembly_api.EmptyMessage
-	3,  // 3: blockassembly_api.BlockAssemblyAPI.AddTx:input_type -> blockassembly_api.AddTxRequest
-	7,  // 4: blockassembly_api.BlockAssemblyAPI.RemoveTx:input_type -> blockassembly_api.RemoveTxRequest
-	4,  // 5: blockassembly_api.BlockAssemblyAPI.AddTxBatch:input_type -> blockassembly_api.AddTxBatchRequest
-	5,  // 6: blockassembly_api.BlockAssemblyAPI.AddTxBatchColumnar:input_type -> blockassembly_api.AddTxBatchColumnarRequest
-	6,  // 7: blockassembly_api.BlockAssemblyAPI.GetMiningCandidate:input_type -> blockassembly_api.GetMiningCandidateRequest
-	0,  // 8: blockassembly_api.BlockAssemblyAPI.GetCurrentDifficulty:input_type -> blockassembly_api.EmptyMessage
-	10, // 9: blockassembly_api.BlockAssemblyAPI.SubmitMiningSolution:input_type -> blockassembly_api.SubmitMiningSolutionRequest
-	0,  // 10: blockassembly_api.BlockAssemblyAPI.ResetBlockAssembly:input_type -> blockassembly_api.EmptyMessage
-	0,  // 11: blockassembly_api.BlockAssemblyAPI.ResetBlockAssemblyFully:input_type -> blockassembly_api.EmptyMessage
-	0,  // 12: blockassembly_api.BlockAssemblyAPI.ResetBlockAssemblyValidateInputs:input_type -> blockassembly_api.EmptyMessage
-	0,  // 13: blockassembly_api.BlockAssemblyAPI.CheckBlockAssemblyValidateInputs:input_type -> blockassembly_api.EmptyMessage
-	0,  // 14: blockassembly_api.BlockAssemblyAPI.GetBlockAssemblyState:input_type -> blockassembly_api.EmptyMessage
-	0,  // 15: blockassembly_api.BlockAssemblyAPI.GetBlockAssemblyQueueStats:input_type -> blockassembly_api.EmptyMessage
-	15, // 16: blockassembly_api.BlockAssemblyAPI.GenerateBlocks:input_type -> blockassembly_api.GenerateBlocksRequest
-	0,  // 17: blockassembly_api.BlockAssemblyAPI.CheckBlockAssembly:input_type -> blockassembly_api.EmptyMessage
-	0,  // 18: blockassembly_api.BlockAssemblyAPI.GetBlockAssemblyBlockCandidate:input_type -> blockassembly_api.EmptyMessage
-	0,  // 19: blockassembly_api.BlockAssemblyAPI.GetBlockAssemblyTxs:input_type -> blockassembly_api.EmptyMessage
-	18, // 20: blockassembly_api.BlockAssemblyAPI.GetCandidateBlock:input_type -> blockassembly_api.GetCandidateBlockRequest
-	1,  // 21: blockassembly_api.BlockAssemblyAPI.HealthGRPC:output_type -> blockassembly_api.HealthResponse
-	8,  // 22: blockassembly_api.BlockAssemblyAPI.AddTx:output_type -> blockassembly_api.AddTxResponse
-	0,  // 23: blockassembly_api.BlockAssemblyAPI.RemoveTx:output_type -> blockassembly_api.EmptyMessage
-	9,  // 24: blockassembly_api.BlockAssemblyAPI.AddTxBatch:output_type -> blockassembly_api.AddTxBatchResponse
-	9,  // 25: blockassembly_api.BlockAssemblyAPI.AddTxBatchColumnar:output_type -> blockassembly_api.AddTxBatchResponse
-	21, // 26: blockassembly_api.BlockAssemblyAPI.GetMiningCandidate:output_type -> model.MiningCandidate
-	14, // 27: blockassembly_api.BlockAssemblyAPI.GetCurrentDifficulty:output_type -> blockassembly_api.GetCurrentDifficultyResponse
-	11, // 28: blockassembly_api.BlockAssemblyAPI.SubmitMiningSolution:output_type -> blockassembly_api.OKResponse
-	0,  // 29: blockassembly_api.BlockAssemblyAPI.ResetBlockAssembly:output_type -> blockassembly_api.EmptyMessage
-	0,  // 30: blockassembly_api.BlockAssemblyAPI.ResetBlockAssemblyFully:output_type -> blockassembly_api.EmptyMessage
-	0,  // 31: blockassembly_api.BlockAssemblyAPI.ResetBlockAssemblyValidateInputs:output_type -> blockassembly_api.EmptyMessage
-	0,  // 32: blockassembly_api.BlockAssemblyAPI.CheckBlockAssemblyValidateInputs:output_type -> blockassembly_api.EmptyMessage
-	12, // 33: blockassembly_api.BlockAssemblyAPI.GetBlockAssemblyState:output_type -> blockassembly_api.StateMessage
-	13, // 34: blockassembly_api.BlockAssemblyAPI.GetBlockAssemblyQueueStats:output_type -> blockassembly_api.QueueStatsMessage
-	0,  // 35: blockassembly_api.BlockAssemblyAPI.GenerateBlocks:output_type -> blockassembly_api.EmptyMessage
-	11, // 36: blockassembly_api.BlockAssemblyAPI.CheckBlockAssembly:output_type -> blockassembly_api.OKResponse
-	16, // 37: blockassembly_api.BlockAssemblyAPI.GetBlockAssemblyBlockCandidate:output_type -> blockassembly_api.GetBlockAssemblyBlockCandidateResponse
-	17, // 38: blockassembly_api.BlockAssemblyAPI.GetBlockAssemblyTxs:output_type -> blockassembly_api.GetBlockAssemblyTxsResponse
-	19, // 39: blockassembly_api.BlockAssemblyAPI.GetCandidateBlock:output_type -> blockassembly_api.GetCandidateBlockResponse
-	21, // [21:40] is the sub-list for method output_type
-	2,  // [2:21] is the sub-list for method input_type
-	2,  // [2:2] is the sub-list for extension type_name
-	2,  // [2:2] is the sub-list for extension extendee
-	0,  // [0:2] is the sub-list for field type_name
+	20, // 2: blockassembly_api.RecoveryPage.state:type_name -> blockassembly_api.RecoveryStateMessage
+	0,  // 3: blockassembly_api.BlockAssemblyAPI.RecoveryState:input_type -> blockassembly_api.EmptyMessage
+	0,  // 4: blockassembly_api.BlockAssemblyAPI.RecoveryReset:input_type -> blockassembly_api.EmptyMessage
+	21, // 5: blockassembly_api.BlockAssemblyAPI.RecoveryTransactions:input_type -> blockassembly_api.RecoveryTransactionsRequest
+	0,  // 6: blockassembly_api.BlockAssemblyAPI.HealthGRPC:input_type -> blockassembly_api.EmptyMessage
+	3,  // 7: blockassembly_api.BlockAssemblyAPI.AddTx:input_type -> blockassembly_api.AddTxRequest
+	7,  // 8: blockassembly_api.BlockAssemblyAPI.RemoveTx:input_type -> blockassembly_api.RemoveTxRequest
+	4,  // 9: blockassembly_api.BlockAssemblyAPI.AddTxBatch:input_type -> blockassembly_api.AddTxBatchRequest
+	5,  // 10: blockassembly_api.BlockAssemblyAPI.AddTxBatchColumnar:input_type -> blockassembly_api.AddTxBatchColumnarRequest
+	6,  // 11: blockassembly_api.BlockAssemblyAPI.GetMiningCandidate:input_type -> blockassembly_api.GetMiningCandidateRequest
+	0,  // 12: blockassembly_api.BlockAssemblyAPI.GetCurrentDifficulty:input_type -> blockassembly_api.EmptyMessage
+	10, // 13: blockassembly_api.BlockAssemblyAPI.SubmitMiningSolution:input_type -> blockassembly_api.SubmitMiningSolutionRequest
+	0,  // 14: blockassembly_api.BlockAssemblyAPI.ResetBlockAssembly:input_type -> blockassembly_api.EmptyMessage
+	0,  // 15: blockassembly_api.BlockAssemblyAPI.ResetBlockAssemblyFully:input_type -> blockassembly_api.EmptyMessage
+	0,  // 16: blockassembly_api.BlockAssemblyAPI.ResetBlockAssemblyValidateInputs:input_type -> blockassembly_api.EmptyMessage
+	0,  // 17: blockassembly_api.BlockAssemblyAPI.CheckBlockAssemblyValidateInputs:input_type -> blockassembly_api.EmptyMessage
+	0,  // 18: blockassembly_api.BlockAssemblyAPI.GetBlockAssemblyState:input_type -> blockassembly_api.EmptyMessage
+	0,  // 19: blockassembly_api.BlockAssemblyAPI.GetBlockAssemblyQueueStats:input_type -> blockassembly_api.EmptyMessage
+	15, // 20: blockassembly_api.BlockAssemblyAPI.GenerateBlocks:input_type -> blockassembly_api.GenerateBlocksRequest
+	0,  // 21: blockassembly_api.BlockAssemblyAPI.CheckBlockAssembly:input_type -> blockassembly_api.EmptyMessage
+	0,  // 22: blockassembly_api.BlockAssemblyAPI.GetBlockAssemblyBlockCandidate:input_type -> blockassembly_api.EmptyMessage
+	0,  // 23: blockassembly_api.BlockAssemblyAPI.GetBlockAssemblyTxs:input_type -> blockassembly_api.EmptyMessage
+	18, // 24: blockassembly_api.BlockAssemblyAPI.GetCandidateBlock:input_type -> blockassembly_api.GetCandidateBlockRequest
+	20, // 25: blockassembly_api.BlockAssemblyAPI.RecoveryState:output_type -> blockassembly_api.RecoveryStateMessage
+	20, // 26: blockassembly_api.BlockAssemblyAPI.RecoveryReset:output_type -> blockassembly_api.RecoveryStateMessage
+	22, // 27: blockassembly_api.BlockAssemblyAPI.RecoveryTransactions:output_type -> blockassembly_api.RecoveryPage
+	1,  // 28: blockassembly_api.BlockAssemblyAPI.HealthGRPC:output_type -> blockassembly_api.HealthResponse
+	8,  // 29: blockassembly_api.BlockAssemblyAPI.AddTx:output_type -> blockassembly_api.AddTxResponse
+	0,  // 30: blockassembly_api.BlockAssemblyAPI.RemoveTx:output_type -> blockassembly_api.EmptyMessage
+	9,  // 31: blockassembly_api.BlockAssemblyAPI.AddTxBatch:output_type -> blockassembly_api.AddTxBatchResponse
+	9,  // 32: blockassembly_api.BlockAssemblyAPI.AddTxBatchColumnar:output_type -> blockassembly_api.AddTxBatchResponse
+	24, // 33: blockassembly_api.BlockAssemblyAPI.GetMiningCandidate:output_type -> model.MiningCandidate
+	14, // 34: blockassembly_api.BlockAssemblyAPI.GetCurrentDifficulty:output_type -> blockassembly_api.GetCurrentDifficultyResponse
+	11, // 35: blockassembly_api.BlockAssemblyAPI.SubmitMiningSolution:output_type -> blockassembly_api.OKResponse
+	0,  // 36: blockassembly_api.BlockAssemblyAPI.ResetBlockAssembly:output_type -> blockassembly_api.EmptyMessage
+	0,  // 37: blockassembly_api.BlockAssemblyAPI.ResetBlockAssemblyFully:output_type -> blockassembly_api.EmptyMessage
+	0,  // 38: blockassembly_api.BlockAssemblyAPI.ResetBlockAssemblyValidateInputs:output_type -> blockassembly_api.EmptyMessage
+	0,  // 39: blockassembly_api.BlockAssemblyAPI.CheckBlockAssemblyValidateInputs:output_type -> blockassembly_api.EmptyMessage
+	12, // 40: blockassembly_api.BlockAssemblyAPI.GetBlockAssemblyState:output_type -> blockassembly_api.StateMessage
+	13, // 41: blockassembly_api.BlockAssemblyAPI.GetBlockAssemblyQueueStats:output_type -> blockassembly_api.QueueStatsMessage
+	0,  // 42: blockassembly_api.BlockAssemblyAPI.GenerateBlocks:output_type -> blockassembly_api.EmptyMessage
+	11, // 43: blockassembly_api.BlockAssemblyAPI.CheckBlockAssembly:output_type -> blockassembly_api.OKResponse
+	16, // 44: blockassembly_api.BlockAssemblyAPI.GetBlockAssemblyBlockCandidate:output_type -> blockassembly_api.GetBlockAssemblyBlockCandidateResponse
+	17, // 45: blockassembly_api.BlockAssemblyAPI.GetBlockAssemblyTxs:output_type -> blockassembly_api.GetBlockAssemblyTxsResponse
+	19, // 46: blockassembly_api.BlockAssemblyAPI.GetCandidateBlock:output_type -> blockassembly_api.GetCandidateBlockResponse
+	25, // [25:47] is the sub-list for method output_type
+	3,  // [3:25] is the sub-list for method input_type
+	3,  // [3:3] is the sub-list for extension type_name
+	3,  // [3:3] is the sub-list for extension extendee
+	0,  // [0:3] is the sub-list for field type_name
 }
 
 func init() { file_services_blockassembly_blockassembly_api_blockassembly_api_proto_init() }
@@ -1508,7 +1728,7 @@ func file_services_blockassembly_blockassembly_api_blockassembly_api_proto_init(
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_services_blockassembly_blockassembly_api_blockassembly_api_proto_rawDesc), len(file_services_blockassembly_blockassembly_api_blockassembly_api_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   20,
+			NumMessages:   23,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
