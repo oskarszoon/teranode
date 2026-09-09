@@ -5,9 +5,7 @@ package subtreevalidation
 
 import (
 	"sync"
-	"time"
 
-	"github.com/bsv-blockchain/teranode/services/blockchain"
 	"github.com/bsv-blockchain/teranode/util"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -223,7 +221,7 @@ func _initPrometheusMetrics() {
 			Namespace: "teranode",
 			Subsystem: "subtreevalidation",
 			Name:      "assembly_feeding_suppressed_total",
-			Help:      "FSM observations suppressing assembly feeding, including skipped Kafka catchup messages; observed state is cached and does not confirm a durable pause",
+			Help:      "FSM observations suppressing assembly feeding for admitted validation; observed state is cached and does not confirm a durable pause",
 		},
 		[]string{"path", "observed_state"},
 	)
@@ -237,35 +235,4 @@ func _initPrometheusMetrics() {
 		},
 		[]string{"reason"},
 	)
-}
-
-// allowAssemblyForObservedFSM records suppression at an admission boundary.
-// GetFSMCurrentState can return synthetic IDLE after notification-stream loss:
-// this metric exposes that fail-closed window, not an authoritative pause state.
-// Cache recovery re-enables feeding; transactions validated during that window
-// rely on normal unmined-transaction reloads to reach assembly.
-// Paths are fixed labels supplied only by the four internal entry paths.
-func (s *Server) allowAssemblyForObservedFSM(state *blockchain.FSMStateType, path string) bool {
-	if state != nil && *state == blockchain.FSMStateRUNNING {
-		return true
-	}
-	observedState := "missing"
-	if state != nil {
-		switch *state {
-		case blockchain.FSMStateIDLE:
-			observedState = "idle"
-		case blockchain.FSMStateCATCHINGBLOCKS:
-			observedState = "catchingblocks"
-		default:
-			observedState = "unknown"
-		}
-	}
-	prometheusAssemblyFeedingSuppressed.WithLabelValues(path, observedState).Inc()
-	// One warning per service per minute; counters retain every observation.
-	now := time.Now().UnixNano()
-	last := s.assemblySuppressionLastWarning.Load()
-	if (last == 0 || now-last >= int64(time.Minute)) && s.assemblySuppressionLastWarning.CompareAndSwap(last, now) {
-		s.logger.Warnf("[SubtreeValidation] Assembly feeding suppressed: path=%s observed_state=%s; cached or synthetic IDLE may indicate subscription loss; check blockchain connectivity and FSM state; recovery may require an unmined transaction reload", path, observedState)
-	}
-	return false
 }

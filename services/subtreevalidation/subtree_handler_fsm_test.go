@@ -115,7 +115,7 @@ func TestSubtreeMessageHandlerAssemblyRequiresRunning(t *testing.T) {
 			}
 			if tt.err == nil {
 				wantSuppressed := float64(1)
-				if tt.wantAssembly {
+				if tt.wantAssembly || !tt.wantValidate {
 					wantSuppressed = 0
 				}
 				require.Equal(t, suppressedBefore+wantSuppressed, testutil.ToFloat64(prometheusAssemblyFeedingSuppressed.WithLabelValues("kafka_subtree", observedState)))

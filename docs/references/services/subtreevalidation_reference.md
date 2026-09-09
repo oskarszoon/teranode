@@ -8,17 +8,22 @@ The `Server` type implements the core functionality for subtree validation in a 
 
 `teranode_subtreevalidation_assembly_feeding_suppressed_total{path,observed_state}`
 counts FSM observations that suppress assembly feeding, once per handler admission
-check. It includes Kafka messages skipped during catchup; it does not count
-transactions or confirm that the node is durably paused. Paths are
+check for admitted validation. Kafka messages skipped during catchup do not
+increment it. It does not count transactions or confirm that the node is durably
+paused. Paths are
 `check_subtree_legacy`, `check_subtree_peer`, `check_block_subtrees`, and
 `kafka_subtree`. Observed states are `idle`, `catchingblocks`, `unknown`, and
 `missing`; RUNNING observations do not increment the counter.
 
 The blockchain client can report a synthetic IDLE after its notification stream
 breaks. Feeding remains disabled until a RUNNING observation returns after cache
-recovery. Transactions validated during that window rely on normal unmined
-transaction reloads to enter assembly. The counter exposes this window without
-changing the conservative cached-state guard.
+recovery. Already suppressed transactions are not automatically replayed by cache
+recovery. The counter exposes this window without changing the conservative
+cached-state guard.
+
+Unexpected suppression emits a warning at most once per minute per service
+instance. Expected CATCHINGBLOCKS observations still count for admitted block
+validation but do not warn or consume the warning budget.
 
 ## Types
 

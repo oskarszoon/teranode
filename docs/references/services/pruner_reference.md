@@ -112,7 +112,7 @@ pruner_skipped_total{reason="preserve_failed"} 0
 
 **Note**: When defensive mode is enabled, skipped records are logged but not tracked as a separate metric label. Monitor logs for "Defensive skip" messages.
 
-`fsm_not_running` replaces `catchup_mode` for the `pruner_skipDuringCatchup` guard. Update external dashboards or alerts that select the old reason value; the counter name is unchanged.
+`fsm_not_running` replaces the old `catchup_mode` reason in the `pruner_skipDuringCatchup` guard; the counter name is unchanged. Earlier releases did not load this setting, so configured nodes did not emit either guard reason. The setting now takes effect, including existing `true` configurations: long catchup, IDLE, or unavailable-state periods defer pruning and can increase disk usage. Review the [upgrade note](../settings/services/pruner_settings.md#pruner_skipduringcatchup) and available capacity.
 
 #### pruner_updating_parents_total
 

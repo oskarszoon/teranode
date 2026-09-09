@@ -41,3 +41,21 @@ func TestAssemblySuppressionWarningIsRateLimited(t *testing.T) {
 	require.True(t, server.allowAssemblyForObservedFSM(&state, "kafka_subtree"))
 	require.Equal(t, int64(2), logger.warnings.Load())
 }
+
+// Expected catchup must not consume the warning budget for a later IDLE
+// observation on another path, which can indicate notification-stream loss.
+func TestExpectedCatchupDoesNotHideIdleSuppressionWarning(t *testing.T) {
+	InitPrometheusMetrics()
+	logger := &suppressionWarningLogger{}
+	server := &Server{logger: logger}
+	state := blockchain.FSMStateCATCHINGBLOCKS
+	counter := prometheusAssemblyFeedingSuppressed.WithLabelValues("check_subtree_legacy", "catchingblocks")
+	before := testutil.ToFloat64(counter)
+	require.False(t, server.allowAssemblyForObservedFSM(&state, "check_subtree_legacy"))
+	require.Equal(t, before+1, testutil.ToFloat64(counter), "admitted catchup validation still records suppressed feeding")
+	require.Zero(t, logger.warnings.Load(), "expected catchup is not a subscription-loss warning")
+
+	state = blockchain.FSMStateIDLE
+	require.False(t, server.allowAssemblyForObservedFSM(&state, "check_block_subtrees"))
+	require.Equal(t, int64(1), logger.warnings.Load(), "catchup must not hide a subsequent IDLE warning")
+}

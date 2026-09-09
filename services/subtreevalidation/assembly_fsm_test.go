@@ -51,11 +51,15 @@ func TestBlockSubtreeAssemblyRequiresRunning(t *testing.T) {
 				{"unknown", state(blockchain.FSMStateType(99)), nil, false},
 				{"missing", nil, nil, false},
 				{"read error", nil, errors.NewProcessingError("FSM unavailable"), false},
+				{"read error with state", state(blockchain.FSMStateRUNNING), errors.NewProcessingError("FSM unavailable"), false},
 			} {
 				t.Run(tt.name, func(t *testing.T) {
 					InitPrometheusMetrics()
 					metricPath := map[string]string{"legacy": "check_subtree_legacy", "peer": "check_subtree_peer", "block": "check_block_subtrees"}[path]
 					observedState := tt.name
+					if tt.err != nil {
+						observedState = "missing"
+					}
 					if observedState == "catchup" {
 						observedState = "catchingblocks"
 					}
@@ -112,7 +116,7 @@ func TestBlockSubtreeAssemblyRequiresRunning(t *testing.T) {
 						require.NoError(t, blockErr)
 						_, err = server.CheckBlockSubtrees(ctx, &subtreevalidation_api.CheckBlockSubtreesRequest{Block: blockBytes, BaseUrl: "http://peer.invalid"})
 					}
-					if tt.err != nil {
+					if tt.err != nil && path != "peer" {
 						require.Error(t, err)
 						require.Empty(t, recorder.recordedOptions(*child.TxIDChainHash()))
 						return
