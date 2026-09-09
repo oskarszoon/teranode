@@ -52,6 +52,16 @@ func (b *BlockAssembler) prepareUnminedRecovery(ctx context.Context, hashes []ch
 	for _, id := range ids {
 		chainIDs[id] = struct{}{}
 	}
+	cache, err := b.readRecoveryGraph(ctx, hashes, chainIDs, accepted)
+	if err != nil {
+		return nil, err
+	}
+	return orderRecoveryTransactions(ctx, hashes, cache)
+}
+
+// readRecoveryGraph hydrates candidates and ancestor frontiers with bounded
+// metadata batches, caching each transaction once for this selection.
+func (b *BlockAssembler) readRecoveryGraph(ctx context.Context, hashes []chainhash.Hash, chainIDs map[uint32]struct{}, accepted func(chainhash.Hash) bool) (map[chainhash.Hash]*recoverySelectionEntry, error) {
 	cache := make(map[chainhash.Hash]*recoverySelectionEntry, len(hashes))
 	frontier := make([]chainhash.Hash, 0, len(hashes))
 	schedule := func(hash chainhash.Hash) {
@@ -91,47 +101,60 @@ func (b *BlockAssembler) prepareUnminedRecovery(ctx context.Context, hashes []ch
 				return nil, errors.NewProcessingError("unmined recovery failed to read transaction metadata", err)
 			}
 			for _, item := range batch {
-				if item.Err != nil {
-					if errors.Is(item.Err, errors.ErrTxNotFound) {
-						continue
-					}
-					return nil, errors.NewProcessingError("unmined recovery failed to read transaction %s", item.Hash.String(), item.Err)
-				}
-				data := item.Data
-				if data == nil {
-					return nil, errors.NewProcessingError("unmined recovery received no metadata for %s", item.Hash.String())
-				}
-				if data.Creating || data.Conflicting {
-					continue
-				}
 				entry := cache[item.Hash]
-				for _, id := range data.BlockIDs {
-					if _, mined := chainIDs[id]; mined {
-						entry.state = recoveryMined
-						break
+				if err := classifyRecoveryMetadata(item, entry, chainIDs, accepted); err != nil {
+					return nil, err
+				}
+				if entry.state == recoveryUnvisited {
+					for _, parent := range entry.tx.TxInpoints.ParentTxHashes {
+						schedule(parent)
 					}
-				}
-				if entry.state == recoveryMined {
-					continue
-				}
-				wasAccepted := accepted != nil && accepted(item.Hash)
-				if data.IsCoinbase || (data.Locked && !wasAccepted) || (data.UnminedSince == 0 && !wasAccepted) {
-					continue
-				}
-				entry.tx = &utxo.UnminedTransaction{
-					Node:       &subtree.Node{Hash: item.Hash, Fee: data.Fee, SizeInBytes: data.SizeInBytes},
-					TxInpoints: &data.TxInpoints,
-					BlockIDs:   data.BlockIDs,
-					Locked:     data.Locked,
-				}
-				entry.state = recoveryUnvisited
-				for _, parent := range data.TxInpoints.ParentTxHashes {
-					schedule(parent)
 				}
 			}
 		}
 	}
 
+	return cache, nil
+}
+
+// classifyRecoveryMetadata separates permanent exclusions from read failures.
+// Chain membership permits mined parents without replaying them; only accepted
+// handoffs permit a still-locked unmined record.
+func classifyRecoveryMetadata(item *utxo.UnresolvedMetaData, entry *recoverySelectionEntry, chainIDs map[uint32]struct{}, accepted func(chainhash.Hash) bool) error {
+	if item.Err != nil {
+		if errors.Is(item.Err, errors.ErrTxNotFound) {
+			return nil
+		}
+		return errors.NewProcessingError("unmined recovery failed to read transaction %s", item.Hash.String(), item.Err)
+	}
+	data := item.Data
+	if data == nil {
+		return errors.NewProcessingError("unmined recovery received no metadata for %s", item.Hash.String())
+	}
+	if data.Creating || data.Conflicting {
+		return nil
+	}
+	for _, id := range data.BlockIDs {
+		if _, mined := chainIDs[id]; mined {
+			entry.state = recoveryMined
+			return nil
+		}
+	}
+	wasAccepted := accepted != nil && accepted(item.Hash)
+	if data.IsCoinbase || (data.Locked && !wasAccepted) || (data.UnminedSince == 0 && !wasAccepted) {
+		return nil
+	}
+	entry.tx = &utxo.UnminedTransaction{
+		Node:       &subtree.Node{Hash: item.Hash, Fee: data.Fee, SizeInBytes: data.SizeInBytes},
+		TxInpoints: &data.TxInpoints,
+		BlockIDs:   data.BlockIDs,
+		Locked:     data.Locked,
+	}
+	entry.state = recoveryUnvisited
+	return nil
+}
+
+func orderRecoveryTransactions(ctx context.Context, hashes []chainhash.Hash, cache map[chainhash.Hash]*recoverySelectionEntry) ([]*utxo.UnminedTransaction, error) {
 	selected := make([]*utxo.UnminedTransaction, 0, len(hashes))
 	// Explicit DFS stack avoids recursion limits on long transaction chains.
 	// A parent is appended only after all of its own ancestors are eligible;

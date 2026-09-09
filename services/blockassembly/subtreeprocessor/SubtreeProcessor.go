@@ -250,8 +250,6 @@ type SubtreeProcessor struct {
 	// recoveryAccepted preserves prior admission evidence across rebuild retries.
 	// It is owned by the processor goroutine, like currentTxMap.
 	recoveryAccepted map[chainhash.Hash]struct{}
-	// Set only while the dispatcher performs a cancellable recovery rebuild.
-	recoveryWorkCtx context.Context
 
 	// reconcileCoinbasesCh handles requests to create canonical coinbase UTXOs
 	// for a set of gap blocks, without touching any other in-memory state
@@ -966,9 +964,7 @@ func (stp *SubtreeProcessor) Start(ctx context.Context) {
 					stp.setCurrentRunningState(StateRunning)
 
 				case recovery := <-stp.recoverUnminedCh:
-					err := stp.runHandlerWithRecover("recoverUnmined", func() error {
-						return stp.recoverUnmined(recovery.ctx, recovery.header, recovery.scanHashes, recovery.prepare)
-					})
+					err := stp.runHandlerWithRecover("recoverUnmined", recovery.run)
 					recovery.result <- err
 
 				case resetBlocksMsg := <-stp.resetCh:
@@ -2321,6 +2317,10 @@ func (stp *SubtreeProcessor) InitCurrentBlockHeader(blockHeader *model.BlockHead
 // Returns:
 //   - error: Any error encountered during addition
 func (stp *SubtreeProcessor) addNode(node subtreepkg.Node, parents *subtreepkg.TxInpoints, skipNotification bool) (err error) {
+	return stp.addNodeWithContext(stp.processorContext(), node, parents, skipNotification, false)
+}
+
+func (stp *SubtreeProcessor) addNodeWithContext(ctx context.Context, node subtreepkg.Node, parents *subtreepkg.TxInpoints, skipNotification, replay bool) (err error) {
 	// parents can only be set to nil, when they are already in the map
 	if parents == nil {
 		if _, ok := stp.currentTxMap.Get(node.Hash); !ok {
@@ -2358,7 +2358,7 @@ func (stp *SubtreeProcessor) addNode(node subtreepkg.Node, parents *subtreepkg.T
 	}
 
 	if stp.currentSubtree.Load().IsComplete() {
-		if err = stp.processCompleteSubtree(skipNotification); err != nil {
+		if err = stp.completeSubtree(ctx, skipNotification, replay); err != nil {
 			return err
 		}
 	}
@@ -2443,6 +2443,12 @@ func (stp *SubtreeProcessor) sendNewSubtree(ctx context.Context, req NewSubtreeR
 }
 
 func (stp *SubtreeProcessor) processCompleteSubtree(skipNotification bool) (err error) {
+	return stp.completeSubtree(stp.processorContext(), skipNotification, false)
+}
+
+// completeSubtree uses the caller's deadline for queueing storage work. Replayed
+// transactions rebuild memory without adding adaptive sizing observations.
+func (stp *SubtreeProcessor) completeSubtree(ctx context.Context, skipNotification, replay bool) (err error) {
 	currentSubtree := stp.currentSubtree.Load()
 
 	_, _, deferFn := tracing.Tracer("blockassembly").Start(context.Background(), "storeSubtree",
@@ -2462,7 +2468,7 @@ func (stp *SubtreeProcessor) processCompleteSubtree(skipNotification bool) (err 
 	// 2. The coinbase is still a transaction that takes space
 	// 3. For sizing decisions, we care about total throughput
 	actualNodeCount := len(currentSubtree.Nodes)
-	if actualNodeCount > 0 && stp.recoveryWorkCtx == nil {
+	if actualNodeCount > 0 && !replay {
 		// Add to ring buffer (overwrites oldest value automatically)
 		stp.subtreeNodeCounts.Value = actualNodeCount
 		stp.subtreeNodeCounts = stp.subtreeNodeCounts.Next()
@@ -2483,7 +2489,7 @@ func (stp *SubtreeProcessor) processCompleteSubtree(skipNotification bool) (err 
 		}
 	}
 
-	if stp.recoveryWorkCtx == nil {
+	if !replay {
 		stp.subtreesInBlock++ // Recovery rebuilds must not resample adaptive sizing.
 	}
 
@@ -2513,13 +2519,9 @@ func (stp *SubtreeProcessor) processCompleteSubtree(skipNotification bool) (err 
 		},
 	}
 
-	// Respect processor context cancellation while sending: a full newSubtreeChan buffer with a
+	// Respect caller context cancellation while sending: a full newSubtreeChan buffer with a
 	// stalled or shut-down listener must not block the processor goroutine forever. Matches the
 	// context-aware sends in the Start() select loop and reorgBlocks.
-	ctx := stp.processorContext()
-	if stp.recoveryWorkCtx != nil {
-		ctx = stp.recoveryWorkCtx
-	}
 	if err := stp.sendNewSubtree(ctx, req); err != nil {
 		return errors.NewProcessingError("[%s] cancelled while sending subtree to newSubtreeChan", oldSubtreeHash.String(), err)
 	}
@@ -2743,7 +2745,11 @@ func (stp *SubtreeProcessor) AddBatchIfRoom(nodes []subtreepkg.Node, txInpoints 
 // Returns:
 //   - error: Any error encountered during addition
 func (stp *SubtreeProcessor) AddDirectly(node *subtreepkg.Node, txInpoints *subtreepkg.TxInpoints, skipNotification bool) error {
-	if err := stp.addNode(*node, txInpoints, skipNotification); err != nil {
+	return stp.addDirectly(stp.processorContext(), node, txInpoints, skipNotification, false)
+}
+
+func (stp *SubtreeProcessor) addDirectly(ctx context.Context, node *subtreepkg.Node, txInpoints *subtreepkg.TxInpoints, skipNotification, replay bool) error {
+	if err := stp.addNodeWithContext(ctx, *node, txInpoints, skipNotification, replay); err != nil {
 		return errors.NewProcessingError("error adding node directly to subtree", err)
 	}
 

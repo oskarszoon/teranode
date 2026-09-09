@@ -11,11 +11,8 @@ import (
 )
 
 type unminedRecoveryRequest struct {
-	ctx        context.Context
-	header     *model.BlockHeader
-	scanHashes []chainhash.Hash
-	prepare    func(context.Context, []chainhash.Hash, func(chainhash.Hash) bool) ([]*utxostore.UnminedTransaction, error)
-	result     chan error
+	run    func() error
+	result chan error
 }
 
 // RecoveryPending reports whether a failed memory rebuild needs a read-only retry.
@@ -39,7 +36,10 @@ func (stp *SubtreeProcessor) RecoverUnmined(ctx context.Context, header *model.B
 	ctx, cancel := context.WithCancel(ctx)
 	stop := context.AfterFunc(stp.processorContext(), cancel)
 	defer func() { stop(); cancel() }()
-	request := unminedRecoveryRequest{ctx: ctx, header: header, scanHashes: scanHashes, prepare: prepare, result: make(chan error, 1)}
+	request := unminedRecoveryRequest{
+		run:    func() error { return stp.recoverUnmined(ctx, header, scanHashes, prepare) },
+		result: make(chan error, 1),
+	}
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -151,13 +151,11 @@ func (stp *SubtreeProcessor) recoverUnmined(ctx context.Context, header *model.B
 	stp.currentSubtree.Store(newTree)
 	stp.currentTxMap.Clear()
 	stp.setTxCountFromSubtrees()
-	stp.recoveryWorkCtx = ctx
-	defer func() { stp.recoveryWorkCtx = nil }()
 	for _, tx := range selected {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := stp.AddDirectly(tx.Node, tx.TxInpoints, true); err != nil {
+		if err := stp.addDirectly(ctx, tx.Node, tx.TxInpoints, true, true); err != nil {
 			return err
 		}
 	}
