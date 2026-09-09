@@ -137,6 +137,24 @@ func recoveryCandidateHashes(t *testing.T, assembler *BlockAssembler) []chainhas
 	return hashes
 }
 
+// A timer pass can be rebuilding between polls. Observe usable mining work
+// before stopping the fixture; a transaction count alone can be partial state.
+func recoveryCandidateContains(ctx context.Context, assembler *BlockAssembler, txID chainhash.Hash) bool {
+	_, trees, lease, err := assembler.GetMiningCandidate(ctx)
+	defer lease.Release()
+	if err != nil {
+		return false
+	}
+	for _, tree := range trees {
+		for _, node := range tree.Nodes {
+			if node.Hash == txID {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func TestRecoverUnminedTransactionsWithoutNewBlock(t *testing.T) {
 	assembler, _ := newUnminedRecoveryTestAssembler(t, blockchain.FSMStateRUNNING)
 	txID := storeSuppressedRecoveryTransaction(t, assembler)
@@ -263,16 +281,14 @@ func TestUnminedRecoveryTimerWorksWithoutNewBlock(t *testing.T) {
 	txID := storeSuppressedRecoveryTransaction(t, assembler)
 	beforeHeader, beforeHeight := assembler.CurrentBlock()
 	require.NotContains(t, recoveryCandidateHashes(t, assembler), txID)
-	initialCount := assembler.TxCount()
 	ctx, cancel := context.WithCancel(t.Context())
 	t.Cleanup(func() { cancel(); assembler.wg.Wait() })
 	require.NoError(t, assembler.startChannelListeners(ctx))
 	require.Eventually(t, func() bool {
-		return assembler.TxCount() > initialCount
+		return recoveryCandidateContains(ctx, assembler, txID)
 	}, 5*time.Second, 10*time.Millisecond, "listener timer must repair a suppressed transaction without a new block")
 	cancel()
 	assembler.wg.Wait()
-	require.Contains(t, recoveryCandidateHashes(t, assembler), txID)
 	afterHeader, afterHeight := assembler.CurrentBlock()
 	require.Equal(t, beforeHeader.Hash(), afterHeader.Hash())
 	require.Equal(t, beforeHeight, afterHeight)
@@ -298,16 +314,14 @@ func TestUnminedRecoveryTimerRetriesFailedReload(t *testing.T) {
 	txID := storeSuppressedRecoveryTransaction(t, assembler)
 	faultStore := &recoveryIteratorFailureStore{Store: assembler.utxoStore}
 	assembler.utxoStore = faultStore
-	initialCount := assembler.TxCount()
 	ctx, cancel := context.WithCancel(t.Context())
 	t.Cleanup(func() { cancel(); assembler.wg.Wait() })
 	require.NoError(t, assembler.startChannelListeners(ctx))
 	require.Eventually(t, func() bool {
-		return faultStore.attempts.Load() >= 2 && assembler.TxCount() > initialCount
+		return faultStore.attempts.Load() >= 2 && recoveryCandidateContains(ctx, assembler, txID)
 	}, 5*time.Second, 10*time.Millisecond, "failed reload must remain eligible for an automatic retry")
 	cancel()
 	assembler.wg.Wait()
-	require.Contains(t, recoveryCandidateHashes(t, assembler), txID)
 }
 
 type recoveryDelayedIteratorStore struct {
