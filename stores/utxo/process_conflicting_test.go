@@ -1376,10 +1376,10 @@ func TestGetCounterConflictingTxHashes_DedupesSpenderWalks(t *testing.T) {
 	result, err := GetCounterConflictingTxHashes(ctx, mockStore, txHash)
 	require.NoError(t, err)
 
-	assert.Contains(t, result, txHash)
-	assert.Contains(t, result, spenderHash)
-	assert.Contains(t, result, childHash)
-	assert.Len(t, result, 3)
+	require.Contains(t, result, txHash)
+	require.Contains(t, result, spenderHash)
+	require.Contains(t, result, childHash)
+	require.Len(t, result, 3)
 
 	mockStore.AssertExpectations(t)
 	mockStore.AssertNumberOfCalls(t, "GetConflictingChildren", 1)
@@ -1438,8 +1438,8 @@ func TestGetConflictingChildren_ReapedMarkOrIsOrderIndependent(t *testing.T) {
 		t.Run("mark on parent "+markOn, func(t *testing.T) {
 			result, err := GetConflictingChildren(context.Background(), newStore(markOn), rootHash)
 			require.Error(t, err)
-			assert.Nil(t, result)
-			assert.Contains(t, err.Error(), "was reaped after being mined")
+			require.Nil(t, result)
+			require.Contains(t, err.Error(), "was reaped after being mined")
 		})
 	}
 }
@@ -1466,7 +1466,7 @@ func TestGetConflictingChildren_ConflictingChildrenTraversal(t *testing.T) {
 	result, err := GetConflictingChildren(context.Background(), mockStore, rootHash)
 	require.NoError(t, err)
 
-	assert.ElementsMatch(t, []chainhash.Hash{midHash, leafHash}, result)
+	require.ElementsMatch(t, []chainhash.Hash{midHash, leafHash}, result)
 }
 
 // fanOutProbeStore serves a fixed descendant graph and records the peak number
@@ -1595,13 +1595,13 @@ func TestGetCounterConflictingTxHashes_MemoDoesNotCacheErrors(t *testing.T) {
 	require.NoError(t, err)
 
 	// input 1's fresh walk found the spender, so it is in the counter set
-	assert.Contains(t, result, txHash)
-	assert.Contains(t, result, spenderHash)
-	assert.Contains(t, result, childHash)
+	require.Contains(t, result, txHash)
+	require.Contains(t, result, spenderHash)
+	require.Contains(t, result, childHash)
 
 	// input 0 still emitted exactly one ghost slot clear
-	assert.Len(t, ghostSpends, 1)
-	assert.Equal(t, uint32(0), ghostSpends[0].Vout)
+	require.Len(t, ghostSpends, 1)
+	require.Equal(t, uint32(0), ghostSpends[0].Vout)
 }
 
 // TestGetConflictingChildren_ReapedMarkSameLevelParent pins the harder half of
@@ -1645,17 +1645,15 @@ func TestGetConflictingChildren_ReapedMarkSameLevelParent(t *testing.T) {
 
 			result, err := GetConflictingChildren(context.Background(), mockStore, rootHash)
 			require.Error(t, err, "a reaped, marked descendant must fail closed regardless of level ordering")
-			assert.Nil(t, result)
-			assert.Contains(t, err.Error(), "was reaped after being mined")
+			require.Nil(t, result)
+			require.Contains(t, err.Error(), "was reaped after being mined")
 		})
 	}
 }
 
 // TestConflictingWalks_NilSpendingDataTxID pins the nil-TxID guard on both
-// descendant walks. SpendingData.Clone handles a nil TxID and the counter walk
-// checks it, so the codebase treats it as reachable; dereferencing it inside a
-// BFS goroutine is an unrecovered panic that takes the process down rather than
-// failing the block. The entry is skipped, matching the counter walk.
+// descendant walks. The entry is skipped, matching the counter walk, rather
+// than dereferencing an unset spender while collecting the next BFS level.
 func TestConflictingWalks_NilSpendingDataTxID(t *testing.T) {
 	rootHash := createTestHash("niltxid-root")
 	childHash := createTestHash("niltxid-child")
@@ -1681,7 +1679,7 @@ func TestConflictingWalks_NilSpendingDataTxID(t *testing.T) {
 		require.NotPanics(t, func() {
 			result, err := GetConflictingChildren(context.Background(), newStore(), rootHash)
 			require.NoError(t, err)
-			assert.Equal(t, []chainhash.Hash{childHash}, result)
+			require.Equal(t, []chainhash.Hash{childHash}, result)
 		})
 	})
 
@@ -1692,7 +1690,7 @@ func TestConflictingWalks_NilSpendingDataTxID(t *testing.T) {
 		require.NotPanics(t, func() {
 			result, err := GetAndLockChildren(context.Background(), store, rootHash)
 			require.NoError(t, err)
-			assert.Contains(t, result, childHash)
+			require.Contains(t, result, childHash)
 		})
 	})
 }

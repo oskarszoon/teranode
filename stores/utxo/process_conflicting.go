@@ -992,9 +992,7 @@ func GetAndLockChildren(ctx context.Context, s Store, hash chainhash.Hash) ([]ch
 
 			if txMeta.SpendingDatas != nil {
 				for _, spendingData := range txMeta.SpendingDatas {
-					// same nil-TxID guard as the conflicting walk: dereferencing a
-					// nil TxID here panics an errgroup goroutine and takes the
-					// process down
+					// Match the counter walk's handling of an unset spender.
 					if spendingData != nil && spendingData.TxID != nil {
 						child := *spendingData.TxID
 						if _, ok := visited[child]; ok {
@@ -1047,8 +1045,11 @@ func GetConflictingChildren(ctx context.Context, s Store, hash chainhash.Hash) (
 	// read back in aerospike/get.go); the SQL stores delete transaction rows at
 	// DAH without recording anything on the parents, so on those backends this
 	// map stays empty and every absent descendant takes the ghost-tolerance
-	// branch below. The reaped gate is therefore an Aerospike-only protection,
-	// not a general one.
+	// branch below. Even on Aerospike, the gate only protects descendants whose
+	// marks survived: disabling the pruned-set skip (#1705) prevents new cuckoo
+	// false-positive skips but does not restore previously lost marks. A failed
+	// parent update in the non-defensive combined cleanup batch can also leave a
+	// deleted child without a mark (see flushCleanupBatches).
 	reapedByParent := make(map[chainhash.Hash]bool)
 
 	for len(currentLevel) > 0 {
@@ -1081,7 +1082,6 @@ func GetConflictingChildren(ctx context.Context, s Store, hash chainhash.Hash) (
 					// Defer the reaped-versus-ghost decision to the classification
 					// pass below, once this level's deletedChildren marks are in.
 					absentErrs[i] = err
-
 					return nil
 				}
 				results[i] = txMeta
@@ -1145,12 +1145,7 @@ func GetConflictingChildren(ctx context.Context, s Store, hash chainhash.Hash) (
 			}
 
 			for _, spendingData := range txMeta.SpendingDatas {
-				// TxID is guarded as well as the slot: SpendingData.Clone handles a
-				// nil TxID and the counter walk below checks both, so the codebase
-				// treats it as reachable. Dereferencing it here would panic inside
-				// an errgroup goroutine — an unrecovered panic that takes the
-				// process down, not just the block. Skipping matches the counter
-				// walk's handling of the same shape.
+				// Match the counter walk's handling of an unset spender.
 				if spendingData != nil && spendingData.TxID != nil {
 					enqueue(*spendingData.TxID, txMeta)
 				}
@@ -1265,6 +1260,11 @@ func getCounterConflictingTxHashesAndGhostSpends(ctx context.Context, s Store, t
 	// the per-input independence the ghost tolerance (#1325) was built on, and
 	// costs nothing in the case the memo exists for: a large cone that reads
 	// successfully is walked exactly once.
+	//
+	// This is not a snapshot: if a spender is reaped after a successful walk,
+	// later inputs reuse that success and do not emit ghost-slot clears for it
+	// during this call. Success-only caching avoids stale errors, but does not
+	// guarantee freshness against concurrent pruning.
 	spenderWalks := make(map[chainhash.Hash][]chainhash.Hash, len(txMeta.Tx.Inputs))
 
 	walkSpender := func(spendingTxID chainhash.Hash) ([]chainhash.Hash, error) {
@@ -1313,10 +1313,11 @@ func getCounterConflictingTxHashesAndGhostSpends(ctx context.Context, s Store, t
 
 					// The probe proves the record is gone, not that the spender was
 					// never mined: DAH housekeeping reaps mined, fully-spent records
-					// too. The pruner marks every reaped child in its surviving
-					// parents' deletedChildren map, so a spender listed there held a
+					// too. A spender listed in its parent's deletedChildren held a
 					// settled, mined spend — clearing its slot would bless a
-					// double-spend of a settled output. Fail closed instead.
+					// double-spend of a settled output. Fail closed instead. Absence
+					// of a mark is not proof it was never mined: the same backend and
+					// marker-loss limits documented in GetConflictingChildren apply.
 					if parentTxMeta.DeletedChildren[*spendingTxID] {
 						return nil, nil, errors.NewProcessingError("[GetCounterConflictingTxHashes][%s] spender %s of parent %s was reaped after being mined (listed in the parent's deletedChildren) — its settled spend is not a ghost", txHash.String(), spendingTxID.String(), input.PreviousTxIDChainHash().String(), err)
 					}
