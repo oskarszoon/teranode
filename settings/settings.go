@@ -269,6 +269,7 @@ func NewSettings(alternativeContext ...string) *Settings {
 			ProcessUTXOFiles:         getBool("blockpersister_processUTXOFiles", true, alternativeContext...),
 		},
 		BlockAssembly: BlockAssemblySettings{
+			UnminedRecoveryInterval:              getDuration("blockassembly_unminedRecoveryInterval", DefaultUnminedRecoveryInterval, alternativeContext...),
 			Disabled:                             getBool("blockassembly_disabled", false, alternativeContext...),
 			GenerateTipWaitTimeout:               getDuration("blockassembly_generateTipWaitTimeout", DefaultGenerateTipWaitTimeout, alternativeContext...),
 			GRPCAddress:                          getString("blockassembly_grpcAddress", "localhost:8085", alternativeContext...),

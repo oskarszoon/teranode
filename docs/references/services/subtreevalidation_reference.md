@@ -17,9 +17,19 @@ paused. Paths are
 
 The blockchain client can report a synthetic IDLE after its notification stream
 breaks. Feeding remains disabled until a RUNNING observation returns after cache
-recovery. Already suppressed transactions are not automatically replayed by cache
-recovery. The counter exposes this window without changing the conservative
-cached-state guard.
+recovery. Block assembly independently recovers stored transactions missing from
+its mining templates at `blockassembly_unminedRecoveryInterval` (default `1h`).
+Recovery requires an authoritative RUNNING response and matching chain tip; real
+IDLE and unavailable or uncertain authority defer it. A deferred or failed pass
+is retried after at most one minute. Cache recovery alone does not replay the
+transactions immediately.
+
+Recovery rechecks transaction and parent eligibility, including transactions
+already accepted into assembly's queue. It preserves validator-owned locks and
+rebuilds parent-before-child order without changing UTXO state. Selection failure
+leaves the existing template and queue intact. A failed destructive rebuild
+prevents mining and queue consumption until repair succeeds. This is automatic
+template repair, not a service drain or permission to rewind live stores.
 
 Unexpected suppression emits a warning at most once per minute per service
 instance. Expected CATCHINGBLOCKS observations still count for admitted block
