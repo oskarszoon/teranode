@@ -41,6 +41,10 @@ func (ba *BlockAssembly) RecoveryState(ctx context.Context, _ *blockassembly_api
 	return recoveryStateMessage(state), nil
 }
 func (ba *BlockAssembly) RecoveryReset(ctx context.Context, _ *blockassembly_api.EmptyMessage) (*blockassembly_api.RecoveryStateMessage, error) {
+	if ba.blockAssembler.unminedTransactionsLoading.Load() {
+		ba.logger.Warnf("[RecoveryReset] service not ready - unmined transactions are still being loaded")
+		return nil, errors.NewServiceError(errServiceNotReadyUnminedLoading)
+	}
 	state, err := ba.blockAssembler.RecoveryReset(ctx)
 	if err != nil {
 		return nil, err
