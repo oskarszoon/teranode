@@ -516,6 +516,12 @@ TRACING_INFO_MAX := 62
 .PHONY: lint-tracing-info
 lint-tracing-info:
 	@count=$$(git grep -c "tracing\.WithLogMessage(" -- '*.go' | awk -F: '{s+=$$NF} END {print s+0}'); \
+	if [ "$$count" -lt 1 ]; then \
+		echo "lint-tracing-info: counted $$count sites, which cannot be right."; \
+		echo "The count command failed (not a git checkout, or git grep unavailable)."; \
+		echo "Failing rather than passing silently."; \
+		exit 1; \
+	fi; \
 	if [ "$$count" -gt "$(TRACING_INFO_MAX)" ]; then \
 		echo "tracing.WithLogMessage sites: $$count (max $(TRACING_INFO_MAX))"; \
 		echo "Each is two INFO lines per operation. Use tracing.WithDebugLogMessage on"; \
