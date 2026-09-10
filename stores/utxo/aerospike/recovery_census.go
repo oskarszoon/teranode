@@ -164,7 +164,7 @@ func (b *RecoveryBackend) inventoryIdentity(ctx context.Context, rec *as.Record,
 		return nil
 	}
 	if item.Master {
-		item.ExpectedPages = uint32(pages)
+		item.ExpectedPages = uint32(pages) // #nosec G115 -- page count is nonnegative and bounded by 65536 above.
 	}
 	if err := recoveryIdentity(rec.Bins, hash); err != nil {
 		fail(err.Error())
@@ -240,7 +240,7 @@ func (b *RecoveryBackend) SpendReferences(ctx context.Context, visit func(rr.Spe
 				continue
 			}
 			child, _ := chainhash.NewHash(raw[32:64])
-			offset := uint64(item.Page)*uint64(b.batchSize) + uint64(i)
+			offset := uint64(item.Page)*uint64(b.batchSize) + uint64(i) // #nosec G115 -- constructor requires positive uint32 batch size; range index is nonnegative.
 			if offset > math.MaxUint32 {
 				return errors.NewProcessingError("spend reference output overflow")
 			}
