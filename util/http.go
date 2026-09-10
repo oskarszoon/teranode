@@ -451,6 +451,14 @@ func SetSSRFProtection(enabled bool) {
 	ssrfProtectionEnabled.Store(enabled)
 }
 
+// SSRFProtectionEnabled reports whether SSRF URL validation is currently active.
+// Tests that disable it should restore this value rather than assuming the
+// default, so a nested or subsequent test cannot be silently left unprotected —
+// or protected when its caller had deliberately turned it off.
+func SSRFProtectionEnabled() bool {
+	return ssrfProtectionEnabled.Load()
+}
+
 // ValidateURL checks that the given URL is safe to request, rejecting non-HTTP schemes
 // and URLs containing link-local IP addresses to prevent SSRF attacks against cloud
 // metadata endpoints (e.g. AWS 169.254.169.254).
@@ -464,7 +472,8 @@ func ValidateURL(rawURL string) error {
 
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
-		return errors.NewInvalidArgumentError("invalid URL: %s", err)
+		// Parse causes can echo invalid ports or hosts containing classifier sentinels.
+		return errors.NewInvalidArgumentError("invalid URL")
 	}
 
 	scheme := strings.ToLower(parsed.Scheme)
@@ -523,6 +532,23 @@ func isBlockedIP(ip net.IP) bool {
 	return false
 }
 
+// unwrapHTTPURLError removes nested URL wrappers while retaining the transport
+// failure. URL parser failures need fixed messages instead: their causes can also
+// include peer-controlled URL text.
+func unwrapHTTPURLError(err error) error {
+	var urlErr *url.Error
+	for errors.As(err, &urlErr) {
+		err = urlErr.Err
+	}
+	// net/http exposes malformed redirect targets only as an untyped error with
+	// this fixed prefix. It embeds both the Location header and the parse cause,
+	// so unwrapping alone would feed peer-controlled text into error classifiers.
+	if err != nil && strings.HasPrefix(err.Error(), "failed to parse Location header ") {
+		return errors.NewServiceError("HTTP redirect has an invalid URL")
+	}
+	return err
+}
+
 // newSignedRequest builds a validated, optionally-signed *http.Request for rawURL.
 // GET by default; POST with an octet-stream body when requestBody is provided.
 //
@@ -538,7 +564,9 @@ func newSignedRequest(ctx context.Context, rawURL string, requestBody ...[]byte)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return nil, errors.NewServiceError("failed to create http request", err)
+		// Request construction may fail while parsing peer-controlled URL text.
+		// Its parse cause is unsafe even after removing the outer *url.Error.
+		return nil, errors.NewServiceError("failed to create http request")
 	}
 
 	// If there is a request body assume we want a POST and write request body.
@@ -572,7 +600,7 @@ func executeHTTPRequest(ctx context.Context, cancelFn context.CancelFunc, rawURL
 	var resp *http.Response
 	resp, err = httpClient.Do(req)
 	if err != nil {
-		return nil, cancelFn, errors.NewServiceError("failed to do http request", err)
+		return nil, cancelFn, errors.NewServiceError("failed to do http request [%s]", RedactPeerURL(rawURL), unwrapHTTPURLError(err))
 	}
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
@@ -582,14 +610,20 @@ func executeHTTPRequest(ctx context.Context, cancelFn context.CancelFunc, rawURL
 	ct := strings.ToLower(resp.Header.Get("content-type"))
 	isHTML := strings.HasPrefix(ct, "text/html")
 	if isHTML {
-		return nil, cancelFn, errors.NewServiceError("http request [%s] returned HTML - assume bad URL", rawURL)
+		// The body is never returned on this path, so it has to be closed here or the
+		// connection leaks outright — which defeats the point of draining error bodies
+		// a few lines up. A 2xx with an unexpected content type is worth draining for
+		// reuse rather than tearing down, so the same bounded helper applies.
+		drainAndCloseErrorBody(resp.Body)
+
+		return nil, cancelFn, errors.NewServiceError("http request [%s] returned HTML - assume bad URL", RedactPeerURL(rawURL))
 	}
 
 	return resp.Body, cancelFn, nil
 }
 
-// maxErrorBodyBytes caps the error-body drain used for connection reuse. Asset
-// 429/503 bodies fit comfortably in 2 KiB; larger bodies do not justify more work.
+// maxErrorBodyBytes caps the initial error-body prefix counted for diagnostics.
+// The remaining bytes have a separate bounded drain for connection reuse.
 // Never embed peer body text in classified errors: message-based legacy context
 // detection would let that text forge local cancellation and suppress failover.
 const maxErrorBodyBytes = 2 << 10 // 2 KiB
@@ -607,6 +641,106 @@ func RedactPeerURL(raw string) string {
 	return u.Scheme + "://" + u.Host
 }
 
+// maxHTTPErrorBodyDrainBytes bounds how much of the REMAINDER of an error body is
+// drained, after the prefix above has been read, purely so the connection can go
+// back into http.Transport's idle pool.
+//
+// The trade-off is deliberate. A body must be read to EOF for the connection to be
+// reusable, so capping the read at maxErrorBodyBytes and closing turned every
+// error larger than 2 KiB into a fresh TCP (+TLS) handshake — on the high-rate
+// failure path, which is exactly when handshakes hurt most. An unbounded
+// io.Copy(io.Discard, ...) would restore reuse but reopen the hole the prefix cap
+// was added to close: a hostile peer answering with an error status and streaming
+// forever. So the drain is itself bounded. A body whose remainder fits is drained
+// and its connection reused; anything larger is abandoned and Close tears the
+// connection down, which is the correct outcome for a peer that streams
+// unboundedly on an error status.
+//
+// The budget is measured from wherever the prefix read stopped, so bodies just
+// over the prefix cap — the common case for a verbose error page — are fully
+// drained.
+const maxHTTPErrorBodyDrainBytes = 64 * 1024
+
+// maxHTTPErrorBodyDrainWait bounds how long the CALLER waits for the remainder drain
+// before abandoning it to the background.
+//
+// It exists because the drain's two requirements pull in opposite directions:
+//
+//   - Connection reuse needs the body read to EOF and CLOSED *before the caller
+//     returns*. Every caller of buildHTTPError cancels its request context immediately
+//     afterwards — DoHTTPRequest defers cancelFn, doHTTPRequestForStreamingWithRetryAfter
+//     calls it outright — and response-body reads honour that context. So a drain that
+//     has not finished by then is killed and the connection is discarded: a purely
+//     asynchronous drain delivers no reuse at all, which is the entire point of
+//     draining.
+//   - A peer that dribbles must not hold the caller. Body reads are otherwise bounded
+//     only by the request context, up to the 5-minute streaming timeout, compounded by
+//     up to six 503 retries.
+//
+// So the drain is synchronous up to this budget and abandoned past it. A peer whose
+// remainder is already buffered — the common case for a verbose error page — drains in
+// microseconds and its connection is reused; a dribbler costs the caller this much and
+// no more.
+//
+// Across a retry ladder that budget multiplies: DoHTTPRequestBodyReaderWithRetry makes
+// up to defaultRetryConfig.maxAttempts attempts, so its worst case is
+// maxAttempts x this budget — 6 x 250ms = 1.5s — reached only against a peer that
+// dribbles its error body on every one of the six attempts. Set that against the
+// ~7.75s of exponential backoff the same ladder already spends between those attempts
+// (250ms doubling, capped at 5s), and the added share is bounded enough that the
+// budget is deliberately not shortened: cutting it would trade away the connection
+// reuse the synchronous drain exists to buy.
+const maxHTTPErrorBodyDrainWait = 250 * time.Millisecond
+
+// drainAndCloseErrorBody drains the remainder of an error body and closes it so the
+// connection can return to http.Transport's idle pool, while bounding what that costs
+// the caller.
+//
+// Bounded three ways: in BYTES by maxHTTPErrorBodyDrainBytes, against a peer that
+// streams forever; in the CALLER'S TIME by maxHTTPErrorBodyDrainWait; and, once
+// abandoned, by the request context its caller is about to cancel anyway.
+//
+// The goroutine takes sole ownership of the body and closes it exactly once, whether it
+// finished or was abandoned — callers must not touch the body afterwards.
+//
+// Note what this does NOT bound: a caller can still block on the prefix read in
+// buildHTTPError, which is synchronous and capped in bytes (2 KiB) but not in time.
+// That exposure is pre-existing and strictly smaller than the unbounded io.ReadAll it
+// replaced; bounding it in time needs a bounded-time reader and would trade away the
+// initial byte-count diagnostic for a legitimately slow error response.
+func drainAndCloseErrorBody(body io.ReadCloser) {
+	if body == nil {
+		return
+	}
+
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+
+		drainErrorBody(body)
+	}()
+
+	timer := time.NewTimer(maxHTTPErrorBodyDrainWait)
+	defer timer.Stop()
+
+	select {
+	case <-done:
+		// Drained and closed before the caller returns, so the connection is reusable.
+	case <-timer.C:
+		// Abandoned. The goroutine keeps sole ownership and closes the body when it
+		// stops, at the byte cap or when the request context dies.
+	}
+}
+
+// drainErrorBody is the byte-bounded drain-then-close that drainAndCloseErrorBody waits
+// on. Split out so the byte bound and the close can be asserted directly, without a
+// test having to race a goroutine.
+func drainErrorBody(body io.ReadCloser) {
+	_, _ = io.Copy(io.Discard, io.LimitReader(body, maxHTTPErrorBodyDrainBytes))
+	_ = body.Close()
+}
+
 // buildHTTPError constructs an appropriate error from a non-OK HTTP response.
 //
 // The error type is chosen to let callers branch with errors.Is:
@@ -616,11 +750,10 @@ func RedactPeerURL(raw string) string {
 //     helpers back off rather than fail the caller — see the *WithRetry helpers)
 //   - other → generic ServiceError
 //
-// The body is drained up to maxErrorBodyBytes (bounding a hostile peer that answers with an error
-// status and then streams indefinitely) but is NOT embedded in the message — only the status code,
-// the caller-supplied URL and the drained byte count. The body is peer-controlled and this error
-// feeds substring-based classification at the catchup gates, so echoing it (even escaped) would let
-// a peer forge a "local" classification. Callers on peer-controlled paths should redact the URL too.
+// The body is never embedded in the message: peer-controlled text could forge a
+// local error through legacy substring classification. After counting a small prefix,
+// drainAndCloseErrorBody bounds the remaining drain in bytes and caller time so
+// buffered error responses can reuse their connection without following an endless stream.
 func buildHTTPError(resp *http.Response, rawURL string) error {
 	// Redact to scheme://host: rawURL may be a peer-gossiped DataHubURL whose crafted path (e.g.
 	// one containing "context canceled") would otherwise ride into this message and be substring-
@@ -635,9 +768,9 @@ func buildHTTPError(resp *http.Response, rawURL string) error {
 	}
 
 	if resp.Body != nil {
-		defer func() {
-			_ = resp.Body.Close()
-		}()
+		// Ownership of the body transfers to the drain once this returns; the prefix
+		// read below completes first, because the deferred call runs last.
+		defer drainAndCloseErrorBody(resp.Body)
 
 		// Drain a bounded amount of the body (helps keep-alive connection reuse) but do
 		// NOT embed the peer-controlled content in the error message. This error feeds
@@ -646,8 +779,7 @@ func buildHTTPError(resp *http.Response, rawURL string) error {
 		// body contained e.g. "context deadline exceeded" or "block assembly is behind"
 		// could otherwise forge a "local" classification — clearing its reputation penalty
 		// AND halting failover to honest peers, re-opening the #1174 wedge. Only the
-		// status code and body length go into the message (plus rawURL, which callers
-		// on peer-controlled paths must redact — see buildHTTPError callers).
+		// status code, prefix length, and redacted URL go into the message.
 		n, _ := io.Copy(io.Discard, io.LimitReader(resp.Body, maxErrorBodyBytes))
 		if n > 0 {
 			return errFn("http request [%s] returned status code [%d] (%d body bytes, omitted)", rawURL, resp.StatusCode, n)
@@ -668,7 +800,7 @@ func parseRetryAfter(h string) time.Duration {
 	if h == "" {
 		return 0
 	}
-	secs, err := strconv.Atoi(h)
+	secs, err := strconv.ParseInt(h, 10, 64)
 	if err != nil || secs <= 0 {
 		return 0
 	}
@@ -858,22 +990,6 @@ func doHTTPRequestBodyReaderWithRetry(ctx context.Context, url string, cfg retry
 	})
 }
 
-// doHTTPRequestWithRetry behaves like DoHTTPRequest (reads the full body into memory)
-// but retries on HTTP 503/429 with jittered exponential backoff. Intended for catchup
-// heavy fetches (e.g. /blocks batches, single blocks) that must back off when a peer's
-// asset endpoint rate-limits, instead of re-bursting and re-tripping the limiter.
-// beforeAttempt (nil = no-op) runs before every attempt, e.g. a per-peer rate-limit wait.
-func doHTTPRequestWithRetry(ctx context.Context, url string, cfg retryConfig, beforeAttempt func(context.Context) error, requestBody ...[]byte) ([]byte, error) {
-	return retryHTTP(ctx, cfg, func(c context.Context) ([]byte, time.Duration, error) {
-		if beforeAttempt != nil {
-			if err := beforeAttempt(c); err != nil {
-				return nil, 0, err
-			}
-		}
-		return readBodyWithRetryAfter(c, url, -1, requestBody...)
-	})
-}
-
 // DoHTTPRequestBoundedWithRetry behaves like DoHTTPRequestBounded (caps the body at
 // maxBytes) but retries on HTTP 503/429 with jittered exponential backoff. Intended for
 // catchup subtree fetches against peer-controlled asset endpoints.
@@ -963,11 +1079,7 @@ func doRequestReaderWithRetryAfter(ctx context.Context, timeout time.Duration, r
 		}
 		// *url.Error renders as `Get "<full rawURL>": <cause>`, embedding the peer path/query.
 		// Unwrap to the cause and attach only the redacted display URL ourselves.
-		var urlErr *url.Error
-		if errors.As(err, &urlErr) {
-			err = urlErr.Err
-		}
-		return nil, 0, errors.NewServiceError("http request [%s] failed", displayURL, err)
+		return nil, 0, errors.NewServiceError("http request [%s] failed", displayURL, unwrapHTTPURLError(err))
 	}
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
@@ -979,6 +1091,14 @@ func doRequestReaderWithRetryAfter(ctx context.Context, timeout time.Duration, r
 
 	ct := strings.ToLower(resp.Header.Get("content-type"))
 	if strings.HasPrefix(ct, "text/html") {
+		// The body is not handed to the caller on this path, so it must be closed here
+		// or the connection leaks outright. Closed rather than drained: cancelFn below
+		// cancels the request context, which makes the connection unusable anyway, so a
+		// drain for reuse would be spending a goroutine on nothing.
+		if resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+
 		cancelFn()
 		return nil, 0, errors.NewServiceError("http request [%s] returned HTML - assume bad URL", displayURL)
 	}

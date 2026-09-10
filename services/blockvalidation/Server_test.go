@@ -1129,6 +1129,8 @@ func Test_Start(t *testing.T) {
 	ctx := context.Background()
 	logger := ulogger.NewErrorTestLogger(t)
 	tSettings := test.CreateBaseTestSettings(t)
+	// Isolate this mock-backed server from health checks in other test processes.
+	tSettings.BlockValidation.GRPCListenAddress = "localhost:0"
 
 	// Use actual in-memory stores
 	utxoStore, _, _, txStore, subtreeStore, deferFunc := setup(t)

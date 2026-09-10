@@ -110,6 +110,9 @@ func TestRecordCatchupSuccess_UpdatesInteractionMetrics(t *testing.T) {
 func TestRecordCatchupFailure_UpdatesInteractionMetrics(t *testing.T) {
 	s, reg, pid := freshTestServer(t)
 	reg.Register(&blockchain.PeerInfo{ID: pid.String()})
+	before, ok := reg.Get(pid.String())
+	require.True(t, ok)
+	initialReputation := before.ReputationScore
 
 	resp, err := s.RecordCatchupFailure(context.Background(), &p2p_api.RecordCatchupFailureRequest{PeerId: pid.String()})
 	require.NoError(t, err)
@@ -118,6 +121,7 @@ func TestRecordCatchupFailure_UpdatesInteractionMetrics(t *testing.T) {
 	got, _ := reg.Get(pid.String())
 	require.Equal(t, int64(1), got.InteractionFailures)
 	require.Equal(t, int64(1), got.CatchupFailures)
+	require.Less(t, got.ReputationScore, initialReputation, "catchup failure must lower general reputation used by sync selection")
 }
 
 func TestRecordCatchupFailure_BlockIncomplete_DowngradesFullPeer(t *testing.T) {

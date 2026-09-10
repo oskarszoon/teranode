@@ -71,28 +71,56 @@ func (u *Server) peerFetchLimiter(baseURL string) *rate.Limiter {
 // deadlock or pin a slot for the lifetime of a slow stream.
 //
 // A failed wait is ALWAYS a local condition (our own pacing budget vs the context
-// deadline), never the peer's fault — x/time/rate.Wait returns a plain non-context
-// error ("would exceed context deadline") in that case, so we re-wrap it as a
-// context-canceled error to ensure errors.IsLocalError classifies it correctly and
-// the peer-reputation gate does not blame the peer for our local stall.
+// deadline), never the peer's fault. Inspect the reservation delay so only a real
+// queue wait receives the pacing marker; an already-ended caller is cancellation.
 func (u *Server) awaitPeerFetchSlot(ctx context.Context, baseURL string) error {
 	lim := u.peerFetchLimiter(baseURL)
 	if lim == nil {
 		return nil
 	}
 
-	if err := lim.Wait(ctx); err != nil {
-		if cerr := ctx.Err(); errors.Is(cerr, context.Canceled) {
-			return errors.NewContextCanceledError("[peerFetchLimiter] local pacing wait aborted", cerr)
+	if err := ctx.Err(); err != nil {
+		return errors.NewContextCanceledError("[peerFetchLimiter] local pacing wait aborted", err)
+	}
+	now := time.Now()
+	reservation := lim.ReserveN(now, 1)
+	if !reservation.OK() {
+		return errors.NewConfigurationError("peer fetch limiter cannot reserve a single token")
+	}
+	granted := false
+	defer func() {
+		if !granted {
+			reservation.Cancel()
 		}
-		// Both a rejected reservation and an expired queue wait belong to this
-		// peer's bucket. The failover gate checks the parent context separately.
+	}()
+	if err := ctx.Err(); err != nil {
+		return errors.NewContextCanceledError("[peerFetchLimiter] local pacing wait aborted", err)
+	}
+	delay := reservation.DelayFrom(now)
+	if delay == 0 {
+		granted = true
+		return nil
+	}
+	pacingExhausted := func() error {
 		pacingErr := errors.NewContextCanceledError("[peerFetchLimiter] local pacing wait budget exhausted", context.DeadlineExceeded)
 		pacingErr.SetData(peerFetchPacingKey, true)
 		return pacingErr
 	}
-
-	return nil
+	if deadline, ok := ctx.Deadline(); ok && delay > deadline.Sub(now) {
+		return pacingExhausted()
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		granted = true
+		return nil
+	case <-ctx.Done():
+		if ctx.Err() == context.DeadlineExceeded {
+			return pacingExhausted()
+		}
+		return errors.NewContextCanceledError("[peerFetchLimiter] local pacing wait aborted", ctx.Err())
+	}
 }
 
 // A pacing queue belongs to one peer. It remains local for reputation, but
@@ -576,6 +604,9 @@ func (u *Server) fetchAndStoreSubtree(ctx context.Context, block *model.Block, s
 	// See findLocalSubtreeFile for why both must be consulted.
 	localFileType, localExists, err := findLocalSubtreeFile(ctx, u.subtreeStore, *subtreeHash)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, errors.NewStorageError("[catchup:fetchAndStoreSubtree] error checking subtree existence for %s", subtreeHash.String(), err)
 	}
 
@@ -585,6 +616,9 @@ func (u *Server) fetchAndStoreSubtree(ctx context.Context, block *model.Block, s
 		// Load existing subtree from store under whichever file type was found
 		subtreeBytes, err := u.subtreeStore.Get(ctx, subtreeHash[:], localFileType)
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			return nil, errors.NewStorageError("[catchup:fetchAndStoreSubtree] Failed to get existing subtree for %s", subtreeHash.String(), err)
 		}
 
@@ -649,6 +683,9 @@ func (u *Server) fetchAndStoreSubtree(ctx context.Context, block *model.Block, s
 		options.WithAllowOverwrite(true),
 		options.WithDeleteAt(dah),
 	); err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, errors.NewStorageError("[catchup:fetchAndStoreSubtree] Failed to store subtreeToCheck for %s", subtreeHash.String(), err)
 	}
 
@@ -780,40 +817,22 @@ func (u *Server) fetchAndStoreSubtreeData(ctx context.Context, shutdownCtx conte
 	}
 
 	// Reject a response the subtree cannot be satisfied by, before Serialize turns it
-	// into a generic ErrSubtreeLengthMismatch that names no peer. An empty body is the
-	// issue-1368 signature: a peer's proxy cache replaying a failed or aborted
-	// on-demand generation as "200 + 0 bytes".
+	// into a generic ErrSubtreeLengthMismatch that names no peer — or panics on a nil
+	// tx at index 0. model.MissingSubtreeDataTxs owns that reasoning, shared with the
+	// subtree meta regenerator's local read so the two cannot drift on it. The
+	// regenerator's meta build asks a finer version of the same question, node by
+	// node, and keeps its own loop; the index-0 rule is the part the three have to
+	// agree on and it lives in the predicate.
 	//
-	// The predicate mirrors what subtreepkg.Data.Serialize *safely* tolerates, which is
-	// not the same as its literal `i != 0` nil exemption. Serialize skips index 0 only
-	// when Nodes[0] is the coinbase placeholder: it then sets txStartIndex = 1 and never
-	// touches Txs[0]. For any other Nodes[0] it sets txStartIndex = 0 while still
-	// guarding its own nil check with `i != 0`, so it walks straight into
-	// Txs[0].SerializeBytes() on a nil *bt.Tx and panics (IsExtended is nil-safe, so it
-	// falls through to Bytes -> toBytesHelper -> Size). Copying the unconditional
-	// exemption here would let such a response through with missing == 0, and the panic
-	// lands in a per-subtree errgroup goroutine that no recover() in this package
-	// covers. That is reachable without malice: a non-first subtree has no coinbase
-	// placeholder, so any block whose tx count is congruent to 1 modulo the subtree size
-	// ends with a one-node subtree holding a real tx hash at index 0.
-	//
-	// So index 0 counts as missing unless it genuinely is the coinbase placeholder —
-	// the only case Serialize actually tolerates — and nothing that used to succeed
-	// starts failing here.
-	missing := 0
-	coinbaseAtZero := len(subtree.Nodes) > 0 && subtree.Nodes[0].Hash.Equal(subtreepkg.CoinbasePlaceholderHashValue)
-
-	for i, tx := range subtreeData.Txs {
-		if tx != nil {
-			continue
-		}
-
-		if i == 0 && coinbaseAtZero {
-			continue
-		}
-
-		missing++
-	}
+	// The exemption argument is true here, which is Data.Serialize's own rule
+	// rather than validateSubtree's. Nothing on this path builds a meta: it stores
+	// the body, and the reason to reject an unsatisfying one is that Serialize
+	// walks into a nil *bt.Tx at index 0. Serialize skips index 0 whenever Nodes[0]
+	// holds the placeholder, whatever the subtree's position, so a stricter rule
+	// here would reject a body Serialize would have handled and charge the peer for
+	// it. The regenerator passes the subtree's real position instead, because a
+	// meta does have to agree with validateSubtree.
+	missing := model.MissingSubtreeDataTxs(subtree, subtreeData, true)
 
 	bytesRead := subtreeDataReader.BytesRead()
 
@@ -994,7 +1013,10 @@ func (u *Server) fetchAndStoreSubtreeAndSubtreeData(ctx context.Context, shutdow
 	if peerSnapshot != nil {
 		peers, _, snapshotErr := peerSnapshot.get()
 		if snapshotErr != nil {
-			return "", errors.NewServiceUnavailableError("local peer discovery unavailable during subtree failover", snapshotErr)
+			// The actual primary failure is already retained in failedPeers and
+			// charged by releaseCatchupLock even when discovery is locally down.
+			// Preserve its diagnostic without changing the local terminal cause.
+			return "", errors.NewServiceUnavailableError("local peer discovery unavailable during subtree failover after [%s]", formatSubtreeFetchAttempts(attempts), snapshotErr)
 		}
 		alternativePeers = selectAlternativePeers(peersAtOrAboveHeight(peers, block.Height), peerID, baseURL, maxSubtreeFailoverPeers)
 	}
@@ -1153,6 +1175,8 @@ func (u *Server) fetchSubtreeDataFromPeer(ctx context.Context, subtreeHash *chai
 			if u.p2pClient != nil && peerID != "" {
 				trackCtx, _, deferFn := tracing.DecoupleTracingSpan(ctx, "blockvalidation", "recordBytesDownloaded")
 				defer deferFn()
+				trackCtx, cancel := context.WithTimeout(context.WithoutCancel(trackCtx), catchupReputationReportTimeout)
+				defer cancel()
 				if err := u.p2pClient.RecordBytesDownloaded(trackCtx, peerID, bytesRead); err != nil {
 					u.logger.Warnf("[fetchSubtreeDataFromPeer][%s] failed to record %d bytes downloaded from peer %s: %v", subtreeHash.String(), bytesRead, peerID, err)
 				}
@@ -1291,6 +1315,8 @@ func (u *Server) trackedBlockResponse(ctx context.Context, reader io.ReadCloser,
 
 			trackCtx, _, deferFn := tracing.DecoupleTracingSpan(ctx, "blockvalidation", "recordBytesDownloaded")
 			defer deferFn()
+			trackCtx, cancel := context.WithTimeout(context.WithoutCancel(trackCtx), catchupReputationReportTimeout)
+			defer cancel()
 			if err := u.p2pClient.RecordBytesDownloaded(trackCtx, peerID, bytesRead); err != nil {
 				u.logger.Warnf("[%s][%s] failed to record %d bytes downloaded from peer %s: %v", operation, hash.String(), bytesRead, peerID, err)
 			}

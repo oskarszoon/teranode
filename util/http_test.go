@@ -157,7 +157,7 @@ func TestDoHTTPRequestNotFound(t *testing.T) {
 // feed substring-based classification at the catchup gates).
 func TestBuildHTTPErrorBodyIsBoundedAndNotEchoed(t *testing.T) {
 	// headMarker is in the first bytes (drained, so its ABSENCE proves no-echo); tailMarker is past
-	// the drain cap (so its absence proves the read was bounded, not run to completion).
+	// the prefix cap. Byte/time bounds are asserted in http_error_drain_test.go.
 	const headMarker = "ERRBODYHEAD"
 	const tailMarker = "ERRBODYTAIL"
 
@@ -176,7 +176,7 @@ func TestBuildHTTPErrorBodyIsBoundedAndNotEchoed(t *testing.T) {
 		_, err := DoHTTPRequest(ctx, server.URL)
 		require.Error(t, err)
 		require.NotContains(t, err.Error(), headMarker, "peer body must never be echoed into the classified error")
-		require.NotContains(t, err.Error(), tailMarker, "the read must be bounded, not run to completion")
+		require.NotContains(t, err.Error(), tailMarker, "even bytes beyond the counted prefix must not be echoed")
 		require.Less(t, len(err.Error()), 512, "message carries only status + URL + byte count, not the body")
 	})
 
@@ -1509,7 +1509,7 @@ func TestBuildHTTPError_429MapsToServiceUnavailable(t *testing.T) {
 	require.Contains(t, err.Error(), "429")
 }
 
-func TestDoHTTPRequestWithRetry_RetriesOn429ThenSucceeds(t *testing.T) {
+func TestDoHTTPRequestBoundedWithRetry_PublicRetriesOn429ThenSucceeds(t *testing.T) {
 	var attempts int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := atomic.AddInt32(&attempts, 1)
@@ -1522,13 +1522,13 @@ func TestDoHTTPRequestWithRetry_RetriesOn429ThenSucceeds(t *testing.T) {
 	}))
 	defer server.Close()
 
-	got, err := doHTTPRequestWithRetry(context.Background(), server.URL, testRetryConfig, nil)
+	got, err := DoHTTPRequestBoundedWithRetry(context.Background(), server.URL, 1024, nil)
 	require.NoError(t, err)
 	require.Equal(t, "batch-ok", string(got))
 	require.Equal(t, int32(2), atomic.LoadInt32(&attempts))
 }
 
-func TestDoHTTPRequestWithRetry_NoRetryOn404(t *testing.T) {
+func TestDoHTTPRequestBoundedWithRetry_NoRetryOn404(t *testing.T) {
 	var attempts int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&attempts, 1)
@@ -1536,7 +1536,7 @@ func TestDoHTTPRequestWithRetry_NoRetryOn404(t *testing.T) {
 	}))
 	defer server.Close()
 
-	_, err := doHTTPRequestWithRetry(context.Background(), server.URL, testRetryConfig, nil)
+	_, err := DoHTTPRequestBoundedWithRetry(context.Background(), server.URL, 1024, nil)
 	require.Error(t, err)
 	require.Equal(t, int32(1), atomic.LoadInt32(&attempts), "404 must not be retried (peer lacks data)")
 }
@@ -1597,7 +1597,7 @@ func TestReadBodyWithRetry_MidStreamStallIsPeerFault(t *testing.T) {
 	defer close(release)
 
 	// No parent deadline → the transport timeout (httpRequestTimeout) governs the read.
-	_, err := doHTTPRequestWithRetry(context.Background(), server.URL, defaultRetryConfig, nil)
+	_, err := DoHTTPRequestBoundedWithRetry(context.Background(), server.URL, 1024, nil)
 	require.Error(t, err)
 	require.False(t, errors.IsLocalError(err),
 		"a peer stalling mid-body must be a peer fault (non-local), not absolved as local; got %T: %v", err, err)
@@ -1625,7 +1625,7 @@ func TestReadBodyWithRetry_ShutdownCancelIsLocal(t *testing.T) {
 		cancel() // simulate shutdown mid-read
 	}()
 
-	_, err := doHTTPRequestWithRetry(ctx, server.URL, defaultRetryConfig, nil)
+	_, err := DoHTTPRequestBoundedWithRetry(ctx, server.URL, 1024, nil)
 	require.Error(t, err)
 	require.True(t, errors.IsLocalError(err),
 		"a shutdown cancel mid-read must be local (not a peer fault); got %T: %v", err, err)
@@ -1647,7 +1647,7 @@ func TestReadBodyWithRetry_PreResponseStallIsPeerFault(t *testing.T) {
 	defer server.Close()
 	defer close(release)
 
-	_, err := doHTTPRequestWithRetry(context.Background(), server.URL, defaultRetryConfig, nil)
+	_, err := DoHTTPRequestBoundedWithRetry(context.Background(), server.URL, 1024, nil)
 	require.Error(t, err)
 	require.False(t, errors.IsLocalError(err),
 		"a peer stalling before headers must be a peer fault (non-local); got %T: %v", err, err)
@@ -1686,12 +1686,6 @@ func TestWithRetryHelpers_SignRequests(t *testing.T) {
 		}))
 		defer server.Close()
 
-		t.Run("doHTTPRequestWithRetry", func(t *testing.T) {
-			gotSig.Store(false)
-			_, err := doHTTPRequestWithRetry(context.Background(), server.URL, defaultRetryConfig, nil)
-			require.NoError(t, err)
-			require.True(t, gotSig.Load())
-		})
 		t.Run("DoHTTPRequestBoundedWithRetry", func(t *testing.T) {
 			gotSig.Store(false)
 			_, err := DoHTTPRequestBoundedWithRetry(context.Background(), server.URL, 1024, nil)
@@ -1880,8 +1874,10 @@ func TestRetryHTTP_HostileRetryAfterNearOverflowStillBacksOff(t *testing.T) {
 
 func TestParseRetryAfter_HugeSeconds(t *testing.T) {
 	// int64-max seconds: clamped to a positive duration (not wrapped negative).
-	require.Positive(t, parseRetryAfter("9223372036854775807"))
-	// Atoi overflow → treated as no hint.
+	require.Equal(t, time.Duration(1<<33)*time.Second, parseRetryAfter("9223372036854775807"))
+	// Delta-seconds above MaxInt32 work identically on 32-bit targets.
+	require.Equal(t, time.Duration(1<<31)*time.Second, parseRetryAfter("2147483648"))
+	// ParseInt overflow → treated as no hint.
 	require.Equal(t, time.Duration(0), parseRetryAfter("99999999999999999999"))
 	// Existing behavior preserved.
 	require.Equal(t, time.Duration(0), parseRetryAfter("-5"))
@@ -1889,11 +1885,11 @@ func TestParseRetryAfter_HugeSeconds(t *testing.T) {
 	require.Equal(t, 3*time.Second, parseRetryAfter("3"))
 }
 
-// TestDoHTTPRequestWithRetry_BeforeAttemptFiresEveryAttempt guards the anti-re-burst
+// TestDoHTTPRequestBoundedWithRetry_BeforeAttemptFiresEveryAttempt guards the anti-re-burst
 // wiring: the per-peer rate-limit hook must run before EVERY attempt (including retries),
 // not just the first. A future refactor hoisting the hook out of the per-attempt closure
 // would silently revert it and this test would catch it.
-func TestDoHTTPRequestWithRetry_BeforeAttemptFiresEveryAttempt(t *testing.T) {
+func TestDoHTTPRequestBoundedWithRetry_BeforeAttemptFiresEveryAttempt(t *testing.T) {
 	var attempts, hookCalls int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if atomic.AddInt32(&attempts, 1) < 3 {
@@ -1906,7 +1902,7 @@ func TestDoHTTPRequestWithRetry_BeforeAttemptFiresEveryAttempt(t *testing.T) {
 	defer server.Close()
 
 	hook := func(context.Context) error { atomic.AddInt32(&hookCalls, 1); return nil }
-	got, err := doHTTPRequestWithRetry(context.Background(), server.URL, testRetryConfig, hook)
+	got, err := DoHTTPRequestBoundedWithRetry(context.Background(), server.URL, 1024, hook)
 	require.NoError(t, err)
 	require.Equal(t, "ok", string(got))
 	require.Equal(t, int32(3), atomic.LoadInt32(&attempts))
