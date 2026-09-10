@@ -98,105 +98,6 @@ func compact(r *bytes.Reader) (uint64, error) {
 	return n, e
 }
 
-// decodeProof verifies Bitcoin's serialized partial Merkle tree without trusting
-// gettxoutproof's reported matches. Allocations are bounded by the response size.
-func decodeProof(data []byte, id string) (Inclusion, error) {
-	p := Inclusion{}
-	target, err := strictHash(id)
-	if err != nil {
-		return p, err
-	}
-	if len(data) < 86 {
-		return p, fmt.Errorf("short merkle proof")
-	}
-	p.Header = append([]byte(nil), data[:80]...)
-	r := bytes.NewReader(data[80:])
-	var total uint32
-	if err = binary.Read(r, binary.LittleEndian, &total); err != nil || total == 0 {
-		return p, fmt.Errorf("invalid transaction count")
-	}
-	n, err := compact(r)
-	if err != nil || n == 0 || n > uint64(total) || n > uint64(r.Len()/32) { // #nosec G115 -- bytes.Reader.Len is nonnegative.
-		return p, fmt.Errorf("invalid proof hash count")
-	}
-	hashes := make([]chainhash.Hash, int(n)) // #nosec G115 -- n was bounded by r.Len()/32, which fits int.
-	for i := range hashes {
-		if _, err = io.ReadFull(r, hashes[i][:]); err != nil {
-			return p, err
-		}
-	}
-	count, err := compact(r)
-	if err != nil || count == 0 || count > uint64(r.Len()) { // #nosec G115 -- bytes.Reader.Len is nonnegative.
-		return p, fmt.Errorf("invalid proof flags")
-	}
-	flags := make([]byte, int(count)) // #nosec G115 -- count was bounded by r.Len(), which fits int.
-	_, err = io.ReadFull(r, flags)
-	if err != nil || r.Len() != 0 {
-		return p, fmt.Errorf("trailing or truncated proof")
-	}
-	width := func(height uint32) uint64 { return (uint64(total) + (uint64(1) << height) - 1) >> height }
-	height := uint32(0)
-	for width(height) > 1 {
-		height++
-	}
-	bits, used, matches := 0, 0, 0
-	var walk func(uint32, uint32) (chainhash.Hash, bool, error)
-	walk = func(h, pos uint32) (chainhash.Hash, bool, error) {
-		if bits >= len(flags)*8 {
-			return chainhash.Hash{}, false, fmt.Errorf("proof flags exhausted")
-		}
-		match := flags[bits/8]&(1<<uint(bits%8)) != 0
-		bits++
-		if h == 0 || !match {
-			if used >= len(hashes) {
-				return chainhash.Hash{}, false, fmt.Errorf("proof hashes exhausted")
-			}
-			v := hashes[used]
-			used++
-			found := h == 0 && match && v == *target
-			if found {
-				matches++
-				p.Index = pos
-			}
-			return v, found, nil
-		}
-		left, lf, e := walk(h-1, pos*2)
-		if e != nil {
-			return left, false, e
-		}
-		right, rf := left, false
-		if uint64(pos)*2+1 < width(h-1) {
-			right, rf, e = walk(h-1, pos*2+1)
-			if e != nil {
-				return right, false, e
-			}
-			if left == right {
-				return right, false, fmt.Errorf("mutated merkle tree")
-			}
-		}
-		if lf {
-			p.MerkleBranch = append(p.MerkleBranch, right.String())
-		}
-		if rf {
-			p.MerkleBranch = append(p.MerkleBranch, left.String())
-		}
-		return hashPair(left, right), lf || rf, nil
-	}
-	root, _, err := walk(height, 0)
-	if err != nil {
-		return p, err
-	}
-	if matches != 1 || used != len(hashes) || (bits+7)/8 != len(flags) || !bytes.Equal(root[:], p.Header[36:68]) {
-		return p, fmt.Errorf("invalid merkle proof")
-	}
-	for bit := bits; bit < len(flags)*8; bit++ {
-		if flags[bit/8]&(1<<uint(bit%8)) != 0 {
-			return p, fmt.Errorf("nonzero proof padding")
-		}
-	}
-	return p, nil
-}
-
 // ReadBoundedTransaction validates wire counts and script lengths against bytes
 // actually present before bt allocates scripts. It accepts standard or extended
 // archive encoding and consumes exactly one transaction from the reader.
@@ -288,4 +189,110 @@ func ReadBoundedTransaction(r *bytes.Reader) (*bt.Tx, error) {
 		return nil, fmt.Errorf("transaction encoding length mismatch")
 	}
 	return tx, nil
+}
+
+// ReadBoundedTransactionStream consumes exactly one archive transaction. Wire
+// lengths are checked before reading or allocating scripts, with bounded work.
+func ReadBoundedTransactionStream(r io.Reader, maxBytes int64) (*bt.Tx, error) {
+	if maxBytes < 10 || maxBytes > 256<<20 {
+		return nil, fmt.Errorf("invalid transaction byte limit")
+	}
+	var wire bytes.Buffer
+	take := func(n uint64) error {
+		remaining := maxBytes - int64(wire.Len())
+		if remaining < 0 || n > uint64(remaining) { // #nosec G115 -- negative remaining is rejected first.
+			return fmt.Errorf("transaction exceeds byte limit")
+		}
+		_, err := io.CopyN(&wire, r, int64(n)) // #nosec G115 -- n is bounded above by maxBytes <= 256 MiB.
+		return err
+	}
+	count := func() (uint64, error) {
+		start := wire.Len()
+		if err := take(1); err != nil {
+			return 0, err
+		}
+		n := 0
+		switch wire.Bytes()[start] {
+		case 253:
+			n = 2
+		case 254:
+			n = 4
+		case 255:
+			n = 8
+		}
+		if err := take(uint64(n)); err != nil {
+			return 0, err
+		}
+		return compact(bytes.NewReader(wire.Bytes()[start:]))
+	}
+	script := func() error {
+		n, err := count()
+		if err != nil {
+			return err
+		}
+		return take(n)
+	}
+	if err := take(4); err != nil {
+		return nil, err
+	}
+	inputs, err := count()
+	if err != nil {
+		return nil, err
+	}
+	extended := false
+	if inputs == 0 {
+		start := wire.Len()
+		if err = take(5); err != nil {
+			return nil, err
+		}
+		if !bytes.Equal(wire.Bytes()[start:], []byte{0, 0, 0, 0, 239}) {
+			return nil, fmt.Errorf("invalid extended marker")
+		}
+		extended = true
+		inputs, err = count()
+		if err != nil {
+			return nil, err
+		}
+	}
+	if inputs == 0 || inputs > uint64(maxBytes/41) || inputs > 1000000 {
+		return nil, fmt.Errorf("transaction input count exceeds bound")
+	}
+	for i := uint64(0); i < inputs; i++ {
+		if err = take(36); err != nil {
+			return nil, err
+		}
+		if err = script(); err != nil {
+			return nil, err
+		}
+		if err = take(4); err != nil {
+			return nil, err
+		}
+		if extended {
+			if err = take(8); err != nil {
+				return nil, err
+			}
+			if err = script(); err != nil {
+				return nil, err
+			}
+		}
+	}
+	outputs, err := count()
+	if err != nil {
+		return nil, err
+	}
+	if outputs == 0 || outputs > uint64(maxBytes/9) || outputs > 1000000 {
+		return nil, fmt.Errorf("transaction output count exceeds bound")
+	}
+	for i := uint64(0); i < outputs; i++ {
+		if err = take(8); err != nil {
+			return nil, err
+		}
+		if err = script(); err != nil {
+			return nil, err
+		}
+	}
+	if err = take(4); err != nil {
+		return nil, err
+	}
+	return ReadBoundedTransaction(bytes.NewReader(wire.Bytes()))
 }

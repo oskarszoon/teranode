@@ -17,7 +17,7 @@ import (
 
 // openExternalTransactionReader matches Aerospike's externalStore URL and its
 // default unprefixed layout. Open lazily: missing optional local bytes must not
-// prevent use of independently available canonical RPC evidence.
+// prevent use of independently available canonical archive evidence.
 func openExternalTransactionReader(ctx context.Context, logger ulogger.Logger, utxoURL *url.URL) (replayrecovery.TransactionReader, func() error, error) {
 	closeEmpty := func() error { return nil }
 	if utxoURL == nil || utxoURL.Query().Get("externalStore") == "" {

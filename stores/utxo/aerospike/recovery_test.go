@@ -10,10 +10,12 @@ import (
 	"github.com/bsv-blockchain/go-bt/v2"
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	"github.com/bsv-blockchain/teranode/errors"
+	rr "github.com/bsv-blockchain/teranode/pkg/replayrecovery"
 	recovery "github.com/bsv-blockchain/teranode/stores/utxo/aerospike"
 	"github.com/bsv-blockchain/teranode/stores/utxo/fields"
 	"github.com/bsv-blockchain/teranode/ulogger"
 	"github.com/bsv-blockchain/teranode/util/test"
+	"github.com/bsv-blockchain/teranode/util/uaerospike"
 	"github.com/stretchr/testify/require"
 )
 
@@ -243,4 +245,156 @@ func TestRecoveryScanReadOnlyAndComplete(t *testing.T) {
 	count = 0
 	require.NoError(t, backend.Scan(ctx, func(string) error { count++; return nil }))
 	require.Equal(t, 259, count)
+}
+
+func TestRecoveryCensusAndAbsentSnapshot(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires Aerospike")
+	}
+	settings := test.CreateBaseTestSettings(t)
+	settings.UtxoStore.UtxoBatchSize = 2
+	client, store, ctx, cleanup := initAerospike(t, settings, ulogger.NewErrorTestLogger(t))
+	t.Cleanup(cleanup)
+	backend, err := recovery.NewRecoveryBackend(client.Client, store.GetNamespace(), store.GetName(), 2)
+	require.NoError(t, err)
+	parent := bt.NewTx()
+	require.NoError(t, parent.From("5555555555555555555555555555555555555555555555555555555555555555", 0, "51", 50000))
+	for range 4 {
+		require.NoError(t, parent.PayToAddress("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", 10000))
+	}
+	_, err = store.Create(ctx, parent, 1000)
+	require.NoError(t, err)
+	child := newChildSpendingOutput(t, parent, 2, 3)
+	for range 2 {
+		require.NoError(t, child.PayToAddress("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", 1000))
+	}
+	_, _, err = store.SpendAndCreate(ctx, child, 1000)
+	require.NoError(t, err)
+	pk, err := as.NewKey(store.GetNamespace(), store.GetName(), parent.TxIDChainHash().CloneBytes())
+	require.NoError(t, err)
+	require.NoError(t, client.Put(nil, pk, as.BinMap{fields.UnminedSince.String(): nil, fields.BlockIDs.String(): []interface{}{1}, fields.BlockHeights.String(): []interface{}{1}, fields.SubtreeIdxs.String(): []interface{}{0}}))
+	var inventory []rr.InventoryRecord
+	require.NoError(t, backend.Inventory(ctx, func(r rr.InventoryRecord) error { inventory = append(inventory, r); return nil }))
+	require.Len(t, inventory, 4)
+	for _, r := range inventory {
+		require.Empty(t, r.Reason)
+		require.NotEmpty(t, r.Record.Data)
+		if r.TxID == parent.TxID() && r.Master {
+			require.False(t, r.Candidate)
+		}
+	}
+	var refs []rr.SpendReference
+	require.NoError(t, backend.SpendReferences(ctx, func(r rr.SpendReference) error { refs = append(refs, r); return nil }))
+	require.Len(t, refs, 1)
+	require.Equal(t, parent.TxID(), refs[0].ParentTxID)
+	require.Equal(t, child.TxID(), refs[0].ChildTxID)
+	require.Equal(t, uint32(2), refs[0].Vout)
+	require.Equal(t, uint32(0), refs[0].Vin)
+	require.False(t, refs[0].Marked)
+	require.Equal(t, uaerospike.CalculateKeySourceInternal(parent.TxIDChainHash(), 1), refs[0].ParentKey)
+	_, err = backend.SnapshotAbsent(ctx, child)
+	require.Error(t, err)
+	snapshot, err := backend.Snapshot(ctx, child)
+	require.NoError(t, err)
+	// A surviving page is not an absent child.
+	require.NoError(t, backend.Delete(ctx, snapshot.Records[0]))
+	_, err = backend.SnapshotAbsent(ctx, child)
+	require.Error(t, err)
+	require.NoError(t, backend.Delete(ctx, snapshot.Records[1]))
+	absent, err := backend.SnapshotAbsent(ctx, child)
+	require.NoError(t, err)
+	require.Empty(t, absent.Records)
+	require.Len(t, absent.Parents, 2)
+	for _, p := range absent.Parents {
+		if len(p.Record.Key) == 36 {
+			_, err = backend.Mark(ctx, p.Record, child.TxID())
+			require.NoError(t, err)
+		}
+	}
+	require.NoError(t, backend.SpendReferences(ctx, func(r rr.SpendReference) error {
+		require.False(t, r.Marked, "master marker is also required")
+		return nil
+	}))
+	for _, p := range absent.Parents {
+		if len(p.Record.Key) == 32 {
+			_, err = backend.Mark(ctx, p.Record, child.TxID())
+			require.NoError(t, err)
+		}
+	}
+	refs = nil
+	require.NoError(t, backend.SpendReferences(ctx, func(r rr.SpendReference) error { refs = append(refs, r); return nil }))
+	require.Len(t, refs, 1)
+	require.True(t, refs[0].Marked)
+	// Malformed replay markers must be visible without losing spend edges.
+	markerKey, err := as.NewKey(store.GetNamespace(), store.GetName(), uaerospike.CalculateKeySourceInternal(parent.TxIDChainHash(), 1))
+	require.NoError(t, err)
+	require.NoError(t, client.Put(nil, markerKey, as.BinMap{fields.DeletedChildren.String(): "corrupt"}))
+	require.NoError(t, backend.Inventory(ctx, func(r rr.InventoryRecord) error {
+		if r.TxID == parent.TxID() && r.Page == 1 {
+			require.Contains(t, r.Reason, "deletedChildren")
+		}
+		return nil
+	}))
+	refs = nil
+	require.NoError(t, backend.SpendReferences(ctx, func(r rr.SpendReference) error { refs = append(refs, r); return nil }))
+	require.Len(t, refs, 1)
+	require.False(t, refs[0].Marked)
+	require.NoError(t, client.Put(nil, markerKey, as.BinMap{fields.DeletedChildren.String(): map[interface{}]interface{}{child.TxID(): true}}))
+	// Locked records remain census members and explicitly block repair.
+	require.NoError(t, client.Put(nil, pk, as.BinMap{fields.Locked.String(): true}))
+	require.NoError(t, backend.Inventory(ctx, func(r rr.InventoryRecord) error {
+		if r.Master {
+			require.True(t, r.Candidate)
+			require.Contains(t, r.Reason, "locked")
+		}
+		return nil
+	}))
+	_, err = backend.SnapshotAbsent(ctx, child)
+	require.ErrorContains(t, err, "locked")
+	require.NoError(t, client.Put(nil, pk, as.BinMap{fields.Locked.String(): false}))
+	for _, flag := range []fields.FieldName{fields.Conflicting, fields.Creating} {
+		require.NoError(t, client.Put(nil, pk, as.BinMap{flag.String(): true}))
+		require.NoError(t, backend.Inventory(ctx, func(r rr.InventoryRecord) error {
+			if r.Master {
+				require.True(t, r.Candidate)
+				require.Contains(t, r.Reason, flag.String())
+			}
+			return nil
+		}))
+		_, err = backend.SnapshotAbsent(ctx, child)
+		require.Error(t, err)
+		require.NoError(t, client.Put(nil, pk, as.BinMap{flag.String(): false}))
+	}
+	require.NoError(t, client.Put(as.NewWritePolicy(0, 3600), pk, as.BinMap{"finite": true}))
+	_, err = backend.SnapshotAbsent(ctx, child)
+	require.ErrorContains(t, err, "finite")
+	require.NoError(t, client.Put(as.NewWritePolicy(0, as.TTLDontExpire), pk, as.BinMap{"finite": nil}))
+	unknown, err := as.NewKey(store.GetNamespace(), store.GetName(), make([]byte, 32))
+	require.NoError(t, err)
+	require.NoError(t, client.Put(nil, unknown, as.BinMap{fields.TxID.String(): parent.TxIDChainHash().CloneBytes()}))
+	findings := 0
+	require.NoError(t, backend.Inventory(ctx, func(r rr.InventoryRecord) error {
+		if r.TxID == "" {
+			findings++
+			require.Contains(t, r.Reason, "ownership")
+			require.Equal(t, unknown.Digest(), r.Record.Key)
+		}
+		return nil
+	}))
+	require.Equal(t, 1, findings)
+	stop := errors.NewProcessingError("stop census")
+	require.ErrorIs(t, backend.Inventory(ctx, func(rr.InventoryRecord) error { return stop }), stop)
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	require.ErrorIs(t, backend.Inventory(cancelled, func(rr.InventoryRecord) error { t.Fatal("unexpected callback"); return nil }), context.Canceled)
+	// Ownerless pages remain visible after their master disappears.
+	_, err = client.Delete(nil, pk)
+	require.NoError(t, err)
+	ownerless := 0
+	require.NoError(t, backend.Inventory(ctx, func(r rr.InventoryRecord) error {
+		require.Contains(t, r.Reason, "master is absent")
+		ownerless++
+		return nil
+	}))
+	require.Equal(t, 2, ownerless)
 }

@@ -1,6 +1,7 @@
 package replayrecovery
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 
@@ -44,14 +45,15 @@ func (b *EvidenceBackend) Transaction(ctx context.Context, id string) (*bt.Tx, e
 			return nil, ctx.Err()
 		}
 	}
-	if b.source == nil {
-		return nil, failure("external transaction evidence source unavailable")
+	var evidence Evidence
+	var err error
+	if b.source != nil {
+		evidence, err = b.source.Check(ctx, id, b.tip)
 	}
-	evidence, err := b.source.Check(ctx, id, b.tip)
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
-	if err == nil && (evidence.Classification == FullySpent || evidence.Classification == Live) {
+	if err == nil && evidence.RawTx != "" && validHash(evidence.BlockHash) {
 		if evidence.TxID != id || evidence.Tip != b.tip || !validHash(evidence.BlockHash) || evidence.BlockHeight > b.tip.Height {
 			return nil, failure("external transaction confirmation identity mismatch")
 		}
@@ -97,4 +99,38 @@ func (b *EvidenceBackend) VerifyParent(ctx context.Context, parent Parent) error
 		return failure("backend cannot verify protected parent spends")
 	}
 	return native.VerifyParent(ctx, parent)
+}
+
+func (b *EvidenceBackend) Inventory(ctx context.Context, visit func(InventoryRecord) error) error {
+	census, ok := b.Backend.(CensusBackend)
+	if !ok {
+		return failure("backend lacks full census")
+	}
+	return census.Inventory(ctx, visit)
+}
+func (b *EvidenceBackend) SpendReferences(ctx context.Context, visit func(SpendReference) error) error {
+	census, ok := b.Backend.(CensusBackend)
+	if !ok {
+		return failure("backend lacks spend census")
+	}
+	return census.SpendReferences(ctx, visit)
+}
+func (b *EvidenceBackend) SnapshotAbsent(ctx context.Context, tx *bt.Tx) (Snapshot, error) {
+	native, ok := b.Backend.(AbsentBackend)
+	if !ok {
+		return Snapshot{}, failure("backend cannot snapshot absent child")
+	}
+	return native.SnapshotAbsent(ctx, tx)
+}
+
+func checkedTransaction(id, raw string) (*bt.Tx, error) {
+	b, err := hex.DecodeString(raw)
+	if err != nil {
+		return nil, failure("invalid raw transaction hex")
+	}
+	tx, err := ReadBoundedTransaction(bytes.NewReader(b))
+	if err != nil || tx == nil || tx.TxID() != id || !bytes.Equal(tx.Bytes(), b) || len(tx.Outputs) == 0 {
+		return nil, failure("raw transaction identity or encoding mismatch")
+	}
+	return tx, nil
 }

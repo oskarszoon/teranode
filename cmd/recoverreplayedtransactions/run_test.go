@@ -12,29 +12,38 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Invalid apply arguments must be rejected before opening production stores.
 func TestRunRejectsUnsafeOptionsBeforeConnecting(t *testing.T) {
-	for _, mode := range []string{"apply", "resume"} {
-		err := Run(context.Background(), ulogger.TestLogger{}, &settings.Settings{}, Options{Mode: mode, Manifest: "manifest.db", Journal: "journal.db", RPC: "https://example.invalid", Timeout: time.Minute, RequestsPerSecond: 1, Concurrency: 1}, io.Discard, io.Discard)
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "maintenance")
+	for _, resume := range []bool{false, true} {
+		err := Run(context.Background(), ulogger.TestLogger{}, &settings.Settings{}, Options{WorkDir: t.TempDir(), Apply: true, Resume: resume, Timeout: time.Minute, Concurrency: 1}, io.Discard, io.Discard)
+		require.ErrorContains(t, err, "maintenance")
 	}
 }
-
 func TestExitCodesRemainDistinctWhenWrapped(t *testing.T) {
 	require.Equal(t, 0, ExitCode(nil))
 	require.Equal(t, 1, ExitCode(commandError("ordinary failure")))
 	require.Equal(t, 2, ExitCode(commandError("audit: %w", replayrecovery.ErrIncomplete)))
-	require.Equal(t, 3, ExitCode(commandError("verify: %w", replayrecovery.ErrPending)))
+}
+func TestOptionsRequireExplicitApplyAndResume(t *testing.T) {
+	base := Options{WorkDir: t.TempDir(), Timeout: time.Minute, Concurrency: 1}
+	require.NoError(t, base.validate())
+	base.Apply = true
+	require.Error(t, base.validate())
+	base.Maintenance = true
+	require.NoError(t, base.validate())
+	base.Apply = false
+	base.Resume = true
+	require.Error(t, base.validate())
+	base.Resume = false
+	base.WorkDir = ""
+	require.Error(t, base.validate())
 }
 
-func TestOptionsRejectConflictingPathsAndModes(t *testing.T) {
-	o := Options{Mode: "discover", Manifest: "same.db", Journal: "same.db", RPC: "https://example.invalid", Timeout: time.Minute, RequestsPerSecond: 1, Concurrency: 1}
-	require.Error(t, o.validate())
-	o.Journal = "journal.db"
-	o.Mode = "purge"
-	require.Error(t, o.validate())
-	o.Mode = "discover"
-	o.HistoryIndex = "same.db"
-	require.Error(t, o.validate())
+func TestVerificationFailurePreservesCompletedMutationReport(t *testing.T) {
+	applied := replayrecovery.Summary{Applied: true, RestartRequired: true, Repaired: 2, Stage: "applied-verification-pending"}
+	failed := replayrecovery.Summary{}
+	report := retainMutationStatus(failed, applied)
+	require.True(t, report.Applied)
+	require.True(t, report.RestartRequired)
+	require.EqualValues(t, 2, report.Repaired)
+	require.False(t, report.Complete)
 }

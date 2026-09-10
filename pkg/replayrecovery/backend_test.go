@@ -11,16 +11,13 @@ import (
 func TestEvidenceBackendCanonicalExternalInputs(t *testing.T) {
 	for _, classification := range []string{FullySpent, Live, Unknown} {
 		t.Run(classification, func(t *testing.T) {
-			native, source, _, tx, _, _ := recoveryFixture(t)
+			native, source, tx, _, _ := recoveryFixture(t)
 			ev := source.evidence[tx.TxID()]
 			ev.Classification = classification
 			source.evidence[tx.TxID()] = ev
 			backend := NewEvidenceBackend(native, source, source.tip, nil)
 			inputs, err := backend.Inputs(context.Background(), tx.TxID())
-			if classification == Unknown {
-				require.Error(t, err)
-				return
-			}
+
 			require.NoError(t, err)
 			require.Equal(t, []string{tx.Inputs[0].PreviousTxIDChainHash().String()}, inputs)
 			raw, err := backend.Transaction(context.Background(), tx.TxID())
@@ -35,7 +32,7 @@ func TestEvidenceBackendCanonicalExternalInputs(t *testing.T) {
 }
 
 func TestEvidenceBackendRetainedUnminedRaw(t *testing.T) {
-	native, source, _, tx, _, _ := recoveryFixture(t)
+	native, source, tx, _, _ := recoveryFixture(t)
 	ev := source.evidence[tx.TxID()]
 	ev.Classification = Unknown
 	source.evidence[tx.TxID()] = ev
@@ -53,7 +50,7 @@ func TestEvidenceBackendRetainedUnminedRaw(t *testing.T) {
 }
 
 func TestEvidenceBackendRejectsWrongArchiveIdentity(t *testing.T) {
-	native, source, _, tx, _, _ := recoveryFixture(t)
+	native, source, tx, _, _ := recoveryFixture(t)
 	delete(source.evidence, tx.TxID())
 	other := tx.Clone()
 	other.LockTime++
@@ -72,7 +69,7 @@ func (b *inlineEvidenceBackend) Transaction(context.Context, string) (*bt.Tx, er
 }
 
 func TestEvidenceBackendInlineIdentityAndParentVerification(t *testing.T) {
-	native, source, _, tx, _, _ := recoveryFixture(t)
+	native, source, tx, _, _ := recoveryFixture(t)
 	underlying := &inlineEvidenceBackend{recordBackend: native, tx: tx}
 	backend := NewEvidenceBackend(underlying, source, source.tip, nil)
 	got, err := backend.Transaction(context.Background(), tx.TxID())

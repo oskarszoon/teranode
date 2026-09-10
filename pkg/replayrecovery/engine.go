@@ -11,10 +11,11 @@ import (
 )
 
 type ApplyOptions struct {
+	Guard       Guard
 	Maintenance bool
 	Resume      bool
 	// Tip must be read independently from the target node's canonical blockchain
-	// store while writers are stopped, not copied from the trusted RPC response.
+	// store while writers are stopped and matched against sealed evidence.
 	Tip Tip
 }
 
@@ -79,7 +80,10 @@ func (j *journal) prepare(id, kind, child string, before Record) (*mutation, err
 	return m, nil
 }
 
-func (j *journal) mark(ctx context.Context, backend Backend, p Parent) error {
+func (j *journal) mark(ctx context.Context, backend Backend, p Parent, guard Guard) error {
+	if err := checkGuard(ctx, guard); err != nil {
+		return err
+	}
 	// Expiry cannot be made atomic with a different record's deletion. Preserve
 	// TTLs by refusing expiring replay guards rather than extending their lifetime.
 	if p.Record.ExpiresAt != 0 {
@@ -112,6 +116,9 @@ func (j *journal) mark(ctx context.Context, backend Backend, p Parent) error {
 			m.After = current
 			return j.finish(id, *m)
 		}
+		if err = checkGuard(ctx, guard); err != nil {
+			return err
+		}
 		after, e := backend.Mark(ctx, m.Before, p.Child)
 		if e != nil {
 			return e
@@ -127,10 +134,16 @@ func (j *journal) mark(ctx context.Context, backend Backend, p Parent) error {
 	} else {
 		return failure("parent generation or before-state changed")
 	}
-	return j.finish(id, *m)
+	if err = j.finish(id, *m); err != nil {
+		return err
+	}
+	return checkGuard(ctx, guard)
 }
 
-func (j *journal) remove(ctx context.Context, backend Backend, before Record) error {
+func (j *journal) remove(ctx context.Context, backend Backend, before Record, guard Guard) error {
+	if err := checkGuard(ctx, guard); err != nil {
+		return err
+	}
 	id := fmt.Sprintf("delete/%x", before.Key)
 	prior, err := j.step(id)
 	if err != nil {
@@ -159,6 +172,9 @@ func (j *journal) remove(ctx context.Context, backend Backend, before Record) er
 	if !backend.Equal(m.Before, *current) {
 		return failure("child generation or before-state changed")
 	}
+	if err = checkGuard(ctx, guard); err != nil {
+		return err
+	}
 	if err = backend.Delete(ctx, m.Before); err != nil {
 		return err
 	}
@@ -169,7 +185,10 @@ func (j *journal) remove(ctx context.Context, backend Backend, before Record) er
 	if current != nil {
 		return failure("child deletion readback failed")
 	}
-	return j.finish(id, *m)
+	if err = j.finish(id, *m); err != nil {
+		return err
+	}
+	return checkGuard(ctx, guard)
 }
 
 func initializeWork(ctx context.Context, m *manifest, j *journal) error {
@@ -252,6 +271,9 @@ func sameSnapshot(backend Backend, a, b Snapshot) bool {
 // Apply never starts node services. All shared-store writers must remain stopped
 // for its duration, including an interrupted apply until deliberate resumption.
 func Apply(ctx context.Context, backend Backend, source Source, manifestPath, journalPath string, opts ApplyOptions) (result Summary, err error) {
+	if err = checkGuard(ctx, opts.Guard); err != nil {
+		return result, err
+	}
 	if !opts.Maintenance {
 		return result, failure("apply requires acknowledgement that all shared-store writers are stopped")
 	}
@@ -263,7 +285,7 @@ func Apply(ctx context.Context, backend Backend, source Source, manifestPath, jo
 	if m.header.Identity != backend.Identity() {
 		return result, failure("manifest belongs to a different store")
 	}
-	if !validHash(opts.Tip.Hash) || (!opts.Resume && opts.Tip != m.header.Tip) {
+	if !validHash(opts.Tip.Hash) || opts.Tip != m.header.Tip {
 		return result, failure("local tip differs from audit; a new discovery or deliberate resume is required")
 	}
 	if err = requireTip(ctx, source, opts.Tip); err != nil {
@@ -278,7 +300,12 @@ func Apply(ctx context.Context, backend Backend, source Source, manifestPath, jo
 	if err != nil {
 		return result, err
 	}
-	defer func() { err = combineErrors(err, j.Close()) }()
+	defer func() {
+		var intents int
+		reportErr := j.db.QueryRow("SELECT COUNT(*) FROM state WHERE key LIKE 'step/%'").Scan(&intents)
+		result.RestartRequired = intents > 0
+		err = combineErrors(combineErrors(err, reportErr), j.Close())
+	}()
 	validated, err := j.get("validated")
 	if err != nil {
 		return result, err
@@ -288,7 +315,7 @@ func Apply(ctx context.Context, backend Backend, source Source, manifestPath, jo
 		// that occurred between discovery and apply. Preflight every before-image
 		// before writing even a replay marker.
 		err = m.each(ctx, true, func(e Entry) error {
-			if e.Snapshot.TxID != e.Evidence.TxID || len(e.Snapshot.Records) == 0 || len(e.Snapshot.Parents) == 0 {
+			if e.Snapshot.TxID != e.Evidence.TxID || (e.Action != "mark-absent" && len(e.Snapshot.Records) == 0) || len(e.Snapshot.Parents) == 0 {
 				return failure("incomplete repair snapshot")
 			}
 			// The manifest is editable operator input, not an authority to choose
@@ -298,7 +325,23 @@ func Apply(ctx context.Context, backend Backend, source Source, manifestPath, jo
 			if parseErr != nil || tx.TxID() != e.Evidence.TxID {
 				return failure("invalid manifest transaction bytes")
 			}
-			actual, snapshotErr := backend.Snapshot(ctx, tx)
+			var actual Snapshot
+			var snapshotErr error
+			switch e.Action {
+			case "delete-recreated":
+				actual, snapshotErr = backend.Snapshot(ctx, tx)
+			case "mark-absent":
+				native, ok := backend.(AbsentBackend)
+				if !ok {
+					return failure("backend cannot verify absent child")
+				}
+				if len(e.Snapshot.Records) != 0 {
+					return failure("marker-only action includes delete records")
+				}
+				actual, snapshotErr = native.SnapshotAbsent(ctx, tx)
+			default:
+				return failure("unsupported repair action")
+			}
 			if snapshotErr != nil {
 				return snapshotErr
 			}
@@ -330,34 +373,7 @@ func Apply(ctx context.Context, backend Backend, source Source, manifestPath, jo
 			return result, err
 		}
 	}
-	// Quiescence must also preserve discovery coverage. New or changed unmined
-	// dependencies require a new audit, not silent omission from the repair graph.
-	err = backend.Scan(ctx, func(id string) error {
-		var exists int
-		if e := m.db.QueryRowContext(ctx, "SELECT 1 FROM entries WHERE id=?", id).Scan(&exists); e != nil {
-			return failure("unmined discovery changed; repeat audit: %w", e)
-		}
-		parents, e := backend.Inputs(ctx, id)
-		if e != nil {
-			return e
-		}
-		unique := map[string]bool{}
-		for _, parent := range parents {
-			unique[parent] = true
-			if e = m.db.QueryRowContext(ctx, "SELECT 1 FROM edges WHERE child=? AND parent=?", id, parent).Scan(&exists); e != nil {
-				return failure("dependency graph changed: %w", e)
-			}
-		}
-		var count int
-		if e = m.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM edges WHERE child=?", id).Scan(&count); e != nil {
-			return e
-		}
-		if count != len(unique) {
-			return failure("dependency graph changed")
-		}
-		return nil
-	})
-	if err != nil {
+	if err = inventoryMatches(ctx, m, j, backend, opts.Guard); err != nil {
 		return result, err
 	}
 	if err = initializeWork(ctx, m, j); err != nil {
@@ -390,21 +406,24 @@ func Apply(ctx context.Context, backend Backend, source Source, manifestPath, jo
 			return result, err
 		}
 		for _, p := range e.Snapshot.Parents {
-			if err = j.mark(ctx, backend, p); err != nil {
+			if err = j.mark(ctx, backend, p, opts.Guard); err != nil {
 				return result, failure("mark parent for %s: %w", e.Evidence.TxID, err)
 			}
 		}
-		for _, r := range e.Snapshot.Records {
+		// Keep the master until all pages are gone so an interrupted job can
+		// still derive native page ownership during its resume census.
+		for i := len(e.Snapshot.Records) - 1; i >= 0; i-- {
+			r := e.Snapshot.Records[i]
 			if err = requireTip(ctx, source, opts.Tip); err != nil {
 				return result, err
 			}
 			// Every destructive boundary requires all replay guards to survive.
 			for _, p := range e.Snapshot.Parents {
-				if err = j.mark(ctx, backend, p); err != nil {
+				if err = j.mark(ctx, backend, p, opts.Guard); err != nil {
 					return result, err
 				}
 			}
-			if err = j.remove(ctx, backend, r); err != nil {
+			if err = j.remove(ctx, backend, r, opts.Guard); err != nil {
 				return result, failure("delete record for %s: %w", e.Evidence.TxID, err)
 			}
 		}
@@ -430,7 +449,8 @@ func Apply(ctx context.Context, backend Backend, source Source, manifestPath, jo
 		return result, err
 	}
 	result.Stage = "applied-verification-pending"
-	if result.Unknown > 0 || result.Live > 0 || result.Blocked > 0 {
+	result.Applied = true
+	if !result.Complete {
 		return result, ErrIncomplete
 	}
 	return result, nil

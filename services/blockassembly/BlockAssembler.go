@@ -99,11 +99,6 @@ var StateStrings = map[State]string{
 // It handles blockchain reorganizations and ensures that block templates remain valid
 // as the chain state changes.
 type BlockAssembler struct {
-	recoveryOnce      sync.Once
-	recoveryProcessID string
-	recoveryResetID   atomic.Uint64
-	recoveryCh        chan recoveryRequest
-
 	// logger provides logging functionality for the assembler
 	logger ulogger.Logger
 
@@ -271,7 +266,6 @@ func NewBlockAssembler(ctx context.Context, logger ulogger.Logger, tSettings *se
 		currentChainMapIDs:  make(map[uint32]struct{}, tSettings.BlockAssembly.MaxBlockReorgCatchup),
 		defaultMiningNBits:  defaultMiningBits,
 		resetCh:             make(chan resetRequest, 2),
-		recoveryCh:          make(chan recoveryRequest),
 		reconcileCh:         make(chan struct{}, 1),
 		currentRunningState: atomic.Value{},
 	}
@@ -408,9 +402,6 @@ func (b *BlockAssembler) startChannelListeners(ctx context.Context) (err error) 
 				// it's created by the blockchain client's Subscribe method
 				return
 
-			case req := <-b.recoveryCh:
-				req.done <- req.run()
-
 			case resetReq := <-b.resetCh:
 				b.setCurrentRunningState(StateResetting)
 
@@ -423,7 +414,17 @@ func (b *BlockAssembler) startChannelListeners(ctx context.Context) (err error) 
 
 				err := b.reset(ctx, resetReq.ValidateInputs)
 
-				b.completeRecoveryReset(resetReq, err)
+				// empty out the reset channel
+				for len(b.resetCh) > 0 {
+					bufferedCh := <-b.resetCh
+					if bufferedCh.ErrCh != nil {
+						bufferedCh.ErrCh <- nil
+					}
+				}
+
+				if resetReq.ErrCh != nil {
+					resetReq.ErrCh <- err
+				}
 
 				b.setCurrentRunningState(StateRunning)
 
@@ -1568,7 +1569,6 @@ type resetRequest struct {
 	FullReset      bool
 	ValidateInputs bool
 	ErrCh          chan error
-	RecoveryCh     chan recoveryResetResult
 }
 
 // Reset triggers a reset of the block assembler state.
@@ -1730,7 +1730,7 @@ func (b *BlockAssembler) GetMiningCandidate(ctx context.Context) (*model.MiningC
 		return nil, nil, errors.NewProcessingError("error converting time now", err)
 	}
 
-	nBits, err := b.getNextNbitsContext(ctx, data.PreviousHeader, timeNow)
+	nBits, err := b.getNextNbits(data.PreviousHeader, timeNow)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1814,7 +1814,7 @@ func (b *BlockAssembler) generateEmptyBlockCandidate(ctx context.Context, bestBl
 		return nil, nil, errors.NewProcessingError("error converting time", err)
 	}
 
-	nBits, err := b.getNextNbitsContext(ctx, bestBlockHeader, timeNow)
+	nBits, err := b.getNextNbits(bestBlockHeader, timeNow)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -2144,11 +2144,7 @@ func (b *BlockAssembler) getReorgBlockHeaders(ctx context.Context, header *model
 //   - *model.NBit: Next difficulty target
 //   - error: Any error encountered during retrieval
 func (b *BlockAssembler) getNextNbits(baBestBlockHeader *model.BlockHeader, nextBlockTime int64) (*model.NBit, error) {
-	return b.getNextNbitsContext(context.Background(), baBestBlockHeader, nextBlockTime)
-}
-
-func (b *BlockAssembler) getNextNbitsContext(ctx context.Context, baBestBlockHeader *model.BlockHeader, nextBlockTime int64) (*model.NBit, error) {
-	nbit, err := b.blockchainClient.GetNextWorkRequired(ctx, baBestBlockHeader.Hash(), nextBlockTime)
+	nbit, err := b.blockchainClient.GetNextWorkRequired(context.Background(), baBestBlockHeader.Hash(), nextBlockTime)
 	if err != nil {
 		return nil, errors.NewProcessingError("error getting next work required", err)
 	}

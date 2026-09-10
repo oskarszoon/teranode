@@ -1566,11 +1566,31 @@ func (ba *BlockAssembly) GetMiningCandidate(ctx context.Context, req *blockassem
 	)
 	defer endSpan()
 
-	includeSubtreeHashes := req.IncludeSubtrees
-	miningCandidate, subtrees, err := ba.createMiningCandidateJob(ctx)
+	isRunning, err := ba.blockchainClient.IsFSMCurrentState(ctx, blockchain.FSMStateRUNNING)
 	if err != nil {
-		return nil, err
+		return nil, errors.WrapGRPC(err)
 	}
+
+	if !isRunning {
+		return nil, errors.WrapGRPC(errors.NewStateError("cannot get mining candidate when FSM is not in RUNNING state"))
+	}
+
+	includeSubtreeHashes := req.IncludeSubtrees
+
+	miningCandidate, subtrees, err := ba.blockAssembler.GetMiningCandidate(ctx)
+	if err != nil {
+		return nil, errors.WrapGRPC(err)
+	}
+
+	ba.logger.Debugf("in GetMiningCandidate: miningCandidate: %+v", miningCandidate.Stringify(true))
+
+	id, _ := chainhash.NewHash(miningCandidate.Id)
+
+	ba.jobStore.Set(*id, &subtreeprocessor.Job{
+		ID:              id,
+		Subtrees:        subtrees,
+		MiningCandidate: miningCandidate,
+	}, jobTTL) // create a new job with a TTL, will be cleaned up automatically
 
 	if includeSubtreeHashes {
 		miningCandidate.SubtreeHashes = make([][]byte, len(subtrees))
@@ -1587,36 +1607,6 @@ func (ba *BlockAssembly) GetMiningCandidate(ctx context.Context, req *blockassem
 	)
 
 	return miningCandidate, nil
-}
-
-// createMiningCandidateJob is the shared materialization path for miner requests
-// and recovery snapshots. It validates the FSM and registers the actual job.
-func (ba *BlockAssembly) createMiningCandidateJob(ctx context.Context) (*model.MiningCandidate, []*subtreepkg.Subtree, error) {
-	isRunning, err := ba.blockchainClient.IsFSMCurrentState(ctx, blockchain.FSMStateRUNNING)
-	if err != nil {
-		return nil, nil, errors.WrapGRPC(err)
-	}
-
-	if !isRunning {
-		return nil, nil, errors.WrapGRPC(errors.NewStateError("cannot get mining candidate when FSM is not in RUNNING state"))
-	}
-
-	miningCandidate, subtrees, err := ba.blockAssembler.GetMiningCandidate(ctx)
-	if err != nil {
-		return nil, nil, errors.WrapGRPC(err)
-	}
-
-	ba.logger.Debugf("in GetMiningCandidate: miningCandidate: %+v", miningCandidate.Stringify(true))
-
-	id, _ := chainhash.NewHash(miningCandidate.Id)
-
-	ba.jobStore.Set(*id, &subtreeprocessor.Job{
-		ID:              id,
-		Subtrees:        subtrees,
-		MiningCandidate: miningCandidate,
-	}, jobTTL) // create a new job with a TTL, will be cleaned up automatically
-
-	return miningCandidate, subtrees, nil
 }
 
 // SubmitMiningSolution processes a mining solution submission.

@@ -39,17 +39,17 @@ func (b *mutationFaultBackend) Mark(ctx context.Context, r Record, id string) (R
 }
 
 func TestApplyLostDeleteResponseResumesWithoutAnotherMutation(t *testing.T) {
-	base, source, assembly, tx, manifest, journal := recoveryFixture(t)
+	base, source, tx, manifest, journal := recoveryFixture(t)
 	backend := &mutationFaultBackend{recordBackend: base, ambiguousDelete: true}
-	_, err := Discover(t.Context(), backend, source, assembly, manifest, nil)
+	_, err := discoverForTest(t.Context(), backend, source, manifest, nil)
 	require.NoError(t, err)
-	_, err = Apply(t.Context(), backend, source, manifest, journal, ApplyOptions{Maintenance: true, Tip: source.tip})
+	_, err = Apply(t.Context(), backend, source, manifest, journal, ApplyOptions{Guard: allowRecovery, Maintenance: true, Tip: source.tip})
 	require.ErrorContains(t, err, "delete response lost")
 	require.NotContains(t, base.records, tx.TxID())
 	require.True(t, base.HasMarker(base.records["parent"], tx.TxID()))
 	writes := base.writes
 	backend.ambiguousDelete = false
-	result, err := Apply(t.Context(), backend, source, manifest, journal, ApplyOptions{Maintenance: true, Resume: true, Tip: source.tip})
+	result, err := Apply(t.Context(), backend, source, manifest, journal, ApplyOptions{Guard: allowRecovery, Maintenance: true, Resume: true, Tip: source.tip})
 	require.NoError(t, err)
 	require.EqualValues(t, 1, result.Repaired)
 	require.Equal(t, writes, base.writes, "recorded intent plus authoritative absence must not repeat deletion")
@@ -58,16 +58,16 @@ func TestApplyLostDeleteResponseResumesWithoutAnotherMutation(t *testing.T) {
 func TestApplyRejectsFalseMutationAcknowledgements(t *testing.T) {
 	for _, mode := range []string{"ignored delete", "wrong marker generation"} {
 		t.Run(mode, func(t *testing.T) {
-			base, source, assembly, tx, manifest, journal := recoveryFixture(t)
+			base, source, tx, manifest, journal := recoveryFixture(t)
 			backend := &mutationFaultBackend{recordBackend: base, ignoredDelete: mode == "ignored delete", wrongMarkerReply: mode == "wrong marker generation"}
-			_, err := Discover(t.Context(), backend, source, assembly, manifest, nil)
+			_, err := discoverForTest(t.Context(), backend, source, manifest, nil)
 			require.NoError(t, err)
-			_, err = Apply(t.Context(), backend, source, manifest, journal, ApplyOptions{Maintenance: true, Tip: source.tip})
+			_, err = Apply(t.Context(), backend, source, manifest, journal, ApplyOptions{Guard: allowRecovery, Maintenance: true, Tip: source.tip})
 			require.Error(t, err)
-			require.Contains(t, base.records, tx.TxID(), "a successful RPC response is insufficient without matching readback")
+			require.Contains(t, base.records, tx.TxID(), "a successful write response is insufficient without matching readback")
 			backend.ignoredDelete = false
 			backend.wrongMarkerReply = false
-			_, err = Apply(t.Context(), backend, source, manifest, journal, ApplyOptions{Maintenance: true, Resume: true, Tip: source.tip})
+			_, err = Apply(t.Context(), backend, source, manifest, journal, ApplyOptions{Guard: allowRecovery, Maintenance: true, Resume: true, Tip: source.tip})
 			require.NoError(t, err)
 			require.NotContains(t, base.records, tx.TxID())
 		})
@@ -75,38 +75,38 @@ func TestApplyRejectsFalseMutationAcknowledgements(t *testing.T) {
 }
 
 func TestResumeRefusesUnrelatedParentChange(t *testing.T) {
-	base, source, assembly, tx, manifest, journal := recoveryFixture(t)
-	_, err := Discover(t.Context(), base, source, assembly, manifest, nil)
+	base, source, tx, manifest, journal := recoveryFixture(t)
+	_, err := discoverForTest(t.Context(), base, source, manifest, nil)
 	require.NoError(t, err)
 	base.failAfterMark = true
-	_, err = Apply(t.Context(), base, source, manifest, journal, ApplyOptions{Maintenance: true, Tip: source.tip})
+	_, err = Apply(t.Context(), base, source, manifest, journal, ApplyOptions{Guard: allowRecovery, Maintenance: true, Tip: source.tip})
 	require.Error(t, err)
 	r := base.records["parent"]
 	r.Generation++
 	base.records["parent"] = r
 	base.failAfterMark = false
 	writes := base.writes
-	_, err = Apply(t.Context(), base, source, manifest, journal, ApplyOptions{Maintenance: true, Resume: true, Tip: source.tip})
-	require.ErrorContains(t, err, "parent generation or before-state changed")
+	_, err = Apply(t.Context(), base, source, manifest, journal, ApplyOptions{Guard: allowRecovery, Maintenance: true, Resume: true, Tip: source.tip})
+	require.ErrorContains(t, err, "store record changed outside the recovery journal")
 	require.Equal(t, writes, base.writes)
 	require.Contains(t, base.records, tx.TxID(), "an existing marker cannot authorize a divergent parent")
 }
 
-func TestResumeRejectsRecreatedMasterBeforeDeletingRemainingPage(t *testing.T) {
-	base, source, assembly, tx, manifest, journal := recoveryFixture(t)
+func TestResumeRejectsRecreatedPageBeforeDeletingMaster(t *testing.T) {
+	base, source, tx, manifest, journal := recoveryFixture(t)
 	key := tx.TxID() + ":page"
-	master := base.records[tx.TxID()]
+	page := Record{Key: []byte(key), Data: []byte("page"), Generation: 3}
 	base.records[key] = Record{Key: []byte(key), Data: []byte("page"), Generation: 3}
-	_, err := Discover(t.Context(), base, source, assembly, manifest, nil)
+	_, err := discoverForTest(t.Context(), base, source, manifest, nil)
 	require.NoError(t, err)
-	base.failDeleteKey = key
-	_, err = Apply(t.Context(), base, source, manifest, journal, ApplyOptions{Maintenance: true, Tip: source.tip})
+	base.failDeleteKey = tx.TxID()
+	_, err = Apply(t.Context(), base, source, manifest, journal, ApplyOptions{Guard: allowRecovery, Maintenance: true, Tip: source.tip})
 	require.Error(t, err)
-	base.records[tx.TxID()] = master
+	base.records[key] = page
 	base.failDeleteKey = ""
 	writes := base.writes
-	_, err = Apply(t.Context(), base, source, manifest, journal, ApplyOptions{Maintenance: true, Resume: true, Tip: source.tip})
-	require.ErrorContains(t, err, "deleted record reappeared")
+	_, err = Apply(t.Context(), base, source, manifest, journal, ApplyOptions{Guard: allowRecovery, Maintenance: true, Resume: true, Tip: source.tip})
+	require.ErrorContains(t, err, "store record changed outside the recovery journal")
 	require.Equal(t, writes, base.writes)
 	require.Contains(t, base.records, key)
 }
@@ -114,15 +114,20 @@ func TestResumeRejectsRecreatedMasterBeforeDeletingRemainingPage(t *testing.T) {
 func TestApplyRevalidatesDiscoveryCoverageAndCanonicalEvidence(t *testing.T) {
 	for _, mode := range []string{"new unmined record", "changed dependency", "live output", "changed tip"} {
 		t.Run(mode, func(t *testing.T) {
-			base, source, assembly, tx, manifest, journal := recoveryFixture(t)
-			_, err := Discover(t.Context(), base, source, assembly, manifest, nil)
+			base, source, tx, manifest, journal := recoveryFixture(t)
+			_, err := discoverForTest(t.Context(), base, source, manifest, nil)
 			require.NoError(t, err)
 			tip := source.tip
 			switch mode {
 			case "new unmined record":
-				base.seeds = append(base.seeds, strings.Repeat("9", 64))
+				id := strings.Repeat("9", 64)
+				base.seeds = append(base.seeds, id)
+				base.records[id] = Record{Key: []byte(id), Data: []byte("new unmined record"), Generation: 1}
 			case "changed dependency":
-				delete(base.txs, tx.TxID())
+				record := base.records[tx.TxID()]
+				record.Data = []byte("changed persisted input")
+				record.Generation++
+				base.records[tx.TxID()] = record
 			case "live output":
 				ev := source.evidence[tx.TxID()]
 				ev.Classification = Live
@@ -130,7 +135,7 @@ func TestApplyRevalidatesDiscoveryCoverageAndCanonicalEvidence(t *testing.T) {
 			case "changed tip":
 				source.tip.Hash = strings.Repeat("9", 64)
 			}
-			_, err = Apply(t.Context(), base, source, manifest, journal, ApplyOptions{Maintenance: true, Tip: tip})
+			_, err = Apply(t.Context(), base, source, manifest, journal, ApplyOptions{Guard: allowRecovery, Maintenance: true, Tip: tip})
 			require.Error(t, err)
 			require.Zero(t, base.writes)
 			require.Contains(t, base.records, tx.TxID())

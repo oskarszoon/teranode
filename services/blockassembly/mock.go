@@ -203,7 +203,6 @@ func (m *Mock) GetCandidateBlock(ctx context.Context, candidateID []byte) (*bloc
 
 // mockBlockAssemblyAPIClient is a mock implementation of BlockAssemblyAPIClient
 type mockBlockAssemblyAPIClient struct {
-	blockassembly_api.BlockAssemblyAPIClient
 	mock.Mock
 }
 

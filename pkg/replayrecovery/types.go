@@ -1,5 +1,5 @@
 // Package replayrecovery audits and repairs recreated confirmed transactions.
-// Evidence, storage mutations, and assembly coordination have separate boundaries
+// Evidence, storage mutations, and maintenance checks have separate boundaries
 // so neither missing metadata nor an unverified write can authorize deletion.
 package replayrecovery
 
@@ -10,9 +10,11 @@ import (
 )
 
 const (
-	FullySpent = "fully-spent"
-	Live       = "live"
-	Unknown    = "unknown"
+	FullySpent  = "fully-spent"
+	Live        = "live"
+	Unconfirmed = "unconfirmed"
+	Confirmed   = "confirmed"
+	Unknown     = "unknown"
 )
 
 type Tip struct {
@@ -49,7 +51,8 @@ type Parent struct {
 }
 
 type Snapshot struct {
-	TxID         string   `json:"txid"`
+	TxID string `json:"txid"`
+	// Records are ordered master first, then pages. Apply deletes in reverse.
 	Records      []Record `json:"records"`
 	Parents      []Parent `json:"parents"`
 	Dependencies []string `json:"dependencies"`
@@ -71,16 +74,31 @@ type Backend interface {
 	Delete(context.Context, Record) error
 }
 
-type AssemblyState struct {
-	CandidateID string `json:"candidate_id,omitempty"`
-	ProcessID   string `json:"process_id"`
-	Tip         Tip    `json:"tip"`
-	ResetID     uint64 `json:"reset_id"`
-}
+// Guard checks persisted maintenance state and the pinned chain tip.
+// A guard is required at every scan and mutation boundary.
+type Guard func(context.Context) error
 
-type Assembly interface {
-	State(context.Context) (AssemblyState, error)
-	Transactions(context.Context, func(string) error) (AssemblyState, error)
-	Reset(context.Context) (AssemblyState, error)
-	Candidate(context.Context, func(string) error) (AssemblyState, error)
+type InventoryRecord struct {
+	Record        Record
+	TxID          string
+	Master        bool
+	Page          uint32
+	ExpectedPages uint32
+	Candidate     bool
+	Reason        string
+}
+type SpendReference struct {
+	ParentKey  []byte
+	ParentTxID string
+	Vout       uint32
+	ChildTxID  string
+	Vin        uint32
+	Marked     bool
+}
+type CensusBackend interface {
+	Inventory(context.Context, func(InventoryRecord) error) error
+	SpendReferences(context.Context, func(SpendReference) error) error
+}
+type AbsentBackend interface {
+	SnapshotAbsent(context.Context, *bt.Tx) (Snapshot, error)
 }

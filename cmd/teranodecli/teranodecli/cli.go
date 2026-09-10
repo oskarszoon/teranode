@@ -428,29 +428,19 @@ func Start(args []string, version, commit string) {
 			return nil
 		}
 	case "recoverreplayedtransactions":
-		mode := cmd.FlagSet.String("mode", "discover", "discover (read-only), apply, resume, verify, or export (JSONL)")
-		manifest := cmd.FlagSet.String("manifest", "", "Manifest SQLite path in a private (0700) recovery directory")
-		journal := cmd.FlagSet.String("journal", "", "Durable repair journal path; required for apply, resume, and verify")
-		rpc := cmd.FlagSet.String("rpc", "", "Explicit trusted BSV RPC URL; used for canonical evidence and current output state")
-		history := cmd.FlagSet.String("history-index", "", "Optional local canonical history index; create during discovery or reuse existing index")
-		historyStart := uint32Flag(cmd.FlagSet, "history-start", 0, "First canonical height to index; historical coverage gaps remain unresolved")
-		historyEnd := uint32Flag(cmd.FlagSet, "history-end", 0, "Last height to index (0 = agreed tip)")
-		maintenance := cmd.FlagSet.Bool("maintenance", false, "Acknowledge all writers sharing the UTXO store are stopped/isolated for apply or resume")
-		reset := cmd.FlagSet.Bool("reset", false, "In verify mode, run ordinary reset and await its actual completion")
-		timeout := cmd.FlagSet.Duration("timeout", 30*time.Minute, "Overall command timeout")
-		rate := cmd.FlagSet.Float64("rpc-rate", 5, "Maximum individual RPC requests per second")
-		concurrency := cmd.FlagSet.Int("concurrency", 4, "Maximum simultaneous RPC requests (1..64)")
+		workDir := cmd.FlagSet.String("work-dir", "", "Private durable recovery directory (0700)")
+		apply := cmd.FlagSet.Bool("apply", false, "Apply proven repairs; default is read-only audit")
+		maintenance := cmd.FlagSet.Bool("maintenance", false, "Acknowledge persisted IDLE and all shared-store writers stopped/drained")
+		resume := cmd.FlagSet.Bool("resume", false, "Resume an interrupted apply using its existing work directory")
+		timeout := cmd.FlagSet.Duration("timeout", 30*time.Minute, "Overall recovery timeout")
+		concurrency := cmd.FlagSet.Int("concurrency", 1, "Maximum concurrent Aerospike scan nodes (1..64)")
 		cmd.Execute = func(args []string) error {
 			if len(args) != 0 {
 				return errors.NewInvalidArgumentError("recoverreplayedtransactions takes no positional arguments; use named flags")
 			}
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 			defer cancel()
-			return recoverreplayedtransactions.Run(ctx, logger, tSettings, recoverreplayedtransactions.Options{
-				Mode: *mode, Manifest: *manifest, Journal: *journal, RPC: *rpc, HistoryIndex: *history,
-				HistoryStart: *historyStart, HistoryEnd: *historyEnd, Maintenance: *maintenance, Reset: *reset,
-				Timeout: *timeout, RequestsPerSecond: *rate, Concurrency: *concurrency,
-			}, os.Stdout, os.Stderr)
+			return recoverreplayedtransactions.Run(ctx, logger, tSettings, recoverreplayedtransactions.Options{WorkDir: *workDir, Apply: *apply, Maintenance: *maintenance, Resume: *resume, Timeout: *timeout, Concurrency: *concurrency}, os.Stdout, os.Stderr)
 		}
 	case "checkblockassembly":
 		cmd.Execute = func(args []string) error {

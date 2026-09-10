@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/bsv-blockchain/go-bt/v2"
@@ -122,33 +123,7 @@ func (s *evidenceSource) Check(_ context.Context, id string, tip Tip) (Evidence,
 	return e, nil
 }
 
-type assemblyFixture struct {
-	state  AssemblyState
-	ids    []string
-	resets int
-}
-
-func (a *assemblyFixture) State(context.Context) (AssemblyState, error) { return a.state, nil }
-func (a *assemblyFixture) Transactions(_ context.Context, emit func(string) error) (AssemblyState, error) {
-	for _, id := range a.ids {
-		if err := emit(id); err != nil {
-			return AssemblyState{}, err
-		}
-	}
-	return a.state, nil
-}
-func (a *assemblyFixture) Candidate(ctx context.Context, emit func(string) error) (AssemblyState, error) {
-	s, err := a.Transactions(ctx, emit)
-	s.CandidateID = "fresh-candidate"
-	return s, err
-}
-func (a *assemblyFixture) Reset(context.Context) (AssemblyState, error) {
-	a.resets++
-	a.state.ResetID++
-	return a.state, nil
-}
-
-func recoveryFixture(t *testing.T) (*recordBackend, *evidenceSource, *assemblyFixture, *bt.Tx, string, string) {
+func recoveryFixture(t *testing.T) (*recordBackend, *evidenceSource, *bt.Tx, string, string) {
 	t.Helper()
 	tx := bt.NewTx()
 	require.NoError(t, tx.From("1111111111111111111111111111111111111111111111111111111111111111", 0, "51", 1000))
@@ -157,80 +132,195 @@ func recoveryFixture(t *testing.T) (*recordBackend, *evidenceSource, *assemblyFi
 	b := &recordBackend{records: map[string]Record{"parent": {Key: []byte("parent"), Data: []byte("spent:" + id), Generation: 7}, id: {Key: []byte(id), Data: []byte("unmined"), Generation: 2}}, txs: map[string]*bt.Tx{id: tx}, seeds: []string{id}}
 	tip := Tip{Hash: "2222222222222222222222222222222222222222222222222222222222222222", Height: 200}
 	s := &evidenceSource{tip: tip, evidence: map[string]Evidence{id: {TxID: id, RawTx: tx.String(), BlockHash: "3333333333333333333333333333333333333333333333333333333333333333", BlockHeight: 100, Classification: FullySpent}}}
-	a := &assemblyFixture{state: AssemblyState{ProcessID: "before-repair", Tip: tip}, ids: []string{id}}
 	dir := t.TempDir()
 	require.NoError(t, os.Chmod(dir, 0700))
-	return b, s, a, tx, filepath.Join(dir, "manifest.db"), filepath.Join(dir, "journal.db")
+	return b, s, tx, filepath.Join(dir, "manifest.db"), filepath.Join(dir, "journal.db")
 }
 
 func TestDiscoveryDefaultNeverWrites(t *testing.T) {
-	b, s, a, _, manifest, _ := recoveryFixture(t)
-	summary, err := Discover(t.Context(), b, s, a, manifest, nil)
+	b, s, _, manifest, _ := recoveryFixture(t)
+	summary, err := discoverForTest(t.Context(), b, s, manifest, nil)
 	require.NoError(t, err)
 	require.Equal(t, int64(1), summary.FullySpent)
 	require.Zero(t, b.writes)
 }
 
 func TestApplyMarkerFailureNeverDeletesChild(t *testing.T) {
-	b, s, a, tx, manifest, journal := recoveryFixture(t)
-	_, err := Discover(t.Context(), b, s, a, manifest, nil)
+	b, s, tx, manifest, journal := recoveryFixture(t)
+	_, err := discoverForTest(t.Context(), b, s, manifest, nil)
 	require.NoError(t, err)
 	b.failMark = true
-	_, err = Apply(t.Context(), b, s, manifest, journal, ApplyOptions{Maintenance: true, Tip: s.tip})
+	_, err = Apply(t.Context(), b, s, manifest, journal, ApplyOptions{Guard: allowRecovery, Maintenance: true, Tip: s.tip})
 	require.Error(t, err)
 	require.Contains(t, b.records, tx.TxID())
 	require.Equal(t, "spent:"+tx.TxID(), string(b.records["parent"].Data))
 	b.failMark = false
-	_, err = Apply(t.Context(), b, s, manifest, journal, ApplyOptions{Maintenance: true, Resume: true, Tip: s.tip})
+	_, err = Apply(t.Context(), b, s, manifest, journal, ApplyOptions{Guard: allowRecovery, Maintenance: true, Resume: true, Tip: s.tip})
 	require.NoError(t, err)
 	require.NotContains(t, b.records, tx.TxID())
 	require.True(t, b.HasMarker(b.records["parent"], tx.TxID()))
 }
 
 func TestApplyResumesAmbiguousVerifiedMarker(t *testing.T) {
-	b, s, a, tx, manifest, journal := recoveryFixture(t)
-	_, err := Discover(t.Context(), b, s, a, manifest, nil)
+	b, s, tx, manifest, journal := recoveryFixture(t)
+	_, err := discoverForTest(t.Context(), b, s, manifest, nil)
 	require.NoError(t, err)
 	b.failAfterMark = true
-	_, err = Apply(t.Context(), b, s, manifest, journal, ApplyOptions{Maintenance: true, Tip: s.tip})
+	_, err = Apply(t.Context(), b, s, manifest, journal, ApplyOptions{Guard: allowRecovery, Maintenance: true, Tip: s.tip})
 	require.Error(t, err)
 	require.Contains(t, b.records, tx.TxID())
 	b.failAfterMark = false
-	_, err = Apply(t.Context(), b, s, manifest, journal, ApplyOptions{Maintenance: true, Resume: true, Tip: s.tip})
+	_, err = Apply(t.Context(), b, s, manifest, journal, ApplyOptions{Guard: allowRecovery, Maintenance: true, Resume: true, Tip: s.tip})
 	require.NoError(t, err)
 	require.NotContains(t, b.records, tx.TxID())
 }
 
 func TestApplyRejectsGenerationConflictAndMissingMaintenance(t *testing.T) {
-	b, s, a, tx, manifest, journal := recoveryFixture(t)
-	_, err := Discover(t.Context(), b, s, a, manifest, nil)
+	b, s, tx, manifest, journal := recoveryFixture(t)
+	_, err := discoverForTest(t.Context(), b, s, manifest, nil)
 	require.NoError(t, err)
-	_, err = Apply(t.Context(), b, s, manifest, journal, ApplyOptions{Tip: s.tip})
+	_, err = Apply(t.Context(), b, s, manifest, journal, ApplyOptions{Guard: allowRecovery, Tip: s.tip})
 	require.Error(t, err)
 	require.Zero(t, b.writes)
 	r := b.records[tx.TxID()]
 	r.Generation++
 	b.records[tx.TxID()] = r
-	_, err = Apply(t.Context(), b, s, manifest, journal, ApplyOptions{Maintenance: true, Tip: s.tip})
+	_, err = Apply(t.Context(), b, s, manifest, journal, ApplyOptions{Guard: allowRecovery, Maintenance: true, Tip: s.tip})
 	require.Error(t, err)
 	require.Contains(t, b.records, tx.TxID())
 	require.Zero(t, b.writes)
 }
 
-func TestVerifyRequiresRestartAndLaterTip(t *testing.T) {
-	b, s, a, _, manifest, journal := recoveryFixture(t)
-	_, err := Discover(t.Context(), b, s, a, manifest, nil)
+func TestVerifyCompletesStoreRecoveryWhileIdle(t *testing.T) {
+	b, s, _, manifest, journal := recoveryFixture(t)
+	_, err := discoverForTest(t.Context(), b, s, manifest, nil)
 	require.NoError(t, err)
-	_, err = Apply(t.Context(), b, s, manifest, journal, ApplyOptions{Maintenance: true, Tip: s.tip})
+	_, err = Apply(t.Context(), b, s, manifest, journal, ApplyOptions{Guard: allowRecovery, Maintenance: true, Tip: s.tip})
 	require.NoError(t, err)
-	a.ids = nil
-	_, err = Verify(t.Context(), b, s, a, manifest, journal, true)
-	require.ErrorIs(t, err, ErrPending)
-	a.state.ProcessID = "after-repair"
-	_, err = Verify(t.Context(), b, s, a, manifest, journal, true)
-	require.ErrorIs(t, err, ErrPending)
-	s.tip = Tip{Hash: "4444444444444444444444444444444444444444444444444444444444444444", Height: 201}
-	a.state.Tip = s.tip
-	_, err = Verify(t.Context(), b, s, a, manifest, journal, false)
+	result, err := Verify(t.Context(), b, s, manifest, journal, allowRecovery)
 	require.NoError(t, err)
+	require.True(t, result.Complete)
+	require.True(t, result.RestartRequired)
+}
+
+func (b *recordBackend) Inventory(ctx context.Context, visit func(InventoryRecord) error) error {
+	for key, r := range b.records {
+		id := key
+		master := true
+		var page, pages uint32
+		if strings.HasSuffix(key, ":page") {
+			id = strings.TrimSuffix(key, ":page")
+			master = false
+			page = 1
+		}
+		if _, ok := b.records[id+":page"]; ok && master {
+			pages = 1
+		}
+		if key == "parent" {
+			id = strings.Repeat("1", 64)
+		}
+		if !validHash(id) {
+			id = strings.Repeat("8", 64)
+		}
+		candidate := false
+		for _, seed := range b.seeds {
+			if seed == id {
+				candidate = true
+			}
+		}
+		if err := visit(InventoryRecord{Record: r, TxID: id, Master: master, Page: page, ExpectedPages: pages, Candidate: candidate}); err != nil {
+			return err
+		}
+	}
+	return ctx.Err()
+}
+func (b *recordBackend) SpendReferences(ctx context.Context, visit func(SpendReference) error) error {
+	for key, r := range b.records {
+		if strings.HasPrefix(string(r.Data), "spent:") {
+			parts := strings.Split(string(r.Data), ":")
+			if err := visit(SpendReference{ParentKey: []byte(key), ParentTxID: strings.Repeat("1", 64), ChildTxID: parts[1], Marked: len(parts) == 3}); err != nil {
+				return err
+			}
+		}
+	}
+	return ctx.Err()
+}
+func (b *recordBackend) SnapshotAbsent(ctx context.Context, tx *bt.Tx) (Snapshot, error) {
+	if _, ok := b.records[tx.TxID()]; ok {
+		return Snapshot{}, failure("child still exists")
+	}
+	if _, ok := b.records[tx.TxID()+":page"]; ok {
+		return Snapshot{}, failure("child page still exists")
+	}
+	p, ok := b.records["parent"]
+	if !ok {
+		return Snapshot{}, failure("missing parent")
+	}
+	return Snapshot{TxID: tx.TxID(), Parents: []Parent{{Record: p, Child: tx.TxID()}}}, ctx.Err()
+}
+func discoverForTest(ctx context.Context, b Backend, s Source, path string, progress func(Summary)) (Summary, error) {
+	census, ok := b.(CensusBackend)
+	if !ok {
+		return Summary{}, failure("test backend lacks census")
+	}
+	if _, err := Inventory(ctx, census, path, allowRecovery); err != nil {
+		return Summary{}, err
+	}
+	return Discover(ctx, b, s, path, allowRecovery, progress)
+}
+func TestApplyRequiresGuardAndStopsAfterMarker(t *testing.T) {
+	for _, mode := range []string{"nil", "before", "after-marker"} {
+		t.Run(mode, func(t *testing.T) {
+			b, s, tx, path, journal := recoveryFixture(t)
+			_, err := discoverForTest(t.Context(), b, s, path, nil)
+			require.NoError(t, err)
+			var guard Guard
+			if mode != "nil" {
+				guard = func(context.Context) error {
+					if mode == "before" || b.writes > 0 {
+						return failure("left IDLE")
+					}
+					return nil
+				}
+			}
+			_, err = Apply(t.Context(), b, s, path, journal, ApplyOptions{Maintenance: true, Tip: s.tip, Guard: guard})
+			require.Error(t, err)
+			require.Contains(t, b.records, tx.TxID())
+			if mode == "after-marker" {
+				require.Equal(t, 1, b.writes)
+			} else {
+				require.Zero(t, b.writes)
+			}
+		})
+	}
+}
+func TestAbsentChildRepairOnlyMarksSurvivingParent(t *testing.T) {
+	b, s, tx, path, journal := recoveryFixture(t)
+	delete(b.records, tx.TxID())
+	summary, err := discoverForTest(t.Context(), b, s, path, nil)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, summary.FullySpent)
+	_, err = Apply(t.Context(), b, s, path, journal, ApplyOptions{Maintenance: true, Tip: s.tip, Guard: allowRecovery})
+	require.NoError(t, err)
+	require.Equal(t, 1, b.writes)
+	require.True(t, b.HasMarker(b.records["parent"], tx.TxID()))
+	_, err = Verify(t.Context(), b, s, path, journal, allowRecovery)
+	require.NoError(t, err)
+}
+
+func TestApplyDeletesPagesBeforeMasterToKeepResumeOwnership(t *testing.T) {
+	b, s, tx, path, journal := recoveryFixture(t)
+	pageKey := tx.TxID() + ":page"
+	b.records[pageKey] = Record{Key: []byte(pageKey), Data: []byte("page"), Generation: 3}
+	_, err := discoverForTest(t.Context(), b, s, path, nil)
+	require.NoError(t, err)
+	b.failDeleteKey = tx.TxID()
+	_, err = Apply(t.Context(), b, s, path, journal, ApplyOptions{Maintenance: true, Tip: s.tip, Guard: allowRecovery})
+	require.Error(t, err)
+	require.Contains(t, b.records, tx.TxID(), "master must remain until every page is gone")
+	require.NotContains(t, b.records, pageKey, "page deletion must precede the attempted master deletion")
+	b.failDeleteKey = ""
+	_, err = Apply(t.Context(), b, s, path, journal, ApplyOptions{Maintenance: true, Resume: true, Tip: s.tip, Guard: allowRecovery})
+	require.NoError(t, err)
+	require.NotContains(t, b.records, tx.TxID())
 }

@@ -1,4 +1,4 @@
-// Package recoverreplayedtransactions provides the operator replay-recovery command.
+// Package recoverreplayedtransactions provides the IDLE-only store recovery job.
 package recoverreplayedtransactions
 
 import (
@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -17,7 +16,6 @@ import (
 	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/model"
 	"github.com/bsv-blockchain/teranode/pkg/replayrecovery"
-	"github.com/bsv-blockchain/teranode/services/blockassembly"
 	"github.com/bsv-blockchain/teranode/services/blockchain"
 	"github.com/bsv-blockchain/teranode/settings"
 	"github.com/bsv-blockchain/teranode/stores/blob"
@@ -25,77 +23,34 @@ import (
 	astore "github.com/bsv-blockchain/teranode/stores/utxo/aerospike"
 	"github.com/bsv-blockchain/teranode/ulogger"
 	"github.com/bsv-blockchain/teranode/util"
+	"golang.org/x/sys/unix"
 )
 
 type Options struct {
-	Mode              string
-	Manifest          string
-	Journal           string
-	RPC               string
-	HistoryIndex      string
-	HistoryStart      uint32
-	HistoryEnd        uint32
-	Maintenance       bool
-	Reset             bool
-	Timeout           time.Duration
-	RequestsPerSecond float64
-	Concurrency       int
+	WorkDir     string
+	Apply       bool
+	Maintenance bool
+	Resume      bool
+	Timeout     time.Duration
+	Concurrency int
 }
 
 func (o Options) validate() error {
-	switch o.Mode {
-	case "discover", "apply", "resume", "verify", "export":
-	default:
-		return commandError("mode must be discover, apply, resume, verify, or export")
+	if o.WorkDir == "" {
+		return commandError("work-dir is required")
 	}
-	if o.Manifest == "" {
-		return commandError("manifest path is required")
+	if o.Apply && !o.Maintenance {
+		return commandError("apply requires --maintenance acknowledgement that all shared-store writers are stopped")
 	}
-	paths := map[string]bool{}
-	for _, path := range []string{o.Manifest, o.Journal, o.HistoryIndex} {
-		if path == "" {
-			continue
-		}
-		absolute, err := filepath.Abs(path)
-		if err != nil {
-			return err
-		}
-		if paths[absolute] {
-			return commandError("manifest, journal, and history index must have distinct paths")
-		}
-		paths[absolute] = true
+	if o.Resume && !o.Apply {
+		return commandError("resume requires --apply")
 	}
-	if o.Mode == "export" {
-		return nil
-	}
-	if o.Mode == "apply" || o.Mode == "resume" {
-		if !o.Maintenance {
-			return commandError("apply requires --maintenance acknowledgement that all shared-store writers are stopped")
-		}
-	}
-	if o.Mode != "discover" && o.Journal == "" {
-		return commandError("journal path is required")
-	}
-	if o.RPC == "" {
-		return commandError("explicit trusted --rpc endpoint is required")
-	}
-	if o.Timeout <= 0 || o.RequestsPerSecond <= 0 || o.Concurrency < 1 || o.Concurrency > 64 {
-		return commandError("timeout/rpc-rate must be positive and concurrency between 1 and 64")
-	}
-	if o.HistoryEnd != 0 && o.HistoryStart > o.HistoryEnd {
-		return commandError("history-start exceeds history-end")
-	}
-	if o.HistoryIndex == "" && (o.HistoryStart != 0 || o.HistoryEnd != 0) {
-		return commandError("history bounds require --history-index")
-	}
-	if o.Reset && o.Mode != "verify" {
-		return commandError("--reset is valid only in verify mode")
+	if o.Timeout <= 0 || o.Concurrency < 1 || o.Concurrency > 64 {
+		return commandError("timeout must be positive and concurrency between 1 and 64")
 	}
 	return nil
 }
 
-// historyClient uses only read RPCs. Construction of a normal SQL blockchain
-// store performs schema updates, so it is unsuitable for read-only discovery.
 type historyClient struct{ blockchain.ClientI }
 
 func (c historyClient) GetBlockInChainByHeightHash(ctx context.Context, height uint32, tip *chainhash.Hash) (*model.Block, bool, error) {
@@ -104,18 +59,17 @@ func (c historyClient) GetBlockInChainByHeightHash(ctx context.Context, height u
 		return nil, false, err
 	}
 	if header == nil || !header.Hash().IsEqual(tip) {
-		return nil, false, commandError("local tip moved during historical lookup")
+		return nil, false, commandError("canonical tip moved during history lookup")
 	}
-	block, err := c.GetBlockByHeight(ctx, height)
+	b, err := c.GetBlockByHeight(ctx, height)
 	if err != nil {
 		return nil, false, err
 	}
-	if block == nil || block.Height != height {
-		return nil, false, commandError("historical block height mismatch")
+	if b == nil || b.Height != height {
+		return nil, false, commandError("canonical block height mismatch")
 	}
-	// LocalHistory validates the body commitment; RPCSource additionally verifies
-	// the containing hash at this height against its independently agreed tip.
-	return block, false, nil
+	// LocalHistory authenticates every header's ancestry back from the pinned tip.
+	return b, false, nil
 }
 
 func readOnlyArchive(logger ulogger.Logger, configured *url.URL) (blob.Store, error) {
@@ -143,36 +97,17 @@ func readOnlyArchive(logger ulogger.Logger, configured *url.URL) (blob.Store, er
 	return blob.NewStore(logger, &u, options.WithHashPrefix(2))
 }
 
-// Run writes a JSON summary to out and progress to progress. It does not start
-// node writers and never changes ordinary reset semantics.
+// Run opens read clients only. It never changes FSM state or starts store cleaners.
 func Run(ctx context.Context, logger ulogger.Logger, s *settings.Settings, o Options, out, progress io.Writer) (err error) {
-	if o.Mode == "" {
-		o.Mode = "discover"
-	}
 	if err = o.validate(); err != nil {
 		return err
 	}
-	if o.Mode == "export" {
-		return replayrecovery.ExportManifest(ctx, o.Manifest, out)
-	}
-	ctx, cancel := context.WithTimeout(ctx, o.Timeout)
-	defer cancel()
+	ctx, timeoutCancel := context.WithTimeout(ctx, o.Timeout)
+	defer timeoutCancel()
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
 	if s == nil || s.UtxoStore.UtxoStore == nil || s.UtxoStore.UtxoStore.Scheme != "aerospike" {
 		return commandError("replay recovery supports only the Aerospike UTXO backend")
-	}
-	u := s.UtxoStore.UtxoStore
-	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return commandError("UTXO store URL must name namespace and set")
-	}
-	client, err := util.GetAerospikeClient(logger, u, s)
-	if err != nil {
-		return err
-	}
-	defer util.CloseAerospikeClient(u.Host)
-	coreBackend, err := astore.NewRecoveryBackend(client.Client, parts[0], parts[1], s.UtxoStore.UtxoBatchSize, u.Host)
-	if err != nil {
-		return err
 	}
 	chain, err := blockchain.NewClient(ctx, logger, s, "replay-recovery")
 	if err != nil {
@@ -181,112 +116,296 @@ func Run(ctx context.Context, logger ulogger.Logger, s *settings.Settings, o Opt
 	if closer, ok := chain.(io.Closer); ok {
 		defer func() { err = combineErrors(err, closer.Close()) }()
 	}
-	localHeader, localMeta, err := chain.GetBestBlockHeader(ctx)
+	guard, err := newIdleGuard(ctx, chain)
 	if err != nil {
 		return err
 	}
-	if localHeader == nil || localMeta == nil {
-		return commandError("local canonical tip unavailable")
-	}
-	localTip := replayrecovery.Tip{Hash: localHeader.Hash().String(), Height: localMeta.Height}
-	var history *LocalHistory
-	if o.HistoryIndex != "" {
-		_, statErr := os.Lstat(o.HistoryIndex)
-		if statErr == nil {
-			history, err = OpenHistory(o.HistoryIndex)
-		} else if errors.Is(statErr, os.ErrNotExist) && o.Mode == "discover" {
-			archive, e := readOnlyArchive(logger, s.SubtreeValidation.SubtreeStore)
-			if e != nil {
-				return e
-			}
-			defer func() { err = combineErrors(err, archive.Close(ctx)) }()
-			end := o.HistoryEnd
-			if end == 0 {
-				end = localTip.Height
-			}
-			lastHistoryProgress := time.Time{}
-			history, err = NewHistory(ctx, o.HistoryIndex, historyClient{chain}, archive, HistoryOptions{StartHeight: o.HistoryStart, EndHeight: end, Progress: func(c HistoryCoverage) {
-				if time.Since(lastHistoryProgress) >= 5*time.Second {
-					_, _ = fmt.Fprintf(progress, "History scanned: %d blocks, %d gaps\n", c.Scanned, c.GapCount)
-					lastHistoryProgress = time.Now()
-				}
-			}})
-			if err == nil {
-				_, _ = fmt.Fprintf(progress, "Indexing retained canonical history %d..%d at %s\n", o.HistoryStart, end, localTip.Hash)
-				err = history.Build(ctx, localTip)
-			}
-		} else {
-			err = statErr
+	watcher := guard.watch(ctx, cancel)
+	defer func() {
+		cancel(nil)
+		<-watcher
+		if cause := context.Cause(ctx); cause != nil && !errors.Is(cause, context.Canceled) {
+			err = combineErrors(err, cause)
 		}
-		if history != nil {
-			defer func() { err = combineErrors(err, history.Close()) }()
-		}
-		if err != nil {
-			return err
-		}
-		coverage, _ := json.Marshal(history.Coverage())
-		_, _ = fmt.Fprintf(progress, "History coverage: %s\n", coverage)
-	}
-	var fallback replayrecovery.History
-	if history != nil {
-		fallback = history
-	}
-	source, err := replayrecovery.NewRPCSource(o.RPC, &http.Client{Timeout: 30 * time.Second}, fallback)
+	}()
+	lock, err := lockWorkDir(o.WorkDir)
 	if err != nil {
 		return err
 	}
-	if err = source.Configure(replayrecovery.RPCOptions{MaxResponseBytes: 16 << 20, RequestsPerSecond: o.RequestsPerSecond, Concurrency: o.Concurrency, Timeout: 30 * time.Second}); err != nil {
-		return err
+	defer func() { err = combineErrors(err, lock.Close()) }()
+	u := s.UtxoStore.UtxoStore
+	namespace := strings.Trim(u.Path, "/")
+	set := u.Query().Get("set")
+	if set == "" {
+		set = "txmeta"
 	}
-	tip, err := source.Tip(ctx)
+	if namespace == "" || strings.Contains(namespace, "/") {
+		return commandError("UTXO URL must name one namespace and optional set query parameter")
+	}
+	client, err := util.GetAerospikeClient(logger, u, s)
 	if err != nil {
 		return err
 	}
-	if tip != localTip {
-		return commandError("local canonical tip and trusted RPC disagree")
+	defer util.CloseAerospikeClient(u.Host)
+	native, err := astore.NewRecoveryBackend(client.Client, namespace, set, s.UtxoStore.UtxoBatchSize, u.Host)
+	if err != nil {
+		return err
 	}
+	native.ScanConcurrency = o.Concurrency
 	retained, closeRetained, err := openExternalTransactionReader(ctx, logger, u)
 	if err != nil {
 		return err
 	}
 	defer func() { err = combineErrors(err, closeRetained()) }()
-	backend := replayrecovery.NewEvidenceBackend(coreBackend, source, localTip, retained)
-	var summary replayrecovery.Summary
-	switch o.Mode {
-	case "apply", "resume":
-		summary, err = replayrecovery.Apply(ctx, backend, source, o.Manifest, o.Journal, replayrecovery.ApplyOptions{Maintenance: o.Maintenance, Resume: o.Mode == "resume", Tip: localTip})
-	case "discover", "verify":
-		ba, e := blockassembly.NewClient(ctx, logger, s)
+	rawBackend := replayrecovery.NewEvidenceBackend(native, nil, guard.tip, retained)
+	archive, err := readOnlyArchive(logger, s.SubtreeValidation.SubtreeStore)
+	if err != nil {
+		return err
+	}
+	defer func() { err = combineErrors(err, archive.Close(ctx)) }()
+	return runJob(ctx, native, rawBackend.Transaction, historyClient{chain}, archive, guard, o, s.ChainCfgParams.GenesisActivationHeight, out, progress)
+}
+
+type jobState struct {
+	Version  int                `json:"version"`
+	Identity string             `json:"identity"`
+	Tip      replayrecovery.Tip `json:"tip"`
+	Apply    bool               `json:"apply"`
+	Phase    string             `json:"phase"`
+}
+
+func lockWorkDir(path string) (*os.File, error) {
+	if err := os.MkdirAll(path, 0700); err != nil {
+		return nil, err
+	}
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	dir := os.NewFile(uintptr(fd), path)
+	var stat unix.Stat_t
+	if err = unix.Fstat(fd, &stat); err != nil {
+		_ = dir.Close()
+		return nil, err
+	}
+	if stat.Mode&0077 != 0 || int64(stat.Uid) != int64(os.Geteuid()) {
+		_ = dir.Close()
+		return nil, commandError("work directory must be owned and private (0700)")
+	}
+	if err = unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		_ = dir.Close()
+		return nil, commandError("recovery work directory already in use: %w", err)
+	}
+	return dir, nil
+}
+func writeJobJSON(path string, value any) (err error) {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(filepath.Dir(path), ".recovery-")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	if _, err = f.Write(append(data, '\n')); err == nil {
+		err = f.Sync()
+	}
+	err = combineErrors(err, f.Close())
+	if err != nil {
+		return err
+	}
+	if err = os.Rename(f.Name(), path); err != nil {
+		return err
+	}
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	return combineErrors(dir.Sync(), dir.Close())
+}
+func readJobState(path string) (state jobState, err error) {
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return state, err
+	}
+	f := os.NewFile(uintptr(fd), path)
+	defer f.Close()
+	var stat unix.Stat_t
+	if err = unix.Fstat(fd, &stat); err != nil {
+		return state, err
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Mode&0077 != 0 || int64(stat.Uid) != int64(os.Geteuid()) {
+		return state, commandError("unsafe recovery state file")
+	}
+	err = json.NewDecoder(io.LimitReader(f, 65536)).Decode(&state)
+	return state, err
+}
+
+func runJob(ctx context.Context, native replayrecovery.Backend, retained replayrecovery.TransactionReader, chain HistoryChain, archive blob.Store, guard *idleGuard, o Options, genesis uint32, out, progress io.Writer) (err error) {
+	manifest := filepath.Join(o.WorkDir, "manifest.sqlite")
+	historyPath := filepath.Join(o.WorkDir, "history.sqlite")
+	journal := filepath.Join(o.WorkDir, "journal.sqlite")
+	statePath := filepath.Join(o.WorkDir, "job.json")
+	state := jobState{Version: 2, Identity: native.Identity(), Tip: guard.tip, Apply: o.Apply, Phase: "inventory"}
+	var summary, mutations replayrecovery.Summary
+	reportAllowed := false
+	defer func() {
+		summary = retainMutationStatus(summary, mutations)
+		if err != nil {
+			summary.Complete = false
+		}
+		if reportAllowed {
+			err = combineErrors(err, writeJobJSON(filepath.Join(o.WorkDir, "report.json"), summary))
+		}
+		err = combineErrors(err, json.NewEncoder(out).Encode(summary))
+	}()
+	if o.Resume {
+		saved, e := readJobState(statePath)
 		if e != nil {
 			return e
 		}
-		defer func() { err = combineErrors(err, ba.Close()) }()
-		assembly := NewAssembly(ba)
-		if o.Mode == "discover" {
-			last := time.Time{}
-			summary, err = replayrecovery.Discover(ctx, backend, source, assembly, o.Manifest, func(p replayrecovery.Summary) {
-				if time.Since(last) >= 5*time.Second {
-					_, _ = fmt.Fprintf(progress, "%s: %d transactions\n", p.Stage, p.Scanned)
-					last = time.Now()
-				}
-			})
-		} else {
-			summary, err = replayrecovery.Verify(ctx, backend, source, assembly, o.Manifest, o.Journal, o.Reset, s.ChainCfgParams.GenesisActivationHeight)
+		if saved.Version != state.Version || saved.Identity != state.Identity || saved.Tip != state.Tip || !saved.Apply {
+			return commandError("resume identity, version, mode or pinned tip mismatch")
+		}
+		state = saved
+	} else {
+		entries, e := os.ReadDir(o.WorkDir)
+		if e != nil {
+			return e
+		}
+		if len(entries) != 0 {
+			return commandError("work directory contains an existing run; use a new directory or explicit --resume")
+		}
+		if err = writeJobJSON(statePath, state); err != nil {
+			return err
 		}
 	}
-	return combineErrors(err, json.NewEncoder(out).Encode(summary))
+	reportAllowed = true
+	if o.Resume && (state.Phase == "apply" || state.Phase == "verify" || state.Phase == "done") {
+		_, e := os.Lstat(journal)
+		mutations.RestartRequired = e == nil
+		mutations.Applied = state.Phase == "verify" || state.Phase == "done"
+	}
+	switch state.Phase {
+	case "inventory", "history", "discover", "apply", "verify", "done":
+	default:
+		return commandError("invalid recovery phase")
+	}
+	beforeApply := state.Phase == "inventory" || state.Phase == "history" || state.Phase == "discover"
+	if beforeApply {
+		if _, e := os.Lstat(journal); e == nil {
+			return commandError("unexpected mutation journal in an unsealed run")
+		} else if !errors.Is(e, os.ErrNotExist) {
+			return e
+		}
+		if o.Resume {
+			// Only unsealed, read-only artifacts owned by this job can be rebuilt.
+			for _, path := range []string{manifest, historyPath} {
+				for _, suffix := range []string{"", ".lock", "-journal"} {
+					if e := os.Remove(path + suffix); e != nil && !errors.Is(e, os.ErrNotExist) {
+						return e
+					}
+				}
+			}
+		}
+		census, ok := native.(replayrecovery.CensusBackend)
+		if !ok {
+			return commandError("backend lacks full store census")
+		}
+		summary, err = replayrecovery.Inventory(ctx, census, manifest, guard.Check)
+		if err != nil {
+			return err
+		}
+		state.Phase = "history"
+		if err = writeJobJSON(statePath, state); err != nil {
+			return err
+		}
+	}
+	options := HistoryOptions{StartHeight: 0, EndHeight: guard.tip.Height, Guard: guard.Check, TargetsPath: manifest, GenesisActivationHeight: genesis, Unconfirmed: retained}
+	last := time.Time{}
+	options.Progress = func(c HistoryCoverage) {
+		if time.Since(last) >= 5*time.Second {
+			_, _ = fmt.Fprintf(progress, "History: %d blocks, %d gaps\n", c.Scanned, c.GapCount)
+			last = time.Now()
+		}
+	}
+	var history *LocalHistory
+	if beforeApply {
+		history, err = NewHistory(ctx, historyPath, chain, archive, options)
+		if err != nil {
+			return err
+		}
+		defer func() { err = combineErrors(err, history.Close()) }()
+		if err = history.Build(ctx, guard.tip); err != nil {
+			return err
+		}
+	} else {
+		history, err = OpenHistory(historyPath, chain, options)
+		if err != nil {
+			return err
+		}
+		defer func() { err = combineErrors(err, history.Close()) }()
+	}
+	backend := replayrecovery.NewEvidenceBackend(native, history, guard.tip, retained)
+	if beforeApply {
+		state.Phase = "discover"
+		if err = writeJobJSON(statePath, state); err != nil {
+			return err
+		}
+		summary, err = replayrecovery.Discover(ctx, backend, history, manifest, guard.Check, func(p replayrecovery.Summary) {
+			if time.Since(last) >= 5*time.Second {
+				_, _ = fmt.Fprintf(progress, "%s: %d records\n", p.Stage, p.Scanned)
+				last = time.Now()
+			}
+		})
+		if err != nil && !errors.Is(err, replayrecovery.ErrIncomplete) {
+			return err
+		}
+		if !o.Apply {
+			return err
+		}
+		state.Phase = "apply"
+		if e := writeJobJSON(statePath, state); e != nil {
+			return e
+		}
+	}
+	_, statErr := os.Lstat(journal)
+	resumeJournal := statErr == nil
+	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+		return statErr
+	}
+	summary, err = replayrecovery.Apply(ctx, backend, history, manifest, journal, replayrecovery.ApplyOptions{Guard: guard.Check, Maintenance: o.Maintenance, Resume: resumeJournal, Tip: guard.tip})
+	mutations = retainMutationStatus(summary, mutations)
+	if err != nil && !errors.Is(err, replayrecovery.ErrIncomplete) {
+		return err
+	}
+	state.Phase = "verify"
+	if e := writeJobJSON(statePath, state); e != nil {
+		return e
+	}
+	summary, err = replayrecovery.Verify(ctx, backend, history, manifest, journal, guard.Check)
+	if err == nil {
+		state.Phase = "done"
+		err = writeJobJSON(statePath, state)
+	}
+	return err
 }
 
-// ExitCode distinguishes an incomplete audit, pending verification, and failure.
 func ExitCode(err error) int {
 	if err == nil {
 		return 0
-	}
-	if errors.Is(err, replayrecovery.ErrPending) {
-		return 3
 	}
 	if errors.Is(err, replayrecovery.ErrIncomplete) {
 		return 2
 	}
 	return 1
+}
+
+// Mutation status is sticky across failures in later read-only phases.
+func retainMutationStatus(report, previous replayrecovery.Summary) replayrecovery.Summary {
+	report.RestartRequired = report.RestartRequired || previous.RestartRequired
+	report.Applied = report.Applied || previous.Applied
+	report.Repaired = max(report.Repaired, previous.Repaired)
+	return report
 }

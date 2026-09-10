@@ -16,30 +16,34 @@ import (
 
 var (
 	ErrIncomplete = sentinelError("recovery audit contains unresolved records")
-	ErrPending    = sentinelError("recovery verification pending")
 )
 
 type Summary struct {
-	Scanned    int64  `json:"scanned"`
-	FullySpent int64  `json:"fully_spent"`
-	Live       int64  `json:"live"`
-	Unknown    int64  `json:"unknown"`
-	Blocked    int64  `json:"blocked"`
-	Repaired   int64  `json:"repaired"`
-	Stage      string `json:"stage"`
+	Scanned         int64  `json:"scanned"`
+	FullySpent      int64  `json:"fully_spent"`
+	Live            int64  `json:"live"`
+	Unknown         int64  `json:"unknown"`
+	Blocked         int64  `json:"blocked"`
+	Repaired        int64  `json:"repaired"`
+	Stage           string `json:"stage"`
+	Complete        bool   `json:"complete"`
+	Applied         bool   `json:"applied"`
+	RestartRequired bool   `json:"restart_required"`
+	Findings        int64  `json:"findings"`
+	Kept            int64  `json:"kept"`
 }
 
 type manifestHeader struct {
-	Version       int           `json:"version"`
-	Identity      string        `json:"identity"`
-	Tip           Tip           `json:"tip"`
-	Assembly      AssemblyState `json:"assembly"`
-	Created       time.Time     `json:"created"`
-	Complete      bool          `json:"complete"`
-	GraphComplete bool          `json:"graph_complete"`
+	Version       int       `json:"version"`
+	Identity      string    `json:"identity"`
+	Tip           Tip       `json:"tip"`
+	Created       time.Time `json:"created"`
+	Complete      bool      `json:"complete"`
+	GraphComplete bool      `json:"graph_complete"`
 }
 
 type Entry struct {
+	Action   string   `json:"action,omitempty"`
 	Evidence Evidence `json:"evidence"`
 	Snapshot Snapshot `json:"snapshot"`
 	Blocked  bool     `json:"blocked"`
@@ -63,7 +67,7 @@ func (m *manifest) checksum() (string, error) {
 		return "", err
 	}
 	_, _ = h.Write(b)
-	for _, query := range []string{"SELECT id,json_array(CAST(entry AS TEXT),classification,blocked) FROM entries ORDER BY id", "SELECT child,parent FROM edges ORDER BY child,parent"} {
+	for _, query := range []string{"SELECT id,json_array(CAST(entry AS TEXT),classification,blocked) FROM entries ORDER BY id", "SELECT child,parent FROM edges ORDER BY child,parent", "SELECT hex(key),json_array(txid,master,page,expected_pages,CAST(record AS TEXT),candidate,reason) FROM inventory ORDER BY key", "SELECT hex(parent_key)||':'||vout,json_array(parent_txid,child_txid,vin,marked) FROM spend_refs ORDER BY parent_key,vout", "SELECT hex(key),reason FROM findings ORDER BY key,reason", "SELECT id, id FROM targets ORDER BY id"} {
 		rows, e := m.db.Query(query)
 		if e != nil {
 			return "", e
@@ -107,7 +111,7 @@ func openManifest(path string, auditOnly ...bool) (_ *manifest, err error) {
 	if err = json.Unmarshal(header, &m.header); err != nil {
 		return nil, err
 	}
-	if m.header.Version != 1 || !m.header.Complete || (!m.header.GraphComplete && (len(auditOnly) == 0 || !auditOnly[0])) {
+	if m.header.Version != 2 || !m.header.Complete || (!m.header.GraphComplete && (len(auditOnly) == 0 || !auditOnly[0])) {
 		return nil, failure("manifest is incomplete or unsupported")
 	}
 	digest, err := m.checksum()
@@ -122,8 +126,18 @@ func openManifest(path string, auditOnly ...bool) (_ *manifest, err error) {
 
 func (m *manifest) summary() (Summary, error) {
 	s := Summary{Stage: "discovered"}
-	err := m.db.QueryRow("SELECT COUNT(*),COALESCE(SUM(classification=? AND blocked=0),0),COALESCE(SUM(classification=?),0),COALESCE(SUM(classification=?),0),COALESCE(SUM(blocked),0) FROM entries", FullySpent, Live, Unknown).Scan(&s.Scanned, &s.FullySpent, &s.Live, &s.Unknown, &s.Blocked)
-	return s, err
+	err := m.db.QueryRow("SELECT COALESCE(SUM(classification=? AND blocked=0),0),COALESCE(SUM(classification=?),0),COALESCE(SUM(classification=?),0),COALESCE(SUM(blocked),0),COALESCE(SUM(classification IN (?,?)),0) FROM entries", FullySpent, Live, Unknown, Unconfirmed, Confirmed).Scan(&s.FullySpent, &s.Live, &s.Unknown, &s.Blocked, &s.Kept)
+	if err != nil {
+		return s, err
+	}
+	if err = m.db.QueryRow("SELECT COUNT(*) FROM inventory").Scan(&s.Scanned); err != nil {
+		return s, err
+	}
+	if err = m.db.QueryRow("SELECT COUNT(*) FROM findings").Scan(&s.Findings); err != nil {
+		return s, err
+	}
+	s.Complete = m.header.GraphComplete && s.Unknown == 0 && s.Live == 0 && s.Blocked == 0 && s.Findings == 0
+	return s, nil
 }
 
 func (m *manifest) each(ctx context.Context, eligibleOnly bool, fn func(Entry) error) error {
@@ -174,52 +188,40 @@ func ExportManifest(ctx context.Context, path string, w io.Writer) error {
 	return m.each(ctx, false, func(e Entry) error { return enc.Encode(e) })
 }
 
-// Discover scans both the unmined store and a complete assembly snapshot without
-// invoking any backend mutation. Unknown transactions remain visible in the audit.
-func Discover(ctx context.Context, backend Backend, source Source, assembly Assembly, path string, progress func(Summary)) (result Summary, err error) {
+// Discover classifies a completed census and seals explicit repair actions.
+func Discover(ctx context.Context, backend Backend, source Source, path string, guard Guard, progress func(Summary)) (result Summary, err error) {
+	if err = checkGuard(ctx, guard); err != nil {
+		return result, err
+	}
 	tip, err := source.Tip(ctx)
 	if err != nil {
 		return result, err
 	}
-	state, err := assembly.State(ctx)
+	if !validHash(tip.Hash) {
+		return result, failure("invalid canonical tip")
+	}
+	db, err := openPrivateDB(path, false, false)
 	if err != nil {
 		return result, err
 	}
-	if state.Tip != tip || !validHash(tip.Hash) || state.ProcessID == "" {
-		return result, failure("local assembly and trusted source must agree on a valid tip")
-	}
-	db, err := openPrivateDB(path, true, false)
-	if err != nil {
-		return result, err
-	}
-	m := &manifest{lockedDB: db, header: manifestHeader{Version: 1, Identity: backend.Identity(), Tip: tip, Assembly: state, Created: time.Now().UTC(), GraphComplete: true}}
+	m := &manifest{lockedDB: db, header: manifestHeader{Version: 2, Identity: backend.Identity(), Tip: tip, Created: time.Now().UTC(), GraphComplete: true}}
 	defer func() { err = combineErrors(err, m.Close()) }()
-	_, err = m.db.Exec("CREATE TABLE manifest(header BLOB NOT NULL,digest TEXT NOT NULL); CREATE TABLE entries(id TEXT PRIMARY KEY,entry BLOB NOT NULL DEFAULT '',classification TEXT NOT NULL DEFAULT '',blocked INTEGER NOT NULL DEFAULT 0); CREATE TABLE edges(child TEXT NOT NULL,parent TEXT NOT NULL,PRIMARY KEY(child,parent)); CREATE INDEX edge_parent ON edges(parent)")
-	if err != nil {
+	var complete int
+	if err = m.db.QueryRow("SELECT complete FROM inventory_state").Scan(&complete); err != nil || complete != 1 {
+		return result, failure("store inventory incomplete")
+	}
+	var existing int
+	if err = m.db.QueryRow("SELECT COUNT(*) FROM manifest").Scan(&existing); err != nil {
 		return result, err
 	}
-	emit := func(id string) error {
-		if !validHash(id) {
-			return failure("invalid discovered transaction identity")
-		}
-		_, e := m.db.ExecContext(ctx, "INSERT OR IGNORE INTO entries(id) VALUES (?)", id)
-		if e == nil && progress != nil {
-			result.Scanned++
-			result.Stage = "enumerating"
-			progress(result)
-		}
-		return e
+	if existing != 0 {
+		return result, failure("manifest is already sealed")
 	}
-	if err = backend.Scan(ctx, emit); err != nil {
+	var unknownOwners int
+	if err = m.db.QueryRow("SELECT COUNT(*) FROM inventory WHERE txid='' ").Scan(&unknownOwners); err != nil {
 		return result, err
 	}
-	after, err := assembly.Transactions(ctx, emit)
-	if err != nil {
-		return result, err
-	}
-	if after.ProcessID != state.ProcessID || after.Tip != tip || after.ResetID != state.ResetID {
-		return result, failure("assembly changed during discovery")
-	}
+	m.header.GraphComplete = unknownOwners == 0
 	result.Scanned = 0
 	result.Stage = "auditing"
 	last := ""
@@ -232,10 +234,12 @@ func Discover(ctx context.Context, backend Backend, source Source, assembly Asse
 		if e != nil {
 			return result, e
 		}
-		inputs, e := backend.Inputs(ctx, id)
-		if e != nil {
-			m.header.GraphComplete = false
+		if e = checkGuard(ctx, guard); e != nil {
+			return result, e
 		}
+		inputs, inputErr := backend.Inputs(ctx, id)
+		// Input gaps remain attached to this component; the native census
+		// independently records incoming spends across the entire store.
 		for _, parent := range inputs {
 			if !validHash(parent) {
 				return result, failure("invalid dependency for %s", id)
@@ -261,18 +265,63 @@ func Discover(ctx context.Context, backend Backend, source Source, assembly Asse
 			return result, failure("evidence identity/tip mismatch for %s", id)
 		}
 		entry := Entry{Evidence: ev}
-		if ev.Classification == FullySpent {
+		var present, findings, candidates int
+		if e = m.db.QueryRow("SELECT COUNT(*) FROM inventory WHERE txid=? AND master=1", id).Scan(&present); e != nil {
+			return result, e
+		}
+		if e = m.db.QueryRow("SELECT COUNT(*) FROM findings f JOIN inventory i ON i.key=f.key WHERE i.txid=?", id).Scan(&findings); e != nil {
+			return result, e
+		}
+		if inputErr != nil || findings > 0 {
+			entry.Evidence.Classification = Unknown
+			entry.Evidence.Reason = "incomplete local inputs or unsafe inventory"
+		}
+		if e = m.db.QueryRow("SELECT COUNT(*) FROM inventory WHERE txid=? AND (candidate=1 OR reason!='')", id).Scan(&candidates); e != nil {
+			return result, e
+		}
+		if present > 0 && candidates == 0 && findings == 0 && inputErr == nil {
+			tx, parseErr := bt.NewTxFromString(ev.RawTx)
+			if parseErr == nil && tx.TxID() == id && validHash(ev.BlockHash) && ev.BlockHeight <= tip.Height {
+				entry.Evidence.Classification = Confirmed
+			} else {
+				entry.Evidence.Classification = Unknown
+				entry.Evidence.Reason = "dependent mined record lacks canonical inclusion"
+			}
+		}
+		if present > 0 {
+			entry.Action = "delete-recreated"
+		} else {
+			entry.Action = "mark-absent"
+		}
+		if entry.Evidence.Classification == FullySpent {
 			tx, parseErr := bt.NewTxFromString(ev.RawTx)
 			if parseErr != nil || tx.TxID() != id || !validHash(ev.BlockHash) || ev.BlockHeight > tip.Height {
 				return result, failure("invalid confirmed evidence for %s", id)
 			}
-			entry.Snapshot, e = backend.Snapshot(ctx, tx)
+			if entry.Action == "mark-absent" {
+				absent, ok := backend.(AbsentBackend)
+				if !ok {
+					e = failure("backend cannot snapshot absent child")
+				} else {
+					entry.Snapshot, e = absent.SnapshotAbsent(ctx, tx)
+				}
+			} else {
+				entry.Snapshot, e = backend.Snapshot(ctx, tx)
+			}
+			if e == nil {
+				for _, parent := range entry.Snapshot.Parents {
+					if parent.Record.ExpiresAt != 0 {
+						e = failure("required parent has finite expiry; automatic repair is unsafe")
+						break
+					}
+				}
+			}
 			if e != nil {
 				entry.Evidence.Classification = Unknown
 				entry.Evidence.Reason = "unsafe local snapshot: " + e.Error()
 			}
 		}
-		if entry.Evidence.Classification != FullySpent && entry.Evidence.Classification != Live && entry.Evidence.Classification != Unknown {
+		if entry.Evidence.Classification != FullySpent && entry.Evidence.Classification != Live && entry.Evidence.Classification != Unknown && entry.Evidence.Classification != Unconfirmed && entry.Evidence.Classification != Confirmed {
 			return result, failure("unsupported evidence classification")
 		}
 		b, e := json.Marshal(entry)
@@ -291,7 +340,8 @@ func Discover(ctx context.Context, backend Backend, source Source, assembly Asse
 	// Uncertain descendants or affected ancestors block the connected affected
 	// component. Historical parents outside the scan are not treated as affected.
 	_, err = m.db.ExecContext(ctx, `WITH RECURSIVE blocked(id) AS (
-SELECT id FROM entries WHERE classification != 'fully-spent'
+SELECT id FROM entries WHERE classification NOT IN ('fully-spent','confirmed')
+UNION SELECT e.parent FROM edges e JOIN inventory i ON i.txid=e.child AND i.master=1 WHERE e.child NOT IN (SELECT id FROM entries)
 UNION SELECT CASE WHEN e.child=b.id THEN e.parent ELSE e.child END FROM edges e JOIN blocked b ON e.child=b.id OR e.parent=b.id JOIN entries n ON n.id=CASE WHEN e.child=b.id THEN e.parent ELSE e.child END
 ) UPDATE entries SET blocked=1 WHERE classification='fully-spent' AND id IN (SELECT id FROM blocked)`)
 	if err != nil {
@@ -330,12 +380,8 @@ UNION SELECT CASE WHEN e.child=b.id THEN e.parent ELSE e.child END FROM edges e 
 	if end != tip {
 		return result, failure("trusted tip changed during discovery")
 	}
-	endState, err := assembly.State(ctx)
-	if err != nil {
+	if err = checkGuard(ctx, guard); err != nil {
 		return result, err
-	}
-	if endState.ProcessID != state.ProcessID || endState.Tip != tip || endState.ResetID != state.ResetID {
-		return result, failure("assembly changed during discovery")
 	}
 	m.header.Complete = true
 	digest, err := m.checksum()
@@ -353,7 +399,7 @@ UNION SELECT CASE WHEN e.child=b.id THEN e.parent ELSE e.child END FROM edges e 
 	if !m.header.GraphComplete {
 		return result, failure("dependency enumeration incomplete: %w", ErrIncomplete)
 	}
-	if result.Unknown > 0 || result.Live > 0 || result.Blocked > 0 {
+	if !result.Complete {
 		return result, ErrIncomplete
 	}
 	return result, nil

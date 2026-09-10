@@ -1,186 +1,138 @@
 # Recover replayed confirmed transactions
 
-`teranode-cli recoverreplayedtransactions` audits unmined Aerospike records and
-block assembly for transactions that were confirmed, fully spent, pruned, then
-recreated by replay after a surviving parent lost its `deletedChildren` marker.
-Ordinary reset, full reset, and reset with input validation can retain these
-records. None of those reset modes performs this recovery.
+`teranode-cli recoverreplayedtransactions` audits the persisted Aerospike store
+for confirmed transactions recreated after pruning, and missing replay markers
+on surviving parents. One job inventories the store, authenticates local chain
+evidence, applies proven repairs when requested, and verifies persisted results.
+Audit is the default. It never purges all unmined transactions.
 
-The default mode is **read-only discovery**. Repair requires independent canonical
-confirmation evidence, current output state, complete dependency enumeration,
-matching local records, and explicit maintenance acknowledgement. It never
-unspends the child's confirmed inputs or removes retained transaction blobs.
+`resetblockassembly` rebuilds assembly from persisted state. It can reload these
+recreated records; clearing assembly alone does not repair the store.
 
-## Evidence and supported storage
+## Operator preconditions
 
-Apply/resume supports Aerospike only. Use the same settings context, namespace,
-set, output batch size, external transaction store, and subtree store as the node.
-The command opens a direct Aerospike connection without starting normal UTXO
-store background workers. Blockchain and assembly access use their gRPC APIs;
-run the matching node version with recovery RPC support.
+1. Put the node in **IDLE**. Stop/drain every writer sharing the UTXO, blockchain
+   and archive stores, or restart services into an inactive configuration.
+   Include propagation/validator, block/subtree validation, assembly and retries,
+   block persister, pruner/blob deletion, legacy ingestion, other replicas and
+   DAH/background cleanup. Disable automatic restart/resume during recovery.
+   Restarting services alone does not prove that writes have stopped.
+2. Keep the existing blockchain metadata service reachable in IDLE, plus SQL,
+   Aerospike and retained archives. Prevent external chain/FSM changes. The job
+   uses existing blockchain read RPCs and a direct Aerospike client; it does not
+   start normal UTXO cleaners or construct a blockchain store that runs migrations.
+3. Preserve backups and incident evidence. Use a private directory on durable
+   storage, owned by the operator, mode `0700`. Allow enough disk for the complete
+   store census, targeted chain evidence and mutation before-images. Files are
+   private `0600` files. Keep them out of automatic cleanup paths.
+4. Run only one recovery job against the store, including across hosts. The work
+   directory lock prevents concurrent use of that directory; it is not a
+   distributed store lease.
 
-An explicit trusted SV Node RPC endpoint is required. For example:
-`https://bsv-rpc.publicnode.com`. Availability and historical retention can change.
-Requests are individual, bounded, rate limited, and unauthenticated when the URL
-contains no credentials. The RPC's UTXO view remains a trust dependency.
+The CLI reads persisted `fsm_state` through the existing blockchain API and
+accepts only `IDLE`. Missing state or a failed read stops the job. It checks state
+and the pinned tip throughout scans, before mutations and during verification;
+a watchdog also cancels work if these checks fail. There is no force override
+and no automatic transition to IDLE or RUNNING.
 
-The command rehashes raw transactions, verifies their Merkle inclusion and
-canonical containing block, and checks outputs with `gettxout` using
-`include_mempool=false`. A null response alone never authorizes deletion. A
-locally empty block-ID list does not prove that a transaction was never mined.
-The local blockchain, assembly, and RPC must agree on the pinned tip.
+**These checks detect changes; they are not an atomic write lock.** Operators
+must isolate writers. IDLE alone does not stop all already-running background
+workers: for example, the pruner's startup gate and catchup pause do not form a
+maintenance barrier. `--maintenance` acknowledges the isolation procedure.
 
-A pruned RPC may lack old transaction bytes. `--history-index` builds or reuses a
-private SQLite index from retained canonical blocks and subtree/subtree-data
-archives. In discovery, set `--history-start` and `--history-end` to bound a new
-index's scan; end zero means the agreed tip. Reusing an existing index does not
-extend its range; use a new path to index additional blocks. The index validates
-archive commitments, then RPC checks
-the canonical inclusion again when evidence is used. Missing or oversized
-archives become visible coverage gaps, not proof of absence. Defaults bound each
-blob to 64 MiB and each block to one million transactions. Index size can be large.
-Interrupted builds require a new index path; completed indexes can be reused.
+## Invocation
 
-Raw external transaction blobs can establish dependency identities, but never
-confirmation or spentness. Missing bytes, unsupported schemas, missing parent
-records/pages, generation conflicts, and incomplete dependency graphs fail
-closed. Automatic repair refuses parents with finite expiry: their replay guards
-cannot be protected atomically across child record deletions without changing
-their TTL. Child expiry and all recorded TTLs are preserved, never extended.
-
-## Maintenance procedure
-
-1. Back up the affected store and preserve the current assembly state and logs.
-   Create a dedicated recovery directory on durable storage, owned by the operator,
-   mode `0700`. Keep it outside temporary directories and automated cleanup paths.
-   Manifest, journal, and history files must be distinct regular files, mode
-   `0600`; recovery files and lock files cannot be symlinks. Journals and index
-   builds use exclusive locks; completed manifests and indexes allow shared reads.
-2. Quiesce ingress and block processing. Keep read access to blockchain and
-   assembly available for discovery, with no pending assembly queue. Stabilize
-   the local and reference tips. Long scans abort if their pinned tip changes.
-3. Discover and export the audit. Review classifications, coverage, dependencies,
-   backend identity, raw before-images, generations, expiry, and complete page
-   inventories. Use fresh paths for each discovery attempt.
-4. Stop **every writer sharing the store**, including remote node replicas,
-   validators, block processing, assembly, pruners, DAH workers, and administrative
-   jobs. Disable automatic restarts. Keep an isolated blockchain read service
-   available. The command cannot enforce this operational isolation;
-   `--maintenance` acknowledges it. Changes since discovery are rejected before
-   any mutation. If shutdown changed records, perform a fresh quiescent audit.
-5. Apply the reviewed manifest. Keep the manifest and journal together. Never
-   substitute another namespace, endpoint, or batch-size configuration.
-6. After successful apply, restart assembly in a controlled environment and run
-   verification with `--reset`. This awaits a real ordinary reset completion,
-   checks surviving parents and repaired-record absence, and audits a fresh
-   mining candidate. Verification remains pending until a later invocation sees
-   a canonical tip transition **after that reset**.
-7. Allow a controlled tip advance; run verification again without `--reset`.
-   Independently validate a complete fresh mining candidate using the normal
-   consensus-validation path before restoring mining/ingress. Preserve the audit
-   artifacts for incident review.
-
-Example commands (run from durable storage and supply the deployment's normal
-settings context):
+Use the node's normal settings context, Aerospike namespace/set, output batch
+size, external transaction store and subtree archive configuration.
 
 ```bash
-mkdir -m 700 ./replay-recovery
-
-# No UTXO writes. Add --history-index and explicit bounds when old RPC history
-# is unavailable and the corresponding local archives are retained.
+# Read-only audit; no UTXO writes.
 teranode-cli recoverreplayedtransactions \
-  --manifest ./replay-recovery/manifest.db \
-  --rpc https://bsv-rpc.publicnode.com
+  --work-dir /var/lib/teranode/recovery-audit
 
-teranode-cli recoverreplayedtransactions --mode export \
-  --manifest ./replay-recovery/manifest.db \
-  > ./replay-recovery/audit.jsonl
+# Fresh apply: inventory, evidence, repair and store verification in one job.
+teranode-cli recoverreplayedtransactions \
+  --work-dir /var/lib/teranode/recovery-apply --apply --maintenance
 
-# Only after all shared-store writers have stopped.
-teranode-cli recoverreplayedtransactions --mode apply --maintenance \
-  --manifest ./replay-recovery/manifest.db \
-  --journal ./replay-recovery/journal.db \
-  --rpc https://bsv-rpc.publicnode.com
-
-# After restarting assembly; exit 3 is expected until a later tip is observed.
-teranode-cli recoverreplayedtransactions --mode verify --reset \
-  --manifest ./replay-recovery/manifest.db \
-  --journal ./replay-recovery/journal.db \
-  --rpc https://bsv-rpc.publicnode.com
-
-# After the post-reset tip transition.
-teranode-cli recoverreplayedtransactions --mode verify \
-  --manifest ./replay-recovery/manifest.db \
-  --journal ./replay-recovery/journal.db \
-  --rpc https://bsv-rpc.publicnode.com
+# Explicitly resume that interrupted apply, while writers remain stopped.
+teranode-cli recoverreplayedtransactions \
+  --work-dir /var/lib/teranode/recovery-apply --apply --maintenance --resume
 ```
 
-When using a history index, pass the same `--history-index` path to apply, resume,
-and verify. Keep the directory private when exporting JSONL: before-images
-contain transaction metadata and raw bytes.
+These are alternatives, not three mandatory stages. A fresh apply includes its
+own complete audit. A new run requires an empty work directory; an audit's
+artifacts cannot be silently repurposed as an apply. Resume requires the same
+store identity, configuration, compatible artifact version and pinned tip.
 
-## Interrupted apply
+The default timeout is 30 minutes; use `--timeout` for a longer maintenance
+window. `--concurrency` limits Aerospike scan node fan-out (default 1, range 1–64).
+Archive parsing remains bounded and sequential. Full history scans can take much
+longer than the default timeout; plan the window before starting.
 
-`--mode resume --maintenance` deliberately resumes the **same manifest and
-journal**. The journal commits each mutation intent before a remote write and
-records its verified outcome. It retains all child page keys even after the
-master record was deleted. Resume accepts only exact before-state, exact own
-marker mutation, or a deletion already authorized by a recorded intent.
-Unrelated changes stop recovery; a record merely containing a marker is not
-enough. Tip changes require fresh canonical evidence against the newly agreed
-local/RPC tip.
+## Evidence and repair scope
 
-All required parent masters and addressed pages receive and retain the marker
-before any child record is deleted. Every deletion boundary rechecks those
-parents. Descendants are repaired before affected ancestors. Shared parent
-generation changes caused by this journal are tracked explicitly.
+The census covers masters and pagination records, including unmined records,
+missing/inconsistent mined metadata, locked/conflicting/creating states,
+parent spend references, absent children lacking markers and affected
+dependencies. It does not depend on current assembly membership. Unsupported
+schemas or unknown page owners remain findings; they are never disposable data.
 
-Do not delete or edit a journal to bypass a failure, automatically retry with
-fresh state, or restore old before-images over a running store. There is no
-automatic rollback: investigate divergent records while writers remain stopped.
-Never run a blanket unmined purge as a substitute.
+The evidence source is the node's validated local canonical chain at the pinned
+tip. No external SV Node RPC is required. The job authenticates retained raw
+transactions against subtree and block Merkle commitments and verifies header
+ancestry. A fully-spent classification requires positive canonical inclusion
+and a correctly ordered canonical spending transaction for every spendable
+output, using the existing chain-era burned-output policy. Empty mined metadata,
+a missing UTXO record or local spent flags alone never authorize deletion.
 
-## Results and verification limits
+The history scan starts at genesis to make absence claims conservative. Missing,
+malformed or oversized archives create coverage gaps. Positive inclusion/spend
+proofs may still authorize repairs despite unrelated gaps; missing coverage
+cannot prove that a transaction is unconfirmed or an output is live. The index
+retains targeted evidence and its dependencies, not all historical raw bytes.
+Subtree transaction data is streamed, with bounded individual transaction and
+block parsing; blocks exceeding limits remain unresolved.
 
-The command emits a JSON summary on stdout and progress/errors on stderr;
-`export` emits JSONL. Default timeout is 30 minutes, RPC rate 5 requests/second,
-and maximum concurrency 4. Adjust `--timeout`, `--rpc-rate`, and `--concurrency`
-for the environment. These are bounds, not promises of parallel processing.
+Repairs are limited to positively proven recreated fully-spent records and
+missing markers for absent fully-spent children. Normally mined dependent
+records and legitimate unconfirmed transactions are preserved. Confirmed
+records with live outputs, unexplained flags, unsafe parent ownership or expiry,
+and incomplete evidence remain untouched. This recovers this incident's
+persisted state; it is not general reconstruction of arbitrary UTXO corruption.
+
+For each repair the job preserves original input spend owners, writes and reads
+back required parent/page replay markers, and conditionally deletes only sealed
+records using their generations. It preserves native bin types and expiration,
+refuses finite-expiry replay guards, does not unspend inputs and does not delete
+retained archive blobs. The durable journal records intent before remote writes
+and verified outcomes afterward. Shared parents and dependency order are tracked.
+
+## Interrupted work and results
+
+Keep writers stopped on failure and retain the entire work directory. Explicit
+resume reconciles only this job's exact expected before/after states. Interrupted
+read-only phases can be rebuilt; a partial scan is never treated as complete.
+Foreign changes, a different tip or unexplained disappearance stop recovery.
+Do not edit/delete a journal to bypass a failure or restore before-images over
+a chain that has advanced. There is no automatic rollback.
+
+Progress goes to stderr. The final JSON summary goes to stdout and `report.json`;
+`manifest.sqlite`, `history.sqlite`, `journal.sqlite` and `job.json` retain the
+private audit, evidence, mutation journal and phase checkpoint.
 
 | Exit | Meaning |
 | --- | --- |
-| 0 | Requested mode succeeded; apply alone still needs verification. |
-| 1 | Invalid configuration, changed evidence/state, incomplete enumeration, or execution failure. |
-| 2 | Audit contains live, unknown, blocked, or unresolved dependency records. |
-| 3 | Verification awaits restart, completed reset, or a post-reset tip transition. |
+| 0 | Complete audit or complete store repair; JSON distinguishes `applied`. |
+| 1 | Unsafe precondition, interruption, operational failure or failed verification. |
+| 2 | Unresolved findings remain, even if independent components were repaired. |
 
-Confirmed transactions with live outputs and transactions whose history cannot
-be proved remain untouched. Uncertain members block their connected affected
-component. With a complete graph, apply can repair independent eligible
-components and still return exit 2. Unconfirmed legitimate transactions can also
-remain `unknown`; this conservative classification prevents an automatic claim
-that the entire incident is resolved. Export shows unresolved rows even when
-the dependency graph is incomplete; such a graph cannot authorize apply.
+A complete graph allows independent proven repairs while unknown components
+remain untouched. Unresolvable ownership prevents safe apply. Read the counts,
+classifications and reasons; an empty assembly is not proof of recovery.
 
-Verification checks full assembly enumeration and transactions in an actually
-materialized mining candidate, surviving original parent spend ownership, replay
-markers, repaired-record absence, duplicate candidate spends, and current input
-availability. In-candidate inputs must refer to available earlier outputs;
-provably unspendable outputs are excluded using the configured Genesis height.
-This audit is **not a full script or consensus validator**. A coinbase-only
-candidate, a reset acknowledgement, or an apparently healthy template alone
-does not demonstrate recovery. The journal also requires store evidence, an
-observed assembly restart, completed reset, and subsequent canonical tip change.
-
-For a separate validation pass after maintenance, run the existing
-`teranode-cli checkblocktemplate` with the same deployment settings. It requests
-a new assembly block candidate and sends it through the block-validation service;
-retain its returned block identity and validation result alongside the recovery
-journal. Run it only in the controlled post-maintenance environment, since the
-normal validation path can have store side effects. This complements the
-recovery command's independent RPC input audit; it does not replace that audit
-or prove historical spentness from local cached validation alone. Any failure
-keeps the node out of normal mining service pending investigation.
-
-If any part remains unresolved, retain the artifacts and report incomplete
-recovery; do not equate an empty template with a repaired UTXO store.
+After successful store repair, **restart assembly and the other writers through
+the normal operational procedure** so stale in-memory state cannot survive.
+Then resume the FSM and verify a fresh valid mining candidate and the next tip
+transition. `restart_required` is explicit after mutations, including interrupted
+attempts. The CLI finishes store verification while IDLE; it cannot prove those
+later runtime observations and never resumes the node itself.

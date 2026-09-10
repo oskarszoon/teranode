@@ -25,10 +25,12 @@ import (
 // RecoveryBackend uses only direct, bounded client calls: no store startup,
 // cleaners, indexes, wrapper retries, or external transaction deletion.
 type RecoveryBackend struct {
-	client         *as.Client
-	namespace, set string
-	batchSize      int
-	target         string
+	// ScanConcurrency limits cluster scan fan-out; zero uses one node at a time.
+	ScanConcurrency int
+	client          *as.Client
+	namespace, set  string
+	batchSize       int
+	target          string
 }
 
 var _ rr.Backend = (*RecoveryBackend)(nil)
@@ -533,53 +535,10 @@ func (b *RecoveryBackend) Snapshot(ctx context.Context, tx *bt.Tx) (rr.Snapshot,
 		}
 		result.Records = append(result.Records, record)
 	}
-	seen := make(map[string]bool)
-	for vin, input := range tx.Inputs {
-		parentHash := input.PreviousTxIDChainHash()
-		if parentHash == nil || parentHash.IsEqual(hash) {
-			return result, errors.NewProcessingError("invalid parent identity")
-		}
-		parent, parentBins, err := b.readRequired(ctx, parentHash[:])
-		if err != nil {
-			return result, err
-		}
-		if err := recoveryIdentity(parentBins, parentHash); err != nil {
-			return result, err
-		}
-		parentTotal, err := recoveryInteger(parentBins, fields.TotalUtxos)
-		if err != nil || int64(input.PreviousTxOutIndex) >= int64(parentTotal) {
-			return result, errors.NewProcessingError("parent output index mismatch")
-		}
-		parentPages, err := recoveryInteger(parentBins, fields.TotalExtraRecs)
-		if err != nil || parentPages != (parentTotal-1)/b.batchSize {
-			return result, errors.NewProcessingError("parent page inventory mismatch")
-		}
-		addressed, outputBins := parent, parentBins
-		page := int(input.PreviousTxOutIndex) / b.batchSize
-		if page > 0 {
-			addressed, outputBins, err = b.readRequired(ctx, uaerospike.CalculateKeySource(parentHash, input.PreviousTxOutIndex, b.batchSize))
-			if err != nil {
-				return result, err
-			}
-			if err := recoveryIdentity(outputBins, parentHash); err != nil {
-				return result, err
-			}
-		}
-		outputs, err := recoveryOutputs(outputBins, min(b.batchSize, parentTotal-page*b.batchSize))
-		if err != nil {
-			return result, err
-		}
-		raw := outputs[int(input.PreviousTxOutIndex)%b.batchSize]
-		if len(raw) != 68 || !bytes.Equal(raw[32:64], hash[:]) || uint64(binary.LittleEndian.Uint32(raw[64:])) != uint64(vin) {
-			return result, errors.NewProcessingError("parent output does not retain original input spend")
-		}
-		for _, record := range []rr.Record{parent, addressed} {
-			if !seen[string(record.Key)] {
-				seen[string(record.Key)] = true
-				result.Parents = append(result.Parents, rr.Parent{Record: record, Child: result.TxID})
-			}
-		}
+	if err := b.snapshotParents(ctx, tx, &result); err != nil {
+		return result, err
 	}
+
 	for id := range dependencies {
 		result.Dependencies = append(result.Dependencies, id)
 	}
@@ -731,6 +690,86 @@ func (b *RecoveryBackend) VerifyParent(ctx context.Context, parent rr.Parent) er
 	for i, spent := range original {
 		if len(spent) == 68 && bytes.Equal(spent[32:64], child[:]) && !bytes.Equal(spent, outputs[i]) {
 			return errors.NewProcessingError("protected original input spend changed")
+		}
+	}
+	return nil
+}
+
+// SnapshotAbsent preserves surviving input owners without treating missing records
+// as deletions performed by this recovery job. Global census handles unknown pages.
+func (b *RecoveryBackend) SnapshotAbsent(ctx context.Context, tx *bt.Tx) (rr.Snapshot, error) {
+	result := rr.Snapshot{}
+	if tx == nil || len(tx.Outputs) == 0 || len(tx.Inputs) == 0 || tx.IsCoinbase() {
+		return result, errors.NewProcessingError("recovery requires non-coinbase transaction with inputs and outputs")
+	}
+	result.TxID = tx.TxID()
+	for page := 0; page <= (len(tx.Outputs)-1)/b.batchSize; page++ {
+		record, err := b.Read(ctx, uaerospike.CalculateKeySourceInternal(tx.TxIDChainHash(), uint32(page)))
+		if err != nil {
+			return result, err
+		}
+		if record != nil {
+			return result, errors.NewProcessingError("absent child record or page is present")
+		}
+	}
+	if err := b.snapshotParents(ctx, tx, &result); err != nil {
+		return result, err
+	}
+	for _, parent := range result.Parents {
+		if parent.Record.ExpiresAt != 0 {
+			return result, errors.NewProcessingError("finite parent expiration cannot be safely guarded")
+		}
+	}
+	return result, nil
+}
+
+func (b *RecoveryBackend) snapshotParents(ctx context.Context, tx *bt.Tx, result *rr.Snapshot) error {
+	hash := tx.TxIDChainHash()
+	seen := make(map[string]bool)
+	for vin, input := range tx.Inputs {
+		parentHash := input.PreviousTxIDChainHash()
+		if parentHash == nil || parentHash.IsEqual(hash) {
+			return errors.NewProcessingError("invalid parent identity")
+		}
+		parent, parentBins, err := b.readRequired(ctx, parentHash[:])
+		if err != nil {
+			return err
+		}
+		if err := recoveryIdentity(parentBins, parentHash); err != nil {
+			return err
+		}
+		parentTotal, err := recoveryInteger(parentBins, fields.TotalUtxos)
+		if err != nil || int64(input.PreviousTxOutIndex) >= int64(parentTotal) {
+			return errors.NewProcessingError("parent output index mismatch")
+		}
+		parentPages, err := recoveryInteger(parentBins, fields.TotalExtraRecs)
+		if err != nil || parentPages != (parentTotal-1)/b.batchSize {
+			return errors.NewProcessingError("parent page inventory mismatch")
+		}
+		addressed, outputBins := parent, parentBins
+		page := int(input.PreviousTxOutIndex) / b.batchSize
+		if page > 0 {
+			addressed, outputBins, err = b.readRequired(ctx, uaerospike.CalculateKeySource(parentHash, input.PreviousTxOutIndex, b.batchSize))
+			if err != nil {
+				return err
+			}
+			if err := recoveryIdentity(outputBins, parentHash); err != nil {
+				return err
+			}
+		}
+		outputs, err := recoveryOutputs(outputBins, min(b.batchSize, parentTotal-page*b.batchSize))
+		if err != nil {
+			return err
+		}
+		raw := outputs[int(input.PreviousTxOutIndex)%b.batchSize]
+		if len(raw) != 68 || !bytes.Equal(raw[32:64], hash[:]) || uint64(binary.LittleEndian.Uint32(raw[64:])) != uint64(vin) {
+			return errors.NewProcessingError("parent output does not retain original input spend")
+		}
+		for _, record := range []rr.Record{parent, addressed} {
+			if !seen[string(record.Key)] {
+				seen[string(record.Key)] = true
+				result.Parents = append(result.Parents, rr.Parent{Record: record, Child: result.TxID})
+			}
 		}
 	}
 	return nil

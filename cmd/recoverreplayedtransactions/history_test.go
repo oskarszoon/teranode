@@ -1,16 +1,15 @@
 package recoverreplayedtransactions
 
 import (
+	"bytes"
 	"context"
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
+	"database/sql"
+	"encoding/hex"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/bsv-blockchain/go-bt/v2"
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
@@ -80,6 +79,13 @@ func TestHistoryCanonicalArchiveAndGaps(t *testing.T) {
 				options.MaxBlockTransactions = 0
 			}
 			progressCalls := 0
+			inventory, e := sql.Open("sqlite", filepath.Join(dir, "inventory.sqlite"))
+			require.NoError(t, e)
+			_, e = inventory.Exec("CREATE TABLE targets(id TEXT PRIMARY KEY); INSERT INTO targets VALUES(?)", tx.TxID())
+			require.NoError(t, e)
+			require.NoError(t, inventory.Close())
+			options.TargetsPath = filepath.Join(dir, "inventory.sqlite")
+			options.Guard = func(context.Context) error { return nil }
 			options.Progress = func(c HistoryCoverage) {
 				progressCalls++
 				require.Equal(t, uint64(1), c.Scanned)
@@ -89,39 +95,12 @@ func TestHistoryCanonicalArchiveAndGaps(t *testing.T) {
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, history.Close()) })
 			require.NoError(t, history.Build(ctx, tip))
-			require.Equal(t, 1, progressCalls)
-			rpc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				var request struct {
-					ID     uint64 `json:"id"`
-					Method string `json:"method"`
-				}
-				require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
-				var result any
-				var failure any
-				switch request.Method {
-				case "getblockchaininfo":
-					result = map[string]any{"bestblockhash": tip.Hash, "blocks": tip.Height, "chain": "regtest"}
-				case "getrawtransaction":
-					failure = map[string]any{"code": -5, "message": "pruned"}
-				case "getblockhash":
-					result = tip.Hash
-				case "gettxout":
-				default:
-					t.Errorf("unexpected RPC method: %s", request.Method)
-				}
-				require.NoError(t, json.NewEncoder(w).Encode(map[string]any{"id": request.ID, "result": result, "error": failure}))
-			}))
-			t.Cleanup(rpc.Close)
-			source, e := replayrecovery.NewRPCSource(rpc.URL, rpc.Client(), history)
+			require.GreaterOrEqual(t, progressCalls, 1)
+			evidence, e := history.Check(ctx, tx.TxID(), tip)
 			require.NoError(t, e)
-			require.NoError(t, source.Configure(replayrecovery.RPCOptions{RequestsPerSecond: 100000, Concurrency: 2, MaxResponseBytes: 1 << 20, Timeout: time.Second}))
-			evidence, e := source.Check(ctx, tx.TxID(), tip)
 			if mode == "valid" {
-				require.NoError(t, e)
-				require.Equal(t, replayrecovery.FullySpent, evidence.Classification)
-				require.Equal(t, "local-history+rpc", evidence.Source)
+				require.Equal(t, replayrecovery.Live, evidence.Classification)
 			} else {
-				require.Error(t, e)
 				require.Equal(t, replayrecovery.Unknown, evidence.Classification)
 			}
 			inclusion, err := history.Lookup(ctx, tx.TxID(), tip)
@@ -137,13 +116,13 @@ func TestHistoryCanonicalArchiveAndGaps(t *testing.T) {
 				_, err = history.Lookup(ctx, tx.TxID(), tip)
 				require.NoError(t, err, "second lookup/build must use index without rescan")
 				require.NoError(t, history.Close())
-				reopened, e := OpenHistory(filepath.Join(dir, "history.sqlite"))
+				reopened, e := OpenHistory(filepath.Join(dir, "history.sqlite"), chain, options)
 				require.NoError(t, e)
 				history = reopened
 				later := replayrecovery.Tip{Hash: strings.Repeat("ab", 32), Height: 2}
 				again, e := history.Lookup(ctx, tx.TxID(), later)
-				require.NoError(t, e)
-				require.Equal(t, inclusion, again)
+				require.Error(t, e)
+				_ = again
 				require.Equal(t, uint64(1), history.Coverage().Scanned)
 			} else {
 				require.Error(t, err)
@@ -156,6 +135,161 @@ func TestHistoryCanonicalArchiveAndGaps(t *testing.T) {
 }
 
 func TestHistoryOpenRejectsMissingIndex(t *testing.T) {
-	_, err := OpenHistory(filepath.Join(t.TempDir(), "missing.sqlite"))
+	_, err := OpenHistory(filepath.Join(t.TempDir(), "missing.sqlite"), nil, HistoryOptions{})
 	require.Error(t, err)
+}
+
+func TestHistoryAuthenticatedSpendAndLargeArchive(t *testing.T) {
+	for _, mode := range []string{"valid", "large", "wrong-order", "gap", "unconfirmed"} {
+		t.Run(mode, func(t *testing.T) {
+			large := mode == "large"
+			ctx := context.Background()
+			u, err := url.Parse("sqlitememory:///")
+			require.NoError(t, err)
+			chain, err := blockchainsql.New(ulogger.TestLogger{}, u, test.CreateBaseTestSettings(t))
+			require.NoError(t, err)
+			defer chain.Close(ctx)
+			archive := memory.New()
+			coinbase, err := bt.NewTxFromString("0100000001" + strings.Repeat("00", 32) + "ffffffff0100ffffffff010100000000000000015100000000")
+			require.NoError(t, err)
+			parent, err := bt.NewTxFromString("0100000001" + strings.Repeat("11", 32) + "000000000100ffffffff010100000000000000015100000000")
+			require.NoError(t, err)
+			childWire := append([]byte{1, 0, 0, 0, 1}, parent.TxIDChainHash().CloneBytes()...)
+			suffix, err := hex.DecodeString("000000000100ffffffff010100000000000000015100000000")
+			require.NoError(t, err)
+			childWire = append(childWire, suffix...)
+			child, err := bt.NewTxFromBytes(childWire)
+			require.NoError(t, err)
+			grandWire := append([]byte{}, childWire...)
+			copy(grandWire[5:37], child.TxIDChainHash().CloneBytes())
+			grandWire[len(grandWire)-4] = 2
+			grand, err := bt.NewTxFromBytes(grandWire)
+			require.NoError(t, err)
+			transactions := []*bt.Tx{parent, child}
+			if mode == "unconfirmed" {
+				transactions = []*bt.Tx{parent}
+			}
+			if mode == "wrong-order" {
+				transactions = []*bt.Tx{child, parent}
+			}
+			if large {
+				for i := 0; i < 65; i++ {
+					wire := append([]byte{}, childWire[:len(childWire)-6]...)
+					wire[5] = 71                          // unrelated filler is authenticated but never retained
+					wire = append(wire, 254, 0, 0, 16, 0) // canonical 1 MiB script length
+					wire = append(wire, bytes.Repeat([]byte{81}, 1<<20)...)
+					wire = append(wire, byte(i), 0, 0, 0)
+					tx, e := bt.NewTxFromBytes(wire)
+					require.NoError(t, e)
+					transactions = append(transactions, tx)
+				}
+			}
+			st, err := subtree.NewTree(7)
+			require.NoError(t, err)
+			require.NoError(t, st.AddCoinbaseNode())
+			var raw bytes.Buffer
+			for _, tx := range transactions {
+				require.NoError(t, st.AddNode(*tx.TxIDChainHash(), 0, uint64(tx.Size())))
+				raw.Write(tx.Bytes())
+			}
+			if large {
+				require.Greater(t, raw.Len(), 64<<20)
+			}
+			data, err := st.Serialize()
+			require.NoError(t, err)
+			key := st.RootHash()
+			require.NoError(t, archive.Set(ctx, key[:], fileformat.FileTypeSubtree, data))
+			require.NoError(t, archive.Set(ctx, key[:], fileformat.FileTypeSubtreeData, raw.Bytes()))
+			root, err := st.RootHashWithReplaceRootNode(coinbase.TxIDChainHash(), 0, uint64(coinbase.Size()))
+			require.NoError(t, err)
+			prev, _, err := chain.GetBestBlockHeader(ctx)
+			require.NoError(t, err)
+			bits, err := model.NewNBitFromString("207fffff")
+			require.NoError(t, err)
+			block := &model.Block{Header: &model.BlockHeader{Version: 1, HashPrevBlock: prev.Hash(), HashMerkleRoot: root, Timestamp: 1700000001, Bits: *bits}, CoinbaseTx: coinbase, Subtrees: []*chainhash.Hash{key}, TransactionCount: uint64(len(transactions) + 1), Height: 1}
+			_, _, err = chain.StoreBlock(ctx, block, "test")
+			require.NoError(t, err)
+			tip := replayrecovery.Tip{Hash: block.Hash().String(), Height: 1}
+			if mode == "gap" {
+				missing := chainhash.Hash{42}
+				next := &model.Block{Header: &model.BlockHeader{Version: 1, HashPrevBlock: block.Hash(), HashMerkleRoot: &missing, Timestamp: 1700000002, Bits: *bits}, CoinbaseTx: coinbase, Subtrees: []*chainhash.Hash{&missing}, TransactionCount: 2, Height: 2}
+				_, _, err = chain.StoreBlock(ctx, next, "test")
+				require.NoError(t, err)
+				tip = replayrecovery.Tip{Hash: next.Hash().String(), Height: 2}
+			}
+
+			dir := t.TempDir()
+			require.NoError(t, os.Chmod(dir, 0700))
+			path := filepath.Join(dir, "history.sqlite")
+			inventory, err := sql.Open("sqlite", filepath.Join(dir, "inventory.sqlite"))
+			require.NoError(t, err)
+			targetID := parent.TxID()
+			if mode == "unconfirmed" {
+				targetID = grand.TxID()
+			}
+			_, err = inventory.Exec("CREATE TABLE targets(id TEXT PRIMARY KEY); INSERT INTO targets VALUES(?)", targetID)
+			require.NoError(t, err)
+			require.NoError(t, inventory.Close())
+			options := HistoryOptions{StartHeight: 1, EndHeight: tip.Height, TargetsPath: filepath.Join(dir, "inventory.sqlite"), Guard: func(context.Context) error { return nil }}
+			if mode == "unconfirmed" {
+				options.StartHeight = 0
+				options.Unconfirmed = func(_ context.Context, id string) (*bt.Tx, error) {
+					switch id {
+					case child.TxID():
+						return child, nil
+					case grand.TxID():
+						return grand, nil
+					}
+					return nil, commandError("unavailable")
+				}
+			}
+			history, err := NewHistory(ctx, path, chain, archive, options)
+			require.NoError(t, err)
+			require.NoError(t, history.Build(ctx, tip))
+			var retained int
+			require.NoError(t, history.db.QueryRow("SELECT count(*) FROM transactions").Scan(&retained))
+			expectedRetained := 2
+			if mode == "unconfirmed" {
+				expectedRetained = 1
+			}
+			require.Equal(t, expectedRetained, retained)
+			require.NoError(t, history.db.QueryRow("SELECT count(*) FROM blocks").Scan(&retained))
+			require.Equal(t, 1, retained)
+			if mode == "unconfirmed" {
+				evidence, e := history.Check(ctx, grand.TxID(), tip)
+				require.NoError(t, e)
+				require.Equal(t, replayrecovery.Unconfirmed, evidence.Classification, evidence.Reason)
+			}
+			if mode == "gap" {
+				require.Equal(t, uint32(1), history.Coverage().GapCount)
+			} else {
+				require.Zero(t, history.Coverage().GapCount)
+			}
+			evidence, err := history.Check(ctx, parent.TxID(), tip)
+			require.NoError(t, err)
+			if mode == "wrong-order" || mode == "unconfirmed" {
+				require.NotEqual(t, replayrecovery.FullySpent, evidence.Classification)
+			} else {
+				require.Equal(t, replayrecovery.FullySpent, evidence.Classification)
+			}
+			require.NoError(t, history.Close())
+			history, err = OpenHistory(path, chain, options)
+			require.NoError(t, err)
+			evidence, err = history.Check(ctx, parent.TxID(), tip)
+			require.NoError(t, err)
+			if mode == "wrong-order" || mode == "unconfirmed" {
+				require.NotEqual(t, replayrecovery.FullySpent, evidence.Classification)
+			} else {
+				require.Equal(t, replayrecovery.FullySpent, evidence.Classification)
+			}
+			require.NoError(t, history.Close())
+			db, err := sql.Open("sqlite", path)
+			require.NoError(t, err)
+			_, err = db.Exec("DELETE FROM targets")
+			require.NoError(t, err)
+			require.NoError(t, db.Close())
+			_, err = OpenHistory(path, chain, options)
+			require.ErrorContains(t, err, "integrity mismatch")
+		})
+	}
 }

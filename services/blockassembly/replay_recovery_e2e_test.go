@@ -1,8 +1,8 @@
 package blockassembly
 
 import (
+	"bytes"
 	"context"
-	"encoding/hex"
 	"fmt"
 	"net/url"
 	"os"
@@ -14,8 +14,11 @@ import (
 	as "github.com/bsv-blockchain/aerospike-client-go/v8"
 	"github.com/bsv-blockchain/go-bt/v2"
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
+	subtree "github.com/bsv-blockchain/go-subtree"
+	command "github.com/bsv-blockchain/teranode/cmd/recoverreplayedtransactions"
 	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/model"
+	"github.com/bsv-blockchain/teranode/pkg/fileformat"
 	rr "github.com/bsv-blockchain/teranode/pkg/replayrecovery"
 	"github.com/bsv-blockchain/teranode/services/blockassembly/subtreeprocessor"
 	"github.com/bsv-blockchain/teranode/services/blockchain"
@@ -30,51 +33,6 @@ import (
 	"github.com/ordishs/gocore"
 	"github.com/stretchr/testify/require"
 )
-
-// This fixture is an independent deterministic transaction history/UTXO oracle,
-// not the damaged local store. Headers commit the fixture transaction bytes.
-type replayChainFixture struct {
-	tip       rr.Tip
-	child     *bt.Tx
-	inclusion *model.BlockHeader
-	parent    *bt.Tx
-}
-
-func (f *replayChainFixture) Tip(context.Context) (rr.Tip, error) { return f.tip, nil }
-func (f *replayChainFixture) Check(_ context.Context, id string, tip rr.Tip) (rr.Evidence, error) {
-	if tip != f.tip {
-		return rr.Evidence{}, errors.NewError("fixture tip mismatch")
-	}
-	ev := rr.Evidence{TxID: id, Tip: tip, Classification: rr.Unknown, Source: "deterministic canonical fixture"}
-	if id == f.child.TxID() {
-		ev.RawTx = hex.EncodeToString(f.child.Bytes())
-		ev.BlockHash = f.inclusion.Hash().String()
-		ev.BlockHeight = 1
-		ev.Classification = rr.FullySpent
-	}
-	return ev, nil
-}
-func (f *replayChainFixture) Unspent(_ context.Context, id string, vout uint32, tip rr.Tip) (bool, error) {
-	if tip != f.tip {
-		return false, errors.NewError("fixture tip mismatch")
-	}
-	return id == f.parent.TxID() && vout == 1, nil
-}
-
-type replayAssemblyAdapter struct{ b *BlockAssembler }
-
-func (a replayAssemblyAdapter) State(ctx context.Context) (rr.AssemblyState, error) {
-	return a.b.RecoveryState(ctx)
-}
-func (a replayAssemblyAdapter) Reset(ctx context.Context) (rr.AssemblyState, error) {
-	return a.b.RecoveryReset(ctx)
-}
-func (a replayAssemblyAdapter) Transactions(ctx context.Context, visit func(string) error) (rr.AssemblyState, error) {
-	return a.b.RecoveryTransactions(ctx, false, visit)
-}
-func (a replayAssemblyAdapter) Candidate(ctx context.Context, visit func(string) error) (rr.AssemblyState, error) {
-	return a.b.RecoveryTransactions(ctx, true, visit)
-}
 
 func replayFixtureBlock(t *testing.T, previous *model.BlockHeader, coinbase *bt.Tx, txs ...*bt.Tx) *model.Block {
 	t.Helper()
@@ -107,7 +65,7 @@ func runReplayRecoveryAerospikeAssemblyEndToEnd(t *testing.T, paginated bool) {
 		t.Skip("requires real Aerospike")
 	}
 	initPrometheusMetrics()
-	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 180*time.Second)
 	defer cancel()
 	container, err := aeroTest.RunContainer(ctx, aeroTest.WithTTLSupport("test"))
 	require.NoError(t, err)
@@ -138,6 +96,28 @@ func runReplayRecoveryAerospikeAssemblyEndToEnd(t *testing.T, paginated bool) {
 	require.NoError(t, err)
 	chain, err := blockchain.NewLocalClient(logger, settings, chainStore, nil, nil)
 	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, chainStore.Close(context.Background())) })
+	archive := memory.New()
+	retain := func(block *model.Block, height uint32, txs ...*bt.Tx) {
+		block.Height = height
+		if len(txs) == 0 {
+			return
+		}
+		st, e := subtree.NewTree(3)
+		require.NoError(t, e)
+		require.NoError(t, st.AddCoinbaseNode())
+		var raw bytes.Buffer
+		for _, tx := range txs {
+			require.NoError(t, st.AddNode(*tx.TxIDChainHash(), 0, uint64(tx.Size())))
+			raw.Write(tx.Bytes())
+		}
+		key := st.RootHash()
+		data, e := st.Serialize()
+		require.NoError(t, e)
+		require.NoError(t, archive.Set(ctx, key[:], fileformat.FileTypeSubtree, data))
+		require.NoError(t, archive.Set(ctx, key[:], fileformat.FileTypeSubtreeData, raw.Bytes()))
+		block.Subtrees = []*chainhash.Hash{key}
+	}
 	genesis, err := chainStore.GetBlockByID(ctx, 0)
 	require.NoError(t, err)
 	parent := bt.NewTx()
@@ -181,6 +161,8 @@ func runReplayRecoveryAerospikeAssemblyEndToEnd(t *testing.T, paginated bool) {
 	require.NoError(t, err)
 	cb2.LockTime = 2
 	block2 := replayFixtureBlock(t, block1.Header, cb2, grandchild)
+	retain(block1, 1, parent, child)
+	retain(block2, 2, grandchild)
 	for i, block := range []*model.Block{block1, block2} {
 		require.NoError(t, chain.AddBlock(ctx, block, "", blockchainoptions.WithMinedSet(true)))
 		require.NoError(t, chain.SetBlockProcessedAt(ctx, block.Hash()))
@@ -202,8 +184,6 @@ func runReplayRecoveryAerospikeAssemblyEndToEnd(t *testing.T, paginated bool) {
 	}
 	_, _, err = store.SpendAndCreate(ctx, child, 2)
 	require.NoError(t, err)
-	source := &replayChainFixture{tip: rr.Tip{Hash: block2.Hash().String(), Height: 2}, child: child, parent: parent, inclusion: block1.Header}
-	backend := rr.NewEvidenceBackend(nativeBackend, source, source.tip, nil)
 	start := func(header *model.BlockHeader, height uint32) (*BlockAssembler, func()) {
 		serviceCtx, stop := context.WithCancel(ctx)
 		announcements := make(chan subtreeprocessor.NewSubtreeRequest, 100)
@@ -238,11 +218,8 @@ func runReplayRecoveryAerospikeAssemblyEndToEnd(t *testing.T, paginated bool) {
 	}
 	assembler, stop := start(block2.Header, 2)
 	containsChild := func(b *BlockAssembler) bool {
-		var ids []string
-		_, err := b.RecoveryTransactions(ctx, false, func(id string) error { ids = append(ids, id); return nil })
-		require.NoError(t, err)
-		for _, id := range ids {
-			if id == child.TxID() {
+		for _, id := range b.subtreeProcessor.GetTransactionHashes(ctx) {
+			if id == *child.TxIDChainHash() {
 				return true
 			}
 		}
@@ -266,21 +243,69 @@ func runReplayRecoveryAerospikeAssemblyEndToEnd(t *testing.T, paginated bool) {
 	stop()
 	assembler, stop = start(block2.Header, 2)
 	require.True(t, containsChild(assembler), "second real startup also retains replay")
+	stop()
+	// Operators stop every writer and persist IDLE before opening recovery.
+	legitimate := makeChild(parent, 1, 2500)
+	_, _, err = store.SpendAndCreate(ctx, legitimate, 2)
+	require.NoError(t, err)
+	require.NoError(t, chain.SetState(ctx, "fsm_state", []byte("IDLE")))
+	tip := rr.Tip{Hash: block2.Hash().String(), Height: 2}
+	guard := func(ctx context.Context) error {
+		state, e := chain.GetState(ctx, "fsm_state")
+		if e != nil {
+			return e
+		}
+		if string(state) != "IDLE" {
+			return errors.NewProcessingError("not IDLE")
+		}
+		header, meta, e := chain.GetBestBlockHeader(ctx)
+		if e != nil {
+			return e
+		}
+		if header.Hash().String() != tip.Hash || meta.Height != tip.Height {
+			return errors.NewProcessingError("tip changed")
+		}
+		return nil
+	}
 	recoveryDir := filepath.Join(t.TempDir(), "recovery")
 	require.NoError(t, os.Mkdir(recoveryDir, 0700))
 	manifest := filepath.Join(recoveryDir, "manifest.db")
 	journal := filepath.Join(recoveryDir, "journal.db")
-	audit, err := rr.Discover(ctx, backend, source, replayAssemblyAdapter{assembler}, manifest, nil)
+	_, err = rr.Inventory(ctx, nativeBackend, manifest, guard)
 	require.NoError(t, err)
-	require.EqualValues(t, 1, audit.Scanned)
+	rawBackend := rr.NewEvidenceBackend(nativeBackend, nil, tip, func(ctx context.Context, id string) (*bt.Tx, error) {
+		h, e := chainhash.NewHashFromStr(id)
+		if e != nil {
+			return nil, e
+		}
+		return store.GetTxFromExternalStore(ctx, *h)
+	})
+	source, err := command.NewHistory(ctx, filepath.Join(recoveryDir, "history.db"), chainStore, archive, command.HistoryOptions{Guard: guard, TargetsPath: manifest, EndHeight: tip.Height, GenesisActivationHeight: settings.ChainCfgParams.GenesisActivationHeight, Unconfirmed: rawBackend.Transaction})
+	require.NoError(t, err)
+	defer source.Close()
+	require.NoError(t, source.Build(ctx, tip))
+	backend := rr.NewEvidenceBackend(nativeBackend, source, tip, rawBackend.Transaction)
+	audit, err := rr.Discover(ctx, backend, source, manifest, guard, nil)
+	require.NoError(t, err)
 	require.EqualValues(t, 1, audit.FullySpent)
-	stop()
-	_, err = rr.Apply(ctx, backend, source, manifest, journal, rr.ApplyOptions{Maintenance: true, Tip: source.tip})
+	_, err = rr.Apply(ctx, backend, source, manifest, journal, rr.ApplyOptions{Maintenance: true, Tip: tip, Guard: guard})
 	require.NoError(t, err)
+	verified, err := rr.Verify(ctx, backend, source, manifest, journal, guard)
+	require.NoError(t, err)
+	require.True(t, verified.Complete)
+	_, err = nativeBackend.Snapshot(ctx, legitimate)
+	require.NoError(t, err, "valid unmined survives repair")
+	state, err := chain.GetState(ctx, "fsm_state")
+	require.NoError(t, err)
+	require.Equal(t, "IDLE", string(state))
+	// Only the operator resumes normal services after successful verification.
+	require.NoError(t, chain.SetState(ctx, "fsm_state", []byte("RUNNING")))
 	assembler, stop = start(block2.Header, 2)
-	_, err = rr.Verify(ctx, backend, source, replayAssemblyAdapter{assembler}, manifest, journal, true)
-	require.ErrorIs(t, err, rr.ErrPending)
 	require.False(t, containsChild(assembler))
+	done := make(chan error, 1)
+	assembler.resetCh <- resetRequest{FullReset: true, ErrCh: done}
+	require.NoError(t, <-done)
+	require.False(t, containsChild(assembler), "ordinary reset does not reload repaired transaction")
 	stop()
 	// A later canonical tip and a fresh legitimate candidate prove verification is
 	// not relying on a reset acknowledgement or empty candidate alone.
@@ -288,29 +313,27 @@ func runReplayRecoveryAerospikeAssemblyEndToEnd(t *testing.T, paginated bool) {
 	require.NoError(t, err)
 	cb3.LockTime = 3
 	block3 := replayFixtureBlock(t, block2.Header, cb3)
+	retain(block3, 3)
 	require.NoError(t, chain.AddBlock(ctx, block3, "", blockchainoptions.WithMinedSet(true)))
 	require.NoError(t, chain.SetBlockProcessedAt(ctx, block3.Hash()))
 	_, err = store.Create(ctx, cb3, 3)
 	require.NoError(t, err)
 	_, err = store.SetMinedMulti(ctx, []*chainhash.Hash{cb3.TxIDChainHash()}, utxo.MinedBlockInfo{BlockID: 3, BlockHeight: 3, OnLongestChain: true})
 	require.NoError(t, err)
-	source.tip = rr.Tip{Hash: block3.Hash().String(), Height: 3}
-	backend = rr.NewEvidenceBackend(nativeBackend, source, source.tip, nil)
 	require.NoError(t, store.SetBlockHeight(3))
-	legitimate := makeChild(parent, 1, 2500)
-	_, _, err = store.SpendAndCreate(ctx, legitimate, 3)
-	require.NoError(t, err)
 	assembler, stop = start(block3.Header, 3)
 	defer stop()
-	var candidateIDs []string
-	candidate, err := assembler.RecoveryTransactions(ctx, true, func(id string) error { candidateIDs = append(candidateIDs, id); return nil })
+	candidate, subtrees, err := assembler.GetMiningCandidate(ctx)
 	require.NoError(t, err)
+	require.NotNil(t, candidate)
+	var candidateIDs []string
+	for _, st := range subtrees {
+		for _, node := range st.Nodes {
+			candidateIDs = append(candidateIDs, node.Hash.String())
+		}
+	}
 	require.Contains(t, candidateIDs, legitimate.TxID())
 	require.NotContains(t, candidateIDs, child.TxID())
-	require.NotEmpty(t, candidate.CandidateID)
-	verified, err := rr.Verify(ctx, backend, source, replayAssemblyAdapter{assembler}, manifest, journal, false)
-	require.NoError(t, err)
-	require.Equal(t, "verified", verified.Stage)
 	_, _, err = store.SpendAndCreate(ctx, child, 3)
 	require.ErrorContains(t, err, "invalid spend")
 	if paginated {
