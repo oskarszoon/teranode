@@ -141,6 +141,11 @@ func (stp *SubtreeProcessor) recoverUnmined(ctx context.Context, header *model.B
 	// Publication and its admission flag share one lock. Previously leased jobs
 	// retain their immutable subtrees; new jobs cannot see a partial rebuild.
 	stp.miningSnapshots.mu.Lock()
+	if stp.recoveryPendingSince.Load() == nil {
+		since := stp.clock.Now()
+		stp.recoveryPendingSince.Store(&since)
+	}
+	prometheusRecoveryPendingSince.Store(stp.recoveryPendingSince.Load())
 	stp.recoveryPending.Store(true)
 	stp.miningSnapshots.mu.Unlock()
 	stp.recoveryAccepted = accepted
@@ -175,6 +180,14 @@ func (stp *SubtreeProcessor) publishRecoveredMiningData() {
 	defer stp.miningSnapshots.mu.Unlock()
 	stp.updatePrecomputedMiningDataLocked()
 	stp.recoveryPending.Store(false)
+	stp.clearRecoveryPendingMetric()
+	stp.recoveryPendingSince.Store(nil)
+}
+
+// Shutdown removes only this processor's sample without opening its safety gate.
+// The first-failure timestamp is reset only after successful publication.
+func (stp *SubtreeProcessor) clearRecoveryPendingMetric() {
+	prometheusRecoveryPendingSince.CompareAndSwap(stp.recoveryPendingSince.Load(), nil)
 }
 
 // Normal queue admission honours removeMap. Direct reconstruction must honour

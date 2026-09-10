@@ -2268,7 +2268,9 @@ func (ba *BlockAssembly) ResetBlockAssembly(ctx context.Context, _ *blockassembl
 		return nil, errors.NewServiceError(errServiceNotReadyUnminedLoading)
 	}
 
-	ba.blockAssembler.Reset(false)
+	if err := ba.blockAssembler.resetWithOptionsContext(ctx, false, false); err != nil {
+		return nil, err
+	}
 
 	return &blockassembly_api.EmptyMessage{}, nil
 }
@@ -2286,7 +2288,9 @@ func (ba *BlockAssembly) ResetBlockAssemblyFully(ctx context.Context, _ *blockas
 		return nil, errors.NewServiceError(errServiceNotReadyUnminedLoading)
 	}
 
-	ba.blockAssembler.Reset(true)
+	if err := ba.blockAssembler.resetWithOptionsContext(ctx, true, false); err != nil {
+		return nil, err
+	}
 
 	return &blockassembly_api.EmptyMessage{}, nil
 }
@@ -2308,7 +2312,9 @@ func (ba *BlockAssembly) ResetBlockAssemblyValidateInputs(ctx context.Context, _
 		return nil, errors.NewServiceError(errServiceNotReadyUnminedLoading)
 	}
 
-	ba.blockAssembler.ResetWithInputValidation()
+	if err := ba.blockAssembler.resetWithOptionsContext(ctx, false, true); err != nil {
+		return nil, err
+	}
 
 	return &blockassembly_api.EmptyMessage{}, nil
 }

@@ -18,6 +18,8 @@ func TestUnminedRecoveryIntervalLoadsConfiguration(t *testing.T) {
 	}{
 		{"2h", 2 * time.Hour},
 		{"30m", 30 * time.Minute},
+		{"0s", 0},
+		{"-1s", -time.Second},
 	} {
 		t.Run(tc.value, func(t *testing.T) {
 			previous := config.Set(key, tc.value)

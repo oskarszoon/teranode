@@ -377,3 +377,60 @@ func TestUnminedRecoveryTimerWaitsAfterSlowFailure(t *testing.T) {
 	cancel()
 	assembler.wg.Wait()
 }
+
+func TestUnminedRecoveryChecksStateBeforePendingBlocks(t *testing.T) {
+	for _, state := range []blockchain.FSMStateType{blockchain.FSMStateIDLE, blockchain.FSMStateCATCHINGBLOCKS, blockchain.FSMStateRUNNING} {
+		t.Run(state.String(), func(t *testing.T) {
+			assembler, _ := newUnminedRecoveryTestAssembler(t, state)
+			header, _ := assembler.CurrentBlock()
+			next := &model.BlockHeader{Version: header.Version, HashPrevBlock: header.Hash(), HashMerkleRoot: &chainhash.Hash{}, Timestamp: header.Timestamp + 1, Bits: header.Bits, Nonce: 933}
+			require.NoError(t, assembler.blockchainClient.AddBlock(t.Context(), &model.Block{Header: next, CoinbaseTx: coinbaseTxForHeader(t, next), TransactionCount: 1, Subtrees: []*chainhash.Hash{}}, "", options.WithMinedSet(false), options.WithSubtreesSet(true)))
+			pending, err := assembler.blockchainClient.GetBlocksMinedNotSet(t.Context())
+			require.NoError(t, err)
+			require.NotEmpty(t, pending)
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+			recovered, err := assembler.recoverUnminedTransactions(ctx)
+			require.False(t, recovered)
+			if state == blockchain.FSMStateRUNNING {
+				require.Error(t, err, "RUNNING must still wait for pending mined flags")
+			} else {
+				require.NoError(t, err, "IDLE and catchup must defer without waiting for mined flags")
+				require.NoError(t, ctx.Err())
+			}
+		})
+	}
+}
+
+func TestUnminedRecoveryDisabledDoesNotScan(t *testing.T) {
+	assembler, _ := newUnminedRecoveryTestAssembler(t, blockchain.FSMStateRUNNING, func(s *settings.Settings) { s.BlockAssembly.UnminedRecoveryInterval = -time.Second })
+	txID := storeSuppressedRecoveryTransaction(t, assembler)
+	iterator := &recoveryIteratorFailureStore{Store: assembler.utxoStore}
+	assembler.utxoStore = iterator
+	recovered, err := assembler.recoverUnminedTransactions(t.Context())
+	require.NoError(t, err)
+	require.False(t, recovered)
+	require.Zero(t, iterator.attempts.Load())
+	require.Zero(t, assembler.nextUnminedRecoveryDelay(false), "disabled recovery must have no timer")
+	require.NotContains(t, recoveryCandidateHashes(t, assembler), txID)
+}
+
+func TestUnminedRecoveryDisabledKeepsPendingRepair(t *testing.T) {
+	assembler, _ := newUnminedRecoveryTestAssembler(t, blockchain.FSMStateRUNNING)
+	txID := storeSuppressedRecoveryTransaction(t, assembler)
+	processor := assembler.subtreeProcessor
+	processor.SetCurrentItemsPerFile(1)
+	recovered, err := assembler.recoverUnminedTransactions(t.Context())
+	require.Error(t, err)
+	require.False(t, recovered)
+	require.True(t, processor.RecoveryPending())
+	assembler.settings.BlockAssembly.UnminedRecoveryInterval = -time.Second
+	require.Equal(t, time.Minute, assembler.nextUnminedRecoveryDelay(false), "disabling new scans must retain already-started repair responsibility")
+	processor.SetCurrentItemsPerFile(32)
+	recovered, err = assembler.recoverUnminedTransactions(t.Context())
+	require.NoError(t, err)
+	require.True(t, recovered)
+	require.False(t, processor.RecoveryPending())
+	require.Contains(t, recoveryCandidateHashes(t, assembler), txID)
+	require.Zero(t, assembler.nextUnminedRecoveryDelay(true))
+}

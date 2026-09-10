@@ -164,6 +164,10 @@ type BlockAssembler struct {
 	// resetCh handles reset requests for the assembler
 	resetCh chan resetRequest
 
+	// Reset waiters observe both service cancellation and listener termination.
+	resetLifecycleDone <-chan struct{}
+	resetStopped       chan struct{}
+
 	// reconcileCh signals the channel listener to reconcile BA's tip with the
 	// blockchain service's tip via processNewBlockAnnouncement. Buffered cap 1
 	// so multiple triggers coalesce into a single reconciliation pass.
@@ -270,6 +274,8 @@ func NewBlockAssembler(ctx context.Context, logger ulogger.Logger, tSettings *se
 		currentChainMapIDs:  make(map[uint32]struct{}, tSettings.BlockAssembly.MaxBlockReorgCatchup),
 		defaultMiningNBits:  defaultMiningBits,
 		resetCh:             make(chan resetRequest, 2),
+		resetLifecycleDone:  ctx.Done(),
+		resetStopped:        make(chan struct{}),
 		reconcileCh:         make(chan struct{}, 1),
 		currentRunningState: atomic.Value{},
 	}
@@ -395,12 +401,20 @@ func (b *BlockAssembler) startChannelListeners(ctx context.Context) (err error) 
 	b.wg.Add(1)
 	go func() {
 		defer b.wg.Done()
+		if b.resetStopped != nil {
+			defer close(b.resetStopped)
+		}
 		// variables are defined here to prevent unnecessary allocations
 		b.setCurrentRunningState(StateRunning)
 		// Fixed delay: a slow scan must not leave a buffered tick that starts
 		// another expensive scan immediately upon completion.
-		recoveryTimer := time.NewTimer(b.unminedRecoveryInterval())
-		defer recoveryTimer.Stop()
+		var recoveryTimer *time.Timer
+		var recoveryTick <-chan time.Time
+		if delay := b.nextUnminedRecoveryDelay(true); delay > 0 {
+			recoveryTimer = time.NewTimer(delay)
+			recoveryTick = recoveryTimer.C
+			defer recoveryTimer.Stop()
+		}
 
 		for {
 			select {
@@ -410,37 +424,28 @@ func (b *BlockAssembler) startChannelListeners(ctx context.Context) (err error) 
 				// it's created by the blockchain client's Subscribe method
 				return
 
-			case <-recoveryTimer.C:
+			case <-recoveryTick:
 				recovered, recoveryErr := b.recoverUnminedTransactions(ctx)
 				if recoveryErr != nil && ctx.Err() == nil {
-					b.logger.Warnf("[BlockAssembler] Unmined transaction recovery deferred: %v", recoveryErr)
+					b.logUnminedRecoveryError(recoveryErr)
 				}
-				recoveryTimer.Reset(b.nextUnminedRecoveryDelay(recovered))
+				if delay := b.nextUnminedRecoveryDelay(recovered); delay > 0 {
+					recoveryTimer.Reset(delay)
+				} else {
+					recoveryTick = nil
+				}
 
 			case resetReq := <-b.resetCh:
 				b.setCurrentRunningState(StateResetting)
-
-				// If FullReset requested, run lightweight consistency scan first
-				if resetReq.FullReset && !b.subtreeProcessor.RecoveryPending() {
-					if fixErr := b.fixUnminedSinceInconsistencies(ctx); fixErr != nil {
-						b.logger.Errorf("[BlockAssembler] error fixing unmined_since inconsistencies: %v", fixErr)
-					}
+				err := resetReq.run(ctx)
+				if err != nil {
+					b.logger.Errorf("[BlockAssembler] error resetting: %v", err)
 				}
-
-				err := b.reset(ctx, resetReq.ValidateInputs)
-
-				// empty out the reset channel
-				for len(b.resetCh) > 0 {
-					bufferedCh := <-b.resetCh
-					if bufferedCh.ErrCh != nil {
-						bufferedCh.ErrCh <- nil
-					}
-				}
-
+				// Every request executes its own options and receives its actual result.
+				// Buffered results remain safe when the caller has already cancelled.
 				if resetReq.ErrCh != nil {
 					resetReq.ErrCh <- err
 				}
-
 				b.setCurrentRunningState(StateRunning)
 
 			case notification := <-b.blockchainSubscriptionCh:
@@ -1591,9 +1596,8 @@ func (b *BlockAssembler) RemoveTx(ctx context.Context, hash chainhash.Hash) erro
 }
 
 type resetRequest struct {
-	FullReset      bool
-	ValidateInputs bool
-	ErrCh          chan error
+	run   func(context.Context) error
+	ErrCh chan error
 }
 
 // Reset triggers a reset of the block assembler state.
@@ -1612,20 +1616,74 @@ func (b *BlockAssembler) ResetWithInputValidation() {
 }
 
 func (b *BlockAssembler) resetWithOptions(fullReset bool, validateInputs bool) {
-	// run in a go routine to prevent blocking
 	go func() {
-		errCh := make(chan error, 1)
-
-		b.resetCh <- resetRequest{
-			FullReset:      fullReset,
-			ValidateInputs: validateInputs,
-			ErrCh:          errCh,
-		}
-
-		if err := <-errCh; err != nil {
-			b.logger.Errorf("[BlockAssembler] error resetting: %v", err)
-		}
+		// The listener logs execution failures even after the caller stops waiting.
+		_ = b.resetWithOptionsContext(context.Background(), fullReset, validateInputs)
 	}()
+}
+
+// resetWithOptionsContext waits for this request's result, cancellation, or shutdown.
+// Cancellation prevents queued work from starting. Once execution starts, it uses
+// the listener lifetime so an RPC deadline cannot interrupt a destructive reset.
+// A caller timeout therefore leaves the reset outcome unknown to that caller.
+func (b *BlockAssembler) resetWithOptionsContext(ctx context.Context, fullReset bool, validateInputs bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	request := newResetRequest(ctx, func(workCtx context.Context) error {
+		return b.executeResetRequest(workCtx, fullReset, validateInputs)
+	})
+	select {
+	case <-b.resetLifecycleDone:
+		return context.Canceled
+	case <-b.resetStopped:
+		return context.Canceled
+	default:
+	}
+	select {
+	case b.resetCh <- request:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-b.resetLifecycleDone:
+		return context.Canceled
+	case <-b.resetStopped:
+		return context.Canceled
+	}
+	select {
+	case err := <-request.ErrCh:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-b.resetLifecycleDone:
+		return context.Canceled
+	case <-b.resetStopped:
+		return context.Canceled
+	}
+}
+
+func newResetRequest(ctx context.Context, run func(context.Context) error) resetRequest {
+	return resetRequest{ErrCh: make(chan error, 1), run: func(listenerCtx context.Context) error {
+		if err := listenerCtx.Err(); err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return run(listenerCtx)
+	}}
+}
+
+func (b *BlockAssembler) executeResetRequest(ctx context.Context, fullReset bool, validateInputs bool) error {
+	// A full reset must not mutate the store while read-only repair is pending.
+	if b.subtreeProcessor.RecoveryPending() {
+		return errors.NewProcessingError("unmined recovery requires read-only repair before reset")
+	}
+	if fullReset {
+		if err := b.fixUnminedSinceInconsistencies(ctx); err != nil {
+			return errors.NewProcessingError("error fixing unmined_since inconsistencies", err)
+		}
+	}
+	return b.reset(ctx, validateInputs)
 }
 
 // GetMiningCandidate retrieves a candidate block for mining.

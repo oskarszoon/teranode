@@ -247,6 +247,8 @@ type SubtreeProcessor struct {
 	recoverUnminedCh chan unminedRecoveryRequest
 	// recoveryPending suppresses mining/dequeue after an incomplete rebuild.
 	recoveryPending atomic.Bool
+	// recoveryPendingSince retains the first pending timestamp across retries.
+	recoveryPendingSince atomic.Pointer[time.Time]
 	// recoveryAccepted preserves prior admission evidence across rebuild retries.
 	// It is owned by the processor goroutine, like currentTxMap.
 	recoveryAccepted map[chainhash.Hash]struct{}
@@ -6558,6 +6560,7 @@ func DeserializeHashesFromReaderIntoBuckets(
 //   - ctx: Context for the stop operation (currently unused, for future extensibility)
 func (stp *SubtreeProcessor) Stop(ctx context.Context) {
 	stp.stopOnce.Do(func() {
+		defer stp.clearRecoveryPendingMetric()
 		h := stp.cancelPtr.Swap(nil)
 		if h != nil && h.f != nil {
 			h.f()

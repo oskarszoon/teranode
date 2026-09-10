@@ -13,7 +13,7 @@ const DefaultGenerateTipWaitTimeout = 90 * time.Second
 const DefaultUnminedRecoveryInterval = time.Hour
 
 type BlockAssemblySettings struct {
-	UnminedRecoveryInterval time.Duration `key:"blockassembly_unminedRecoveryInterval" desc:"Delay between automatic unmined transaction recovery passes" default:"1h" category:"BlockAssembly" type:"duration"`
+	UnminedRecoveryInterval time.Duration `key:"blockassembly_unminedRecoveryInterval" desc:"Delay between automatic unmined recovery passes; zero uses 1h, negative disables new passes" default:"1h" category:"BlockAssembly" type:"duration"`
 	Disabled                bool          `key:"blockassembly_disabled" desc:"Disable block assembly service" default:"false" category:"BlockAssembly" usage:"Set true for non-mining nodes" type:"bool" longdesc:"### Purpose\nCompletely disables the block assembly service when set to **true**.\n\n### Use Cases\n- **Relay nodes** - Only forward transactions\n- **Archive nodes** - Store historical data\n- **API-only nodes** - Serve blockchain queries\n\n### How It Works\nSaves significant resources by not tracking mempool or building block candidates.\n\n### Recommendations\nMining nodes and pool operators should keep this set to **false**."`
 	// GenerateTipWaitTimeout bounds how long GenerateBlocks waits for block assembly
 	// to reach the chain tip and return to Running before building a candidate.

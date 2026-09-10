@@ -9,12 +9,17 @@ import (
 	"github.com/bsv-blockchain/teranode/services/blockchain"
 	"github.com/bsv-blockchain/teranode/settings"
 	"github.com/bsv-blockchain/teranode/stores/utxo"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 const unminedRecoveryRetryDelay = time.Minute
 
 func (b *BlockAssembler) unminedRecoveryInterval() time.Duration {
-	if interval := b.settings.BlockAssembly.UnminedRecoveryInterval; interval > 0 {
+	if interval := b.settings.BlockAssembly.UnminedRecoveryInterval; interval != 0 {
+		if interval < 0 {
+			return 0
+		}
 		return interval
 	}
 	return settings.DefaultUnminedRecoveryInterval
@@ -24,6 +29,13 @@ func (b *BlockAssembler) unminedRecoveryInterval() time.Duration {
 // recovery interval after an operator resume or temporary loss of authority.
 func (b *BlockAssembler) nextUnminedRecoveryDelay(recovered bool) time.Duration {
 	interval := b.unminedRecoveryInterval()
+	if interval == 0 {
+		// Disabling new passes must never abandon an incomplete replacement.
+		if b.subtreeProcessor.RecoveryPending() || b.recoveryMiningBlocked.Load() {
+			return unminedRecoveryRetryDelay
+		}
+		return 0
+	}
 	if (!recovered || b.recoveryMiningBlocked.Load()) && interval > unminedRecoveryRetryDelay {
 		return unminedRecoveryRetryDelay
 	}
@@ -36,12 +48,11 @@ func (b *BlockAssembler) recoverUnminedTransactions(ctx context.Context) (bool, 
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
+	if b.unminedRecoveryInterval() == 0 && !b.subtreeProcessor.RecoveryPending() && !b.recoveryMiningBlocked.Load() {
+		return false, nil
+	}
 	// State and tip reads must not hold the assembly listener indefinitely.
 	readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	if err := b.subtreeProcessor.WaitForPendingBlocks(readCtx); err != nil {
-		cancel()
-		return false, err
-	}
 	state, err := b.blockchainClient.ReadFSMState(readCtx)
 	if err != nil {
 		cancel()
@@ -50,6 +61,11 @@ func (b *BlockAssembler) recoverUnminedTransactions(ctx context.Context) (bool, 
 	if state != blockchain.FSMStateRUNNING {
 		cancel()
 		return false, nil
+	}
+	// IDLE/catchup need no mined-flag wait. RUNNING still waits before reading the tip.
+	if err := b.subtreeProcessor.WaitForPendingBlocks(readCtx); err != nil {
+		cancel()
+		return false, err
 	}
 	bestHeader, bestMeta, err := b.blockchainClient.GetBestBlockHeader(readCtx)
 	cancel()
@@ -153,4 +169,14 @@ func (b *BlockAssembler) scanUnminedRecoveryHashes(ctx context.Context) (hashes 
 			}
 		}
 	}
+}
+
+// An older blockchain service is an expected rollout condition. Preserve warnings
+// for readiness, storage and rebuild failures that require operator attention.
+func (b *BlockAssembler) logUnminedRecoveryError(err error) {
+	if status.Code(err) == codes.Unimplemented {
+		b.logger.Infof("[BlockAssembler] Unmined recovery requires a blockchain service upgrade: %v", err)
+		return
+	}
+	b.logger.Warnf("[BlockAssembler] Unmined transaction recovery deferred: %v", err)
 }
