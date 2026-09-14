@@ -293,3 +293,124 @@ func TestHistoryAuthenticatedSpendAndLargeArchive(t *testing.T) {
 		})
 	}
 }
+
+// Use canonical SQL metadata and committed archive bytes, with no UTXO ancestry
+// required: confirmed transactions' parents may already have been pruned.
+func reviewHistoryFixture(t *testing.T, transactions []*bt.Tx, target string, options HistoryOptions) (*LocalHistory, *blockchainsql.SQL, *memory.Memory, string, replayrecovery.Tip) {
+	t.Helper()
+	ctx := t.Context()
+	u, err := url.Parse("sqlitememory:///")
+	require.NoError(t, err)
+	chain, err := blockchainsql.New(ulogger.TestLogger{}, u, test.CreateBaseTestSettings(t))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, chain.Close(ctx)) })
+	archive := memory.New()
+	genesis, err := chain.GetBlockByID(ctx, 0)
+	require.NoError(t, err)
+	coinbase := genesis.CoinbaseTx.Clone()
+	coinbase.LockTime++
+	st, err := subtree.NewTree(4)
+	require.NoError(t, err)
+	require.NoError(t, st.AddCoinbaseNode())
+	var raw bytes.Buffer
+	for _, tx := range transactions {
+		require.NoError(t, st.AddNode(*tx.TxIDChainHash(), 0, uint64(tx.Size())))
+		raw.Write(tx.Bytes())
+	}
+	data, err := st.Serialize()
+	require.NoError(t, err)
+	key := st.RootHash()
+	require.NoError(t, archive.Set(ctx, key[:], fileformat.FileTypeSubtree, data))
+	require.NoError(t, archive.Set(ctx, key[:], fileformat.FileTypeSubtreeData, raw.Bytes()))
+	root, err := st.RootHashWithReplaceRootNode(coinbase.TxIDChainHash(), 0, uint64(coinbase.Size()))
+	require.NoError(t, err)
+	block := &model.Block{Header: &model.BlockHeader{Version: 1, HashPrevBlock: genesis.Hash(), HashMerkleRoot: root, Timestamp: genesis.Header.Timestamp + 600, Bits: genesis.Header.Bits}, CoinbaseTx: coinbase, Subtrees: []*chainhash.Hash{key}, TransactionCount: uint64(len(transactions) + 1), Height: 1}
+	_, _, err = chain.StoreBlock(ctx, block, "test")
+	require.NoError(t, err)
+	dir := t.TempDir()
+	require.NoError(t, os.Chmod(dir, 0700))
+	options.TargetsPath = filepath.Join(dir, "inventory.sqlite")
+	inventory, err := sql.Open("sqlite", options.TargetsPath)
+	require.NoError(t, err)
+	_, err = inventory.Exec("CREATE TABLE targets(id TEXT PRIMARY KEY); INSERT INTO targets VALUES(?)", target)
+	require.NoError(t, err)
+	require.NoError(t, inventory.Close())
+	options.EndHeight = 1
+	options.Guard = func(context.Context) error { return nil }
+	path := filepath.Join(dir, "history.sqlite")
+	history, err := NewHistory(ctx, path, chain, archive, options)
+	require.NoError(t, err)
+	return history, chain, archive, path, replayrecovery.Tip{Hash: block.Hash().String(), Height: 1}
+}
+
+func TestHistoryExpansionStopsAtConfirmedTransactions(t *testing.T) {
+	for _, mode := range []string{"pruned", "retained", "unconfirmed"} {
+		t.Run(mode, func(t *testing.T) {
+			var transactions []*bt.Tx
+			parent := strings.Repeat("11", 32)
+			retained := make(map[string]*bt.Tx)
+			for i := 0; i < 11; i++ {
+				hash, err := chainhash.NewHashFromStr(parent)
+				require.NoError(t, err)
+				tx, err := bt.NewTxFromString("0100000001" + hex.EncodeToString(hash[:]) + "000000000100ffffffff010100000000000000015100000000")
+				require.NoError(t, err)
+				transactions = append(transactions, tx)
+				retained[tx.TxID()] = tx
+				parent = tx.TxID()
+			}
+			target := transactions[8].TxID()
+			options := HistoryOptions{}
+			if mode != "pruned" {
+				options.Unconfirmed = func(_ context.Context, id string) (*bt.Tx, error) { return retained[id], nil }
+			}
+			if mode == "unconfirmed" {
+				target = transactions[10].TxID()
+			}
+			blocksRead := 0
+			options.Progress = func(HistoryCoverage) { blocksRead++ }
+			history, _, _, _, tip := reviewHistoryFixture(t, transactions[:10], target, options)
+			defer history.Close()
+			require.NoError(t, history.Build(t.Context(), tip))
+			evidence, err := history.Check(t.Context(), target, tip)
+			require.NoError(t, err)
+			wantPasses, wantTargets, wantClass := 1, 1, replayrecovery.FullySpent
+			if mode == "unconfirmed" {
+				wantPasses, wantTargets, wantClass = 2, 2, replayrecovery.Unconfirmed
+			}
+			require.Equal(t, wantClass, evidence.Classification, evidence.Reason)
+			require.Equal(t, 2*wantPasses, blocksRead, "confirmed ancestry must not multiply full-history scans")
+			var count int
+			require.NoError(t, history.db.QueryRow("SELECT count(*) FROM targets").Scan(&count))
+			require.Equal(t, wantTargets, count, "only unconfirmed dependencies need expansion")
+		})
+	}
+}
+
+func TestHistoryResumeRejectsChangedConsensusEra(t *testing.T) {
+	tx, err := bt.NewTxFromString("0100000001" + strings.Repeat("11", 32) + "000000000100ffffffff010100000000000000016a00000000")
+	require.NoError(t, err)
+	history, chain, _, path, tip := reviewHistoryFixture(t, []*bt.Tx{tx}, tx.TxID(), HistoryOptions{GenesisActivationHeight: 2})
+	require.NoError(t, history.Build(t.Context(), tip))
+	evidence, err := history.Check(t.Context(), tx.TxID(), tip)
+	require.NoError(t, err)
+	require.Equal(t, replayrecovery.FullySpent, evidence.Classification)
+	require.NoError(t, history.Close())
+	options := HistoryOptions{GenesisActivationHeight: 1, Guard: func(context.Context) error { return nil }}
+	reopened, err := OpenHistory(path, chain, options)
+	if reopened != nil {
+		require.NoError(t, reopened.Close())
+	}
+	require.ErrorContains(t, err, "consensus settings")
+	require.Nil(t, reopened)
+	options.GenesisActivationHeight = 2
+	reopened, err = OpenHistory(path, chain, options)
+	require.NoError(t, err)
+	require.NoError(t, reopened.Close())
+	options.GenesisActivationHeight = 1
+	current, _, _, _, currentTip := reviewHistoryFixture(t, []*bt.Tx{tx}, tx.TxID(), options)
+	defer current.Close()
+	require.NoError(t, current.Build(t.Context(), currentTip))
+	evidence, err = current.Check(t.Context(), tx.TxID(), currentTip)
+	require.NoError(t, err)
+	require.Equal(t, replayrecovery.Live, evidence.Classification, "changed era makes the output spendable")
+}

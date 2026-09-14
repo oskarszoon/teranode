@@ -338,10 +338,11 @@ func Discover(ctx context.Context, backend Backend, source Source, path string, 
 		}
 	}
 	// Uncertain descendants or affected ancestors block the connected affected
-	// component. Historical parents outside the scan are not treated as affected.
+	// component. Seed only affected parents of unclassified descendants; a healthy
+	// sibling must not pull its historical parent into the affected component.
 	_, err = m.db.ExecContext(ctx, `WITH RECURSIVE blocked(id) AS (
 SELECT id FROM entries WHERE classification NOT IN ('fully-spent','confirmed')
-UNION SELECT e.parent FROM edges e JOIN inventory i ON i.txid=e.child AND i.master=1 WHERE e.child NOT IN (SELECT id FROM entries)
+UNION SELECT e.parent FROM edges e JOIN inventory i ON i.txid=e.child AND i.master=1 JOIN entries p ON p.id=e.parent WHERE e.child NOT IN (SELECT id FROM entries)
 UNION SELECT CASE WHEN e.child=b.id THEN e.parent ELSE e.child END FROM edges e JOIN blocked b ON e.child=b.id OR e.parent=b.id JOIN entries n ON n.id=CASE WHEN e.child=b.id THEN e.parent ELSE e.child END
 ) UPDATE entries SET blocked=1 WHERE classification='fully-spent' AND id IN (SELECT id FROM blocked)`)
 	if err != nil {

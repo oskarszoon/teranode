@@ -239,9 +239,6 @@ func (h *LocalHistory) Build(ctx context.Context, tip replayrecovery.Tip) error 
 		if err = h.db.QueryRowContext(ctx, "SELECT count(*) FROM targets").Scan(&before); err != nil {
 			return err
 		}
-		if err = h.expandUnconfirmed(ctx); err != nil {
-			return err
-		}
 		if _, err = h.db.ExecContext(ctx, "DELETE FROM transactions; DELETE FROM spends; DELETE FROM blocks; DELETE FROM gaps"); err != nil {
 			return err
 		}
@@ -275,6 +272,11 @@ func (h *LocalHistory) Build(ctx context.Context, tip replayrecovery.Tip) error 
 			if h.options.Progress != nil {
 				h.options.Progress(h.coverage)
 			}
+		}
+		// Authenticate targets before expanding dependencies: confirmed records
+		// already have sufficient ancestry evidence in the validated chain.
+		if err = h.expandUnconfirmed(ctx); err != nil {
+			return err
 		}
 		var after int
 		if err = h.db.QueryRowContext(ctx, "SELECT count(*) FROM targets").Scan(&after); err != nil {
@@ -398,11 +400,6 @@ func (h *LocalHistory) indexBlock(ctx context.Context, b *model.Block, height ui
 		if !transaction.IsCoinbase() {
 			for _, input := range transaction.Inputs {
 				parent := input.PreviousTxIDStr()
-				if target > 0 {
-					if _, e := tx.ExecContext(ctx, "INSERT OR IGNORE INTO targets VALUES(?)", parent); e != nil {
-						return e
-					}
-				}
 				var n int
 				if e := tx.QueryRowContext(ctx, "SELECT count(*) FROM targets WHERE id=?", parent).Scan(&n); e != nil {
 					return e
@@ -648,6 +645,9 @@ func OpenHistory(path string, chain HistoryChain, options HistoryOptions) (_ *Lo
 	if historySealDigest(digest, o, c) != seal.Digest {
 		return nil, errors.NewProcessingError("history index integrity mismatch")
 	}
+	if o.GenesisActivationHeight != options.GenesisActivationHeight {
+		return nil, errors.NewProcessingError("history consensus settings changed; resume refused")
+	}
 	o.Guard = options.Guard
 	o.Unconfirmed = options.Unconfirmed
 	if chain == nil || o.Guard == nil {
@@ -747,10 +747,17 @@ func (h *LocalHistory) expandUnconfirmed(ctx context.Context) error {
 	if h.options.Unconfirmed == nil {
 		return nil
 	}
-	// Keyset paging keeps candidate/dependency memory bounded, including new IDs.
+	// Freeze this pass's unresolved targets. Newly discovered parents must get
+	// a canonical scan before their own ancestry can be expanded.
+	if _, err := h.db.ExecContext(ctx, `CREATE TEMP TABLE IF NOT EXISTS pending_targets(id TEXT PRIMARY KEY);
+DELETE FROM pending_targets;
+INSERT INTO pending_targets SELECT id FROM targets WHERE NOT EXISTS(SELECT 1 FROM transactions WHERE txid=targets.id)`); err != nil {
+		return err
+	}
+	// Keyset paging keeps dependency memory bounded.
 	last := ""
 	for {
-		rows, err := h.db.QueryContext(ctx, "SELECT id FROM targets WHERE id>? ORDER BY id LIMIT 256", last)
+		rows, err := h.db.QueryContext(ctx, "SELECT id FROM pending_targets WHERE id>? ORDER BY id LIMIT 256", last)
 		if err != nil {
 			return err
 		}

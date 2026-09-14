@@ -138,3 +138,73 @@ func TestApplyBoundaryParentDisappearsBetweenPages(t *testing.T) {
 	require.Equal(t, []string{pageKey}, backend.deleted)
 	require.Contains(t, backend.records, tx.TxID())
 }
+
+type dependencyCensusBackend struct {
+	*recordBackend
+	refs []SpendReference
+}
+
+func (b *dependencyCensusBackend) SpendReferences(ctx context.Context, visit func(SpendReference) error) error {
+	if err := b.recordBackend.SpendReferences(ctx, visit); err != nil {
+		return err
+	}
+	for _, ref := range b.refs {
+		if err := visit(ref); err != nil {
+			return err
+		}
+	}
+	return ctx.Err()
+}
+
+func TestApplyBoundaryHealthySiblingDoesNotBlockReplay(t *testing.T) {
+	base, source, replay, manifestPath, journalPath := recoveryFixture(t)
+	sibling := bt.NewTx()
+	parentID := replay.Inputs[0].PreviousTxIDChainHash().String()
+	require.NoError(t, sibling.From(parentID, 1, "51", 1000))
+	require.NoError(t, sibling.PayToAddress("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", 500))
+	siblingRecord := Record{Key: []byte(sibling.TxID()), Data: []byte("normally mined sibling"), Generation: 3}
+	base.records[sibling.TxID()] = siblingRecord
+	base.txs[sibling.TxID()] = sibling
+	backend := &dependencyCensusBackend{recordBackend: base, refs: []SpendReference{{ParentKey: []byte("parent"), ParentTxID: parentID, Vout: 1, ChildTxID: sibling.TxID()}}}
+	summary, err := discoverForTest(t.Context(), backend, source, manifestPath, nil)
+	require.NoError(t, err, "a healthy sibling must not make their historical parent an affected entry")
+	require.True(t, summary.Complete)
+	require.EqualValues(t, 1, summary.FullySpent)
+	require.Zero(t, summary.Blocked)
+	result, err := Apply(t.Context(), backend, source, manifestPath, journalPath, ApplyOptions{Guard: allowRecovery, Maintenance: true, Tip: source.tip})
+	require.NoError(t, err)
+	require.EqualValues(t, 1, result.Repaired)
+	require.NotContains(t, backend.records, replay.TxID())
+	require.Equal(t, siblingRecord, backend.records[sibling.TxID()])
+	require.True(t, backend.HasMarker(backend.records["parent"], replay.TxID()))
+}
+
+func TestApplyBoundaryUnknownDescendantThroughConfirmedEntryBlocksReplay(t *testing.T) {
+	base, source, replay, manifestPath, journalPath := recoveryFixture(t)
+	descendant := func(parent *bt.Tx) *bt.Tx {
+		tx := bt.NewTx()
+		require.NoError(t, tx.From(parent.TxID(), 0, parent.Outputs[0].LockingScript.String(), parent.Outputs[0].Satoshis))
+		require.NoError(t, tx.PayToAddress("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", parent.Outputs[0].Satoshis-100))
+		base.txs[tx.TxID()] = tx
+		base.records[tx.TxID()] = Record{Key: []byte(tx.TxID()), Data: []byte("mined metadata"), Generation: 3}
+		return tx
+	}
+	confirmed := descendant(replay)
+	unresolved := descendant(confirmed)
+	source.evidence[confirmed.TxID()] = Evidence{TxID: confirmed.TxID(), RawTx: confirmed.String(), BlockHash: source.tip.Hash, BlockHeight: source.tip.Height, Classification: Live}
+	backend := &dependencyCensusBackend{recordBackend: base, refs: []SpendReference{
+		{ParentKey: []byte(replay.TxID()), ParentTxID: replay.TxID(), ChildTxID: confirmed.TxID()},
+		{ParentKey: []byte(confirmed.TxID()), ParentTxID: confirmed.TxID(), ChildTxID: unresolved.TxID()},
+	}}
+	summary, err := discoverForTest(t.Context(), backend, source, manifestPath, nil)
+	require.ErrorIs(t, err, ErrIncomplete)
+	require.EqualValues(t, 1, summary.Kept, "canonical intermediary remains confirmed")
+	require.EqualValues(t, 1, summary.Blocked, "unclassified descendant still protects its affected ancestors")
+	result, err := Apply(t.Context(), backend, source, manifestPath, journalPath, ApplyOptions{Guard: allowRecovery, Maintenance: true, Tip: source.tip})
+	require.ErrorIs(t, err, ErrIncomplete)
+	require.Zero(t, result.Repaired)
+	require.Zero(t, backend.writes)
+	require.Contains(t, backend.records, replay.TxID())
+	require.Contains(t, backend.records, confirmed.TxID())
+	require.Contains(t, backend.records, unresolved.TxID())
+}
