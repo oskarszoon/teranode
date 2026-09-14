@@ -25,7 +25,8 @@ import (
 	"github.com/bsv-blockchain/teranode/services/subtreevalidation"
 	"github.com/bsv-blockchain/teranode/services/subtreevalidation/subtreevalidation_api"
 	"github.com/bsv-blockchain/teranode/services/validator"
-	"github.com/bsv-blockchain/teranode/stores/blob/memory"
+	"github.com/bsv-blockchain/teranode/stores/blob/file"
+	bloboptions "github.com/bsv-blockchain/teranode/stores/blob/options"
 	blockchainstore "github.com/bsv-blockchain/teranode/stores/blockchain"
 	"github.com/bsv-blockchain/teranode/stores/utxo"
 	utxosql "github.com/bsv-blockchain/teranode/stores/utxo/sql"
@@ -60,7 +61,13 @@ func TestLegacyHistoricalTestnetSync(t *testing.T) {
 	utxos, err := utxosql.New(ctx, logger, s, s.UtxoStore.UtxoStore)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, utxos.Close(context.Background())) })
-	subtrees, txs := memory.New(), memory.New()
+	// Fixture blobs remain available until the temporary directories are cleaned up.
+	subtrees, err := file.New(logger, &url.URL{Scheme: "file", Path: t.TempDir()}, bloboptions.WithDisableDAH(true))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, subtrees.Close(context.Background())) })
+	txs, err := file.New(logger, &url.URL{Scheme: "file", Path: t.TempDir()}, bloboptions.WithDisableDAH(true))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, txs.Close(context.Background())) })
 	chain, err := blockchain.NewLocalClient(logger, s, chainStore, subtrees, utxos)
 	require.NoError(t, err)
 	require.NoError(t, chain.SetBlockMinedSet(ctx, params.GenesisHash))
