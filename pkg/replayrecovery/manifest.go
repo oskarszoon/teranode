@@ -34,6 +34,7 @@ type Summary struct {
 }
 
 type manifestHeader struct {
+	Retention     uint32    `json:"block_height_retention"`
 	Version       int       `json:"version"`
 	Identity      string    `json:"identity"`
 	Tip           Tip       `json:"tip"`
@@ -111,7 +112,7 @@ func openManifest(path string, auditOnly ...bool) (_ *manifest, err error) {
 	if err = json.Unmarshal(header, &m.header); err != nil {
 		return nil, err
 	}
-	if m.header.Version != 2 || !m.header.Complete || (!m.header.GraphComplete && (len(auditOnly) == 0 || !auditOnly[0])) {
+	if m.header.Version != 3 || !m.header.Complete || (!m.header.GraphComplete && (len(auditOnly) == 0 || !auditOnly[0])) {
 		return nil, failure("manifest is incomplete or unsupported")
 	}
 	digest, err := m.checksum()
@@ -204,7 +205,7 @@ func Discover(ctx context.Context, backend Backend, source Source, path string, 
 	if err != nil {
 		return result, err
 	}
-	m := &manifest{lockedDB: db, header: manifestHeader{Version: 2, Identity: backend.Identity(), Tip: tip, Created: time.Now().UTC(), GraphComplete: true}}
+	m := &manifest{lockedDB: db, header: manifestHeader{Version: 3, Identity: backend.Identity(), Tip: tip, Retention: source.Retention(), Created: time.Now().UTC(), GraphComplete: true}}
 	defer func() { err = combineErrors(err, m.Close()) }()
 	var complete int
 	if err = m.db.QueryRow("SELECT complete FROM inventory_state").Scan(&complete); err != nil || complete != 1 {
@@ -292,6 +293,10 @@ func Discover(ctx context.Context, backend Backend, source Source, path string, 
 			entry.Action = "delete-recreated"
 		} else {
 			entry.Action = "mark-absent"
+		}
+		if entry.Evidence.Classification == FullySpent && !outsideRetention(ev, tip, m.header.Retention) {
+			entry.Evidence.Classification = Unknown
+			entry.Evidence.Reason = "confirmation or last spend is inside the reorg retention window"
 		}
 		if entry.Evidence.Classification == FullySpent {
 			tx, parseErr := bt.NewTxFromString(ev.RawTx)

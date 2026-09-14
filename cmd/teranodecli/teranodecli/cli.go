@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"sort"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/bsv-blockchain/teranode/cmd/aerospikekafkaconnector"
@@ -154,9 +155,20 @@ func Start(args []string, version, commit string) {
 	cmd := setupCommand(command)
 	tSettings := settings.NewSettings()
 
-	logger := ulogger.InitLogger("teranode-cli", tSettings)
+	var logger ulogger.Logger
 	if command == "recoverreplayedtransactions" {
+		// Both console formatting and dual JSON logging otherwise bypass WithWriter
+		// and write directly to stdout. Recovery reserves stdout for its report.
+		// Environment values take precedence over context-specific config values.
+		for _, key := range []string{"PRETTY_LOGS", "jsonLogging"} {
+			if err := os.Setenv(key, "false"); err != nil {
+				fmt.Fprintf(os.Stderr, "Cannot configure recovery logging: %v\n", err)
+				os.Exit(1)
+			}
+		}
 		logger = ulogger.New("teranode-cli", ulogger.WithLevel(tSettings.LogLevel), ulogger.WithWriter(os.Stderr))
+	} else {
+		logger = ulogger.InitLogger("teranode-cli", tSettings)
 	}
 
 	util.InitGRPCResolver(logger, tSettings.GRPCResolver)
@@ -412,7 +424,7 @@ func Start(args []string, version, commit string) {
 			if len(args) != 0 {
 				return errors.NewInvalidArgumentError("recoverreplayedtransactions takes no positional arguments; use named flags")
 			}
-			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+			ctx, cancel := recoveryContext()
 			defer cancel()
 			return recoverreplayedtransactions.Run(ctx, logger, tSettings, recoverreplayedtransactions.Options{WorkDir: *workDir, Apply: *apply, Maintenance: *maintenance, Resume: *resume, Timeout: *timeout, Concurrency: *concurrency}, os.Stdout, os.Stderr)
 		}
@@ -557,6 +569,10 @@ func Start(args []string, version, commit string) {
 		fmt.Printf("Error executing command: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func recoveryContext() (context.Context, context.CancelFunc) {
+	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 }
 
 // formatSatoshis formats a satoshi amount with thousand separators for better readability.

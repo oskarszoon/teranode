@@ -370,6 +370,14 @@ func TestHistoryExpansionStopsAtConfirmedTransactions(t *testing.T) {
 			options.Progress = func(HistoryCoverage) { blocksRead++ }
 			history, _, _, _, tip := reviewHistoryFixture(t, transactions[:10], target, options)
 			defer history.Close()
+			if mode == "unconfirmed" {
+				// The newly discovered parent has not been a target yet. Its
+				// normally mined census row stops speculative ancestry expansion;
+				// its inclusion is authenticated by the second archive pass.
+				_, err := history.db.Exec(`CREATE TABLE census.inventory(txid TEXT,master INTEGER,candidate INTEGER,reason TEXT);
+INSERT INTO census.inventory VALUES(?,1,0,'')`, transactions[9].TxID())
+				require.NoError(t, err)
+			}
 			require.NoError(t, history.Build(t.Context(), tip))
 			evidence, err := history.Check(t.Context(), target, tip)
 			require.NoError(t, err)

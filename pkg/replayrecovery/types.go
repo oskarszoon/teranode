@@ -23,17 +23,19 @@ type Tip struct {
 }
 
 type Evidence struct {
-	TxID           string `json:"txid"`
-	RawTx          string `json:"raw_tx"`
-	BlockHash      string `json:"block_hash"`
-	BlockHeight    uint32 `json:"block_height"`
-	Tip            Tip    `json:"tip"`
-	Source         string `json:"source"`
-	Classification string `json:"classification"`
-	Reason         string `json:"reason"`
+	TxID            string `json:"txid"`
+	RawTx           string `json:"raw_tx"`
+	BlockHash       string `json:"block_hash"`
+	BlockHeight     uint32 `json:"block_height"`
+	LastSpendHeight uint32 `json:"last_spend_height"`
+	Tip             Tip    `json:"tip"`
+	Source          string `json:"source"`
+	Classification  string `json:"classification"`
+	Reason          string `json:"reason"`
 }
 
 type Source interface {
+	Retention() uint32
 	Tip(context.Context) (Tip, error)
 	Check(context.Context, string, Tip) (Evidence, error)
 }
