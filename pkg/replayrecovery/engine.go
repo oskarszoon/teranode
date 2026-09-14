@@ -19,6 +19,13 @@ type ApplyOptions struct {
 	Tip Tip
 }
 
+// The last authenticated spend and the confirmation must both be old enough
+// for pruning. Widen before addition so height overflow cannot authorize repair.
+func outsideRetention(e Evidence, tip Tip, retention uint32) bool {
+	last := max(e.BlockHeight, e.LastSpendHeight)
+	return uint64(last)+uint64(retention) <= uint64(tip.Height)
+}
+
 func requireTip(ctx context.Context, source Source, want Tip) error {
 	tip, err := source.Tip(ctx)
 	if err != nil {
@@ -72,7 +79,7 @@ func (j *journal) prepare(id, kind, child string, before Record) (*mutation, err
 	if err != nil {
 		return nil, err
 	}
-	// FULL-synchronous SQLite commit happens before returning to the caller,
+	// EXTRA-synchronous SQLite commit happens before returning to the caller,
 	// therefore before a remote write. A failed commit cannot authorize a write.
 	if err = j.put("step/"+id, b); err != nil {
 		return nil, err
@@ -285,6 +292,9 @@ func Apply(ctx context.Context, backend Backend, source Source, manifestPath, jo
 	if m.header.Identity != backend.Identity() {
 		return result, failure("manifest belongs to a different store")
 	}
+	if m.header.Retention != source.Retention() {
+		return result, failure("reorg retention policy differs from audit")
+	}
 	if !validHash(opts.Tip.Hash) || opts.Tip != m.header.Tip {
 		return result, failure("local tip differs from audit; a new discovery or deliberate resume is required")
 	}
@@ -399,7 +409,7 @@ func Apply(ctx context.Context, backend Backend, source Source, manifestPath, jo
 		if checkErr != nil {
 			return result, checkErr
 		}
-		if ev.TxID != e.Evidence.TxID || ev.RawTx != e.Evidence.RawTx || ev.Classification != FullySpent || ev.Tip != opts.Tip {
+		if ev.TxID != e.Evidence.TxID || ev.RawTx != e.Evidence.RawTx || ev.Classification != FullySpent || ev.Tip != opts.Tip || !validHash(ev.BlockHash) || !outsideRetention(ev, opts.Tip, m.header.Retention) {
 			return result, failure("canonical evidence no longer authorizes repair of %s", e.Evidence.TxID)
 		}
 		if err = requireTip(ctx, source, opts.Tip); err != nil {

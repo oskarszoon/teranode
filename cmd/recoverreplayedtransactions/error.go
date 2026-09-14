@@ -2,6 +2,9 @@ package recoverreplayedtransactions
 
 import "fmt"
 
+// ErrFindings reports a completed read-only audit with repairs still required.
+var ErrFindings = commandError("recovery audit contains repairable records")
+
 func commandError(format string, args ...any) error {
 	//nolint:forbidigo // Preserve sentinel identity used by documented CLI exit codes.
 	return fmt.Errorf(format, args...)

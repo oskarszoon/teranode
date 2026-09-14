@@ -323,16 +323,26 @@ func runReplayRecoveryAerospikeAssemblyEndToEnd(t *testing.T, paginated bool) {
 	require.NoError(t, store.SetBlockHeight(3))
 	assembler, stop = start(block3.Header, 3)
 	defer stop()
-	candidate, subtrees, err := assembler.GetMiningCandidate(ctx)
-	require.NoError(t, err)
-	require.NotNil(t, candidate)
+	// Startup handles blockchain notifications asynchronously; mining can return
+	// an empty candidate while that work is in progress. Wait for the real candidate.
 	var candidateIDs []string
-	for _, st := range subtrees {
-		for _, node := range st.Nodes {
-			candidateIDs = append(candidateIDs, node.Hash.String())
+	require.Eventually(t, func() bool {
+		candidate, subtrees, err := assembler.GetMiningCandidate(ctx)
+		if err != nil || candidate == nil {
+			return false
 		}
-	}
-	require.Contains(t, candidateIDs, legitimate.TxID())
+		candidateIDs = candidateIDs[:0]
+		found := false
+		for _, st := range subtrees {
+			for _, node := range st.Nodes {
+				candidateIDs = append(candidateIDs, node.Hash.String())
+				if node.Hash == *legitimate.TxIDChainHash() {
+					found = true
+				}
+			}
+		}
+		return found
+	}, 5*time.Second, 10*time.Millisecond, "fresh candidate preserves legitimate unmined after startup settles")
 	require.NotContains(t, candidateIDs, child.TxID())
 	_, _, err = store.SpendAndCreate(ctx, child, 3)
 	require.ErrorContains(t, err, "invalid spend")

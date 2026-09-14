@@ -100,7 +100,9 @@ func openPrivateDB(path string, create, readonly bool) (_ *lockedDB, err error) 
 		return nil, err
 	}
 	if !readonly {
-		if _, err = db.Exec("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON"); err != nil {
+		// EXTRA also syncs the directory after deleting the rollback journal,
+		// so a power loss cannot undo a commit that authorized a remote mutation.
+		if _, err = db.Exec("PRAGMA journal_mode=DELETE; PRAGMA synchronous=EXTRA; PRAGMA foreign_keys=ON"); err != nil {
 			return nil, err
 		}
 	}
@@ -139,26 +141,70 @@ func openJournal(path string, resume bool, digest, identity string) (_ *journal,
 			_ = j.Close()
 		}
 	}()
-	if !resume {
-		if _, err = j.db.Exec("CREATE TABLE state (key TEXT PRIMARY KEY, value BLOB NOT NULL)"); err != nil {
+	tx, err := j.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback() //nolint:errcheck // rollback after commit is harmless
+	var objects int
+	if err = tx.QueryRow("SELECT COUNT(*) FROM sqlite_schema").Scan(&objects); err != nil {
+		return nil, err
+	}
+	if objects != 0 {
+		var b []byte
+		err = tx.QueryRow("SELECT value FROM state WHERE key='header'").Scan(&b)
+		if err == nil {
+			var header []string
+			if err = json.Unmarshal(b, &header); err != nil {
+				return nil, err
+			}
+			if len(header) != 3 || header[0] != "replay-recovery-journal-v1" || header[1] != digest || header[2] != identity {
+				return nil, failure("journal belongs to a different manifest, backend, or version")
+			}
+			return j, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
 			return nil, err
 		}
-		header, _ := json.Marshal([]string{"replay-recovery-journal-v1", digest, identity})
-		if err = j.put("header", header); err != nil {
+	}
+	// A crash before the first commit may leave an empty database. Older
+	// versions could also commit the state schema before writing the header.
+	// Recover only these empty initialization states; never discard or adopt
+	// rows that might contain a prior run's intents, outcomes or checkpoints.
+	const schema = "CREATE TABLE state (key TEXT PRIMARY KEY, value BLOB NOT NULL)"
+	var applicationID, version int
+	if err = tx.QueryRow("PRAGMA application_id").Scan(&applicationID); err != nil {
+		return nil, err
+	}
+	if err = tx.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		return nil, err
+	}
+	if applicationID != 0 || version != 0 {
+		return nil, failure("uninitialized journal belongs to a different application or version")
+	}
+	if objects != 0 {
+		var matching, rows int
+		if err = tx.QueryRow("SELECT COUNT(*) FROM sqlite_schema WHERE (type='table' AND name='state' AND tbl_name='state' AND sql=?) OR (type='index' AND name='sqlite_autoindex_state_1' AND tbl_name='state' AND sql IS NULL)", schema).Scan(&matching); err != nil {
 			return nil, err
 		}
-	} else {
-		b, e := j.get("header")
-		if e != nil {
-			return nil, e
+		if objects != 2 || matching != 2 {
+			return nil, failure("uninitialized journal has an unexpected schema")
 		}
-		var header []string
-		if e = json.Unmarshal(b, &header); e != nil {
-			return nil, e
+		if err = tx.QueryRow("SELECT COUNT(*) FROM state").Scan(&rows); err != nil {
+			return nil, err
 		}
-		if len(header) != 3 || header[0] != "replay-recovery-journal-v1" || header[1] != digest || header[2] != identity {
-			return nil, failure("journal belongs to a different manifest, backend, or version")
+		if rows != 0 {
+			return nil, failure("journal has state without its identity header")
 		}
+	} else if _, err = tx.Exec(schema); err != nil {
+		return nil, err
+	}
+	header, _ := json.Marshal([]string{"replay-recovery-journal-v1", digest, identity})
+	if _, err = tx.Exec("INSERT INTO state(key,value) VALUES ('header',?)", header); err != nil {
+		return nil, err
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, err
 	}
 	return j, nil
 }

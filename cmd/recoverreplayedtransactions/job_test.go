@@ -148,7 +148,7 @@ func TestRunJobAerospike(t *testing.T) {
 			before, e := native.Read(ctx, uaerospike.CalculateKeySourceInternal(parent.TxIDChainHash(), 0))
 			require.NoError(t, e)
 			summary, e := run(options)
-			require.NoError(t, e)
+			require.ErrorIs(t, e, ErrFindings)
 			require.True(t, summary.Complete)
 			after, e := native.Read(ctx, uaerospike.CalculateKeySourceInternal(parent.TxIDChainHash(), 0))
 			require.NoError(t, e)
@@ -167,6 +167,10 @@ func TestRunJobAerospike(t *testing.T) {
 			require.NoError(t, e)
 			require.Equal(t, "done", state.Phase)
 			options.Resume = true
+			changedRetention := options
+			changedRetention.blockHeightRetention = 1
+			_, e = run(changedRetention)
+			require.ErrorContains(t, e, "block height retention mismatch")
 			summary, e = run(options)
 			require.NoError(t, e)
 			require.True(t, summary.Complete)

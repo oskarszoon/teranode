@@ -37,6 +37,7 @@ type HistoryOptions struct {
 	Guard                   replayrecovery.Guard `json:"-"`
 	TargetsPath             string
 	GenesisActivationHeight uint32
+	BlockHeightRetention    uint32
 	Unconfirmed             replayrecovery.TransactionReader `json:"-"`
 	Progress                func(HistoryCoverage)            `json:"-"`
 	StartHeight, EndHeight  uint32
@@ -60,7 +61,7 @@ type HistoryChain interface {
 }
 
 // LocalHistory indexes target transactions and authenticated spenders on disk.
-// Newly discovered dependencies cause another bounded pass before sealing.
+// Dependencies are expanded between at most two authenticated body passes.
 type LocalHistory struct {
 	db       *sql.DB
 	file     *os.File
@@ -125,7 +126,7 @@ func NewHistory(ctx context.Context, path string, chain HistoryChain, archive bl
 		}
 	}()
 	db.SetMaxOpenConns(1)
-	_, err = db.ExecContext(ctx, `PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA cache_size=-4096;
+	_, err = db.ExecContext(ctx, `PRAGMA journal_mode=DELETE; PRAGMA synchronous=EXTRA; PRAGMA cache_size=-4096;
  CREATE TABLE blocks(hash TEXT PRIMARY KEY,height INTEGER NOT NULL,header BLOB NOT NULL,leaves BLOB NOT NULL);
  CREATE TABLE transactions(txid TEXT NOT NULL,block TEXT NOT NULL,position INTEGER NOT NULL,raw BLOB NOT NULL,PRIMARY KEY(txid,block));
  CREATE TABLE targets(id TEXT PRIMARY KEY);
@@ -156,6 +157,8 @@ func (h *LocalHistory) Close() error {
 	}
 	return errors.Join(dbErr, lockErr)
 }
+
+func (h *LocalHistory) Retention() uint32 { return h.options.BlockHeightRetention }
 
 func (h *LocalHistory) Coverage() HistoryCoverage {
 	h.mu.RLock()
@@ -220,21 +223,12 @@ func (h *LocalHistory) Build(ctx context.Context, tip replayrecovery.Tip) error 
 	}
 	h.coverage.Tip = tip
 	// Authenticate every ancestor before accepting any body, including across gaps.
-	expected := tip.Hash
-	for height := int64(tip.Height); height >= int64(h.options.StartHeight); height-- {
-		if err = h.checkTip(ctx, tip); err != nil {
-			return err
-		}
-		block, invalid, e := h.chain.GetBlockInChainByHeightHash(ctx, uint32(height), tipHash) // #nosec G115 -- loop bounds are uint32 heights.
-		if e != nil || invalid || block == nil || block.Header == nil || block.Header.HashPrevBlock == nil || block.Hash().String() != expected {
-			return errors.NewProcessingError("canonical header ancestry unavailable at %d", height)
-		}
-		if _, err = h.db.ExecContext(ctx, "INSERT INTO headers VALUES(?,?,?)", height, expected, block.Header.Bytes()); err != nil {
-			return err
-		}
-		expected = block.Header.HashPrevBlock.String()
+	// Header writes are batched; point membership and hash links are still
+	// checked at every height. The caller's watchdog cancels slow RPCs.
+	if err = h.indexHeaders(ctx, tip, tipHash); err != nil {
+		return err
 	}
-	for {
+	for pass := 0; pass < 2; pass++ {
 		var before int
 		if err = h.db.QueryRowContext(ctx, "SELECT count(*) FROM targets").Scan(&before); err != nil {
 			return err
@@ -245,8 +239,10 @@ func (h *LocalHistory) Build(ctx context.Context, tip replayrecovery.Tip) error 
 		h.coverage.Scanned = 0
 		h.coverage.GapCount = 0
 		for height := uint64(h.options.StartHeight); height <= uint64(h.options.EndHeight); height++ {
-			if err = h.checkTip(ctx, tip); err != nil {
-				return err
+			if (height-uint64(h.options.StartHeight))%128 == 0 {
+				if err = h.checkTip(ctx, tip); err != nil {
+					return err
+				}
 			}
 			block, invalid, readErr := h.chain.GetBlockInChainByHeightHash(ctx, uint32(height), tipHash) // #nosec G115 -- loop bounds are uint32 heights.
 			var pinned string
@@ -273,13 +269,22 @@ func (h *LocalHistory) Build(ctx context.Context, tip replayrecovery.Tip) error 
 				h.options.Progress(h.coverage)
 			}
 		}
-		// Authenticate targets before expanding dependencies: confirmed records
-		// already have sufficient ancestry evidence in the validated chain.
+		if err = h.checkTip(ctx, tip); err != nil {
+			return err
+		}
+		if pass == 1 {
+			break
+		}
+		// Confirmed targets stop ancestry expansion. Newly discovered parents
+		// are collected transitively, then authenticated in one final pass.
 		if err = h.expandUnconfirmed(ctx); err != nil {
 			return err
 		}
 		var after int
 		if err = h.db.QueryRowContext(ctx, "SELECT count(*) FROM targets").Scan(&after); err != nil {
+			return err
+		}
+		if err = h.checkTip(ctx, tip); err != nil {
 			return err
 		}
 		if before == after {
@@ -303,12 +308,48 @@ func (h *LocalHistory) Build(ctx context.Context, tip replayrecovery.Tip) error 
 	if err != nil {
 		return err
 	}
+	if err = h.checkTip(ctx, tip); err != nil {
+		return err
+	}
 	if _, err = h.db.ExecContext(ctx, "INSERT INTO coverage(data) VALUES(?)", data); err != nil {
 		return err
 	}
 	h.built = true
 	return nil
 }
+
+// indexHeaders bounds durable commits to 128 headers while verifying every
+// predecessor hash. A failed batch cannot leave partially authenticated headers.
+func (h *LocalHistory) indexHeaders(ctx context.Context, tip replayrecovery.Tip, tipHash *chainhash.Hash) error {
+	expected := tip.Hash
+	for height := int64(tip.Height); height >= int64(h.options.StartHeight); {
+		if err := h.checkTip(ctx, tip); err != nil {
+			return err
+		}
+		tx, err := h.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		for batch := 0; batch < 128 && height >= int64(h.options.StartHeight); batch++ {
+			block, invalid, e := h.chain.GetBlockInChainByHeightHash(ctx, uint32(height), tipHash) // #nosec G115 -- loop bounds are uint32 heights.
+			if e != nil || invalid || block == nil || block.Header == nil || block.Header.HashPrevBlock == nil || block.Hash().String() != expected {
+				_ = tx.Rollback()
+				return errors.NewProcessingError("canonical header ancestry unavailable at %d", height)
+			}
+			if _, err = tx.ExecContext(ctx, "INSERT INTO headers VALUES(?,?,?)", height, expected, block.Header.Bytes()); err != nil {
+				_ = tx.Rollback()
+				return err
+			}
+			expected = block.Header.HashPrevBlock.String()
+			height--
+		}
+		if err = tx.Commit(); err != nil {
+			return err
+		}
+	}
+	return h.checkTip(ctx, tip)
+}
+
 func (h *LocalHistory) readBlob(ctx context.Context, key []byte, kind fileformat.FileType) ([]byte, error) {
 	r, err := h.archive.GetIoReader(ctx, key, kind)
 	if err != nil {
@@ -580,7 +621,11 @@ type historySeal struct {
 }
 
 // OpenHistory checks index integrity and reattaches live guarded canonical reads.
-func OpenHistory(path string, chain HistoryChain, options HistoryOptions) (_ *LocalHistory, err error) {
+func OpenHistory(path string, chain HistoryChain, options HistoryOptions) (*LocalHistory, error) {
+	return openHistory(context.Background(), path, chain, options)
+}
+
+func openHistory(ctx context.Context, path string, chain HistoryChain, options HistoryOptions) (_ *LocalHistory, err error) {
 	path, err = filepath.Abs(path)
 	if err != nil {
 		return nil, err
@@ -626,7 +671,7 @@ func OpenHistory(path string, chain HistoryChain, options HistoryOptions) (_ *Lo
 	}()
 	db.SetMaxOpenConns(1)
 	var data []byte
-	if err = db.QueryRow("SELECT data FROM coverage WHERE length(data)<=65536").Scan(&data); err != nil {
+	if err = db.QueryRowContext(ctx, "SELECT data FROM coverage WHERE length(data)<=65536").Scan(&data); err != nil {
 		return nil, errors.NewProcessingError("history index incomplete", err)
 	}
 	var seal historySeal
@@ -638,14 +683,14 @@ func OpenHistory(path string, chain HistoryChain, options HistoryOptions) (_ *Lo
 	if seal.Version != 2 || o.EndHeight < o.StartHeight || o.MaxBlockTransactions < 1 || o.MaxBlockTransactions > 4000000 || o.MaxBlobBytes < 64 || o.MaxBlobBytes > 256<<20 || c.StartHeight != o.StartHeight || c.EndHeight != o.EndHeight || c.Scanned != uint64(o.EndHeight)-uint64(o.StartHeight)+1 || uint64(c.GapCount) > c.Scanned || c.Complete != (c.GapCount == 0) {
 		return nil, errors.NewProcessingError("invalid history index seal")
 	}
-	digest, e := historyDigest(context.Background(), db)
+	digest, e := historyDigest(ctx, db)
 	if e != nil {
 		return nil, e
 	}
 	if historySealDigest(digest, o, c) != seal.Digest {
 		return nil, errors.NewProcessingError("history index integrity mismatch")
 	}
-	if o.GenesisActivationHeight != options.GenesisActivationHeight {
+	if o.GenesisActivationHeight != options.GenesisActivationHeight || o.BlockHeightRetention != options.BlockHeightRetention {
 		return nil, errors.NewProcessingError("history consensus settings changed; resume refused")
 	}
 	o.Guard = options.Guard
@@ -654,10 +699,52 @@ func OpenHistory(path string, chain HistoryChain, options HistoryOptions) (_ *Lo
 		return nil, errors.NewProcessingError("live history chain and guard required")
 	}
 	history := &LocalHistory{db: db, file: file, chain: chain, options: o, coverage: c, built: true}
-	if err = history.authenticateStoredHeaders(context.Background()); err != nil {
+	if err = history.authenticateStoredHeaders(ctx); err != nil {
 		return nil, err
 	}
 	return history, nil
+}
+
+// ReuseTargets restores a completed index's expanded targets into a fresh
+// census, provided every new census target was covered by that index. A false
+// result leaves the census unchanged and requires a new history build.
+func (h *LocalHistory) ReuseTargets(ctx context.Context, path string) (reused bool, err error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.built {
+		return false, errors.NewProcessingError("history index incomplete")
+	}
+	if err = h.checkTip(ctx, h.coverage.Tip); err != nil {
+		return false, err
+	}
+	path, err = filepath.Abs(path)
+	if err != nil {
+		return false, err
+	}
+	u := url.URL{Scheme: "file", Path: path, RawQuery: "mode=rw"}
+	if _, err = h.db.ExecContext(ctx, "ATTACH DATABASE ? AS resume_census", u.String()); err != nil {
+		return false, err
+	}
+	defer func() {
+		_, detachErr := h.db.ExecContext(context.Background(), "DETACH DATABASE resume_census")
+		if err == nil {
+			err = detachErr
+		}
+	}()
+	var missing int
+	if err = h.db.QueryRowContext(ctx, "SELECT count(*) FROM resume_census.targets c WHERE NOT EXISTS(SELECT 1 FROM main.targets h WHERE h.id=c.id)").Scan(&missing); err != nil {
+		return false, err
+	}
+	if missing != 0 {
+		return false, nil
+	}
+	if _, err = h.db.ExecContext(ctx, "INSERT OR IGNORE INTO resume_census.targets SELECT id FROM main.targets"); err != nil {
+		return false, err
+	}
+	if err = h.checkTip(ctx, h.coverage.Tip); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (h *LocalHistory) Tip(ctx context.Context) (replayrecovery.Tip, error) {
@@ -743,59 +830,97 @@ func historyTransaction(id, raw string) (*bt.Tx, error) {
 	return tx, nil
 }
 
-func (h *LocalHistory) expandUnconfirmed(ctx context.Context) error {
+// expandUnconfirmed performs one bounded breadth-first walk. Census metadata
+// is only a stop hint: every discovered parent still needs authenticated archive
+// inclusion, or full absence and input proofs, before Check can classify it.
+func (h *LocalHistory) expandUnconfirmed(ctx context.Context) (err error) {
 	if h.options.Unconfirmed == nil {
 		return nil
 	}
-	// Freeze this pass's unresolved targets. Newly discovered parents must get
-	// a canonical scan before their own ancestry can be expanded.
-	if _, err := h.db.ExecContext(ctx, `CREATE TEMP TABLE IF NOT EXISTS pending_targets(id TEXT PRIMARY KEY);
-DELETE FROM pending_targets;
-INSERT INTO pending_targets SELECT id FROM targets WHERE NOT EXISTS(SELECT 1 FROM transactions WHERE txid=targets.id)`); err != nil {
+	const maxWork = 10000
+	var hasInventory int
+	if h.options.TargetsPath != "" {
+		if err := h.db.QueryRowContext(ctx, "SELECT count(*) FROM census.sqlite_master WHERE type='table' AND name='inventory'").Scan(&hasInventory); err != nil {
+			return err
+		}
+	}
+	// The total expansion budget also bounds this durable write transaction.
+	txn, err := h.db.BeginTx(ctx, nil)
+	if err != nil {
 		return err
 	}
-	// Keyset paging keeps dependency memory bounded.
-	last := ""
-	for {
-		rows, err := h.db.QueryContext(ctx, "SELECT id FROM pending_targets WHERE id>? ORDER BY id LIMIT 256", last)
-		if err != nil {
-			return err
+	defer func() {
+		if err == nil {
+			err = txn.Commit()
+		} else {
+			_ = txn.Rollback()
 		}
-		var ids []string
-		for rows.Next() {
-			var id string
-			if err = rows.Scan(&id); err != nil {
-				_ = rows.Close()
+	}()
+	if _, err := txn.ExecContext(ctx, `CREATE TEMP TABLE pending_targets(id TEXT PRIMARY KEY,depth INTEGER,expanded INTEGER DEFAULT 0);
+CREATE INDEX pending_expansion ON pending_targets(expanded,depth,id);
+INSERT INTO pending_targets(id,depth) SELECT id,0 FROM targets WHERE NOT EXISTS(SELECT 1 FROM transactions WHERE txid=targets.id)`); err != nil {
+		return err
+	}
+	defer func() { _, _ = txn.ExecContext(context.Background(), "DROP TABLE pending_targets") }()
+	edges := 0
+	for work := 0; work < maxWork; work++ {
+		if work%128 == 0 {
+			if err := h.checkTip(ctx, h.coverage.Tip); err != nil {
 				return err
 			}
-			ids = append(ids, id)
 		}
-		err = rows.Err()
-		if closeErr := rows.Close(); err == nil {
-			err = closeErr
-		}
-		if err != nil {
-			return err
-		}
-		if len(ids) == 0 {
+		var id string
+		var depth int
+		err := txn.QueryRowContext(ctx, "SELECT id,depth FROM pending_targets WHERE expanded=0 ORDER BY depth,id LIMIT 1").Scan(&id, &depth)
+		if err == sql.ErrNoRows {
 			return nil
 		}
-		for _, id := range ids {
-			if err = h.checkTip(ctx, h.coverage.Tip); err != nil {
+		if err != nil {
+			return err
+		}
+		if _, err = txn.ExecContext(ctx, "UPDATE pending_targets SET expanded=1 WHERE id=?", id); err != nil {
+			return err
+		}
+		if depth >= 256 {
+			continue
+		}
+		var confirmed int
+		if err = txn.QueryRowContext(ctx, "SELECT count(*) FROM transactions WHERE txid=?", id).Scan(&confirmed); err != nil {
+			return err
+		}
+		if confirmed != 0 {
+			continue
+		}
+		if hasInventory != 0 {
+			var mined int
+			if err = txn.QueryRowContext(ctx, "SELECT count(*) FROM census.inventory WHERE txid=? AND master=1 AND candidate=0 AND reason=''", id).Scan(&mined); err != nil {
 				return err
 			}
-			tx, e := h.options.Unconfirmed(ctx, id)
-			if e != nil || tx == nil || tx.TxID() != id || tx.IsCoinbase() {
+			if mined != 0 {
 				continue
 			}
-			for _, in := range tx.Inputs {
-				if _, err = h.db.ExecContext(ctx, "INSERT OR IGNORE INTO targets VALUES(?)", in.PreviousTxIDStr()); err != nil {
-					return err
-				}
+		}
+		tx, e := h.options.Unconfirmed(ctx, id)
+		if e != nil || tx == nil || tx.TxID() != id || tx.IsCoinbase() {
+			continue
+		}
+		for _, in := range tx.Inputs {
+			// One shared budget bounds fan-out across all roots. Unexpanded
+			// dependencies remain Unknown; reaching a bound never proves absence.
+			if edges >= maxWork {
+				return nil
+			}
+			edges++
+			parent := in.PreviousTxIDStr()
+			if _, err = txn.ExecContext(ctx, "INSERT OR IGNORE INTO targets VALUES(?)", parent); err != nil {
+				return err
+			}
+			if _, err = txn.ExecContext(ctx, "INSERT OR IGNORE INTO pending_targets(id,depth) VALUES(?,?)", parent, depth+1); err != nil {
+				return err
 			}
 		}
-		last = ids[len(ids)-1]
 	}
+	return nil
 }
 
 func (h *LocalHistory) Check(ctx context.Context, id string, tip replayrecovery.Tip) (replayrecovery.Evidence, error) {
@@ -882,6 +1007,9 @@ func (h *LocalHistory) Check(ctx context.Context, id string, tip replayrecovery.
 			for _, input := range st.Inputs {
 				if input.PreviousTxIDStr() == id && uint64(input.PreviousTxOutIndex) == uint64(vout) {
 					proven = true
+					if spend.Height > e.LastSpendHeight {
+						e.LastSpendHeight = spend.Height
+					}
 					break
 				}
 			}

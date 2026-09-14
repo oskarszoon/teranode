@@ -219,21 +219,6 @@ func (b *RecoveryBackend) SpendReferences(ctx context.Context, visit func(rr.Spe
 			// spend edges so unknown components cannot disappear from the graph.
 			markers = nil
 		}
-		masterMarkers := markers
-		if !item.Master {
-			hash, err := chainhash.NewHashFromStr(item.TxID)
-			if err != nil {
-				return err
-			}
-			_, masterBins, err := b.readRequired(ctx, hash[:])
-			if err != nil {
-				return err
-			}
-			masterMarkers, err = recoveryMarkers(masterBins)
-			if err != nil {
-				masterMarkers = nil
-			}
-		}
 		for i, value := range values {
 			raw, ok := value.([]byte)
 			if !ok || len(raw) != 68 {
@@ -244,7 +229,7 @@ func (b *RecoveryBackend) SpendReferences(ctx context.Context, visit func(rr.Spe
 			if offset > math.MaxUint32 {
 				return errors.NewProcessingError("spend reference output overflow")
 			}
-			ref := rr.SpendReference{ParentKey: append([]byte(nil), item.Record.Key...), ParentTxID: item.TxID, Vout: uint32(offset), ChildTxID: child.String(), Vin: binary.LittleEndian.Uint32(raw[64:]), Marked: markers[child.String()] == true && masterMarkers[child.String()] == true}
+			ref := rr.SpendReference{ParentKey: append([]byte(nil), item.Record.Key...), ParentTxID: item.TxID, Vout: uint32(offset), ChildTxID: child.String(), Vin: binary.LittleEndian.Uint32(raw[64:]), Marked: markers[child.String()] == true}
 			if err := visit(ref); err != nil {
 				return err
 			}

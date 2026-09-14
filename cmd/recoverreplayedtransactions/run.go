@@ -3,6 +3,7 @@ package recoverreplayedtransactions
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -33,6 +34,8 @@ type Options struct {
 	Resume      bool
 	Timeout     time.Duration
 	Concurrency int
+	// Set from the daemon's configured policy by Run, never overridden by CLI flags.
+	blockHeightRetention uint32
 }
 
 func (o Options) validate() error {
@@ -109,6 +112,10 @@ func Run(ctx context.Context, logger ulogger.Logger, s *settings.Settings, o Opt
 	if s == nil || s.UtxoStore.UtxoStore == nil || s.UtxoStore.UtxoStore.Scheme != "aerospike" {
 		return commandError("replay recovery supports only the Aerospike UTXO backend")
 	}
+	o.blockHeightRetention = max(s.GlobalBlockHeightRetention, s.GetUtxoStoreBlockHeightRetention())
+	if o.blockHeightRetention == 0 {
+		return commandError("block height retention must be positive for replay recovery")
+	}
 	chain, err := blockchain.NewClient(ctx, logger, s, "replay-recovery")
 	if err != nil {
 		return err
@@ -167,11 +174,12 @@ func Run(ctx context.Context, logger ulogger.Logger, s *settings.Settings, o Opt
 }
 
 type jobState struct {
-	Version  int                `json:"version"`
-	Identity string             `json:"identity"`
-	Tip      replayrecovery.Tip `json:"tip"`
-	Apply    bool               `json:"apply"`
-	Phase    string             `json:"phase"`
+	Version              int                `json:"version"`
+	Identity             string             `json:"identity"`
+	Tip                  replayrecovery.Tip `json:"tip"`
+	Apply                bool               `json:"apply"`
+	Phase                string             `json:"phase"`
+	BlockHeightRetention uint32             `json:"block_height_retention"`
 }
 
 func lockWorkDir(path string) (*os.File, error) {
@@ -247,12 +255,12 @@ func runJob(ctx context.Context, native replayrecovery.Backend, retained replayr
 	historyPath := filepath.Join(o.WorkDir, "history.sqlite")
 	journal := filepath.Join(o.WorkDir, "journal.sqlite")
 	statePath := filepath.Join(o.WorkDir, "job.json")
-	state := jobState{Version: 2, Identity: native.Identity(), Tip: guard.tip, Apply: o.Apply, Phase: "inventory"}
+	state := jobState{Version: 3, Identity: native.Identity(), Tip: guard.tip, Apply: o.Apply, Phase: "inventory", BlockHeightRetention: o.blockHeightRetention}
 	var summary, mutations replayrecovery.Summary
 	reportAllowed := false
 	defer func() {
 		summary = retainMutationStatus(summary, mutations)
-		if err != nil {
+		if err != nil && !errors.Is(err, ErrFindings) {
 			summary.Complete = false
 		}
 		if reportAllowed {
@@ -267,6 +275,9 @@ func runJob(ctx context.Context, native replayrecovery.Backend, retained replayr
 		}
 		if saved.Version != state.Version || saved.Identity != state.Identity || saved.Tip != state.Tip || !saved.Apply {
 			return commandError("resume identity, version, mode or pinned tip mismatch")
+		}
+		if saved.BlockHeightRetention != state.BlockHeightRetention {
+			return commandError("resume block height retention mismatch")
 		}
 		state = saved
 	} else {
@@ -300,13 +311,10 @@ func runJob(ctx context.Context, native replayrecovery.Backend, retained replayr
 			return e
 		}
 		if o.Resume {
-			// Only unsealed, read-only artifacts owned by this job can be rebuilt.
-			for _, path := range []string{manifest, historyPath} {
-				for _, suffix := range []string{"", ".lock", "-journal"} {
-					if e := os.Remove(path + suffix); e != nil && !errors.Is(e, os.ErrNotExist) {
-						return e
-					}
-				}
+			// Refresh the read-only census. A sealed history index can be reused
+			// below if it covers every target found in this fresh census.
+			if err = removeJobArtifact(manifest); err != nil {
+				return err
 			}
 		}
 		census, ok := native.(replayrecovery.CensusBackend)
@@ -322,7 +330,7 @@ func runJob(ctx context.Context, native replayrecovery.Backend, retained replayr
 			return err
 		}
 	}
-	options := HistoryOptions{StartHeight: 0, EndHeight: guard.tip.Height, Guard: guard.Check, TargetsPath: manifest, GenesisActivationHeight: genesis, Unconfirmed: retained}
+	options := HistoryOptions{StartHeight: 0, EndHeight: guard.tip.Height, Guard: guard.Check, TargetsPath: manifest, GenesisActivationHeight: genesis, BlockHeightRetention: o.blockHeightRetention, Unconfirmed: retained}
 	last := time.Time{}
 	options.Progress = func(c HistoryCoverage) {
 		if time.Since(last) >= 5*time.Second {
@@ -332,16 +340,13 @@ func runJob(ctx context.Context, native replayrecovery.Backend, retained replayr
 	}
 	var history *LocalHistory
 	if beforeApply {
-		history, err = NewHistory(ctx, historyPath, chain, archive, options)
+		history, err = buildJobHistory(ctx, historyPath, chain, archive, options, guard.tip, o.Resume)
 		if err != nil {
 			return err
 		}
 		defer func() { err = combineErrors(err, history.Close()) }()
-		if err = history.Build(ctx, guard.tip); err != nil {
-			return err
-		}
 	} else {
-		history, err = OpenHistory(historyPath, chain, options)
+		history, err = openHistory(ctx, historyPath, chain, options)
 		if err != nil {
 			return err
 		}
@@ -363,7 +368,7 @@ func runJob(ctx context.Context, native replayrecovery.Backend, retained replayr
 			return err
 		}
 		if !o.Apply {
-			return err
+			return auditResult(summary, err)
 		}
 		state.Phase = "apply"
 		if e := writeJobJSON(statePath, state); e != nil {
@@ -392,11 +397,64 @@ func runJob(ctx context.Context, native replayrecovery.Backend, retained replayr
 	return err
 }
 
+func buildJobHistory(ctx context.Context, path string, chain HistoryChain, archive blob.Store, options HistoryOptions, tip replayrecovery.Tip, resume bool) (*LocalHistory, error) {
+	if resume {
+		history, err := openHistory(ctx, path, chain, options)
+		if err == nil {
+			if history.Coverage().Tip != tip {
+				return nil, combineErrors(commandError("history index bound to different tip"), history.Close())
+			}
+			reuse, reuseErr := history.ReuseTargets(ctx, options.TargetsPath)
+			if reuseErr != nil {
+				return nil, combineErrors(reuseErr, history.Close())
+			}
+			if reuse {
+				return history, nil
+			}
+			if err = history.Close(); err != nil {
+				return nil, err
+			}
+		} else if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, sql.ErrNoRows) {
+			// A corrupt seal or changed consensus policy must fail closed.
+			return nil, err
+		}
+		// Missing/unsealed history, or new census targets, requires a fresh
+		// read-only build. This helper is never used after mutations begin.
+		if err = removeJobArtifact(path); err != nil {
+			return nil, err
+		}
+	}
+	history, err := NewHistory(ctx, path, chain, archive, options)
+	if err != nil {
+		return nil, err
+	}
+	if err = history.Build(ctx, tip); err != nil {
+		return nil, combineErrors(err, history.Close())
+	}
+	return history, nil
+}
+
+func removeJobArtifact(path string) error {
+	for _, suffix := range []string{"", ".lock", "-journal"} {
+		if err := os.Remove(path + suffix); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
+func auditResult(summary replayrecovery.Summary, err error) error {
+	if err == nil && summary.FullySpent > 0 {
+		return ErrFindings
+	}
+	return err
+}
+
 func ExitCode(err error) int {
 	if err == nil {
 		return 0
 	}
-	if errors.Is(err, replayrecovery.ErrIncomplete) {
+	if errors.Is(err, replayrecovery.ErrIncomplete) || errors.Is(err, ErrFindings) {
 		return 2
 	}
 	return 1

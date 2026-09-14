@@ -208,3 +208,33 @@ func TestApplyBoundaryUnknownDescendantThroughConfirmedEntryBlocksReplay(t *test
 	require.Contains(t, backend.records, confirmed.TxID())
 	require.Contains(t, backend.records, unresolved.TxID())
 }
+
+func TestMinedDescendantEntryWithoutInclusionBlocksRepair(t *testing.T) {
+	base, source, replay, manifestPath, journalPath := recoveryFixture(t)
+	child := bt.NewTx()
+	require.NoError(t, child.From(replay.TxID(), 0, replay.Outputs[0].LockingScript.String(), replay.Outputs[0].Satoshis))
+	require.NoError(t, child.PayToAddress("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", 250))
+	base.txs[child.TxID()] = child
+	base.records[child.TxID()] = Record{Key: []byte(child.TxID()), Data: []byte("normally mined"), Generation: 3}
+	source.evidence[child.TxID()] = Evidence{TxID: child.TxID(), RawTx: child.String(), BlockHeight: 100, Classification: Live}
+	backend := &dependencyCensusBackend{recordBackend: base, refs: []SpendReference{{ParentKey: []byte(replay.TxID()), ParentTxID: replay.TxID(), ChildTxID: child.TxID()}}}
+	summary, err := discoverForTest(t.Context(), backend, source, manifestPath, nil)
+	require.ErrorIs(t, err, ErrIncomplete)
+	require.EqualValues(t, 1, summary.Unknown)
+	require.Zero(t, summary.Kept)
+	require.EqualValues(t, 1, summary.Blocked)
+	m, err := openManifest(manifestPath)
+	require.NoError(t, err)
+	var data []byte
+	require.NoError(t, m.db.QueryRow("SELECT entry FROM entries WHERE id=?", child.TxID()).Scan(&data))
+	var entry Entry
+	require.NoError(t, json.Unmarshal(data, &entry))
+	require.Equal(t, "dependent mined record lacks canonical inclusion", entry.Evidence.Reason)
+	require.NoError(t, m.Close())
+	result, err := Apply(t.Context(), backend, source, manifestPath, journalPath, ApplyOptions{Guard: allowRecovery, Maintenance: true, Tip: source.tip})
+	require.ErrorIs(t, err, ErrIncomplete)
+	require.Zero(t, result.Repaired)
+	require.Zero(t, backend.writes)
+	require.Contains(t, base.records, replay.TxID())
+	require.Contains(t, base.records, child.TxID())
+}

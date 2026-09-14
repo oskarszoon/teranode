@@ -2,7 +2,10 @@ package aerospike_test
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -312,9 +315,24 @@ func TestRecoveryCensusAndAbsentSnapshot(t *testing.T) {
 		}
 	}
 	require.NoError(t, backend.SpendReferences(ctx, func(r rr.SpendReference) error {
-		require.False(t, r.Marked, "master marker is also required")
+		require.True(t, r.Marked, "the output page marker alone rejects replay")
 		return nil
 	}))
+	// Production pruning marks only the spent output page. With no missing
+	// marker, a clean census needs no historical archive for this absent child.
+	manifestDir := t.TempDir()
+	require.NoError(t, os.Chmod(manifestDir, 0700))
+	manifestPath := filepath.Join(manifestDir, "clean.sqlite")
+	_, err = rr.Inventory(ctx, backend, manifestPath, func(context.Context) error { return nil })
+	require.NoError(t, err)
+	db, err := sql.Open("sqlite", manifestPath)
+	require.NoError(t, err)
+	var entries int
+	require.NoError(t, db.QueryRow("SELECT COUNT(*) FROM entries").Scan(&entries))
+	require.NoError(t, db.Close())
+	require.Zero(t, entries, "a correctly marked absent child is not a recovery finding")
+	_, _, err = store.SpendAndCreate(ctx, child, 1001)
+	require.ErrorContains(t, err, "invalid spend")
 	for _, p := range absent.Parents {
 		if len(p.Record.Key) == 32 {
 			_, err = backend.Mark(ctx, p.Record, child.TxID())

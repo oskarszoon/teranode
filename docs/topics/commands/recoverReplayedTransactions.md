@@ -62,12 +62,22 @@ teranode-cli recoverreplayedtransactions \
 These are alternatives, not three mandatory stages. A fresh apply includes its
 own complete audit. A new run requires an empty work directory; an audit's
 artifacts cannot be silently repurposed as an apply. Resume requires the same
-store identity, configuration, compatible artifact version and pinned tip.
+store identity, configuration (including the reorg retention policy), compatible
+artifact version and pinned tip. Artifacts from older versions without the
+retention policy are not accepted by this version; never edit a journal or its
+version fields to bypass that refusal.
 
 The default timeout is 30 minutes; use `--timeout` for a longer maintenance
 window. `--concurrency` limits Aerospike scan node fan-out (default 1, range 1–64).
 Archive parsing remains bounded and sequential. Full history scans can take much
-longer than the default timeout; plan the window before starting.
+longer than the default timeout; plan the window before starting and explicitly
+set `--timeout` to cover it. Mainnet-scale runtime has not been measured. The
+scan uses at most two body passes, expands unresolved ancestry transitively with
+a depth limit of 256 and a shared limit of 10,000 processed records/input edges,
+and batches
+header writes and guard checks. Reaching a limit leaves unresolved evidence;
+it never authorizes a repair. The watchdog still checks maintenance every five
+seconds, and phase boundaries check it synchronously.
 
 ## Evidence and repair scope
 
@@ -82,7 +92,14 @@ tip. No external SV Node RPC is required. The job authenticates retained raw
 transactions against subtree and block Merkle commitments and verifies header
 ancestry. A fully-spent classification requires positive canonical inclusion
 and a correctly ordered canonical spending transaction for every spendable
-output, using the existing chain-era burned-output policy. Empty mined metadata,
+output, using the existing chain-era burned-output policy. Both confirmation
+and the latest authenticated spend must be outside the reorg retention window:
+`max(confirmation height, last spend height) + retention <= pinned tip height`.
+Retention is the greater of `global_blockHeightRetention` and the effective UTXO
+retention including its adjustment. A zero retention policy is refused by the
+command. Discovery seals this policy; apply rechecks it and fresh evidence before
+writing markers or deleting records. Recent fully-spent records remain unresolved
+so a reorg can still recover their transactions. Empty mined metadata,
 a missing UTXO record or local spent flags alone never authorize deletion.
 
 The history scan starts at genesis to make absence claims conservative. Missing,
@@ -94,7 +111,9 @@ Subtree transaction data is streamed, with bounded individual transaction and
 block parsing; blocks exceeding limits remain unresolved.
 
 Repairs are limited to positively proven recreated fully-spent records and
-missing markers for absent fully-spent children. Normally mined dependent
+missing markers for absent fully-spent children. A marker on the parent record
+that owns the spent output is sufficient, including a pagination record without
+a master marker; this matches normal pruning and replay validation. Normally mined dependent
 records and legitimate unconfirmed transactions are preserved. Confirmed
 records with live outputs, unexplained flags, unsafe parent ownership or expiry,
 and incomplete evidence remain untouched. This recovers this incident's
@@ -112,9 +131,21 @@ and verified outcomes afterward. Shared parents and dependency order are tracked
 Keep writers stopped on failure and retain the entire work directory. Explicit
 resume reconciles only this job's exact expected before/after states. Interrupted
 read-only phases can be rebuilt; a partial scan is never treated as complete.
+A completed, sealed history index is reused only after a fresh census confirms
+that all its targets are covered; newly discovered targets require rebuilding.
+An unfinished body scan still restarts from its read-only phase boundary, so a
+larger maintenance timeout is essential for large stores. SIGINT, SIGTERM and
+SIGHUP cancel through the job context and attempt to persist the final report;
+SIGKILL and power loss cannot run that cleanup.
 Foreign changes, a different tip or unexplained disappearance stop recovery.
 Do not edit/delete a journal to bypass a failure or restore before-images over
 a chain that has advanced. There is no automatic rollback.
+
+Mutation journal commits use SQLite `synchronous=EXTRA` with DELETE journaling,
+including directory synchronization before remote writes. Journal schema and
+identity header are committed together; resume may initialize a provably empty
+journal left before that commit, but refuses existing headerless state or foreign
+schemas. [SQLite durability details](https://www.sqlite.org/pragma.html#pragma_synchronous).
 
 Progress goes to stderr. The final JSON summary goes to stdout and `report.json`;
 `manifest.sqlite`, `history.sqlite`, `journal.sqlite` and `job.json` retain the
@@ -122,9 +153,12 @@ private audit, evidence, mutation journal and phase checkpoint.
 
 | Exit | Meaning |
 | --- | --- |
-| 0 | Complete audit or complete store repair; JSON distinguishes `applied`. |
+| 0 | Complete audit with no repairable or unresolved findings, or complete store repair; JSON distinguishes `applied`. |
 | 1 | Unsafe precondition, interruption, operational failure or failed verification. |
-| 2 | Unresolved findings remain, even if independent components were repaired. |
+| 2 | Audit found repairable records, or unresolved findings remain even if independent components were repaired. |
+
+`complete` describes whether classification/verification finished; a complete
+audit with repairable records returns exit 2 and performs no mutations.
 
 A complete graph allows independent proven repairs while unknown components
 remain untouched. Unresolvable ownership prevents safe apply. Read the counts,
@@ -136,3 +170,14 @@ Then resume the FSM and verify a fresh valid mining candidate and the next tip
 transition. `restart_required` is explicit after mutations, including interrupted
 attempts. The CLI finishes store verification while IDLE; it cannot prove those
 later runtime observations and never resumes the node itself.
+
+The restart step above refers to assembly and the other application writers.
+The recovery backend currently uses generation-guarded Aerospike deletes without
+`DurableDelete`. On persistent namespaces, an Aerospike cold restart can resurrect
+older deleted record versions. Durable deletes prevent that using tombstones,
+but Community Edition rejects that policy, so it is not enabled unconditionally.
+Keep the mutation journal and backups. After an Aerospike cold restart, keep
+writers isolated and run a fresh audit in a new work directory before resuming;
+a completed journal cannot certify newly resurrected records. See
+[Aerospike durable deletes](https://aerospike.com/docs/database/learn/architecture/durable-deletes)
+and [cold restart behavior](https://aerospike.com/docs/database/manage/database/cold-start).

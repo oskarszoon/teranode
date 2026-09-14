@@ -109,10 +109,12 @@ func (b *recordBackend) VerifyParent(_ context.Context, p Parent) error {
 }
 
 type evidenceSource struct {
-	tip      Tip
-	evidence map[string]Evidence
+	retention uint32
+	tip       Tip
+	evidence  map[string]Evidence
 }
 
+func (s *evidenceSource) Retention() uint32                { return s.retention }
 func (s *evidenceSource) Tip(context.Context) (Tip, error) { return s.tip, nil }
 func (s *evidenceSource) Check(_ context.Context, id string, tip Tip) (Evidence, error) {
 	e, ok := s.evidence[id]
