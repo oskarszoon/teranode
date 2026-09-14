@@ -28,6 +28,10 @@ recreated records; clearing assembly alone does not repair the store.
 4. Run only one recovery job against the store, including across hosts. The work
    directory lock prevents concurrent use of that directory; it is not a
    distributed store lease.
+5. On release 0.15, stores using `utxostore_utxoBatchSize=1` must have
+   `aerospike_enable_spend_filter_expressions=false` on every writer before
+   writers resume. The expression spend path does not enforce replay markers;
+   recovery does not fix that path. Keep the store's existing output batch size.
 
 The CLI reads persisted `fsm_state` through the existing blockchain API and
 accepts only `IDLE`. Missing state or a failed read stops the job. It checks state
@@ -40,11 +44,20 @@ must isolate writers. IDLE alone does not stop all already-running background
 workers: for example, the pruner's startup gate and catchup pause do not form a
 maintenance barrier. `--maintenance` acknowledges the isolation procedure.
 
-On release 0.15, the blockchain service changes its runtime FSM before persisting
-the new state. A persistence failure is logged and can leave persisted `IDLE`
-behind a different runtime state. Resolve any FSM persistence errors and keep
-external FSM transitions disabled throughout recovery; the CLI's persisted-state
-check cannot establish that writers are inactive.
+On release 0.15, legacy sync automatically requests RUN when current, including
+from IDLE. Stop legacy sync and other automatic transition sources throughout
+recovery; avoiding manual FSM transitions is insufficient. The blockchain service
+changes its runtime FSM before persisting the new state. A persistence failure
+is logged but the transition command can still report success, leaving persisted
+`IDLE` behind a different runtime state. Resolve any FSM persistence errors;
+the CLI's persisted-state check cannot establish that writers are inactive.
+
+Isolate promptly, before further reorg/conflict processing. Release 0.15
+`ProcessConflicting` can clear parent spend references to absent children when
+their replay markers are missing, erasing evidence that recovery needs to discover
+those children. A complete recovery report cannot certify evidence already
+erased before the census. Preserve incident backups for separate investigation
+if this processing may already have occurred.
 
 ## Invocation
 
@@ -79,9 +92,9 @@ Archive parsing remains bounded and sequential. Full history scans can take much
 longer than the default timeout; plan the window before starting and explicitly
 set `--timeout` to cover it. Mainnet-scale runtime has not been measured. The
 scan uses at most two body passes, expands unresolved ancestry transitively with
-a depth limit of 256 and a shared limit of 10,000 processed records/input edges,
-and batches
-header writes and guard checks. Reaching a limit leaves unresolved evidence;
+a depth limit of 256 and separate limits of 10,000 processed records and 10,000
+input edges across all roots, and batches header writes and guard checks.
+Reaching a limit leaves unresolved evidence;
 it never authorizes a repair. The watchdog still checks maintenance every five
 seconds, and phase boundaries check it synchronously.
 
@@ -137,8 +150,8 @@ and verified outcomes afterward. Shared parents and dependency order are tracked
 Keep writers stopped on failure and retain the entire work directory. Explicit
 resume reconciles only this job's exact expected before/after states. Interrupted
 read-only phases can be rebuilt; a partial scan is never treated as complete.
-A completed, sealed history index is reused only after a fresh census confirms
-that all its targets are covered; newly discovered targets require rebuilding.
+A completed, sealed history index is reused only if every fresh census target
+is already indexed; any target missing from the index requires rebuilding.
 An unfinished body scan still restarts from its read-only phase boundary, so a
 larger maintenance timeout is essential for large stores. SIGINT, SIGTERM and
 SIGHUP cancel through the job context and attempt to persist the final report;
