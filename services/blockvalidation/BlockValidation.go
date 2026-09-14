@@ -1781,6 +1781,19 @@ func (u *BlockValidation) ValidateBlockWithOptions(ctx context.Context, block *m
 		// optimistic-mining AddBlock that would otherwise put the block on the chain first.
 		// This matters because BelowCheckpoint is true for EVERY height in
 		// 1..highestCheckpoint, not just the checkpoint heights themselves.
+		// Bound the target the header DECLARES before checking the hash against it.
+		// HasMetTargetDifficulty alone only asks whether the hash meets the target the
+		// header chose for itself, which a fabricated header answers in about two
+		// hashes by declaring nBits=0x207fffff (GHSA-gggq-8f59-4jm9). Runs here, ahead
+		// of the UTXO-mutating subtree validation below.
+		if limitErr := block.Header.HasMetPowLimit(u.settings.ChainCfgParams); limitErr != nil {
+			if !opts.IsRevalidation {
+				u.storeInvalidBlock(ctx, block, opts.PeerID, baseURL, "block declares a target easier than the network proof-of-work limit")
+			}
+
+			return errors.NewBlockInvalidError("[ValidateBlock][%s] block declares a target easier than the network proof-of-work limit", block.Header.Hash().String(), limitErr)
+		}
+
 		headerValid, _, err := block.Header.HasMetTargetDifficulty()
 		if !headerValid {
 			reason := "block does not meet target difficulty"
@@ -1803,7 +1816,7 @@ func (u *BlockValidation) ValidateBlockWithOptions(ctx context.Context, block *m
 		// mandatory height > 0 guard, so a peer cannot obtain the skip by declaring height 0
 		// or a fabricated sub-checkpoint height. The checkpoint hash-match itself was
 		// asserted above.
-		skipDifficultyCheck := model.BelowCheckpoint(u.settings.ChainCfgParams.Checkpoints, block.Height)
+		skipDifficultyCheck := u.skipExpectedDifficulty(ctx, block)
 
 		if skipDifficultyCheck {
 			ctxLogger.Debugf("[ValidateBlock][%s] skipping expected-nBits validation for block at height %d (at or below highest checkpoint height %d)",
@@ -2583,6 +2596,33 @@ func (u *BlockValidation) enqueueRevalidation(data revalidateBlockData) {
 	}
 }
 
+// skipExpectedDifficulty decides whether this block may skip the expected-nBits
+// (DAA) check. It requires proof that the node is still building the
+// checkpoint-certified prefix, not merely that the block's height falls inside
+// it — see model.SkipExpectedDifficulty for why height alone is forgeable.
+//
+// Fail-closed: if the best height cannot be read we cannot show we are still
+// building the prefix, so the real rule runs. That is the safe direction; on a
+// syncing node the block is re-fetched and retried, whereas skipping wrongly
+// hands a peer free proof-of-work.
+func (u *BlockValidation) skipExpectedDifficulty(ctx context.Context, block *model.Block) bool {
+	checkpoints := u.settings.ChainCfgParams.Checkpoints
+
+	if !model.BelowCheckpoint(checkpoints, block.Height) {
+		return false
+	}
+
+	_, bestMeta, err := u.blockchainClient.GetBestBlockHeader(ctx)
+	if err != nil || bestMeta == nil {
+		u.logger.Warnf("[skipExpectedDifficulty][%s] could not read best block header, applying the expected-nBits rule: %v", block.Hash().String(), err)
+		return false
+	}
+
+	// Invalidation removes descendants from the best chain, so reconsidering
+	// historical blocks is covered by the syncing arm as the prefix is rebuilt.
+	return model.SkipExpectedDifficulty(checkpoints, block.Height, bestMeta.Height)
+}
+
 // checkpointConfirmedAncestor reports whether block b is provably part of the main
 // chain that has already reached and matched the highest hardcoded checkpoint hash. It
 // is the ancestry predicate gating the below-checkpoint coinbase no-inflation skip in
@@ -2659,13 +2699,20 @@ func (u *BlockValidation) reValidateBlock(blockData revalidateBlockData) error {
 	// The header hash must meet the target its own nBits declares, below checkpoint or not
 	// — see the matching block in ValidateBlockWithOptions for why this half of the old
 	// skip is never safe to take. Enforced before the subtree work below.
+	// Same floor as ValidateBlockWithOptions, and for the same reason: this path
+	// runs validateBlockSubtrees (UTXO-mutating) below, so the declared target must
+	// be bounded here rather than left to block.Valid afterwards.
+	if limitErr := blockData.block.Header.HasMetPowLimit(u.settings.ChainCfgParams); limitErr != nil {
+		return errors.NewBlockInvalidError("[reValidateBlock][%s] block declares a target easier than the network proof-of-work limit", blockData.block.Header.Hash().String(), limitErr)
+	}
+
 	if headerValid, _, err := blockData.block.Header.HasMetTargetDifficulty(); !headerValid {
 		return errors.NewBlockInvalidError("[reValidateBlock][%s] block does not meet target difficulty: %s", blockData.block.Header.Hash().String(), err)
 	}
 
 	// Skip the expected-nBits (DAA) check for blocks at or below the highest checkpoint:
 	// the difficulty schedule over that prefix is certified by the pinned checkpoint hashes.
-	skipDifficultyCheck := model.BelowCheckpoint(u.settings.ChainCfgParams.Checkpoints, blockData.block.Height)
+	skipDifficultyCheck := u.skipExpectedDifficulty(ctx, blockData.block)
 
 	if skipDifficultyCheck {
 		u.logger.Debugf("[reValidateBlock][%s] skipping expected-nBits validation for block at height %d (at or below highest checkpoint height %d)",
