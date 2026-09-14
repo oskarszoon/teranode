@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"math/big"
+	"slices"
 	"sync"
 
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
@@ -65,6 +66,12 @@ func (d *Difficulty) CalcNextWorkRequired(ctx context.Context, blockHeader *mode
 	// If regtest we don't adjust the difficulty
 	if d.settings.ChainCfgParams.NoDifficultyAdjustment {
 		return &blockHeader.Bits, nil
+	}
+
+	// Activation is measured at the parent, as in SV Node's GetNextWorkRequired.
+	// Historical blocks must not be evaluated with the modern 144-block DAA.
+	if blockHeight < d.settings.ChainCfgParams.DaaForkHeight {
+		return d.calcHistoricalWorkRequired(ctx, blockHeader, blockHeight, currentBlockTime)
 	}
 
 	// Special difficulty rule for testnet:
@@ -157,6 +164,84 @@ func (d *Difficulty) CalcNextWorkRequired(ctx context.Context, blockHeader *mode
 	d.mu.Unlock()
 
 	return nBits, nil
+}
+
+// calcHistoricalWorkRequired applies the original 2016-block retarget, testnet's
+// minimum-difficulty recovery, and (after UAHF) emergency difficulty adjustment.
+func (d *Difficulty) calcHistoricalWorkRequired(ctx context.Context, parent *model.BlockHeader, height uint32, blockTime int64) (*model.NBit, error) {
+	const interval = 2016
+	const medianTimeSpan = 11 // Bitcoin median-time-past window.
+	params := d.settings.ChainCfgParams
+	target := parent.Bits.CalculateTarget()
+	if (uint64(height)+1)%interval == 0 {
+		// The first interval starts at genesis: 2016 blocks span 2015 gaps.
+		hash, err := d.store.GetHashOfAncestorBlock(ctx, parent.Hash(), interval-1)
+		if err != nil {
+			return nil, errors.NewStorageError("[Difficulty] getting historical retarget ancestor", err)
+		}
+		first, _, err := d.store.GetBlockHeader(ctx, hash)
+		if err != nil || first == nil {
+			return nil, errors.NewStorageError("[Difficulty] getting historical retarget header", err)
+		}
+		timespan := interval * int64(params.TargetTimePerBlock.Seconds())
+		elapsed := int64(parent.Timestamp) - int64(first.Timestamp)
+		if elapsed < timespan/4 {
+			elapsed = timespan / 4
+		} else if elapsed > timespan*4 {
+			elapsed = timespan * 4
+		}
+		target.Mul(target, big.NewInt(elapsed))
+		target.Div(target, big.NewInt(timespan))
+	} else if params.ReduceMinDifficulty {
+		if blockTime > int64(parent.Timestamp)+2*int64(params.TargetTimePerBlock.Seconds()) {
+			return d.powLimitnBits, nil
+		}
+		// Walk this parent's ancestry, stopping at the last non-special target
+		// or at a retarget boundary. Missing history must not become easy work.
+		for height%interval != 0 && parent.Bits == *d.powLimitnBits {
+			previous, _, err := d.store.GetBlockHeader(ctx, parent.HashPrevBlock)
+			if err != nil || previous == nil {
+				return nil, errors.NewStorageError("[Difficulty] restoring historical testnet target", err)
+			}
+			parent = previous
+			height--
+		}
+		return &parent.Bits, nil
+	} else {
+		if height < params.UahfForkHeight || height < 6 || parent.Bits == *d.powLimitnBits {
+			return &parent.Bits, nil
+		}
+		// EDA compares the parent's MTP with its sixth ancestor's MTP.
+		count := uint64(medianTimeSpan + 6)
+		if uint64(height)+1 < count {
+			count = uint64(height) + 1
+		}
+		headers, _, err := d.store.GetBlockHeaders(ctx, parent.Hash(), count)
+		if err != nil || uint64(len(headers)) != count {
+			return nil, errors.NewStorageError("[Difficulty] getting historical median-time window", err)
+		}
+		median := func(headers []*model.BlockHeader) uint32 {
+			times := make([]uint32, len(headers))
+			for i, header := range headers {
+				times[i] = header.Timestamp
+			}
+			slices.Sort(times)
+			return times[len(times)/2]
+		}
+		elapsed := int64(median(headers[:min(len(headers), medianTimeSpan)])) - int64(median(headers[6:]))
+		if elapsed < 12*60*60 {
+			return &parent.Bits, nil
+		}
+		target.Add(target, new(big.Int).Rsh(new(big.Int).Set(target), 2))
+	}
+	if target.Cmp(params.PowLimit) > 0 {
+		target.Set(params.PowLimit)
+	}
+	compact, err := BigToCompact(target)
+	if err != nil {
+		return nil, err
+	}
+	return model.NewNBitFromSlice(uint32ToBytes(compact))
 }
 
 // computeTarget calculates the target difficulty based on the first and last suitable blocks.
