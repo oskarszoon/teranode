@@ -107,6 +107,7 @@ func TestLegacyHistoricalTestnetSync(t *testing.T) {
 	p := peer.NewInboundPeer(logger, s, &peer.Config{})
 	state := &peerSyncState{requestedBlocks: expiringmap.New[chainhash.Hash, blockRequestOrigin](time.Hour)}
 	t.Cleanup(state.requestedBlocks.Stop)
+	checkpoint := params.Checkpoints[0]
 	sm := &SyncManager{
 		ctx: ctx, logger: logger, settings: s, chainParams: &params,
 		blockchainClient: chain, utxoStore: utxos, subtreeStore: subtrees,
@@ -115,7 +116,7 @@ func TestLegacyHistoricalTestnetSync(t *testing.T) {
 		requestedBlocks: expiringmap.New[chainhash.Hash, blockRequestOrigin](time.Hour),
 		orphanTxs:       expiringmap.New[chainhash.Hash, *orphanTxAndParents](time.Hour),
 		headerList:      list.New(), blockSizeTracker: newBlockSizeTracker(10),
-		nextCheckpoint: &params.Checkpoints[0],
+		nextCheckpoint: &checkpoint,
 	}
 	t.Cleanup(sm.requestedBlocks.Stop)
 	t.Cleanup(sm.orphanTxs.Stop)
