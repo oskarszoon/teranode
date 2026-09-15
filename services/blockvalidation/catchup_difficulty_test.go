@@ -85,6 +85,19 @@ func TestValidateHeaderChainDifficulty_HistoricalTestnet(t *testing.T) {
 	require.NoError(t, validateHeaderChainDifficulty(tSettings, &model.BlockHeaderMeta{Height: 0}, headers))
 }
 
+func TestValidateHeaderChainDifficulty_STNPreservesExistingRules(t *testing.T) {
+	s := test.CreateBaseTestSettings(t)
+	params := chaincfg.StnParams
+	s.ChainCfgParams = &params
+	bits, err := model.NewNBitFromString("180a097a")
+	require.NoError(t, err)
+	anchor, headers := buildConstantChain(300, 600, bits)
+	anchor.Height = 1000 // STN used DAA here before this historical testnet fix.
+	require.NoError(t, validateHeaderChainDifficulty(s, anchor, headers))
+	headers[200].Bits = *powLimitNBit(s)
+	require.True(t, errors.IsMaliciousResponseError(validateHeaderChainDifficulty(s, anchor, headers)))
+}
+
 func TestValidateHeaderChainDifficulty_DAAActivation(t *testing.T) {
 	tSettings := daaSettings(t, chaincfg.MainNetParams)
 	bits, err := model.NewNBitFromString("180a097a")
