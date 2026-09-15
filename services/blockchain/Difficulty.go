@@ -10,6 +10,7 @@ import (
 
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	safeconversion "github.com/bsv-blockchain/go-safe-conversion"
+	"github.com/bsv-blockchain/go-wire"
 	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/model"
 	"github.com/bsv-blockchain/teranode/settings"
@@ -70,7 +71,8 @@ func (d *Difficulty) CalcNextWorkRequired(ctx context.Context, blockHeader *mode
 
 	// Activation is measured at the parent, as in SV Node's GetNextWorkRequired.
 	// Historical blocks must not be evaluated with the modern 144-block DAA.
-	if blockHeight < d.settings.ChainCfgParams.DaaForkHeight {
+	// Preserve STN's existing rules until its parameters and history are reconciled.
+	if blockHeight < d.settings.ChainCfgParams.DaaForkHeight && d.settings.ChainCfgParams.Net != wire.STN {
 		return d.calcHistoricalWorkRequired(ctx, blockHeader, blockHeight, currentBlockTime)
 	}
 
@@ -179,8 +181,11 @@ func (d *Difficulty) calcHistoricalWorkRequired(ctx context.Context, parent *mod
 			return nil, errors.NewStorageError("[Difficulty] getting historical retarget ancestor", err)
 		}
 		first, _, err := d.store.GetBlockHeader(ctx, hash)
-		if err != nil || first == nil {
+		if err != nil {
 			return nil, errors.NewStorageError("[Difficulty] getting historical retarget header", err)
+		}
+		if first == nil {
+			return nil, errors.NewStorageError("[Difficulty] missing historical retarget header", errors.ErrNotFound)
 		}
 		timespan := interval * int64(params.TargetTimePerBlock.Seconds())
 		elapsed := int64(parent.Timestamp) - int64(first.Timestamp)
@@ -195,18 +200,31 @@ func (d *Difficulty) calcHistoricalWorkRequired(ctx context.Context, parent *mod
 		if blockTime > int64(parent.Timestamp)+2*int64(params.TargetTimePerBlock.Seconds()) {
 			return d.powLimitnBits, nil
 		}
-		// Walk this parent's ancestry, stopping at the last non-special target
-		// or at a retarget boundary. Missing history must not become easy work.
-		for height%interval != 0 && parent.Bits == *d.powLimitnBits {
-			previous, _, err := d.store.GetBlockHeader(ctx, parent.HashPrevBlock)
-			if err != nil || previous == nil {
-				return nil, errors.NewStorageError("[Difficulty] restoring historical testnet target", err)
-			}
-			parent = previous
-			height--
+		if height%interval == 0 || parent.Bits != *d.powLimitnBits {
+			return &parent.Bits, nil
 		}
-		return &parent.Bits, nil
+		// Read this parent's ancestry once, bounded by the retarget boundary.
+		// The parent is already available; the batch starts at its predecessor.
+		headers, _, err := d.store.GetBlockHeaders(ctx, parent.HashPrevBlock, uint64(height%interval))
+		if err != nil {
+			return nil, errors.NewStorageError("[Difficulty] restoring historical testnet target", err)
+		}
+		expectedHash := parent.HashPrevBlock
+		for _, header := range headers {
+			// The store's main-chain range read can race with a reorg.
+			if header == nil || !header.Hash().IsEqual(expectedHash) {
+				return nil, errors.NewStorageError("[Difficulty] discontinuous historical testnet ancestry")
+			}
+			height--
+			if height%interval == 0 || header.Bits != *d.powLimitnBits {
+				return &header.Bits, nil
+			}
+			expectedHash = header.HashPrevBlock
+		}
+		return nil, errors.NewStorageError("[Difficulty] missing historical testnet target", errors.ErrNotFound)
 	} else {
+		// Canonical pre-UAHF mainnet never reaches the EDA threshold. Skip its
+		// MTP reads; SV Node's ungated EDA check returns the same historical targets.
 		if height < params.UahfForkHeight || height < 6 || parent.Bits == *d.powLimitnBits {
 			return &parent.Bits, nil
 		}
@@ -216,8 +234,18 @@ func (d *Difficulty) calcHistoricalWorkRequired(ctx context.Context, parent *mod
 			count = uint64(height) + 1
 		}
 		headers, _, err := d.store.GetBlockHeaders(ctx, parent.Hash(), count)
-		if err != nil || uint64(len(headers)) != count {
+		if err != nil {
 			return nil, errors.NewStorageError("[Difficulty] getting historical median-time window", err)
+		}
+		if uint64(len(headers)) != count {
+			return nil, errors.NewStorageError("[Difficulty] incomplete historical median-time window", errors.ErrNotFound)
+		}
+		expectedHash := parent.Hash()
+		for _, header := range headers {
+			if header == nil || !header.Hash().IsEqual(expectedHash) {
+				return nil, errors.NewStorageError("[Difficulty] discontinuous historical median-time ancestry")
+			}
+			expectedHash = header.HashPrevBlock
 		}
 		median := func(headers []*model.BlockHeader) uint32 {
 			times := make([]uint32, len(headers))

@@ -29,6 +29,7 @@ import (
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	subtreepkg "github.com/bsv-blockchain/go-subtree"
 	txmap "github.com/bsv-blockchain/go-tx-map"
+	"github.com/bsv-blockchain/go-wire"
 	"github.com/bsv-blockchain/teranode/errors"
 	p2pconstants "github.com/bsv-blockchain/teranode/interfaces/p2p"
 	"github.com/bsv-blockchain/teranode/model"
@@ -2981,7 +2982,7 @@ func (u *BlockValidation) enqueueRevalidation(data revalidateBlockData) {
 // syncing node the block is re-fetched and retried, whereas skipping wrongly
 // hands a peer free proof-of-work.
 func (u *BlockValidation) skipExpectedDifficulty(ctx context.Context, block *model.Block) bool {
-	if block.Height <= u.settings.ChainCfgParams.DaaForkHeight {
+	if block.Height <= u.settings.ChainCfgParams.DaaForkHeight && u.settings.ChainCfgParams.Net != wire.STN {
 		return false
 	}
 

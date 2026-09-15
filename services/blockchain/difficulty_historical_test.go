@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/bsv-blockchain/go-chaincfg"
+	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/model"
 	blockchainstore "github.com/bsv-blockchain/teranode/stores/blockchain"
 	"github.com/bsv-blockchain/teranode/ulogger"
@@ -115,18 +116,39 @@ func TestDifficultyHistoricalRetarget(t *testing.T) {
 }
 
 func TestDifficultyHistoricalTestnetRestoresTarget(t *testing.T) {
-	params := chaincfg.TestNetParams
-	d, headers := historicalDifficultyChain(t, params, 20, 600)
-	parent := headers[20]
-	// A special minimum-difficulty block follows an ordinary target.
-	parent.Bits = *d.powLimitnBits
 	for _, tc := range []struct {
-		delay int64
-		want  string
-	}{{1200, "1c0ffff0"}, {1201, "1d00ffff"}} {
-		bits, err := d.CalcNextWorkRequired(t.Context(), parent, 20, int64(parent.Timestamp)+tc.delay)
-		require.NoError(t, err)
-		require.Equal(t, tc.want, bits.String())
+		name   string
+		height uint32
+		want   string
+	}{{"last ordinary target", 20, "1c0ffff0"}, {"retarget boundary", 2015, "1d00ffff"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			params := chaincfg.TestNetParams
+			d, headers := historicalDifficultyChain(t, params, tc.height, 600)
+			genesis, err := model.NewBlockFromMsgBlock(params.GenesisBlock, nil)
+			require.NoError(t, err)
+			genesis.CoinbaseTx.LockTime = 1
+			parent := headers[tc.height]
+			// Persist a run of special blocks so both single and batch reads
+			// see the same ancestry, including a minimum-difficulty boundary.
+			for height := tc.height + 1; height <= tc.height+3; height++ {
+				header := *parent
+				header.HashPrevBlock = parent.Hash()
+				header.Timestamp += 600
+				header.Bits = *d.powLimitnBits
+				_, _, err := d.store.StoreBlock(t.Context(), &model.Block{Header: &header, CoinbaseTx: genesis.CoinbaseTx, TransactionCount: 1, Height: height}, "test")
+				require.NoError(t, err)
+				parent = &header
+			}
+			for _, delay := range []int64{1200, 1201} {
+				bits, err := d.CalcNextWorkRequired(t.Context(), parent, tc.height+3, int64(parent.Timestamp)+delay)
+				require.NoError(t, err)
+				want := tc.want
+				if delay == 1201 {
+					want = "1d00ffff"
+				}
+				require.Equal(t, want, bits.String())
+			}
+		})
 	}
 }
 
@@ -164,15 +186,45 @@ func TestDifficultyHistoricalDAAActivation(t *testing.T) {
 }
 
 func TestDifficultyHistoricalMissingHistory(t *testing.T) {
-	params := chaincfg.TestNetParams
-	d, headers := historicalDifficultyChain(t, params, 20, 600)
-	parent := *headers[20]
-	parent.Bits = *d.powLimitnBits
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	bits, err := d.CalcNextWorkRequired(ctx, &parent, 20, int64(parent.Timestamp)+600)
-	require.Error(t, err)
-	require.Nil(t, bits, "unavailable ancestry cannot silently grant minimum difficulty")
+	for _, tc := range []struct {
+		name   string
+		params chaincfg.Params
+	}{{"testnet restoration", chaincfg.TestNetParams}, {"EDA window", chaincfg.MainNetParams}} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.params.UahfForkHeight = 0
+			d, headers := historicalDifficultyChain(t, tc.params, 6, 600)
+			parent := *headers[6]
+			if tc.params.ReduceMinDifficulty {
+				parent.Bits = *d.powLimitnBits
+				// This hash has never been stored, independently of cache state.
+				missing := *parent.HashPrevBlock
+				missing[0] ^= 0xff
+				parent.HashPrevBlock = &missing
+			}
+			// The EDA case has only seven headers where seventeen are required.
+			bits, err := d.CalcNextWorkRequired(t.Context(), &parent, 20, int64(parent.Timestamp)+600)
+			require.ErrorIs(t, err, errors.ErrNotFound)
+			require.Nil(t, bits, "unavailable ancestry cannot silently grant minimum difficulty")
+		})
+	}
+}
+
+func TestDifficultySTNPreservesExistingRules(t *testing.T) {
+	d, headers := historicalDifficultyChain(t, chaincfg.StnParams, 2200, 300)
+	previousSettings := *d.settings
+	previousParams := chaincfg.StnParams
+	previousParams.DaaForkHeight = 0 // Before this fix STN always used this path.
+	previousSettings.ChainCfgParams = &previousParams
+	previous, err := NewDifficulty(d.store, ulogger.TestLogger{}, &previousSettings)
+	require.NoError(t, err)
+	for _, height := range []uint32{0, 147, 148, 2199, 2200} {
+		parent := headers[height]
+		want, err := previous.CalcNextWorkRequired(t.Context(), parent, height, int64(parent.Timestamp)+300)
+		require.NoError(t, err)
+		bits, err := d.CalcNextWorkRequired(t.Context(), parent, height, int64(parent.Timestamp)+300)
+		require.NoError(t, err)
+		require.Equal(t, *want, *bits, "STN parent %d", height)
+	}
 }
 
 func TestDifficultyHistoricalRetargetPowLimit(t *testing.T) {

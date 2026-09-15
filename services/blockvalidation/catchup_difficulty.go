@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"math/big"
 
+	"github.com/bsv-blockchain/go-wire"
 	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/model"
 	"github.com/bsv-blockchain/teranode/services/blockchain"
@@ -137,7 +138,7 @@ func validateHeaderChainDifficulty(tSettings *settings.Settings, anchor *model.B
 		}
 
 		parentHeight := anchor.Height + 1 + uint32(parentIdx)
-		if parentHeight < tSettings.ChainCfgParams.DaaForkHeight {
+		if parentHeight < tSettings.ChainCfgParams.DaaForkHeight && tSettings.ChainCfgParams.Net != wire.STN {
 			continue
 		}
 
