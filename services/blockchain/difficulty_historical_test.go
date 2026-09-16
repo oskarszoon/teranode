@@ -6,6 +6,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	"github.com/bsv-blockchain/go-chaincfg"
 	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/model"
@@ -115,22 +116,42 @@ func TestDifficultyHistoricalRetarget(t *testing.T) {
 	}
 }
 
+// Count read volume while executing every query against the real SQLite store.
+type historicalHeaderReadStore struct {
+	blockchainstore.Store
+	requestedHeaders uint64
+}
+
+func (s *historicalHeaderReadStore) GetBlockHeaders(ctx context.Context, hash *chainhash.Hash, count uint64) ([]*model.BlockHeader, []*model.BlockHeaderMeta, error) {
+	s.requestedHeaders += count
+	return s.Store.GetBlockHeaders(ctx, hash, count)
+}
+
 func TestDifficultyHistoricalTestnetRestoresTarget(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		height uint32
-		want   string
-	}{{"last ordinary target", 20, "1c0ffff0"}, {"retarget boundary", 2015, "1d00ffff"}} {
+		name       string
+		height     uint32
+		run        uint32
+		want       string
+		maxHeaders uint64
+	}{
+		{"last ordinary target", 20, 3, "1c0ffff0", 0},
+		{"short run late in interval", 1800, 3, "1c0ffff0", 64},
+		{"long minimum-difficulty run", 20, 70, "1c0ffff0", 0},
+		{"retarget boundary", 2015, 70, "1d00ffff", 0},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
 			params := chaincfg.TestNetParams
 			d, headers := historicalDifficultyChain(t, params, tc.height, 600)
+			reads := &historicalHeaderReadStore{Store: d.store}
+			d.store = reads
 			genesis, err := model.NewBlockFromMsgBlock(params.GenesisBlock, nil)
 			require.NoError(t, err)
 			genesis.CoinbaseTx.LockTime = 1
 			parent := headers[tc.height]
 			// Persist a run of special blocks so both single and batch reads
 			// see the same ancestry, including a minimum-difficulty boundary.
-			for height := tc.height + 1; height <= tc.height+3; height++ {
+			for height := tc.height + 1; height <= tc.height+tc.run; height++ {
 				header := *parent
 				header.HashPrevBlock = parent.Hash()
 				header.Timestamp += 600
@@ -140,13 +161,16 @@ func TestDifficultyHistoricalTestnetRestoresTarget(t *testing.T) {
 				parent = &header
 			}
 			for _, delay := range []int64{1200, 1201} {
-				bits, err := d.CalcNextWorkRequired(t.Context(), parent, tc.height+3, int64(parent.Timestamp)+delay)
+				bits, err := d.CalcNextWorkRequired(t.Context(), parent, tc.height+tc.run, int64(parent.Timestamp)+delay)
 				require.NoError(t, err)
 				want := tc.want
 				if delay == 1201 {
 					want = "1d00ffff"
 				}
 				require.Equal(t, want, bits.String())
+			}
+			if tc.maxHeaders != 0 {
+				require.LessOrEqual(t, reads.requestedHeaders, tc.maxHeaders, "a short minimum-difficulty run must not fetch the whole retarget interval")
 			}
 		})
 	}

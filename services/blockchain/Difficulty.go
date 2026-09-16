@@ -204,25 +204,29 @@ func (d *Difficulty) calcHistoricalWorkRequired(ctx context.Context, parent *mod
 		if height%interval == 0 || parent.Bits != *d.powLimitnBits {
 			return &parent.Bits, nil
 		}
-		// Read this parent's ancestry once, bounded by the retarget boundary.
-		// The parent is already available; the batch starts at its predecessor.
-		headers, _, err := d.store.GetBlockHeaders(ctx, parent.HashPrevBlock, uint64(height%interval))
-		if err != nil {
-			return nil, errors.NewStorageError("[Difficulty] restoring historical testnet target", err)
-		}
+		// Small batches avoid reading the whole interval for short minimum-difficulty runs.
 		expectedHash := parent.HashPrevBlock
-		for _, header := range headers {
-			// The store's main-chain range read can race with a reorg.
-			if header == nil || !header.Hash().IsEqual(expectedHash) {
-				return nil, errors.NewStorageError("[Difficulty] discontinuous historical testnet ancestry")
+		for {
+			count := uint64(min(int(height%interval), 32))
+			headers, _, err := d.store.GetBlockHeaders(ctx, expectedHash, count)
+			if err != nil {
+				return nil, errors.NewStorageError("[Difficulty] restoring historical testnet target", err)
 			}
-			height--
-			if height%interval == 0 || header.Bits != *d.powLimitnBits {
-				return &header.Bits, nil
+			for _, header := range headers {
+				// The store's main-chain range read can race with a reorg.
+				if header == nil || !header.Hash().IsEqual(expectedHash) {
+					return nil, errors.NewStorageError("[Difficulty] discontinuous historical testnet ancestry")
+				}
+				height--
+				if height%interval == 0 || header.Bits != *d.powLimitnBits {
+					return &header.Bits, nil
+				}
+				expectedHash = header.HashPrevBlock
 			}
-			expectedHash = header.HashPrevBlock
+			if uint64(len(headers)) < count {
+				return nil, errors.NewStorageError("[Difficulty] missing historical testnet target", errors.ErrNotFound)
+			}
 		}
-		return nil, errors.NewStorageError("[Difficulty] missing historical testnet target", errors.ErrNotFound)
 	} else {
 		// Canonical pre-UAHF mainnet never reaches the EDA threshold. Skip its
 		// MTP reads; SV Node's ungated EDA check returns the same historical targets.
