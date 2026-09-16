@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/url"
 	"os"
+	"sync/atomic"
 	"testing"
 
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
@@ -119,11 +120,11 @@ func TestDifficultyHistoricalRetarget(t *testing.T) {
 // Count read volume while executing every query against the real SQLite store.
 type historicalHeaderReadStore struct {
 	blockchainstore.Store
-	requestedHeaders uint64
+	requestedHeaders atomic.Uint64
 }
 
 func (s *historicalHeaderReadStore) GetBlockHeaders(ctx context.Context, hash *chainhash.Hash, count uint64) ([]*model.BlockHeader, []*model.BlockHeaderMeta, error) {
-	s.requestedHeaders += count
+	s.requestedHeaders.Add(count)
 	return s.Store.GetBlockHeaders(ctx, hash, count)
 }
 
@@ -170,8 +171,53 @@ func TestDifficultyHistoricalTestnetRestoresTarget(t *testing.T) {
 				require.Equal(t, want, bits.String())
 			}
 			if tc.maxHeaders != 0 {
-				require.LessOrEqual(t, reads.requestedHeaders, tc.maxHeaders, "a short minimum-difficulty run must not fetch the whole retarget interval")
+				require.LessOrEqual(t, reads.requestedHeaders.Load(), tc.maxHeaders, "a short minimum-difficulty run must not fetch the whole retarget interval")
 			}
+		})
+	}
+}
+
+func TestDifficultyHistoricalTestnetSequentialRestoration(t *testing.T) {
+	const run = uint32(400)
+	for _, tc := range []struct {
+		name       string
+		gap        uint32
+		maxHeaders uint64
+	}{
+		{"consecutive parents", 1, 64},
+		{"delayed gaps", 70, 2*uint64(run) + 64},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			params := chaincfg.TestNetParams
+			d, headers := historicalDifficultyChain(t, params, 20, 600)
+			d.settings.BlockAssembly.DifficultyCache = true
+			reads := &historicalHeaderReadStore{Store: d.store}
+			d.store = reads
+			genesis, err := model.NewBlockFromMsgBlock(params.GenesisBlock, nil)
+			require.NoError(t, err)
+			genesis.CoinbaseTx.LockTime = 1
+			parent := headers[20]
+			for i := range run {
+				header := *parent
+				header.HashPrevBlock = parent.Hash()
+				header.Timestamp += 600
+				header.Bits = *d.powLimitnBits
+				height := uint32(21) + i
+				_, _, err := d.store.StoreBlock(t.Context(), &model.Block{Header: &header, CoinbaseTx: genesis.CoinbaseTx, TransactionCount: 1, Height: height}, "test")
+				require.NoError(t, err)
+				// Match AddBlock's best-tip cache reset after storing each block.
+				d.ResetCache()
+				delay, want := int64(600), headers[20].Bits
+				if i%tc.gap != 0 {
+					delay, want = 1201, *d.powLimitnBits
+				}
+				bits, err := d.CalcNextWorkRequired(t.Context(), &header, height, int64(header.Timestamp)+delay)
+				require.NoError(t, err)
+				require.Equal(t, want, *bits)
+				parent = &header
+			}
+			require.LessOrEqual(t, reads.requestedHeaders.Load(), tc.maxHeaders, "sequential restoration must not repeatedly read the accumulated run")
+			t.Logf("requested %d headers across %d parents", reads.requestedHeaders.Load(), run)
 		})
 	}
 }

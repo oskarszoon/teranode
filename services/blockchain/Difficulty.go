@@ -38,6 +38,14 @@ type Difficulty struct {
 	mu                sync.RWMutex
 	lastBlockHash     *chainhash.Hash
 	lastComputednBits *model.NBit
+	lastTestnetTarget historicalTestnetTarget
+}
+
+type historicalTestnetTarget struct {
+	hash   chainhash.Hash
+	height uint32
+	bits   model.NBit
+	valid  bool
 }
 
 // NewDifficulty creates a new Difficulty instance with the provided dependencies.
@@ -203,6 +211,31 @@ func (d *Difficulty) calcHistoricalWorkRequired(ctx context.Context, parent *mod
 		if height%interval == 0 || parent.Bits != *d.powLimitnBits {
 			return &parent.Bits, nil
 		}
+		// Cache restoration independently of the candidate timestamp. Hash and
+		// height bind the result to verified ancestry within one retarget interval.
+		parentHash, parentHeight := *parent.Hash(), height
+		cacheEnabled := d.settings.BlockAssembly.DifficultyCache
+		var cached historicalTestnetTarget
+		if cacheEnabled {
+			d.mu.RLock()
+			cached = d.lastTestnetTarget
+			d.mu.RUnlock()
+		}
+		if cached.height/interval != height/interval {
+			cached.valid = false
+		}
+		remember := func(bits model.NBit) *model.NBit {
+			if cacheEnabled {
+				d.mu.Lock()
+				d.lastTestnetTarget = historicalTestnetTarget{hash: parentHash, height: parentHeight, bits: bits, valid: true}
+				d.mu.Unlock()
+			}
+			return &bits
+		}
+		if cached.valid && ((cached.height == height && cached.hash == parentHash) ||
+			(cached.height == height-1 && parent.HashPrevBlock.IsEqual(&cached.hash))) {
+			return remember(cached.bits), nil
+		}
 		// Small batches avoid reading the whole interval for short minimum-difficulty runs.
 		expectedHash := parent.HashPrevBlock
 		for {
@@ -218,7 +251,12 @@ func (d *Difficulty) calcHistoricalWorkRequired(ctx context.Context, parent *mod
 				}
 				height--
 				if height%interval == 0 || header.Bits != *d.powLimitnBits {
-					return &header.Bits, nil
+					return remember(header.Bits), nil
+				}
+				// Delayed candidates can skip calculations; only walk the gap
+				// back to a previously verified restoration on this ancestry.
+				if cached.valid && cached.height == height && expectedHash.IsEqual(&cached.hash) {
+					return remember(cached.bits), nil
 				}
 				expectedHash = header.HashPrevBlock
 			}
@@ -538,4 +576,5 @@ func (d *Difficulty) ResetCache() {
 	defer d.mu.Unlock()
 	d.lastBlockHash = nil
 	d.lastComputednBits = nil
+	// Historical restoration stays valid for its immutable ancestry hash.
 }
