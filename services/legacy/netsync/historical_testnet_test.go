@@ -1,3 +1,5 @@
+//go:build longtest
+
 package netsync
 
 import (
