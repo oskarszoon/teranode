@@ -208,6 +208,9 @@ func (d *Difficulty) calcHistoricalWorkRequired(ctx context.Context, parent *mod
 		if blockTime > int64(parent.Timestamp)+2*int64(params.TargetTimePerBlock.Seconds()) {
 			return d.powLimitnBits, nil
 		}
+		// Keep this before every remember: entries must describe non-boundary
+		// minimum-difficulty parents. Direct-child and mid-walk cache hits rely
+		// on that invariant to reuse the preceding ordinary target.
 		if height%interval == 0 || parent.Bits != *d.powLimitnBits {
 			return &parent.Bits, nil
 		}
