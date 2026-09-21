@@ -528,21 +528,22 @@ func NewSettings(alternativeContext ...string) *Settings {
 			LockedBatcherTickerIntervalMillis:       getInt("utxostore_lockedBatcherTickerIntervalMillis", 0, alternativeContext...),
 		},
 		P2P: P2PSettings{
-			BlockTopic:         getString("p2p_block_topic", "", alternativeContext...),
-			SubtreeTopic:       getString("p2p_subtree_topic", "", alternativeContext...),
-			GRPCAddress:        getString("p2p_grpcAddress", "", alternativeContext...),
-			GRPCListenAddress:  getString("p2p_grpcListenAddress", "localhost:9906", alternativeContext...),
-			HTTPAddress:        getString("p2p_httpAddress", "localhost:9906", alternativeContext...),
-			HTTPListenAddress:  getString("p2p_httpListenAddress", "", alternativeContext...),
-			ListenAddresses:    getMultiString("p2p_listen_addresses", "|", []string{}, alternativeContext...),
-			AdvertiseAddresses: getMultiString("p2p_advertise_addresses", "|", []string{}, alternativeContext...), // This is used to announce the node to the network on a different address than the listen address
-			Port:               getInt("p2p_port", 9905, alternativeContext...),                                   // This is the port that go-p2p-message-bus will listen on (0.0.0.0 and ::)
-			ListenMode:         getString("listen_mode", ListenModeFull, alternativeContext...),
-			PeerID:             getString("p2p_peer_id", "", alternativeContext...),
-			PrivateKey:         getString("p2p_private_key", "", alternativeContext...),
-			RejectedTxTopic:    getString("p2p_rejected_tx_topic", "", alternativeContext...),
-			StaticPeers:        getMultiString("p2p_static_peers", "|", []string{}, alternativeContext...),
-			BootstrapPeers:     getMultiString("p2p_bootstrap_peers", "|", []string{}, alternativeContext...),
+			BlockTopic:          getString("p2p_block_topic", "", alternativeContext...),
+			SubtreeTopic:        getString("p2p_subtree_topic", "", alternativeContext...),
+			GRPCAddress:         getString("p2p_grpcAddress", "", alternativeContext...),
+			GRPCListenAddress:   getString("p2p_grpcListenAddress", "localhost:9906", alternativeContext...),
+			HTTPAddress:         getString("p2p_httpAddress", "localhost:9906", alternativeContext...),
+			HTTPListenAddress:   getString("p2p_httpListenAddress", "", alternativeContext...),
+			ListenAddresses:     getMultiString("p2p_listen_addresses", "|", []string{}, alternativeContext...),
+			AdvertiseAddresses:  getMultiString("p2p_advertise_addresses", "|", []string{}, alternativeContext...), // This is used to announce the node to the network on a different address than the listen address
+			Port:                getInt("p2p_port", 9905, alternativeContext...),                                   // This is the port that go-p2p-message-bus will listen on (0.0.0.0 and ::)
+			ListenMode:          getString("listen_mode", ListenModeFull, alternativeContext...),
+			PeerID:              getString("p2p_peer_id", "", alternativeContext...),
+			PrivateKey:          getString("p2p_private_key", "", alternativeContext...),
+			RejectedTxTopic:     getString("p2p_rejected_tx_topic", "", alternativeContext...),
+			StaticPeers:         getMultiString("p2p_static_peers", "|", []string{}, alternativeContext...),
+			BootstrapPeers:      getMultiString("p2p_bootstrap_peers", "|", []string{}, alternativeContext...),
+			AllowedPublisherIDs: getMultiString("p2p_allowed_publisher_ids", "|", []string{}, alternativeContext...),
 			// Peer persistence
 			PeerCacheDir: getString("p2p_peer_cache_dir", "", alternativeContext...), // Empty = binary directory
 			BanThreshold: getInt("p2p_ban_threshold", 100, alternativeContext...),
