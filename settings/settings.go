@@ -543,7 +543,7 @@ func NewSettings(alternativeContext ...string) *Settings {
 			RejectedTxTopic:     getString("p2p_rejected_tx_topic", "", alternativeContext...),
 			StaticPeers:         getMultiString("p2p_static_peers", "|", []string{}, alternativeContext...),
 			BootstrapPeers:      getMultiString("p2p_bootstrap_peers", "|", []string{}, alternativeContext...),
-			AllowedPublisherIDs: getMultiString("p2p_allowed_publisher_ids", "|", []string{}, alternativeContext...),
+			AllowedPublisherIDs: dropEmptyStrings(getMultiString("p2p_allowed_publisher_ids", "|", []string{}, alternativeContext...)),
 			// Peer persistence
 			PeerCacheDir: getString("p2p_peer_cache_dir", "", alternativeContext...), // Empty = binary directory
 			BanThreshold: getInt("p2p_ban_threshold", 100, alternativeContext...),
@@ -815,6 +815,25 @@ func (s *Settings) GetBlobStoreURL(storeType int32) (*url.URL, error) {
 	default:
 		return nil, errors.New("unknown blob store type: " + fmt.Sprintf("%d", storeType))
 	}
+}
+
+// dropEmptyStrings removes empty entries from a pipe-separated multi-value
+// setting. gocore's GetMulti trims whitespace but keeps empty items, so a
+// trailing or doubled separator (e.g. "12D3KooWA|") otherwise reaches the
+// consumer as a genuinely empty entry - not to be confused with a malformed
+// one, which must still reach the consumer and fail there. Used for
+// p2p_allowed_publisher_ids, where an empty entry fails peer-ID decoding and
+// stops the node starting over what is usually a typo, not a bad ID.
+func dropEmptyStrings(values []string) []string {
+	out := values[:0:0]
+
+	for _, v := range values {
+		if v != "" {
+			out = append(out, v)
+		}
+	}
+
+	return out
 }
 
 func max(a, b int) int {

@@ -277,4 +277,18 @@ func TestP2PAllowedPublisherIDs_LoaderReadsKey(t *testing.T) {
 
 		require.Equal(t, []string{"12D3KooWA1b2C3", "12D3KooWD4e5F6"}, NewSettings().P2P.AllowedPublisherIDs, "loader must split %s on '|' under context %q", settingName, ctx)
 	})
+
+	t.Run("trailing separator does not produce an empty entry", func(t *testing.T) {
+		gocore.Config().Set(winName, "12D3KooWA1b2C3|")
+		t.Cleanup(func() { gocore.Config().Set(winName, "") })
+
+		require.Equal(t, []string{"12D3KooWA1b2C3"}, NewSettings().P2P.AllowedPublisherIDs, "a trailing '|' must not leave an empty entry, or the allowlist fails client construction over a typo")
+	})
+
+	t.Run("doubled separator does not produce an empty entry", func(t *testing.T) {
+		gocore.Config().Set(winName, "12D3KooWA1b2C3||12D3KooWD4e5F6")
+		t.Cleanup(func() { gocore.Config().Set(winName, "") })
+
+		require.Equal(t, []string{"12D3KooWA1b2C3", "12D3KooWD4e5F6"}, NewSettings().P2P.AllowedPublisherIDs, "a doubled '|' must not leave an empty entry, or the allowlist fails client construction over a typo")
+	})
 }

@@ -300,9 +300,13 @@ func privateIPColocationWhitelist() []*net.IPNet {
 // pubsub message authorship against it. This is global across every subscribed topic
 // (block, subtree, node status, rejected tx), not just block and subtree: a
 // non-allowlisted peer's messages on all four are silently dropped before delivery.
-// Because node status is included, a filtered peer stops appearing in the peer
-// registry and in the /p2p-ws monitoring feed while remaining fully connected. That
-// consequence is accepted, not worked around here - see the field's settings doc.
+// Because node status is included, a filtered peer stops being registered or
+// refreshed by incoming messages. That only removes it from the peer registry and
+// the /p2p-ws monitoring feed immediately if it was never registered before the
+// allowlist took effect: a pre-existing entry stays, and reconcileConnectionStates
+// keeps it flagged connected off live libp2p connectivity regardless of pubsub
+// filtering, until p2p_peer_registry_ttl (default 24h) evicts it. That consequence
+// is accepted, not worked around here - see the field's settings doc.
 func buildP2PMessageBusConfig(logger ulogger.Logger, tSettings *settings.Settings, privKey crypto.PrivKey, protocolVersion, dhtMode string, advertiseAddresses []string) (p2pMessageBus.Config, error) {
 	if tSettings.P2P.EnablePeerExchange && !tSettings.P2P.EnablePeerScoring {
 		return p2pMessageBus.Config{}, errors.NewConfigurationError("p2p_enable_peer_exchange requires p2p_enable_peer_scoring (gossipsub v1.1 pairs PX with scoring); disable peer exchange or enable scoring")
