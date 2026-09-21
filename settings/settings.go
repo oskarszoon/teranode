@@ -823,7 +823,8 @@ func (s *Settings) GetBlobStoreURL(storeType int32) (*url.URL, error) {
 // consumer as a genuinely empty entry - not to be confused with a malformed
 // one, which must still reach the consumer and fail there. Used for
 // p2p_allowed_publisher_ids, where an empty entry fails peer-ID decoding and
-// stops the node starting over what is usually a typo, not a bad ID.
+// stops the node from starting over what is usually a typo, not a genuinely
+// malformed entry.
 func dropEmptyStrings(values []string) []string {
 	out := values[:0:0]
 
