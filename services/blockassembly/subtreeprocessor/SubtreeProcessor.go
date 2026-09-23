@@ -81,6 +81,7 @@ type Job struct {
 	ID              *chainhash.Hash        // Unique identifier for the job
 	Subtrees        []*subtreepkg.Subtree  // Collection of subtrees for the job
 	MiningCandidate *model.MiningCandidate // Mining candidate information
+	Lease           *MiningSnapshotLease   // Owns mmap storage while the job is cached
 }
 
 // NewSubtreeRequest encapsulates a request to process a new subtree.
@@ -88,6 +89,9 @@ type Job struct {
 // and the subtree processor, including an error channel for asynchronous result reporting.
 
 type NewSubtreeRequest struct {
+	Lease             *MiningSnapshotLease // Owns mmap nodes through asynchronous storage
+	stopLeaseRelease  func() bool
+	storageLifecycle  *storageRequestLifecycle
 	Subtree           *subtreepkg.Subtree                                     // The subtree to process
 	ParentTxMap       TxInpointsMap                                           // Map of parent transactions
 	DeletedTxs        *txmap.SyncedMap[chainhash.Hash, subtreepkg.TxInpoints] // Backup map for deleted transactions
@@ -152,6 +156,9 @@ type PrecomputedMiningData struct {
 
 	// Subtrees snapshot for lock-free access
 	Subtrees []*subtreepkg.Subtree
+
+	// Lease owns this returned snapshot; readers must release it.
+	Lease *MiningSnapshotLease
 
 	// Metadata
 	UpdatedAt time.Time
@@ -237,6 +244,15 @@ type SubtreeProcessor struct {
 	// resetCh handles requests to reset the processor state
 	resetCh chan *resetBlocks
 
+	recoverUnminedCh chan unminedRecoveryRequest
+	// recoveryPending suppresses mining/dequeue after an incomplete rebuild.
+	recoveryPending atomic.Bool
+	// recoveryPendingSince retains the first pending timestamp across retries.
+	recoveryPendingSince atomic.Pointer[time.Time]
+	// recoveryAccepted preserves prior admission evidence across rebuild retries.
+	// It is owned by the processor goroutine, like currentTxMap.
+	recoveryAccepted map[chainhash.Hash]struct{}
+
 	// reconcileCoinbasesCh handles requests to create canonical coinbase UTXOs
 	// for a set of gap blocks, without touching any other in-memory state
 	reconcileCoinbasesCh chan reconcileCoinbasesMsg
@@ -302,6 +318,16 @@ type SubtreeProcessor struct {
 	// blockchainClient provides access to blockchain data
 	blockchainClient blockchain.ClientI
 
+	// pendingInvalidations collects blocks whose conflict resolution asked to
+	// demote a transaction confirmed on that block's own ancestry. Such a block
+	// is an ancestor double spend and should never have been accepted; the
+	// demotion is refused so UTXO state stays consistent with the honest chain,
+	// and the block hash is parked here for BlockAssembler to invalidate AFTER
+	// block movement completes. Invalidating inline would re-enter the
+	// blockchain service while this processor still holds movement state.
+	pendingInvalidationsMu sync.Mutex
+	pendingInvalidations   []chainhash.Hash
+
 	// subtreeStore provides persistent storage for subtrees
 	subtreeStore blob.Store
 
@@ -345,6 +371,7 @@ type SubtreeProcessor struct {
 	// precomputedMiningData holds pre-computed data for mining candidate generation.
 	// Updated by the main goroutine, read atomically by GetMiningCandidate.
 	precomputedMiningData atomic.Pointer[PrecomputedMiningData]
+	miningSnapshots       miningSnapshotStorage
 
 	// mmapDir, when non-empty, enables mmap-backed subtree Nodes.
 	mmapDir string
@@ -528,7 +555,8 @@ func NewSubtreeProcessor(_ context.Context, logger ulogger.Logger, tSettings *se
 		return nil, errors.NewInvalidArgumentError("error adding coinbase placeholder to first subtree", err)
 	}
 
-	queue := NewLockFreeQueue()
+	maxQueueItems := normalizeMaxQueueItems(logger, tSettings.BlockAssembly.MaxQueueItems, tSettings.BlockAssembly.SendBatchSize)
+	queue := NewLockFreeQueueWithLimit(maxQueueItems)
 
 	// Calculate subtree sample size based on expected block time
 	// With ~10 min blocks, 18 samples = ~3 hours of history
@@ -570,6 +598,7 @@ func NewSubtreeProcessor(_ context.Context, logger ulogger.Logger, tSettings *se
 		moveForwardBlockChan:         make(chan moveBlockRequest),
 		reorgBlockChan:               make(chan reorgBlocksRequest),
 		resetCh:                      make(chan *resetBlocks),
+		recoverUnminedCh:             make(chan unminedRecoveryRequest),
 		reconcileCoinbasesCh:         make(chan reconcileCoinbasesMsg),
 		removeTxCh:                   make(chan chainhash.Hash, 100),
 		lengthCh:                     make(chan chan int),
@@ -717,6 +746,10 @@ func (stp *SubtreeProcessor) Start(ctx context.Context) {
 					return
 
 				case getSubtreesChan := <-stp.getSubtreesChan:
+					if stp.recoveryPending.Load() {
+						getSubtreesChan <- nil
+						continue
+					}
 					stp.setCurrentRunningState(StateGetSubtrees)
 
 					logger.Debugf("[SubtreeProcessor] get current subtrees")
@@ -795,6 +828,10 @@ func (stp *SubtreeProcessor) Start(ctx context.Context) {
 					stp.setCurrentRunningState(StateRunning)
 
 				case responseChan := <-stp.getIncompleteSubtreeDataChan:
+					if stp.recoveryPending.Load() {
+						responseChan <- nil
+						continue
+					}
 					// On-demand snapshot of incomplete subtree for mining (only when requested)
 					currentSt := stp.currentSubtree.Load()
 					if stp.chainedSubtreeCount.Load() > 0 || currentSt == nil || currentSt.Length() <= 1 {
@@ -856,6 +893,10 @@ func (stp *SubtreeProcessor) Start(ctx context.Context) {
 					stp.setCurrentRunningState(StateRunning)
 
 				case reorgReq := <-stp.reorgBlockChan:
+					if stp.recoveryPending.Load() {
+						reorgReq.errChan <- errors.NewProcessingError("[SubtreeProcessor] incomplete unmined recovery requires read-only repair before reorg")
+						continue
+					}
 					reorgReq.errChan <- stp.runHandlerWithRecover("reorgBlocks", func() error {
 						stp.setCurrentRunningState(StateReorg)
 						logger.Infof("[SubtreeProcessor] reorgReq subtree processor: %d, %d", len(reorgReq.moveBackBlocks), len(reorgReq.moveForwardBlocks))
@@ -869,6 +910,10 @@ func (stp *SubtreeProcessor) Start(ctx context.Context) {
 					stp.setCurrentRunningState(StateRunning)
 
 				case moveForwardReq := <-stp.moveForwardBlockChan:
+					if stp.recoveryPending.Load() {
+						moveForwardReq.errChan <- errors.NewProcessingError("[SubtreeProcessor] incomplete unmined recovery requires read-only repair before block movement")
+						continue
+					}
 					moveForwardReq.errChan <- stp.runHandlerWithRecover("moveForwardBlock", func() error {
 						stp.setCurrentRunningState(StateMoveForwardBlock)
 
@@ -930,7 +975,15 @@ func (stp *SubtreeProcessor) Start(ctx context.Context) {
 					logger.Infof("[SubtreeProcessor][%s] moveForwardBlock subtree processor DONE", moveForwardReq.block.String())
 					stp.setCurrentRunningState(StateRunning)
 
+				case recovery := <-stp.recoverUnminedCh:
+					err := stp.runHandlerWithRecover("recoverUnmined", recovery.run)
+					recovery.result <- err
+
 				case resetBlocksMsg := <-stp.resetCh:
+					if stp.recoveryPending.Load() {
+						resetBlocksMsg.responseCh <- ResetResponse{Err: errors.NewProcessingError("[SubtreeProcessor] incomplete unmined recovery requires read-only repair before reset")}
+						continue
+					}
 					resetErr := stp.runHandlerWithRecover("reset", func() error {
 						stp.setCurrentRunningState(StateResetBlocks)
 						return stp.reset(resetBlocksMsg.blockHeader, resetBlocksMsg.moveBackBlocks, resetBlocksMsg.moveForwardBlocks,
@@ -991,6 +1044,9 @@ func (stp *SubtreeProcessor) Start(ctx context.Context) {
 					stp.setCurrentRunningState(StateRunning)
 
 				case <-stp.announcementTicker.C:
+					if stp.recoveryPending.Load() {
+						continue
+					}
 					// Periodically announce the current subtree if it has transactions.
 					// Skip if the subtree is nearly full: a complete subtree is imminent and
 					// a partial here would just duplicate the announcement that follows.
@@ -1032,6 +1088,13 @@ func (stp *SubtreeProcessor) Start(ctx context.Context) {
 					}
 
 				default:
+					if stp.recoveryPending.Load() {
+						select {
+						case <-processorCtx.Done():
+						case <-time.After(time.Millisecond):
+						}
+						continue
+					}
 					// Record that the consumer passed through this branch
 					// before doing any dequeue work, so a slow or wedged
 					// step further down still counts as "the consumer was
@@ -1413,7 +1476,7 @@ func (stp *SubtreeProcessor) reset(blockHeader *model.BlockHeader, moveBackBlock
 	itemsPerFile := int(stp.currentItemsPerFile.Load())
 
 	if cs := stp.currentSubtree.Load(); cs != nil {
-		cs.Close()
+		stp.closeMiningSubtree(cs)
 	}
 	newSubtree, _ := stp.newSubtree(itemsPerFile)
 	stp.currentSubtree.Store(newSubtree)
@@ -1571,7 +1634,8 @@ func (stp *SubtreeProcessor) reset(blockHeader *model.BlockHeader, moveBackBlock
 					// postProcess). Any in-flight tx whose parent gets cascaded here
 					// is dropped by that drain regardless of cascade discovery, so
 					// the per-block transient set is not needed here.
-					losingTxHashesMap, _, err := utxostore.ProcessConflicting(ctx, stp.utxoStore, block.Height, *block.Hash(), conflictingNodes, processedConflictingHashesMap)
+					losingTxHashesMap, _, err := utxostore.ProcessConflicting(ctx, stp.utxoStore, block.Height, *block.Hash(), conflictingNodes, processedConflictingHashesMap,
+						utxostore.NewAncestryGuard(stp.blockchainClient.CheckBlockIsAncestorOfBlock), stp.refusalHandler(block))
 					if err != nil {
 						return errors.NewProcessingError("[moveForwardBlock][%s] error processing conflicting transactions in Reset()", block.String(), err)
 					}
@@ -1950,6 +2014,15 @@ func (stp *SubtreeProcessor) TxCount() uint64 {
 // number of batches - see LockFreeQueue.length for why that distinction
 // matters.
 //
+// For items added through the bounded reservation path (AddBatchIfRoom), this
+// counts reserved-or-published items: while a failed reservation is being rolled
+// back the value can transiently read slightly higher than the number of
+// dequeuable items, but it never reads lower than the published-outstanding
+// count — the directional guarantee the state-transition drain snapshot relies
+// on. The unbounded AddBatch path now reserves before publishing too, so it
+// upholds that same guarantee; it additionally bypasses the cap entirely and is
+// not used by the ingest handlers.
+//
 // Returns:
 //   - int64: Current queue length, in transactions
 func (stp *SubtreeProcessor) QueueLength() int64 {
@@ -2009,6 +2082,31 @@ func (stp *SubtreeProcessor) ConsumerStarted() bool {
 //   - bool: true once the consumer goroutine has exited
 func (stp *SubtreeProcessor) ConsumerExited() bool {
 	return stp.stopped.Load()
+}
+
+// QueueMaxItems returns the enforced (normalized) ingest-queue item cap, or a
+// value <= 0 when the queue is unbounded. It is the cap the reservation path
+// actually enforces, reported in the queue-full shed message.
+//
+// Returns:
+//   - int64: The enforced item cap (<= 0 when unbounded)
+func (stp *SubtreeProcessor) QueueMaxItems() int64 {
+	return stp.queue.MaxItems()
+}
+
+// QueueHeadAge returns how long the oldest batch still in the ingest queue has
+// been waiting. It is a diagnostic gauge for dispatcher-stall visibility and is
+// safe to call from a monitoring goroutine; it returns 0 when the queue is empty.
+//
+// Returns:
+//   - time.Duration: Age of the oldest queued batch, or 0 if the queue is empty
+func (stp *SubtreeProcessor) QueueHeadAge() time.Duration {
+	// Use the queue's injectable clock, the same source publish stamps batches
+	// with, so the age is a difference of two readings of one clock rather than a
+	// mix of the fake clock and wall time — deterministic under a fake clock and
+	// consistent with every other queue time comparison.
+	ageMillis := stp.queue.headAgeMillis(stp.queue.clock.Now().UnixMilli())
+	return time.Duration(ageMillis) * time.Millisecond
 }
 
 // SubtreeCount returns the total number of subtrees.
@@ -2232,6 +2330,10 @@ func (stp *SubtreeProcessor) InitCurrentBlockHeader(blockHeader *model.BlockHead
 // Returns:
 //   - error: Any error encountered during addition
 func (stp *SubtreeProcessor) addNode(node subtreepkg.Node, parents *subtreepkg.TxInpoints, skipNotification bool) (err error) {
+	return stp.addNodeWithContext(stp.processorContext(), node, parents, skipNotification, false)
+}
+
+func (stp *SubtreeProcessor) addNodeWithContext(ctx context.Context, node subtreepkg.Node, parents *subtreepkg.TxInpoints, skipNotification, replay bool) (err error) {
 	// parents can only be set to nil, when they are already in the map
 	if parents == nil {
 		if _, ok := stp.currentTxMap.Get(node.Hash); !ok {
@@ -2269,7 +2371,7 @@ func (stp *SubtreeProcessor) addNode(node subtreepkg.Node, parents *subtreepkg.T
 	}
 
 	if stp.currentSubtree.Load().IsComplete() {
-		if err = stp.processCompleteSubtree(skipNotification); err != nil {
+		if err = stp.completeSubtree(ctx, skipNotification, replay); err != nil {
 			return err
 		}
 	}
@@ -2336,18 +2438,33 @@ func (stp *SubtreeProcessor) processorContext() context.Context {
 // the send completes, nil on success. Mirrors the context-aware sends in the
 // Start() select loop and reorgBlocks.
 func (stp *SubtreeProcessor) sendNewSubtree(ctx context.Context, req NewSubtreeRequest) error {
+	// Cancellation can abort an unaccepted send. Once queued, storage belongs
+	// to the processor lifetime, including after a recovery call returns.
+	storageCtx := ctx
+	if lifetime := stp.processorCtx.Load(); lifetime != nil {
+		storageCtx = *lifetime
+	}
+	// Before Start, startup's caller context is the only available lifetime.
+	req = stp.retainStorageRequest(storageCtx, req)
 	select {
 	case stp.newSubtreeChan <- req:
 		return nil
 	case <-ctx.Done():
+		req.Release()
 		return ctx.Err()
 	}
 }
 
 func (stp *SubtreeProcessor) processCompleteSubtree(skipNotification bool) (err error) {
+	return stp.completeSubtree(stp.processorContext(), skipNotification, false)
+}
+
+// completeSubtree uses the caller's deadline for queueing storage work. Replayed
+// transactions rebuild memory without adding adaptive sizing observations.
+func (stp *SubtreeProcessor) completeSubtree(ctx context.Context, skipNotification, replay bool) (err error) {
 	currentSubtree := stp.currentSubtree.Load()
 
-	_, _, deferFn := tracing.Tracer("blockassembly").Start(context.Background(), "storeSubtree",
+	_, _, deferFn := tracing.Tracer("blockassembly").Start(ctx, "storeSubtree",
 		tracing.WithParentStat(stp.stats),
 		tracing.WithHistogram(prometheusBlockAssemblySubtreeCompleteHist),
 		tracing.WithDebugLogMessage(stp.logger, "[SubtreeProcessor][processCompleteSubtree][%s] processing complete subtree", currentSubtree.RootHash().String()),
@@ -2364,7 +2481,7 @@ func (stp *SubtreeProcessor) processCompleteSubtree(skipNotification bool) (err 
 	// 2. The coinbase is still a transaction that takes space
 	// 3. For sizing decisions, we care about total throughput
 	actualNodeCount := len(currentSubtree.Nodes)
-	if actualNodeCount > 0 {
+	if actualNodeCount > 0 && !replay {
 		// Add to ring buffer (overwrites oldest value automatically)
 		stp.subtreeNodeCounts.Value = actualNodeCount
 		stp.subtreeNodeCounts = stp.subtreeNodeCounts.Next()
@@ -2385,7 +2502,9 @@ func (stp *SubtreeProcessor) processCompleteSubtree(skipNotification bool) (err 
 		}
 	}
 
-	stp.subtreesInBlock++ // Track number of subtrees in current block
+	if !replay {
+		stp.subtreesInBlock++ // Recovery rebuilds must not resample adaptive sizing.
+	}
 
 	oldSubtree := currentSubtree
 	oldSubtreeHash := oldSubtree.RootHash()
@@ -2413,10 +2532,9 @@ func (stp *SubtreeProcessor) processCompleteSubtree(skipNotification bool) (err 
 		},
 	}
 
-	// Respect processor context cancellation while sending: a full newSubtreeChan buffer with a
+	// Respect caller context cancellation while sending: a full newSubtreeChan buffer with a
 	// stalled or shut-down listener must not block the processor goroutine forever. Matches the
 	// context-aware sends in the Start() select loop and reorgBlocks.
-	ctx := stp.processorContext()
 	if err := stp.sendNewSubtree(ctx, req); err != nil {
 		return errors.NewProcessingError("[%s] cancelled while sending subtree to newSubtreeChan", oldSubtreeHash.String(), err)
 	}
@@ -2597,13 +2715,35 @@ func (stp *SubtreeProcessor) updateChainedSubtreeCounts() {
 	stp.chainedSubtreesTotalSize.Store(totalSize)
 }
 
-// AddBatch adds a batch of transaction nodes to the processor queue.
+// AddBatch adds a batch of transaction nodes to the processor queue
+// unconditionally. This path bypasses the capacity bound but, like
+// AddBatchIfRoom, reserves its items before publishing so it upholds the
+// queueLength >= published-outstanding invariant; callers needing the bound must
+// use AddBatchIfRoom.
+//
+// Its only non-test caller is the teranodecli subtree benchmark, which drives the
+// processor directly and wants no cap. The ingest handlers must use AddBatchIfRoom:
+// this method is what the queue bound exists to keep them away from.
 //
 // Parameters:
 //   - nodes: Transaction nodes to add
 //   - txInpoints: Parent transaction references for each node
 func (stp *SubtreeProcessor) AddBatch(nodes []subtreepkg.Node, txInpoints []*subtreepkg.TxInpoints) {
 	stp.queue.enqueueBatch(nodes, txInpoints)
+}
+
+// AddBatchIfRoom adds a batch of transaction nodes to the processor queue only
+// if the configured capacity bound would not be exceeded, reporting whether it
+// did. When no bound is configured it never refuses, behaving as AddBatch.
+//
+// Parameters:
+//   - nodes: Transaction nodes to add
+//   - txInpoints: Parent transaction references for each node
+//
+// Returns:
+//   - bool: true if the batch was enqueued, false if it was refused for room
+func (stp *SubtreeProcessor) AddBatchIfRoom(nodes []subtreepkg.Node, txInpoints []*subtreepkg.TxInpoints) bool {
+	return stp.queue.enqueueBatchIfRoom(nodes, txInpoints)
 }
 
 // AddDirectly adds a transaction node directly to the subtree processor without going through the queue.
@@ -2618,7 +2758,11 @@ func (stp *SubtreeProcessor) AddBatch(nodes []subtreepkg.Node, txInpoints []*sub
 // Returns:
 //   - error: Any error encountered during addition
 func (stp *SubtreeProcessor) AddDirectly(node *subtreepkg.Node, txInpoints *subtreepkg.TxInpoints, skipNotification bool) error {
-	if err := stp.addNode(*node, txInpoints, skipNotification); err != nil {
+	return stp.addDirectly(stp.processorContext(), node, txInpoints, skipNotification, false)
+}
+
+func (stp *SubtreeProcessor) addDirectly(ctx context.Context, node *subtreepkg.Node, txInpoints *subtreepkg.TxInpoints, skipNotification, replay bool) error {
+	if err := stp.addNodeWithContext(ctx, *node, txInpoints, skipNotification, replay); err != nil {
 		return errors.NewProcessingError("error adding node directly to subtree", err)
 	}
 
@@ -2972,7 +3116,7 @@ func (stp *SubtreeProcessor) reChainSubtrees(fromIndex int) error {
 	itemsPerFile := int(stp.currentItemsPerFile.Load())
 
 	if cs := stp.currentSubtree.Load(); cs != nil {
-		cs.Close()
+		stp.closeMiningSubtree(cs)
 	}
 	newSubtree, err := stp.newSubtree(itemsPerFile)
 	if err != nil {
@@ -3033,7 +3177,7 @@ func (stp *SubtreeProcessor) reChainSubtrees(fromIndex int) error {
 
 	// Close old subtrees that were re-chained
 	for _, st := range originalSubtrees {
-		st.Close()
+		stp.closeMiningSubtree(st)
 	}
 
 	return nil
@@ -3147,11 +3291,22 @@ func (stp *SubtreeProcessor) GetCompletedSubtreesForMiningCandidate() []*subtree
 	return subtrees
 }
 
-// GetPrecomputedMiningData returns the pre-computed mining data for lock-free reads.
-// This can be called from any goroutine without synchronization.
+// GetPrecomputedMiningData returns a leased snapshot. The caller must release
+// its Lease after all readers finish using the subtree nodes.
 // Updated when a subtree completes or a block is processed.
 func (stp *SubtreeProcessor) GetPrecomputedMiningData() *PrecomputedMiningData {
-	return stp.precomputedMiningData.Load()
+	stp.miningSnapshots.mu.Lock()
+	defer stp.miningSnapshots.mu.Unlock()
+	if stp.recoveryPending.Load() {
+		return nil
+	}
+	data := stp.precomputedMiningData.Load()
+	if data == nil {
+		return nil
+	}
+	snapshot := *data
+	snapshot.Lease = stp.miningSnapshots.retainLocked(data.Subtrees)
+	return &snapshot
 }
 
 // GetIncompleteSubtreeMiningData requests a snapshot of the incomplete subtree from
@@ -3161,6 +3316,9 @@ func (stp *SubtreeProcessor) GetPrecomputedMiningData() *PrecomputedMiningData {
 // processing goroutine is busy (e.g., during a reorg). The caller's context
 // is also respected for earlier cancellation.
 func (stp *SubtreeProcessor) GetIncompleteSubtreeMiningData(ctx context.Context) *PrecomputedMiningData {
+	if stp.recoveryPending.Load() {
+		return nil
+	}
 	const timeout = 5 * time.Second
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -3183,6 +3341,17 @@ func (stp *SubtreeProcessor) GetIncompleteSubtreeMiningData(ctx context.Context)
 // Derived values (fees, tx count, merkle proof, etc.) are computed by the caller (GetMiningCandidate).
 // This should only be called from the main processing goroutine.
 func (stp *SubtreeProcessor) updatePrecomputedMiningData() {
+	stp.miningSnapshots.mu.Lock()
+	defer stp.miningSnapshots.mu.Unlock()
+	if stp.recoveryPending.Load() {
+		return
+	}
+	stp.updatePrecomputedMiningDataLocked()
+}
+
+// updatePrecomputedMiningDataLocked publishes the current completed subtrees.
+// The caller owns miningSnapshots.mu and runs on the processor goroutine.
+func (stp *SubtreeProcessor) updatePrecomputedMiningDataLocked() {
 	currentBlockHeader := stp.currentBlockHeader.Load()
 	if currentBlockHeader == nil {
 		return
@@ -3719,7 +3888,15 @@ func (stp *SubtreeProcessor) reorgBlocks(ctx context.Context, moveBackBlocks []*
 	// Assembly txs must be included because some may have entered the UTXO store via
 	// block validation of a non-longest-chain block (e.g., competing fork), where they
 	// were inserted with UnminedSince=0 (mined). These need unmined_since set.
-	// For txs that already have unmined_since set (from propagation), this is idempotent.
+	//
+	// This folds the WHOLE mempool into the mark-false set on every reorg. It is only safe
+	// because MarkTransactionsOnLongestChain(false) keeps an existing unmined_since and
+	// stamps only an absent one. Before that guard (issue 1768) every reorg rewrote
+	// unmined_since = currentBlockHeight across the mempool, which restarted the pruner's
+	// parent-preservation clock for every unmined child while each parent's deleteAtHeight
+	// kept counting from the original spend — a one-block fork opened a
+	// blockHeightRetention-unminedTxRetention window in which parents were pruned from
+	// under live children.
 	//
 	// MoveBack txs are handled by BlockAssembler.Reset (which calls
 	// MarkTransactionsOnLongestChain before reorgBlocks runs).
@@ -3783,8 +3960,7 @@ func (stp *SubtreeProcessor) reorgBlocks(ctx context.Context, moveBackBlocks []*
 		// buffer during a large (>1000 subtree) reorg must not block this
 		// goroutine forever if the consumer has been cancelled. Matches the
 		// select pattern used by the other newSubtreeChan sends.
-		select {
-		case stp.newSubtreeChan <- NewSubtreeRequest{
+		if sendErr := stp.sendNewSubtree(ctx, NewSubtreeRequest{
 			Subtree:     subtree,
 			ParentTxMap: stp.currentTxMap,
 			DeletedTxs:  stp.deletedTxs,
@@ -3792,9 +3968,8 @@ func (stp *SubtreeProcessor) reorgBlocks(ctx context.Context, moveBackBlocks []*
 			OnStorageComplete: func() {
 				stp.cleanupDeletedTxs(st)
 			},
-		}:
-		case <-ctx.Done():
-			return errors.NewProcessingError("[reorgBlocks] context cancelled while announcing subtrees", ctx.Err())
+		}); sendErr != nil {
+			return errors.NewProcessingError("[reorgBlocks] context cancelled while announcing subtrees", sendErr)
 		}
 	}
 	for _, errCh := range errChs {
@@ -4199,7 +4374,7 @@ func (stp *SubtreeProcessor) moveBackBlockBulkBuild(ctx context.Context, block *
 
 	// Step 6: Reset subtree state with coinbase in first subtree
 	if cs := stp.currentSubtree.Load(); cs != nil {
-		cs.Close()
+		stp.closeMiningSubtree(cs)
 	}
 	newSubtree, err := stp.newSubtree(subtreeSize)
 	if err != nil {
@@ -4438,6 +4613,72 @@ func (stp *SubtreeProcessor) createTransactionMapIfNeeded(ctx context.Context, b
 	return transactionMap, conflictingNodes, nil
 }
 
+// refusalHandler builds the refusal callback for utxostore.ProcessConflicting
+// for the block currently being applied. The guard itself is passed separately
+// as a required argument.
+//
+// The block is already stored by the time block assembly moves forward, so the
+// guard anchors on the block's own hash rather than its parent: the ancestry
+// query includes the target block itself, which also catches a losing
+// transaction mined in the applying block.
+//
+// A refused demotion means the block is an ancestor double spend. It is logged
+// at error level, counted on teranode_utxo_conflicting_demotion_refused_total,
+// and the block is queued for out-of-band invalidation.
+func (stp *SubtreeProcessor) refusalHandler(block *model.Block) utxostore.ProcessConflictingOption {
+	blockHash := *block.Hash()
+
+	return utxostore.WithRefusalHandler(
+		func(loser chainhash.Hash) {
+			stp.logger.Errorf("[processConflictingTransactions][%s] REFUSED to demote transaction %s: it is mined on this block's own ancestry. "+
+				"The block contains a double spend of a confirmed transaction and should not have been accepted; queuing it for invalidation",
+				blockHash.String(), loser.String())
+
+			stp.QueueInvalidation(blockHash)
+		},
+	)
+}
+
+// QueueInvalidation records a block that must be invalidated because its
+// conflict resolution would have reversed a spend confirmed in its own
+// ancestry. Idempotent.
+//
+// Also used to put a hash BACK on the queue when the invalidation RPC fails:
+// the refusal has already made conflict resolution a no-op, so until the block
+// is actually invalidated this node is building on a chain it knows to be
+// invalid, and dropping the request would leave that state with nothing but a
+// log line to find it by.
+func (stp *SubtreeProcessor) QueueInvalidation(blockHash chainhash.Hash) {
+	stp.pendingInvalidationsMu.Lock()
+	defer stp.pendingInvalidationsMu.Unlock()
+
+	for _, existing := range stp.pendingInvalidations {
+		if existing.Equal(blockHash) {
+			return
+		}
+	}
+
+	stp.pendingInvalidations = append(stp.pendingInvalidations, blockHash)
+}
+
+// DrainPendingInvalidations returns and clears the blocks whose conflict
+// resolution was refused because it would have reversed a confirmed spend.
+// BlockAssembler calls this after block movement has finished and invalidates
+// each one best-effort.
+func (stp *SubtreeProcessor) DrainPendingInvalidations() []chainhash.Hash {
+	stp.pendingInvalidationsMu.Lock()
+	defer stp.pendingInvalidationsMu.Unlock()
+
+	if len(stp.pendingInvalidations) == 0 {
+		return nil
+	}
+
+	drained := stp.pendingInvalidations
+	stp.pendingInvalidations = nil
+
+	return drained
+}
+
 // processConflictingTransactions handles conflicting transactions and returns
 // losing transaction hashes plus the transient conflicting-hash set populated
 // from the BFS cascade. Callers feed the set into the immediately-following
@@ -4518,7 +4759,8 @@ func (stp *SubtreeProcessor) processConflictingTransactions(ctx context.Context,
 		}
 
 		var allMarkedConflicting []chainhash.Hash
-		if losingTxHashesMap, allMarkedConflicting, err = utxostore.ProcessConflicting(ctx, stp.utxoStore, block.Height, *block.Hash(), conflictingNodes, processedConflictingHashesMap); err != nil {
+		if losingTxHashesMap, allMarkedConflicting, err = utxostore.ProcessConflicting(ctx, stp.utxoStore, block.Height, *block.Hash(), conflictingNodes, processedConflictingHashesMap,
+			utxostore.NewAncestryGuard(stp.blockchainClient.CheckBlockIsAncestorOfBlock), stp.refusalHandler(block)); err != nil {
 			return nil, nil, errors.NewProcessingError("[moveForwardBlock][%s] error processing conflicting transactions", block.String(), err)
 		}
 
@@ -4590,7 +4832,7 @@ func (stp *SubtreeProcessor) resetSubtreeState(createProperlySizedSubtrees bool)
 	}
 
 	if cs := stp.currentSubtree.Load(); cs != nil {
-		cs.Close()
+		stp.closeMiningSubtree(cs)
 	}
 	newSubtree, err := stp.newSubtree(subtreeSize)
 	if err != nil {
@@ -6404,6 +6646,7 @@ func DeserializeHashesFromReaderIntoBuckets(
 //   - ctx: Context for the stop operation (currently unused, for future extensibility)
 func (stp *SubtreeProcessor) Stop(ctx context.Context) {
 	stp.stopOnce.Do(func() {
+		defer stp.clearRecoveryPendingMetric()
 		h := stp.cancelPtr.Swap(nil)
 		if h != nil && h.f != nil {
 			h.f()
@@ -6424,10 +6667,10 @@ func (stp *SubtreeProcessor) Stop(ctx context.Context) {
 		stp.chainedSubtrees = nil
 		stp.chainedSubtreesMu.Unlock()
 		for _, st := range toClose {
-			st.Close()
+			stp.closeMiningSubtree(st)
 		}
 		if cs := stp.currentSubtree.Load(); cs != nil {
-			cs.Close()
+			stp.closeMiningSubtree(cs)
 		}
 		// Clean up DiskTxMap
 		if stp.diskTxMap != nil {
@@ -6461,6 +6704,6 @@ func (stp *SubtreeProcessor) closeChainedSubtrees() {
 	stp.chainedSubtreesTotalSize.Store(0)
 	stp.chainedSubtreesMu.Unlock()
 	for _, st := range toClose {
-		st.Close()
+		stp.closeMiningSubtree(st)
 	}
 }

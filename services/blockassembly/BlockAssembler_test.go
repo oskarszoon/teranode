@@ -456,31 +456,31 @@ func TestBlockAssembly_AddTx(t *testing.T) {
 
 		_, _, err := testItems.utxoStore.SpendAndCreate(ctx, tx1, 0, utxoStore.WithCreateOnly())
 		require.NoError(t, err)
-		testItems.blockAssembler.AddTxBatch([]subtreepkg.Node{{Hash: *hash1, Fee: 111}}, []*subtreepkg.TxInpoints{{ParentTxHashes: []chainhash.Hash{}}})
+		require.True(t, testItems.blockAssembler.AddTxBatchIfRoom([]subtreepkg.Node{{Hash: *hash1, Fee: 111}}, []*subtreepkg.TxInpoints{{ParentTxHashes: []chainhash.Hash{}}}))
 
 		_, _, err = testItems.utxoStore.SpendAndCreate(ctx, tx2, 0, utxoStore.WithCreateOnly())
 		require.NoError(t, err)
-		testItems.blockAssembler.AddTxBatch([]subtreepkg.Node{{Hash: *hash2, Fee: 222}}, []*subtreepkg.TxInpoints{{ParentTxHashes: []chainhash.Hash{}}})
+		require.True(t, testItems.blockAssembler.AddTxBatchIfRoom([]subtreepkg.Node{{Hash: *hash2, Fee: 222}}, []*subtreepkg.TxInpoints{{ParentTxHashes: []chainhash.Hash{}}}))
 
 		_, _, err = testItems.utxoStore.SpendAndCreate(ctx, tx3, 0, utxoStore.WithCreateOnly())
 		require.NoError(t, err)
-		testItems.blockAssembler.AddTxBatch([]subtreepkg.Node{{Hash: *hash3, Fee: 333}}, []*subtreepkg.TxInpoints{{ParentTxHashes: []chainhash.Hash{}}})
+		require.True(t, testItems.blockAssembler.AddTxBatchIfRoom([]subtreepkg.Node{{Hash: *hash3, Fee: 333}}, []*subtreepkg.TxInpoints{{ParentTxHashes: []chainhash.Hash{}}}))
 
 		_, _, err = testItems.utxoStore.SpendAndCreate(ctx, tx4, 0, utxoStore.WithCreateOnly())
 		require.NoError(t, err)
-		testItems.blockAssembler.AddTxBatch([]subtreepkg.Node{{Hash: *hash4, Fee: 110}}, []*subtreepkg.TxInpoints{{ParentTxHashes: []chainhash.Hash{}}})
+		require.True(t, testItems.blockAssembler.AddTxBatchIfRoom([]subtreepkg.Node{{Hash: *hash4, Fee: 110}}, []*subtreepkg.TxInpoints{{ParentTxHashes: []chainhash.Hash{}}}))
 
 		_, _, err = testItems.utxoStore.SpendAndCreate(ctx, tx5, 0, utxoStore.WithCreateOnly())
 		require.NoError(t, err)
-		testItems.blockAssembler.AddTxBatch([]subtreepkg.Node{{Hash: *hash5, Fee: 220}}, []*subtreepkg.TxInpoints{{ParentTxHashes: []chainhash.Hash{}}})
+		require.True(t, testItems.blockAssembler.AddTxBatchIfRoom([]subtreepkg.Node{{Hash: *hash5, Fee: 220}}, []*subtreepkg.TxInpoints{{ParentTxHashes: []chainhash.Hash{}}}))
 
 		_, _, err = testItems.utxoStore.SpendAndCreate(ctx, tx6, 0, utxoStore.WithCreateOnly())
 		require.NoError(t, err)
-		testItems.blockAssembler.AddTxBatch([]subtreepkg.Node{{Hash: *hash6, Fee: 330}}, []*subtreepkg.TxInpoints{{ParentTxHashes: []chainhash.Hash{}}})
+		require.True(t, testItems.blockAssembler.AddTxBatchIfRoom([]subtreepkg.Node{{Hash: *hash6, Fee: 330}}, []*subtreepkg.TxInpoints{{ParentTxHashes: []chainhash.Hash{}}}))
 
 		_, _, err = testItems.utxoStore.SpendAndCreate(ctx, tx7, 0, utxoStore.WithCreateOnly())
 		require.NoError(t, err)
-		testItems.blockAssembler.AddTxBatch([]subtreepkg.Node{{Hash: *hash7, Fee: 6}}, []*subtreepkg.TxInpoints{{ParentTxHashes: []chainhash.Hash{}}})
+		require.True(t, testItems.blockAssembler.AddTxBatchIfRoom([]subtreepkg.Node{{Hash: *hash7, Fee: 6}}, []*subtreepkg.TxInpoints{{ParentTxHashes: []chainhash.Hash{}}}))
 
 		completeWg.Wait()
 
@@ -493,7 +493,8 @@ func TestBlockAssembly_AddTx(t *testing.T) {
 		// should include the 7 transactions added + the coinbase placeholder of the first subtree
 		assert.Equal(t, uint64(8), testItems.blockAssembler.subtreeProcessor.TxCount())
 
-		miningCandidate, subtrees, err := testItems.blockAssembler.GetMiningCandidate(ctx)
+		miningCandidate, subtrees, miningLease, err := testItems.blockAssembler.GetMiningCandidate(ctx)
+		defer miningLease.Release()
 		require.NoError(t, err)
 		assert.NotNil(t, miningCandidate)
 		assert.NotNil(t, subtrees)
@@ -847,23 +848,23 @@ func TestBlockAssembly_ShouldNotAllowMoreThanOneCoinbaseTx(t *testing.T) {
 
 		_, _, err := testItems.utxoStore.SpendAndCreate(ctx, tx1, 0, utxoStore.WithCreateOnly())
 		require.NoError(t, err)
-		testItems.blockAssembler.AddTxBatch([]subtreepkg.Node{{Hash: *subtreepkg.CoinbasePlaceholderHash, Fee: 5000000000}}, []*subtreepkg.TxInpoints{{ParentTxHashes: []chainhash.Hash{}}})
+		require.True(t, testItems.blockAssembler.AddTxBatchIfRoom([]subtreepkg.Node{{Hash: *subtreepkg.CoinbasePlaceholderHash, Fee: 5000000000}}, []*subtreepkg.TxInpoints{{ParentTxHashes: []chainhash.Hash{}}}))
 
 		_, _, err = testItems.utxoStore.SpendAndCreate(ctx, tx2, 0, utxoStore.WithCreateOnly())
 		require.NoError(t, err)
-		testItems.blockAssembler.AddTxBatch([]subtreepkg.Node{{Hash: *hash2, Fee: 222}}, []*subtreepkg.TxInpoints{{ParentTxHashes: []chainhash.Hash{}}})
+		require.True(t, testItems.blockAssembler.AddTxBatchIfRoom([]subtreepkg.Node{{Hash: *hash2, Fee: 222}}, []*subtreepkg.TxInpoints{{ParentTxHashes: []chainhash.Hash{}}}))
 
 		_, _, err = testItems.utxoStore.SpendAndCreate(ctx, tx3, 0, utxoStore.WithCreateOnly())
 		require.NoError(t, err)
-		testItems.blockAssembler.AddTxBatch([]subtreepkg.Node{{Hash: *hash3, Fee: 334}}, []*subtreepkg.TxInpoints{{ParentTxHashes: []chainhash.Hash{}}})
+		require.True(t, testItems.blockAssembler.AddTxBatchIfRoom([]subtreepkg.Node{{Hash: *hash3, Fee: 334}}, []*subtreepkg.TxInpoints{{ParentTxHashes: []chainhash.Hash{}}}))
 
 		_, _, err = testItems.utxoStore.SpendAndCreate(ctx, tx4, 0, utxoStore.WithCreateOnly())
 		require.NoError(t, err)
-		testItems.blockAssembler.AddTxBatch([]subtreepkg.Node{{Hash: *hash4, Fee: 444}}, []*subtreepkg.TxInpoints{{ParentTxHashes: []chainhash.Hash{}}})
+		require.True(t, testItems.blockAssembler.AddTxBatchIfRoom([]subtreepkg.Node{{Hash: *hash4, Fee: 444}}, []*subtreepkg.TxInpoints{{ParentTxHashes: []chainhash.Hash{}}}))
 
 		_, _, err = testItems.utxoStore.SpendAndCreate(ctx, tx5, 0, utxoStore.WithCreateOnly())
 		require.NoError(t, err)
-		testItems.blockAssembler.AddTxBatch([]subtreepkg.Node{{Hash: *hash5, Fee: 555}}, []*subtreepkg.TxInpoints{{ParentTxHashes: []chainhash.Hash{}}})
+		require.True(t, testItems.blockAssembler.AddTxBatchIfRoom([]subtreepkg.Node{{Hash: *hash5, Fee: 555}}, []*subtreepkg.TxInpoints{{ParentTxHashes: []chainhash.Hash{}}}))
 
 		wg.Wait()
 
@@ -882,7 +883,9 @@ func TestBlockAssembly_ShouldNotAllowMoreThanOneCoinbaseTx(t *testing.T) {
 		require.Eventually(t, func() bool {
 			var mcErr error
 
-			miningCandidate, subtree, mcErr = testItems.blockAssembler.GetMiningCandidate(ctx)
+			var miningLease *subtreeprocessor.MiningSnapshotLease
+			miningCandidate, subtree, miningLease, mcErr = testItems.blockAssembler.GetMiningCandidate(ctx)
+			defer miningLease.Release()
 
 			return mcErr == nil && miningCandidate != nil && len(subtree) == 1
 		}, 5*time.Second, 20*time.Millisecond, "mining candidate did not include the completed subtree in time")
@@ -970,25 +973,27 @@ func TestBlockAssembly_GetMiningCandidate(t *testing.T) {
 
 		_, _, err := testItems.utxoStore.SpendAndCreate(ctx, tx2, 0, utxoStore.WithCreateOnly())
 		require.NoError(t, err)
-		testItems.blockAssembler.AddTxBatch([]subtreepkg.Node{{Hash: *hash2, Fee: 222, SizeInBytes: 222}}, []*subtreepkg.TxInpoints{{ParentTxHashes: []chainhash.Hash{}}})
+		require.True(t, testItems.blockAssembler.AddTxBatchIfRoom([]subtreepkg.Node{{Hash: *hash2, Fee: 222, SizeInBytes: 222}}, []*subtreepkg.TxInpoints{{ParentTxHashes: []chainhash.Hash{}}}))
 
 		_, _, err = testItems.utxoStore.SpendAndCreate(ctx, tx3, 0, utxoStore.WithCreateOnly())
 		require.NoError(t, err)
-		testItems.blockAssembler.AddTxBatch([]subtreepkg.Node{{Hash: *hash3, Fee: 333, SizeInBytes: 333}}, []*subtreepkg.TxInpoints{{ParentTxHashes: []chainhash.Hash{}}})
+		require.True(t, testItems.blockAssembler.AddTxBatchIfRoom([]subtreepkg.Node{{Hash: *hash3, Fee: 333, SizeInBytes: 333}}, []*subtreepkg.TxInpoints{{ParentTxHashes: []chainhash.Hash{}}}))
 
 		_, _, err = testItems.utxoStore.SpendAndCreate(ctx, tx4, 0, utxoStore.WithCreateOnly())
 		require.NoError(t, err)
-		testItems.blockAssembler.AddTxBatch([]subtreepkg.Node{{Hash: *hash4, Fee: 444, SizeInBytes: 444}}, []*subtreepkg.TxInpoints{{ParentTxHashes: []chainhash.Hash{}}})
+		require.True(t, testItems.blockAssembler.AddTxBatchIfRoom([]subtreepkg.Node{{Hash: *hash4, Fee: 444, SizeInBytes: 444}}, []*subtreepkg.TxInpoints{{ParentTxHashes: []chainhash.Hash{}}}))
 
 		// Wait until the assembler has committed all 3 txs into the mining candidate.
 		// completeWg.Done() previously fired before the assembler acked the subtree
 		// via ErrChan, so GetMiningCandidate could see NumTxs < 3.
 		require.Eventually(t, func() bool {
-			mc, _, err := testItems.blockAssembler.GetMiningCandidate(ctx)
+			mc, _, miningLease, err := testItems.blockAssembler.GetMiningCandidate(ctx)
+			defer miningLease.Release()
 			return err == nil && mc != nil && mc.NumTxs == 3
 		}, 5*time.Second, 20*time.Millisecond)
 
-		miningCandidate, subtrees, err := testItems.blockAssembler.GetMiningCandidate(ctx)
+		miningCandidate, subtrees, miningLease, err := testItems.blockAssembler.GetMiningCandidate(ctx)
+		defer miningLease.Release()
 		require.NoError(t, err)
 
 		assert.NotNil(t, miningCandidate)
@@ -1089,12 +1094,13 @@ func TestBlockAssembly_GetMiningCandidate_MaxBlockSize(t *testing.T) {
 			_, _, err := testItems.utxoStore.SpendAndCreate(ctx, tx, 0, utxoStore.WithCreateOnly())
 			require.NoError(t, err)
 
-			testItems.blockAssembler.AddTxBatch([]subtreepkg.Node{{Hash: *tx.TxIDChainHash(), Fee: 1000000000, SizeInBytes: 15000}}, []*subtreepkg.TxInpoints{{ParentTxHashes: []chainhash.Hash{}}})
+			require.True(t, testItems.blockAssembler.AddTxBatchIfRoom([]subtreepkg.Node{{Hash: *tx.TxIDChainHash(), Fee: 1000000000, SizeInBytes: 15000}}, []*subtreepkg.TxInpoints{{ParentTxHashes: []chainhash.Hash{}}}))
 		}
 
 		completeWg.Wait()
 
-		miningCandidate, subtrees, err := testItems.blockAssembler.GetMiningCandidate(ctx)
+		miningCandidate, subtrees, miningLease, err := testItems.blockAssembler.GetMiningCandidate(ctx)
+		defer miningLease.Release()
 		require.NoError(t, err)
 
 		assert.NotNil(t, miningCandidate)
@@ -1188,7 +1194,7 @@ func TestBlockAssembly_GetMiningCandidate_MaxBlockSize_LessThanSubtreeSize(t *te
 			_, _, err := testItems.utxoStore.SpendAndCreate(ctx, tx, 0, utxoStore.WithCreateOnly())
 			require.NoError(t, err)
 
-			testItems.blockAssembler.AddTxBatch([]subtreepkg.Node{{Hash: *tx.TxIDChainHash(), Fee: 1000000000, SizeInBytes: 150000}}, []*subtreepkg.TxInpoints{{ParentTxHashes: []chainhash.Hash{}}}) // 0.15MB
+			require.True(t, testItems.blockAssembler.AddTxBatchIfRoom([]subtreepkg.Node{{Hash: *tx.TxIDChainHash(), Fee: 1000000000, SizeInBytes: 150000}}, []*subtreepkg.TxInpoints{{ParentTxHashes: []chainhash.Hash{}}})) // 0.15MB
 		}
 
 		wg.Wait()
@@ -1198,7 +1204,9 @@ func TestBlockAssembly_GetMiningCandidate_MaxBlockSize_LessThanSubtreeSize(t *te
 		// template (no error) because precomputed data is not yet available.
 		var err error
 		require.Eventually(t, func() bool {
-			_, _, err = testItems.blockAssembler.GetMiningCandidate(ctx)
+			var miningLease *subtreeprocessor.MiningSnapshotLease
+			_, _, miningLease, err = testItems.blockAssembler.GetMiningCandidate(ctx)
+			defer miningLease.Release()
 			return err != nil
 		}, 5*time.Second, 100*time.Millisecond, "expected GetMiningCandidate to return an error when subtree exceeds max block size")
 
@@ -1293,27 +1301,27 @@ func TestBlockAssembly_CoinbaseSubsidyBugReproduction(t *testing.T) {
 		// Add transactions to UTXO store and then to block assembler
 		_, _, err := testItems.utxoStore.SpendAndCreate(ctx, tx1, 0, utxoStore.WithCreateOnly())
 		require.NoError(t, err)
-		testItems.blockAssembler.AddTxBatch([]subtreepkg.Node{{
+		require.True(t, testItems.blockAssembler.AddTxBatchIfRoom([]subtreepkg.Node{{
 			Hash:        *tx1.TxIDChainHash(),
 			Fee:         200000, // 0.002 BSV
 			SizeInBytes: 250,
-		}}, []*subtreepkg.TxInpoints{{ParentTxHashes: []chainhash.Hash{}}})
+		}}, []*subtreepkg.TxInpoints{{ParentTxHashes: []chainhash.Hash{}}}))
 
 		_, _, err = testItems.utxoStore.SpendAndCreate(ctx, tx2, 0, utxoStore.WithCreateOnly())
 		require.NoError(t, err)
-		testItems.blockAssembler.AddTxBatch([]subtreepkg.Node{{
+		require.True(t, testItems.blockAssembler.AddTxBatchIfRoom([]subtreepkg.Node{{
 			Hash:        *tx2.TxIDChainHash(),
 			Fee:         300000, // 0.003 BSV
 			SizeInBytes: 250,
-		}}, []*subtreepkg.TxInpoints{{ParentTxHashes: []chainhash.Hash{}}})
+		}}, []*subtreepkg.TxInpoints{{ParentTxHashes: []chainhash.Hash{}}}))
 
 		_, _, err = testItems.utxoStore.SpendAndCreate(ctx, tx3, 0, utxoStore.WithCreateOnly())
 		require.NoError(t, err)
-		testItems.blockAssembler.AddTxBatch([]subtreepkg.Node{{
+		require.True(t, testItems.blockAssembler.AddTxBatchIfRoom([]subtreepkg.Node{{
 			Hash:        *tx3.TxIDChainHash(),
 			Fee:         100000, // 0.001 BSV
 			SizeInBytes: 250,
-		}}, []*subtreepkg.TxInpoints{{ParentTxHashes: []chainhash.Hash{}}})
+		}}, []*subtreepkg.TxInpoints{{ParentTxHashes: []chainhash.Hash{}}}))
 
 		wg.Wait()
 
@@ -1330,7 +1338,8 @@ func TestBlockAssembly_CoinbaseSubsidyBugReproduction(t *testing.T) {
 		var coinbaseValue uint64
 
 		require.Eventually(t, func() bool {
-			mc, _, mcErr := testItems.blockAssembler.GetMiningCandidate(ctx)
+			mc, _, miningLease, mcErr := testItems.blockAssembler.GetMiningCandidate(ctx)
+			defer miningLease.Release()
 			if mcErr != nil || mc == nil || mc.NumTxs != 3 {
 				return false
 			}
@@ -1487,7 +1496,8 @@ func TestBlockAssembler_GetMiningCandidate_PrecomputedData(t *testing.T) {
 		// Do not start channel listeners: the subscription goroutine races with
 		// this test by overwriting bestBlock via processNewBlockAnnouncement.
 		// GetMiningCandidate works directly against the values we set above.
-		candidate, subtrees, err := ba.GetMiningCandidate(context.Background())
+		candidate, subtrees, miningLease, err := ba.GetMiningCandidate(context.Background())
+		defer miningLease.Release()
 		require.NoError(t, err)
 		require.NotNil(t, candidate)
 		assert.Equal(t, uint32(2), candidate.Height)
@@ -1523,7 +1533,8 @@ func TestBlockAssembler_GetMiningCandidate_PrecomputedData(t *testing.T) {
 		originalStp := ba.subtreeProcessor
 		ba.subtreeProcessor = mockStp
 
-		candidate, subtrees, err := ba.GetMiningCandidate(context.Background())
+		candidate, subtrees, miningLease, err := ba.GetMiningCandidate(context.Background())
+		defer miningLease.Release()
 		require.NoError(t, err)
 		require.NotNil(t, candidate)
 		// Stale data detected: falls back to empty block at next height (5+1=6)
@@ -1569,7 +1580,8 @@ func TestBlockAssembler_GetMiningCandidate_HappyPath(t *testing.T) {
 		originalStp := ba.subtreeProcessor
 		ba.subtreeProcessor = mockStp
 
-		candidate, subtrees, err := ba.GetMiningCandidate(context.Background())
+		candidate, subtrees, miningLease, err := ba.GetMiningCandidate(context.Background())
+		defer miningLease.Release()
 		require.NoError(t, err)
 		require.NotNil(t, candidate)
 
@@ -1625,7 +1637,8 @@ func TestBlockAssembler_GetMiningCandidate_HappyPath(t *testing.T) {
 		originalStp := ba.subtreeProcessor
 		ba.subtreeProcessor = mockStp
 
-		candidate, subtrees, err := ba.GetMiningCandidate(context.Background())
+		candidate, subtrees, miningLease, err := ba.GetMiningCandidate(context.Background())
+		defer miningLease.Release()
 		require.NoError(t, err)
 		require.NotNil(t, candidate)
 
@@ -1666,10 +1679,10 @@ func TestBlockAssembler_GetMiningCandidate_StaleFallbackIntegration(t *testing.T
 		// precomputed mining data gets populated for the genesis header.
 		for i := 0; i < 5; i++ {
 			txHash := chainhash.HashH([]byte{byte(i), 0xAA})
-			ba.AddTxBatch(
+			require.True(t, ba.AddTxBatchIfRoom(
 				[]subtreepkg.Node{{Hash: txHash, Fee: uint64(100 * (i + 1)), SizeInBytes: 250}},
 				[]*subtreepkg.TxInpoints{{}},
-			)
+			))
 		}
 
 		// Give the subtree processor time to dequeue and process the transactions
@@ -1677,6 +1690,9 @@ func TestBlockAssembler_GetMiningCandidate_StaleFallbackIntegration(t *testing.T
 
 		// Verify precomputed data currently references the genesis header
 		data := ba.subtreeProcessor.GetPrecomputedMiningData()
+		if data != nil {
+			defer data.Lease.Release()
+		}
 		// Precomputed data may or may not exist depending on whether a
 		// subtree completed. Either way, the key behavior tested below
 		// is that after advancing the block height, GetMiningCandidate
@@ -1700,7 +1716,8 @@ func TestBlockAssembler_GetMiningCandidate_StaleFallbackIntegration(t *testing.T
 		// so any precomputed or incomplete data references genesis → stale.
 
 		// GetMiningCandidate must detect the mismatch and return an empty block.
-		candidate, subtrees, err := ba.GetMiningCandidate(ctx)
+		candidate, subtrees, miningLease, err := ba.GetMiningCandidate(ctx)
+		defer miningLease.Release()
 		require.NoError(t, err)
 		require.NotNil(t, candidate)
 
@@ -1738,10 +1755,10 @@ func TestBlockAssembler_GetMiningCandidate_StaleFallbackIntegration(t *testing.T
 		// Add transactions so the incomplete subtree has data
 		for i := 0; i < 3; i++ {
 			txHash := chainhash.HashH([]byte{byte(i), 0xBB})
-			ba.AddTxBatch(
+			require.True(t, ba.AddTxBatchIfRoom(
 				[]subtreepkg.Node{{Hash: txHash, Fee: uint64(200 * (i + 1)), SizeInBytes: 300}},
 				[]*subtreepkg.TxInpoints{{}},
-			)
+			))
 		}
 
 		// Give the subtree processor time to dequeue
@@ -1750,7 +1767,8 @@ func TestBlockAssembler_GetMiningCandidate_StaleFallbackIntegration(t *testing.T
 		// The subtree processor's block header and the block assembler's
 		// best block both point to genesis. Precomputed data (if any) and
 		// incomplete subtree data should be fresh.
-		candidate, subtrees, err := ba.GetMiningCandidate(ctx)
+		candidate, subtrees, miningLease, err := ba.GetMiningCandidate(ctx)
+		defer miningLease.Release()
 		require.NoError(t, err)
 		require.NotNil(t, candidate)
 		assert.Equal(t, uint32(1), candidate.Height)

@@ -363,22 +363,37 @@ func TestSendFSMEvent_RunFromIdle_NoCheckpoints(t *testing.T) {
 	store.AssertNotCalled(t, "GetBestBlockHeader", mock.Anything)
 }
 
-// Automatic RUN cannot leave operator IDLE, even before checkpoint admission.
-func TestRunFromIdle_RejectsBeforeCheckpointRead(t *testing.T) {
+// TestExplicitRunFromIdle_BelowCheckpointRejectsAndPreservesIdle protects the operator RUN
+// contract for an explicit operator RUN. A below-checkpoint node
+// must therefore reject RUN and remain durably parked in IDLE rather than
+// silently entering the irreversible CATCHINGBLOCKS state.
+func TestExplicitRunFromIdle_BelowCheckpointRejectsAndPreservesIdle(t *testing.T) {
 	ctx := context.Background()
-	b := newFSMHardeningBlockchain(t)
-	b.settings.ChainCfgParams.Checkpoints = []chaincfg.Checkpoint{{Height: 1}}
-	b.store = &fsmHardeningReadStore{Store: b.store, read: func(context.Context) (*model.BlockHeader, *model.BlockHeaderMeta, error) {
-		t.Fatal("automatic IDLE rejection must precede the checkpoint read")
-		return nil, nil, nil
-	}}
-	_, err := b.Run(ctx, nil)
-	require.ErrorContains(t, err, "automatic FSM transition refused while IDLE")
+	highest := HighestCheckpointHeight(chaincfg.MainNetParams.Checkpoints)
+	require.Greater(t, highest, uint32(0))
+
+	store := &fsmGateStore{}
+	hdr := &model.BlockHeader{HashPrevBlock: &chainhash.Hash{}, HashMerkleRoot: &chainhash.Hash{}}
+	store.On("GetBestBlockHeader", mock.Anything).Return(hdr, &model.BlockHeaderMeta{Height: 0}, nil)
+
+	b := newTestBlockchainForGate(t, &chaincfg.MainNetParams, store)
+	b.settings.BlockChain.FSMStateChangeDelay = 0
+	b.finiteStateMachine = b.NewFiniteStateMachine()
+	b.finiteStateMachine.SetState(blockchain_api.FSMStateType_IDLE.String())
+	require.NoError(t, store.SetFSMState(ctx, blockchain_api.FSMStateType_IDLE.String()))
+
+	_, err := b.SendFSMEvent(ctx, &blockchain_api.SendFSMEventRequest{Event: blockchain_api.FSMEventType_RUN})
+	require.Error(t, err)
+	require.ErrorContains(t, err, "below highest checkpoint")
 	require.ErrorContains(t, err, "setfsmstate --fsmstate catchingblocks")
 	require.Equal(t, blockchain_api.FSMStateType_IDLE.String(), b.finiteStateMachine.Current())
-	persisted, err := b.store.GetFSMState(ctx)
-	require.NoError(t, err)
-	require.Equal(t, blockchain_api.FSMStateType_IDLE.String(), persisted)
+
+	persisted, perr := store.GetFSMState(ctx)
+	require.NoError(t, perr)
+	require.Equal(t, blockchain_api.FSMStateType_IDLE.String(), persisted,
+		"rejected RUN must not change the persisted state")
+
+	store.AssertExpectations(t)
 }
 
 // TestSendFSMEvent_InvalidRunSkipsCheckpointRead protects error ordering for
@@ -449,4 +464,22 @@ func TestSendFSMEvent_RunFromIdle_StoreErrorRejects(t *testing.T) {
 				"FSM must stay in IDLE when the gate cannot reach a verdict")
 		})
 	}
+}
+
+// Automatic RUN cannot leave operator IDLE, even before checkpoint admission.
+func TestRunFromIdle_RejectsBeforeCheckpointRead(t *testing.T) {
+	ctx := context.Background()
+	b := newFSMHardeningBlockchain(t)
+	b.settings.ChainCfgParams.Checkpoints = []chaincfg.Checkpoint{{Height: 1}}
+	b.store = &fsmHardeningReadStore{Store: b.store, read: func(context.Context) (*model.BlockHeader, *model.BlockHeaderMeta, error) {
+		t.Fatal("automatic IDLE rejection must precede the checkpoint read")
+		return nil, nil, nil
+	}}
+	_, err := b.Run(ctx, nil)
+	require.ErrorContains(t, err, "automatic RUN refused from IDLE")
+	require.ErrorContains(t, err, "use SendFSMEvent")
+	require.Equal(t, blockchain_api.FSMStateType_IDLE.String(), b.finiteStateMachine.Current())
+	persisted, err := b.store.GetFSMState(ctx)
+	require.NoError(t, err)
+	require.Equal(t, blockchain_api.FSMStateType_IDLE.String(), persisted)
 }

@@ -9,6 +9,7 @@ import (
 
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	"github.com/bsv-blockchain/teranode/model"
+	"github.com/bsv-blockchain/teranode/services/blockchain"
 	"github.com/bsv-blockchain/teranode/services/blockvalidation/catchup"
 	"github.com/bsv-blockchain/teranode/services/blockvalidation/testhelpers"
 	"github.com/stretchr/testify/assert"
@@ -164,48 +165,54 @@ func TestCatchup_ConcurrentCatchupLock(t *testing.T) {
 		server, _, _, cleanup := setupTestCatchupServer(t)
 		defer cleanup()
 
-		numGoroutines := 10
+		const numGoroutines = 10
 		successCount := 0
 		failureCount := 0
 		mu := sync.Mutex{}
+		start := make(chan struct{})
+		release := make(chan struct{})
+		var attempted, finished sync.WaitGroup
+		attempted.Add(numGoroutines)
+		finished.Add(numGoroutines)
 
-		var wg sync.WaitGroup
-		wg.Add(numGoroutines)
-
-		// Start multiple goroutines trying to acquire catchup lock
 		for i := 0; i < numGoroutines; i++ {
-			go func(id int) {
-				defer wg.Done()
-
-				header := testhelpers.CreateTestHeaders(t, 1)[0]
-				ctx := &CatchupContext{
-					blockUpTo: &model.Block{
-						Header: header,
-						Height: uint32(1000 + id),
-					},
-				}
-
+			header := testhelpers.CreateTestHeaders(t, 1)[0]
+			ctx := &CatchupContext{
+				blockUpTo: &model.Block{
+					Header: header,
+					Height: uint32(1000 + i),
+				},
+			}
+			go func() {
+				defer finished.Done()
+				<-start
 				err := server.acquireCatchupLock(ctx)
 				mu.Lock()
 				if err == nil {
 					successCount++
-					// Hold lock briefly
-					time.Sleep(10 * time.Millisecond)
-					server.releaseCatchupLock(ctx, &err)
 				} else {
 					failureCount++
 				}
 				mu.Unlock()
-			}(i)
+				attempted.Done()
+
+				if err == nil {
+					// Keep ownership until EVERY contender has attempted. A timed
+					// sleep permits a delayed contender to win after release, which
+					// is valid sequential ownership rather than a lock failure.
+					<-release
+					server.releaseCatchupLock(ctx, &err)
+				}
+			}()
 		}
 
-		wg.Wait()
+		close(start)
+		attempted.Wait()
+		close(release)
+		finished.Wait()
 
-		// Exactly one should succeed
-		assert.Equal(t, 1, successCount,
-			"Exactly one goroutine should acquire lock")
-		assert.Equal(t, numGoroutines-1, failureCount,
-			"All other goroutines should fail")
+		require.Equal(t, 1, successCount, "exactly one concurrent contender should acquire the lock")
+		require.Equal(t, numGoroutines-1, failureCount, "all contenders must fail while the winner retains ownership")
 	})
 
 	t.Run("LockReleasedOnPanic", func(t *testing.T) {
@@ -363,63 +370,20 @@ func TestCatchup_PartialStateRecovery(t *testing.T) {
 	})
 }
 
-// TestCatchup_FSMStateManagement tests FSM state transitions during catchup
+// TestCatchup_FSMStateManagement exercises real persisted state at both boundaries.
 func TestCatchup_FSMStateManagement(t *testing.T) {
-	t.Run("FSMStateTransitions", func(t *testing.T) {
-		ctx := context.Background()
-		server, mockBlockchainClient, _, cleanup := setupTestCatchupServer(t)
-		defer cleanup()
+	ctx := context.Background()
+	server, client, store, catchupCtx := newPromotionAuthority(t)
+	require.NoError(t, client.Run(ctx, "test setup"))
+	requirePromotionState(t, client, store, blockchain.FSMStateRUNNING)
 
-		testHeaders := testhelpers.CreateTestHeaders(t, 5)
-		catchupCtx := &CatchupContext{
-			blockUpTo: &model.Block{
-				Header: testHeaders[4],
-				Height: 1005,
-			},
-			blockHeaders: testHeaders[1:],
-		}
+	var size atomic.Int64
+	size.Store(4)
+	require.NoError(t, server.setFSMCatchingBlocks(ctx, catchupCtx, &size))
+	requirePromotionState(t, client, store, blockchain.FSMStateCATCHINGBLOCKS)
 
-		// Clear permissive defaults so .Once() expectations are matched
-		mockBlockchainClient.ExpectedCalls = filterMockCalls(mockBlockchainClient.ExpectedCalls, "CatchUpBlocks")
-		mockBlockchainClient.ExpectedCalls = filterMockCalls(mockBlockchainClient.ExpectedCalls, "Run")
-
-		// Mock FSM state changes
-		mockBlockchainClient.On("CatchUpBlocks", mock.Anything).
-			Return(nil).Once()
-
-		mockBlockchainClient.On("Run", mock.Anything, "blockvalidation/Server").
-			Return(nil).Once()
-
-		// Test setting CATCHINGBLOCKS state
-		size := atomic.Int64{}
-		size.Store(4)
-		err := server.setFSMCatchingBlocks(ctx, catchupCtx, &size)
-		assert.NoError(t, err, "Should set FSM to CATCHINGBLOCKS")
-
-		// Test restoring RUN state
-		server.restoreFSMState(ctx, catchupCtx)
-
-		mockBlockchainClient.AssertExpectations(t)
-	})
-
-	t.Run("CompletionDoesNotDependOnCachedState", func(t *testing.T) {
-		ctx := context.Background()
-		server, mockBlockchainClient, _, cleanup := setupTestCatchupServer(t)
-		defer cleanup()
-
-		header := testhelpers.CreateTestHeaders(t, 1)[0]
-		catchupCtx := &CatchupContext{
-			blockUpTo: &model.Block{
-				Header: header,
-				Height: 1000,
-			},
-		}
-
-		server.restoreFSMState(ctx, catchupCtx)
-
-		mockBlockchainClient.AssertNotCalled(t, "GetFSMCurrentState", mock.Anything)
-		mockBlockchainClient.AssertCalled(t, "Run", mock.Anything, "blockvalidation/Server")
-	})
+	server.restoreFSMState(ctx, catchupCtx)
+	requirePromotionState(t, client, store, blockchain.FSMStateRUNNING)
 }
 
 // TestCatchup_MetricsAndTracking tests metrics recording during crash recovery

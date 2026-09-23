@@ -35,6 +35,9 @@ func (u *Server) enqueueCatchup(item processBlockCatchup) bool {
 				return true
 			}
 		}
+		if len(alternatives) >= maxCatchupAlternatives {
+			return true
+		}
 		// Copy because the active consumer may be traversing the previous snapshot.
 		alternatives = append(append([]processBlockCatchup(nil), alternatives...), item)
 		u.catchupAlternatives.Set(hash, alternatives, ttlcache.NoTTL)

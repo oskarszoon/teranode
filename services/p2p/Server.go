@@ -77,6 +77,15 @@ const (
 	// when p2p_gossip_handler_concurrency is unset.
 	defaultGossipHandlerConcurrency = 4
 
+	// gossipKafkaPublishBuffer sizes the block/subtree producers' publish
+	// channels. The gossip handlers use TryPublish, so a full channel is a
+	// DROPPED announcement rather than backpressure — the buffer must absorb
+	// ordinary producer latency (broker leader election, linger flush), not
+	// just smooth a burst. Sized alongside the TryPublish switch on purpose:
+	// the old 10-slot buffer was tuned for a blocking send that could only
+	// delay, never lose.
+	gossipKafkaPublishBuffer = 1000
+
 	// syncCoordinatorStopTimeout is the sync coordinator's drain sub-budget
 	// inside Server.Stop. Coordinator RPCs are bounded at defaultRPCTimeout
 	// (5s), so a healthy drain completes well within it; the cap only bites
@@ -85,30 +94,36 @@ const (
 	// producer flushes later in Server.Stop still get usable time.
 	syncCoordinatorStopTimeout = 10 * time.Second
 
-	// maxP2PMessageSize is the absolute upper bound on a pubsub message payload.
-	// Anything larger is dropped before parsing. Per-topic limits below should
-	// always be tighter than this; this is the safety net.
-	maxP2PMessageSize = 10 * 1024 * 1024 // 10MB
+	// maxGossipMessageSize is the ceiling every per-topic cap below must stay
+	// at or under (guarded by TestTopicKindCaps_WithinGossipCeiling). Teranode
+	// gossip payloads are small JSON announcements, realistically ~1KB, so
+	// nothing legitimate comes near 10KB.
+	//
+	// This ceiling is NOT enforced on the wire. go-p2p-message-bus exposes
+	// neither pubsub.WithMaxMessageSize nor RegisterTopicValidator, so the
+	// libp2p default (1MiB) is the only pre-relay check and the per-topic caps
+	// below run in the subscription handlers, after gossipsub has already
+	// forwarded the message to the mesh. See docs/p2p-libp2p-review.md.
+	maxGossipMessageSize = 10 * 1024 // 10KB
 
 	// Per-topic size limits. Each topic's payload is well-bounded, so these are
 	// kept tight to drop obvious abuse (e.g. multi-MB blobs) before JSON parsing
 	// and to give us a clear ceiling per message type.
 	//
 	// Block / subtree messages carry: hash (64 chars), height, DataHub URL,
-	// peer ID, 80B block header, client name. Realistic size is < 1KB.
-	// Block keeps extra headroom for the optional hex-encoded coinbase tx.
-	maxBlockMessageSize   = 32 * 1024 // 32KB
-	maxSubtreeMessageSize = 8 * 1024  // 8KB
-	// node_status messages are NodeStatusMessage JSON, realistically ~1KB.
-	// (The old 64KB cap was headroom for a connected-peers list that never
-	// existed — ConnectedPeersCount has always been an int.) The per-field
-	// bounds cap the raw string bytes at ~5KB, but json.Marshal HTML-escapes
-	// some printable characters to six bytes each, so the marshalled form of a
-	// pathological-yet-valid message can exceed the raw sum; publishToNetwork
-	// therefore enforces these caps on every outbound payload (topicKindCaps),
-	// so a local config that would be dropped by peers fails loudly here
-	// instead.
-	maxNodeStatusMessageSize = 16 * 1024 // 16KB
+	// peer ID, 80B block header, client name. Realistic size is < 1KB. The
+	// optional Coinbase field has never been populated by any Teranode version
+	// and nothing consumes it, so block gets no extra headroom for it.
+	maxBlockMessageSize   = maxGossipMessageSize
+	maxSubtreeMessageSize = 8 * 1024 // 8KB
+	// node_status messages are NodeStatusMessage JSON, realistically ~1KB. The
+	// per-field bounds cap the raw string bytes at ~5KB, but json.Marshal
+	// HTML-escapes some printable characters to six bytes each, so the
+	// marshalled form of a pathological-yet-valid message can exceed the raw
+	// sum; publishToNetwork therefore enforces these caps on every outbound
+	// payload (topicKindCaps), so a local config that would be dropped by
+	// peers fails loudly here instead.
+	maxNodeStatusMessageSize = maxGossipMessageSize
 	// rejected_tx messages carry: tx hash, reason string, peer ID. Our egress
 	// truncates the reason to maxGossipReasonLen, but un-upgraded peers publish
 	// the untruncated validator error chain, so keep headroom for those during
@@ -164,6 +179,11 @@ type Server struct {
 	blockPeerMap                      cappedPeerMap                  // Which peer sent each block (canonical hash -> peerMapEntry); insert-capped, issue 1409
 	subtreePeerMap                    cappedPeerMap                  // Which peer ANNOUNCED each subtree via gossip, not necessarily who served its bytes (canonical hash -> peerMapEntry); insert-capped, issue 1409
 	reportedInvalidBlocks             cappedPeerMap                  // Invalid blocks already scored (canonical hash -> scoring record); dedupes at-least-once Kafka redelivery so one invalid block is scored once per TTL, not once per delivery
+	blockSeenHashes                   seenHashCache                  // Block hashes already announced within the TTL; suppresses replayed announcements before the Kafka publish
+	subtreeSeenHashes                 seenHashCache                  // Subtree hashes already announced within the TTL; suppresses replayed announcements before the Kafka publish
+	lastAnnouncedBlockHash            atomic.Pointer[chainhash.Hash] // Most recently gossiped tip; suppresses the consecutive re-announcements a blockchain-subscription reconnect replays
+	lastAnnouncedSubtreeHash          atomic.Pointer[chainhash.Hash] // Most recently gossiped subtree, same consecutive-duplicate guard as lastAnnouncedBlockHash
+	connectedPeersProbe               atomic.Pointer[peersProbe]     // Briefly cached "any peer connected" answer for the sender guards; GetPeers walks every connection and subtrees announce constantly
 	startTime                         time.Time                      // Server start time for uptime calculation
 	peerRegistry                      blockchain.PeerRegistryClientI // gRPC client for the centralized peer registry hosted by the blockchain service
 	peerSelector                      *PeerSelector                  // Stateless peer selection logic
@@ -228,6 +248,15 @@ type Server struct {
 	// localHeightCache is a short-lived cache of the local best height used by
 	// getLocalHeight, avoiding a blockchain gRPC round-trip per gossip message.
 	localHeightCache atomic.Pointer[localHeightCacheEntry]
+	// catchupMaliciousLastCharge throttles the ban-score charge applied by
+	// RecordCatchupMalicious to one per peer per catchupMaliciousChargeWindow.
+	// A single misbehaving block is reported through several catchup paths in
+	// the same cycle; without the throttle one offense would accumulate points
+	// from each path and cross the ban threshold on its own. Guarded by
+	// catchupMaliciousChargeMu; lazily initialized so tests that construct
+	// Server directly work.
+	catchupMaliciousChargeMu   sync.Mutex
+	catchupMaliciousLastCharge map[string]time.Time
 }
 
 // privateIPColocationWhitelist returns local-network ranges for exemption from the
@@ -266,6 +295,18 @@ func privateIPColocationWhitelist() []*net.IPNet {
 // inverted here because the settings key is expressed as an enable flag while the bus
 // config expresses it as a disable flag. PX enabled without scoring is the
 // spec-violating state this wiring exists to eliminate, so it is a configuration error.
+//
+// AllowedPublisherIDs, when set, is passed straight through to the bus, which filters
+// pubsub message authorship against it. This is global across every subscribed topic
+// (block, subtree, node status, rejected tx), not just block and subtree: a
+// non-allowlisted peer's messages on all four are silently dropped before delivery.
+// Because node status is included, a filtered peer stops being registered or
+// refreshed by incoming messages. That only removes it from the peer registry and
+// the /p2p-ws monitoring feed immediately if it was never registered before the
+// allowlist took effect: a pre-existing entry stays, and reconcileConnectionStates
+// keeps it flagged connected off live libp2p connectivity regardless of pubsub
+// filtering, until p2p_peer_registry_ttl (default 24h) evicts it. That consequence
+// is accepted, not worked around here - see the field's settings doc.
 func buildP2PMessageBusConfig(logger ulogger.Logger, tSettings *settings.Settings, privKey crypto.PrivKey, protocolVersion, dhtMode string, advertiseAddresses []string) (p2pMessageBus.Config, error) {
 	if tSettings.P2P.EnablePeerExchange && !tSettings.P2P.EnablePeerScoring {
 		return p2pMessageBus.Config{}, errors.NewConfigurationError("p2p_enable_peer_exchange requires p2p_enable_peer_scoring (gossipsub v1.1 pairs PX with scoring); disable peer exchange or enable scoring")
@@ -278,6 +319,7 @@ func buildP2PMessageBusConfig(logger ulogger.Logger, tSettings *settings.Setting
 		PeerCacheFile:       p2pCacheFilePath(tSettings.P2P.PeerCacheDir),
 		BootstrapPeers:      tSettings.P2P.BootstrapPeers,
 		StaticPeers:         tSettings.P2P.StaticPeers,
+		AllowedPublisherIDs: tSettings.P2P.AllowedPublisherIDs,
 		ProtocolVersion:     protocolVersion,
 		DHTMode:             dhtMode,
 		DHTCleanupInterval:  tSettings.P2P.DHTCleanupInterval,
@@ -358,12 +400,46 @@ func buildP2PMessageBusConfig(logger ulogger.Logger, tSettings *settings.Setting
 		logger.Warnf("[p2p] gossipsub peer scoring DISABLED (p2p_enable_peer_scoring=false), peer exchange %v", tSettings.P2P.EnablePeerExchange)
 	}
 
+	// The listen port is independent of what the node announces. Leaving Port
+	// zero makes the bus bind a random ephemeral port that changes on every
+	// restart, so every firewall rule and port mapping written for p2p_port
+	// points at nothing.
+	conf.Port = tSettings.P2P.Port
+
 	if len(advertiseAddresses) > 0 {
 		conf.AnnounceAddrs = advertiseAddresses
-		conf.Port = tSettings.P2P.Port
 	}
 
 	return conf, nil
+}
+
+// resolveAdvertiseAddresses decides which addresses, if any, the node announces
+// to peers. An empty result leaves announcement to libp2p, which advertises the
+// interface addresses it actually bound (private ones included) and whatever
+// public address peers observe via Identify.
+//
+// The listen addresses are deliberately never announced: the bus only supports
+// wildcard binds, and a wildcard is not a dialable address. That also means
+// SharePrivateAddresses currently has no effect on what is announced; the bus
+// offers no address filter short of a full AnnounceAddrs override.
+func resolveAdvertiseAddresses(logger ulogger.Logger, tSettings *settings.Settings) []string {
+	switch {
+	case tSettings.P2P.ListenMode == settings.ListenModeSilent:
+		// Silent mode: no explicit announce addresses. Discoverability is
+		// removed by disabling the DHT (see NewServer), not by this branch.
+		if len(tSettings.P2P.AdvertiseAddresses) > 0 {
+			logger.Infof("[silent mode] p2p_advertise_addresses %v suppressed - nothing is announced in silent mode", tSettings.P2P.AdvertiseAddresses)
+		} else {
+			logger.Infof("[silent mode] no advertise addresses announced")
+		}
+		return nil
+	case len(tSettings.P2P.AdvertiseAddresses) > 0:
+		logger.Infof("Using configured advertise addresses: %v", tSettings.P2P.AdvertiseAddresses)
+		return tSettings.P2P.AdvertiseAddresses
+	default:
+		logger.Infof("No advertise addresses configured - libp2p will advertise every bound interface address (private ones included) and the public address observed by peers; p2p_share_private_addresses=%v has no effect on this", tSettings.P2P.SharePrivateAddresses)
+		return nil
+	}
 }
 
 // NewServer creates a new P2P server instance with the provided configuration and dependencies.
@@ -411,14 +487,19 @@ func NewServer(
 ) (*Server, error) {
 	logger.Debugf("Creating P2P service")
 
-	listenAddresses := tSettings.P2P.ListenAddresses
-	if listenAddresses == nil {
-		return nil, errors.NewConfigurationError("p2p_listen_addresses not set in config")
-	}
+	initPrometheusMetrics()
 
 	p2pPort := tSettings.P2P.Port
 	if p2pPort == 0 {
 		return nil, errors.NewConfigurationError("p2p_port not set in config")
+	}
+
+	// go-p2p-message-bus always binds 0.0.0.0 and :: on p2pPort. Reject any
+	// listen address that asks for something else rather than ignoring it: an
+	// operator who narrowed the bind to one interface must not be left believing
+	// it took effect.
+	if err := settings.ValidateP2PListenAddresses(tSettings.P2P.ListenAddresses, p2pPort); err != nil {
+		return nil, err
 	}
 
 	if tSettings.ChainCfgParams.TopicPrefix == "" {
@@ -523,30 +604,7 @@ func NewServer(
 		}
 	}
 
-	// Configure advertise addresses
-	// With go-p2p v1.2.1, address advertisement is handled more intelligently:
-	// - If AdvertiseAddresses is explicitly set, those addresses are used
-	// - If SharePrivateAddresses is true, we pass listen addresses to ensure local connectivity
-	// - Otherwise, go-p2p will automatically filter private IPs and detect public addresses
-	// In silent mode, address advertisement is always suppressed regardless of other settings.
-	var advertiseAddresses []string
-	if listenMode == settings.ListenModeSilent {
-		// Silent mode: never advertise any addresses so the node remains undiscoverable
-		advertiseAddresses = []string{}
-		logger.Infof("[silent mode] Address advertisement suppressed - node will not be discoverable")
-	} else if len(tSettings.P2P.AdvertiseAddresses) > 0 {
-		// Use explicitly configured advertise addresses
-		advertiseAddresses = tSettings.P2P.AdvertiseAddresses
-		logger.Infof("Using configured advertise addresses: %v", advertiseAddresses)
-	} else if tSettings.P2P.SharePrivateAddresses {
-		// Share private addresses for local/test environments
-		advertiseAddresses = listenAddresses
-		logger.Infof("Sharing private addresses for local connectivity: %v", advertiseAddresses)
-	} else {
-		// Let go-p2p auto-detect and filter private addresses
-		advertiseAddresses = []string{}
-		logger.Infof("Private address sharing disabled - go-p2p will auto-detect public addresses only")
-	}
+	advertiseAddresses := resolveAdvertiseAddresses(logger, tSettings)
 
 	// Construct the full Bitcoin protocol ID with version and network topic prefix
 	// This ensures we only connect to peers on the same network (e.g. mainnet/testnet)
@@ -583,10 +641,10 @@ func NewServer(
 	if err != nil {
 		return nil, errors.NewServiceError("failed to create p2p client", err)
 	}
-	// Log P2P node creation
-	logger.Infof("P2P node created successfully")
-	// The node will learn its external address via libp2p's Identify protocol
-	// when peers connect and tell us what address they see us from
+	// The bus logs the addresses libp2p actually bound ("Listening on: ...")
+	// through our logger. The node learns its external address via libp2p's
+	// Identify protocol when peers connect and tell us what address they see us from.
+	logger.Infof("P2P node created successfully on port %d", conf.Port)
 
 	p2pServer := &Server{
 		P2PClient:              p2pClient,
@@ -738,6 +796,12 @@ func (s *Server) applyPeerMapLimits(tSettings *settings.Settings) {
 	s.blockPeerMap.setMaxSize(maxSize)
 	s.subtreePeerMap.setMaxSize(maxSize)
 	s.reportedInvalidBlocks.setMaxSize(maxSize)
+
+	// The seen-hash dedup caches take their limits from the same call: their
+	// zero values fall back to the package defaults, so this too costs only
+	// configurability when skipped.
+	s.blockSeenHashes.setLimits(tSettings.P2P.SeenHashMaxSize, tSettings.P2P.SeenHashMaxPublishers, tSettings.P2P.SeenHashTTL)
+	s.subtreeSeenHashes.setLimits(tSettings.P2P.SeenHashMaxSize, tSettings.P2P.SeenHashMaxPublishers, tSettings.P2P.SeenHashTTL)
 }
 
 // announcePeerMapLimits logs the two ways a configured value differs from what
@@ -933,8 +997,8 @@ func (s *Server) Start(ctx context.Context, readyCh chan<- struct{}) error {
 		s.invalidSubtreeKafkaConsumerClient.Start(ctx, s.invalidSubtreeHandler(ctx), kafka.WithLogErrorAndMoveOn())
 	}
 
-	s.subtreeKafkaProducerClient.Start(ctx, make(chan *kafka.Message, 10))
-	s.blocksKafkaProducerClient.Start(ctx, make(chan *kafka.Message, 10))
+	s.subtreeKafkaProducerClient.Start(ctx, make(chan *kafka.Message, gossipKafkaPublishBuffer))
+	s.blocksKafkaProducerClient.Start(ctx, make(chan *kafka.Message, gossipKafkaPublishBuffer))
 
 	// Warm the node-status cache before the HTTP surface (and its /p2p-ws
 	// route) comes up, so websocket clients are always served the cached status
@@ -982,6 +1046,10 @@ func (s *Server) Start(ctx context.Context, readyCh chan<- struct{}) error {
 			}
 		}
 	}()
+
+	// Keep the connected-peers gauge current on its own ticker, independent of
+	// the NAT-diagnostics logging goroutine above (see startConnectedPeersMonitor).
+	s.startConnectedPeersMonitor(ctx, connectedPeersPollInterval)
 
 	// Start the peer-registry batcher before the topic subscriptions that feed it
 	if s.registryBatcher != nil {
@@ -1185,7 +1253,7 @@ func (s *Server) rejectedTxHandler(ctx context.Context) func(msg *kafka.KafkaMes
 		// publishToNetwork.
 		s.logger.Debugf("[rejectedTxHandler] publishing rejectedTxMessage to p2p network")
 
-		if err = s.publishToNetwork(ctx, s.rejectedTxTopicName, msgBytes); err != nil {
+		if _, err = s.publishToNetwork(ctx, s.rejectedTxTopicName, msgBytes); err != nil {
 			s.logger.Errorf("[rejectedTxHandler] publish error: %v", err)
 		}
 
@@ -1496,7 +1564,7 @@ func (s *Server) handleNodeStatusTopic(ctx context.Context, m []byte, peerID str
 	if err := nodeStatusMessage.validateFields(); err != nil {
 		s.logger.Errorf("[handleNodeStatusTopic] invalid node_status field from peer %s: %v", peerID, err)
 		if !isSelf {
-			s.applyBanScore(peerID, ReasonProtocolViolation)
+			_ = s.applyBanScore(peerID, ReasonProtocolViolation)
 		}
 		return
 	}
@@ -1514,7 +1582,7 @@ func (s *Server) handleNodeStatusTopic(ctx context.Context, m []byte, peerID str
 	// Check that sender ID matches the claimed peer ID
 	if peerID != nodeStatusMessage.PeerID {
 		s.logger.Errorf("[handleNodeStatusTopic] peer ID spoofing detected: from=%s claimed=%s", peerID, nodeStatusMessage.PeerID)
-		s.applyBanScore(peerID, ReasonProtocolViolation)
+		_ = s.applyBanScore(peerID, ReasonProtocolViolation)
 		return
 	}
 
@@ -1522,7 +1590,7 @@ func (s *Server) handleNodeStatusTopic(ctx context.Context, m []byte, peerID str
 		// Validate BaseURL to prevent SSRF attacks
 		if err := s.validateDataHubURL(nodeStatusMessage.BaseURL); err != nil {
 			s.logger.Errorf("[handleNodeStatusTopic] invalid BaseURL from peer %s: %v", peerID, err)
-			s.applyBanScore(peerID, ReasonProtocolViolation)
+			_ = s.applyBanScore(peerID, ReasonProtocolViolation)
 			return
 		}
 
@@ -1638,12 +1706,51 @@ func (s *Server) handleNodeStatusTopic(ctx context.Context, m []byte, peerID str
 	}
 }
 
+// connectedPeersProbeTTL bounds how often the sender-side duplicate guards may
+// walk the connection list: GetPeers does per-peer work (connection lookup and
+// multiaddr formatting) and handleSubtreeNotification runs once per subtree.
+// The staleness cost is one guard decision made on a peer set up to this old —
+// at worst a briefly missed suppression or a marker armed moments before the
+// last peer left, both self-healing on the next probe.
+const connectedPeersProbeTTL = 2 * time.Second
+
+// peersProbe is one cached "any peer connected" answer.
+type peersProbe struct {
+	nonEmpty  bool
+	checkedAt time.Time
+}
+
+// hasConnectedPeers reports whether any peer is currently connected, cached
+// for connectedPeersProbeTTL.
+func (s *Server) hasConnectedPeers() bool {
+	if v := s.connectedPeersProbe.Load(); v != nil && time.Since(v.checkedAt) < connectedPeersProbeTTL {
+		return v.nonEmpty
+	}
+
+	nonEmpty := s.P2PClient != nil && len(s.P2PClient.GetPeers()) > 0
+	s.connectedPeersProbe.Store(&peersProbe{nonEmpty: nonEmpty, checkedAt: time.Now()})
+
+	return nonEmpty
+}
+
 func (s *Server) handleBlockNotification(ctx context.Context, hash *chainhash.Hash) error {
 	if s.settings.P2P.ListenMode == settings.ListenModeListenOnly || s.settings.P2P.ListenMode == settings.ListenModeSilent {
 		return nil
 	}
 
 	ctxLogger := s.logger.WithTraceContext(ctx)
+
+	// A blockchain-subscription reconnect replays the current tip notification
+	// (sendInitialNotification / the client's lastBlockNotification replay), so
+	// a flapping blockchain stream would re-gossip the same hash with a fresh
+	// seqno — a replay to peers that suppress and spam-score repeats. Suppress
+	// consecutive duplicates only: a reorg away and back changes the announced
+	// hash in between and still gets through.
+	if last := s.lastAnnouncedBlockHash.Load(); last != nil && last.IsEqual(hash) {
+		ctxLogger.Debugf("[handleBlockNotification] suppressing repeat announcement of current tip %s", hash.String())
+		return nil
+	}
+
 	var msgBytes []byte
 
 	h, meta, err := s.blockchainClient.GetBlockHeader(ctx, hash)
@@ -1693,8 +1800,19 @@ func (s *Server) handleBlockNotification(ctx context.Context, hash *chainhash.Ha
 		return errors.NewError("blockMessage - json marshal error", err)
 	}
 
-	if err = s.publishToNetwork(ctx, s.blockTopicName, msgBytes); err != nil {
+	sent, err := s.publishToNetwork(ctx, s.blockTopicName, msgBytes)
+	if err != nil {
 		return errors.NewError("blockMessage - publish error", err)
+	}
+
+	// Record the tip only when the publish gate actually sent it AND there was
+	// someone to reach: the gate drops block publishes in degraded FSM states
+	// (returning nil), and a GossipSub publish into an empty mesh succeeds
+	// silently — recording either would suppress the re-announcement a
+	// later-connecting or recovering peer needs. The connected-peer set is a
+	// proxy for the topic mesh.
+	if sent && s.hasConnectedPeers() {
+		s.lastAnnouncedBlockHash.Store(hash)
 	}
 
 	// Also send a node_status update when best block changes
@@ -2234,7 +2352,7 @@ func (s *Server) handleNodeStatusNotification(ctx context.Context) error {
 	s.logger.Infof("[handleNodeStatusNotification] P2P publishing node_status to topic %s (height=%d, version=%s, storage=%q)", s.nodeStatusTopicName, nodeStatusMessage.BestHeight, nodeStatusMessage.Version, nodeStatusMessage.Storage)
 	s.logger.Debugf("[handleNodeStatusNotification] JSON payload: %s", string(msgBytes))
 
-	if err = s.publishToNetwork(ctx, s.nodeStatusTopicName, msgBytes); err != nil {
+	if _, err = s.publishToNetwork(ctx, s.nodeStatusTopicName, msgBytes); err != nil {
 		return errors.NewError("nodeStatusMessage - publish error", err)
 	}
 
@@ -2245,6 +2363,16 @@ func (s *Server) handleNodeStatusNotification(ctx context.Context) error {
 
 func (s *Server) handleSubtreeNotification(ctx context.Context, hash *chainhash.Hash) error {
 	if s.settings.P2P.ListenMode == settings.ListenModeListenOnly || s.settings.P2P.ListenMode == settings.ListenModeSilent {
+		return nil
+	}
+
+	// Mirror of the consecutive-duplicate guard in handleBlockNotification: a
+	// flapping notification source must not re-gossip the same subtree hash
+	// with a fresh seqno, which reads as a replay to receivers. Distinct
+	// subtrees stream constantly, so only a replayed notification can repeat
+	// the immediately preceding hash.
+	if last := s.lastAnnouncedSubtreeHash.Load(); last != nil && last.IsEqual(hash) {
+		s.logger.Debugf("[handleSubtreeNotification] suppressing repeat announcement of subtree %s", hash.String())
 		return nil
 	}
 
@@ -2282,8 +2410,15 @@ func (s *Server) handleSubtreeNotification(ctx context.Context, hash *chainhash.
 		return errors.NewError("subtreeMessage - json marshal error", err)
 	}
 
-	if err := s.publishToNetwork(ctx, s.subtreeTopicName, msgBytes); err != nil {
+	sent, err := s.publishToNetwork(ctx, s.subtreeTopicName, msgBytes)
+	if err != nil {
 		return errors.NewError("subtreeMessage - publish error", err)
+	}
+
+	// Same sent-and-non-empty-mesh gate as handleBlockNotification: a publish
+	// nobody heard must not suppress the re-announcement.
+	if sent && s.hasConnectedPeers() {
+		s.lastAnnouncedSubtreeHash.Store(hash)
 	}
 
 	return nil
@@ -2527,10 +2662,12 @@ func (s *Server) Stop(ctx context.Context) error {
 	// Peer registry cleanup ticker is gone — the centralized blockchain registry
 	// drives its own TTL/LRU eviction (deferred to PR2 in any case).
 
-	// Clear the peer maps to free memory
+	// Clear the peer maps and seen-hash caches to free memory
 	s.blockPeerMap.Clear()
 	s.subtreePeerMap.Clear()
 	s.reportedInvalidBlocks.Clear()
+	s.blockSeenHashes.Clear()
+	s.subtreeSeenHashes.Clear()
 	s.logger.Infof("[Stop] cleared peer maps")
 
 	if len(errs) > 0 {
@@ -2627,6 +2764,11 @@ func (s *Server) BanPeer(ctx context.Context, peer *p2p_api.BanPeerRequest) (*p2
 		return nil, errors.WrapGRPCPublic(err)
 	}
 
+	// This RPC bypasses AddBanScore/onPeerBanned entirely, so it must
+	// increment prometheusP2PBanEvents itself or operator-issued bans would
+	// be invisible to the metric despite its name implying all ban events.
+	prometheusP2PBanEvents.WithLabelValues(ReasonOperatorBan).Inc()
+
 	return &p2p_api.BanPeerResponse{Ok: true}, nil
 }
 
@@ -2706,7 +2848,7 @@ func (s *Server) ClearBanned(ctx context.Context, _ *emptypb.Empty) (*p2p_api.Cl
 func (s *Server) AddBanScore(ctx context.Context, req *p2p_api.AddBanScoreRequest) (*p2p_api.AddBanScoreResponse, error) {
 	reason := req.Reason
 	switch reason {
-	case "invalid_subtree", "protocol_violation", "spam", "invalid_block":
+	case "invalid_subtree", "protocol_violation", "spam", "invalid_block", "catchup_malicious", ReasonCorruptBlockBody:
 		// known reason; pass through to the registry which has matching weights
 	default:
 		if reason == "" {
@@ -2730,19 +2872,24 @@ func (s *Server) AddBanScore(ctx context.Context, req *p2p_api.AddBanScoreReques
 }
 
 // applyBanScore is a fire-and-forget helper used from internal codepaths that
-// can't usefully propagate an error (libp2p notifiees, gossip handlers).
-func (s *Server) applyBanScore(peerID, reason string) {
+// can't usefully propagate an error (libp2p notifiees, gossip handlers). It
+// returns the AddBanScore error (nil on success, or when no registry is wired)
+// for the rare caller that needs to know whether the charge actually landed;
+// statement-context callers ignore it and keep their fire-and-forget shape.
+func (s *Server) applyBanScore(peerID, reason string) error {
 	if s.peerRegistry == nil {
-		return
+		return nil
 	}
-	_, banned, err := s.peerRegistry.AddBanScore(s.gCtx, peerID, reason, 0)
+	score, banned, err := s.peerRegistry.AddBanScore(s.gCtx, peerID, reason, 0)
 	if err != nil {
 		s.logger.Warnf("[applyBanScore] AddBanScore %s/%s failed: %v", peerID, reason, err)
-		return
+		return err
 	}
+	s.logger.Infof("[applyBanScore] Added score to peer %s for reason %s. New score: %d, Banned: %t", peerID, reason, score, banned)
 	if banned {
 		s.onPeerBanned(peerID, reason)
 	}
+	return nil
 }
 
 // onPeerBanned reacts to a NEW ban transition (score crossed threshold this
@@ -2758,6 +2905,10 @@ func (s *Server) onPeerBanned(peerID, reason string) {
 	}
 	until := time.Now().Add(banDuration)
 	s.logger.Infof("[onPeerBanned] Peer %s banned until %s for reason: %s", peerID, until.Format(time.RFC3339), reason)
+	// The label is bounded to the known reason set; the unbounded value
+	// handed to peerRegistry.AddBanScore above is untouched so per-reason
+	// ban-score weights aren't affected.
+	prometheusP2PBanEvents.WithLabelValues(normalizeBanReasonLabel(reason)).Inc()
 
 	// Make the ban effective for gossip filtering immediately, without waiting
 	// for the cached IsPeerBanned=false entry to expire.
@@ -3016,6 +3167,9 @@ func peerInfoToP2PProto(p *blockchain.PeerInfo) *p2p_api.PeerRegistryInfo {
 		CatchupAttempts:        p.CatchupAttempts,
 		CatchupSuccesses:       p.CatchupSuccesses,
 		CatchupFailures:        p.CatchupFailures,
+		BlocksReceived:         p.BlocksReceived,
+		SubtreesReceived:       p.SubtreesReceived,
+		TransactionsReceived:   p.TransactionsReceived,
 	}
 }
 

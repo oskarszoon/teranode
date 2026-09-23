@@ -3,6 +3,8 @@ package subtreeprocessor
 
 import (
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/bsv-blockchain/teranode/util"
 	"github.com/prometheus/client_golang/prometheus"
@@ -35,10 +37,20 @@ var (
 	prometheusSubtreeProcessorDiskMapEntries               prometheus.Gauge
 	prometheusSubtreeProcessorDiskMapFilterRAM             prometheus.Gauge
 	prometheusSubtreeProcessorDiskMapDiskWritten           prometheus.Gauge
+
+	// prometheusSubtreeProcessorOversizeBatchAdmitted counts batches larger than the
+	// whole item cap admitted alone onto an otherwise empty ingest queue. Such a batch
+	// can never satisfy a reservation, so refusing it would wedge that producer
+	// permanently; admitting it lets the cap be transiently exceeded by one batch. A
+	// non-zero value means a client's batch size is above this pod's normalized cap.
+	prometheusSubtreeProcessorOversizeBatchAdmitted prometheus.Counter
 )
 
 var (
 	prometheusMetricsInitOnce sync.Once
+	// Like the other processor gauges, this represents the active processor in
+	// this process. Store only its timestamp, without retaining the processor.
+	prometheusRecoveryPendingSince atomic.Pointer[time.Time]
 )
 
 // initPrometheusMetrics initializes all Prometheus metrics for the subtree processor.
@@ -56,6 +68,18 @@ func initPrometheusMetrics() {
 // The metrics cover various aspects of subtree processing including transaction
 // addition, block movements, and performance timing for critical operations.
 func _initPrometheusMetrics() {
+	promauto.NewGaugeFunc(prometheus.GaugeOpts{
+		Namespace: "teranode",
+		Subsystem: "subtreeprocessor",
+		Name:      "recovery_pending_seconds",
+		Help:      "Seconds spent in the current pending memory recovery, or zero when healthy",
+	}, func() float64 {
+		if since := prometheusRecoveryPendingSince.Load(); since != nil {
+			return max(0, time.Since(*since).Seconds())
+		}
+		return 0
+	})
+
 	prometheusSubtreeProcessorAddTx = promauto.NewCounter(
 		prometheus.CounterOpts{
 			Namespace: "teranode",
@@ -239,6 +263,15 @@ func _initPrometheusMetrics() {
 			Subsystem: "subtreeprocessor",
 			Name:      "diskmap_disk_written_bytes",
 			Help:      "Data bytes written to disk for disk-backed transaction map",
+		},
+	)
+
+	prometheusSubtreeProcessorOversizeBatchAdmitted = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Namespace: "teranode",
+			Subsystem: "subtreeprocessor",
+			Name:      "oversize_batch_admitted_total",
+			Help:      "Number of batches larger than the whole item cap admitted alone onto an empty ingest queue",
 		},
 	)
 }

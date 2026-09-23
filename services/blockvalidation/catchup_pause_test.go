@@ -10,6 +10,8 @@ import (
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/model"
+	"github.com/bsv-blockchain/teranode/pkg/adaptivefetch"
+	"github.com/bsv-blockchain/teranode/pkg/fileformat"
 	"github.com/bsv-blockchain/teranode/services/blockchain"
 	"github.com/bsv-blockchain/teranode/services/blockchain/blockchain_api"
 	"github.com/bsv-blockchain/teranode/services/blockvalidation/testhelpers"
@@ -205,12 +207,12 @@ func TestCatchupAdmission_PrefetchNextBlockWaitsForResume(t *testing.T) {
 	server, authority := newCatchupAdmissionAuthority(t, blockchain.FSMStateCATCHINGBLOCKS.String())
 	blocks := testhelpers.CreateTestBlockChain(t, 3)
 	var calls atomic.Int32
-	server.fetchSubtreeDataForBlockFn = func(ctx context.Context, _ *model.Block, _, _ string) (map[string]struct{}, error) {
+	server.fetchSubtreeDataForBlockFn = func(ctx context.Context, _ *model.Block, _, _ string) (map[string]struct{}, map[chainhash.Hash]map[fileformat.FileType]struct{}, error) {
 		if calls.Add(1) == 1 {
 			_, err := authority.server.SendFSMEvent(ctx, &blockchain_api.SendFSMEventRequest{Event: blockchain.FSMEventIDLE})
-			return nil, err
+			return nil, nil, err
 		}
-		return nil, nil
+		return nil, nil, nil
 	}
 	queue := make(chan workItem, 2)
 	results := make(chan resultItem, 2)
@@ -430,4 +432,43 @@ func TestCatchupAdmission_ReadinessRecoversWithoutOperatorResume(t *testing.T) {
 	}
 	require.Equal(t, int32(1), calls.Load())
 	require.Zero(t, authority.cachedReads.Load())
+}
+
+// Admission waits happen after the memory reservation. Cancellation of an
+// operator pause must release that reservation without starting blob writes.
+func TestCatchupAdmission_PrefetchPauseCancellationReleasesBudget(t *testing.T) {
+	const budget = 4 * minCatchupPrefetchWeight
+	server := newBudgetedPrefetchWorkerServer(t, budget, adaptivefetch.ModePessimistic)
+	_, authority := newCatchupAdmissionAuthority(t, blockchain.FSMStateIDLE.String())
+	server.blockchainClient = authority
+	var calls atomic.Int32
+	server.fetchSubtreeDataForBlockFn = func(context.Context, *model.Block, string, string) (map[string]struct{}, map[chainhash.Hash]map[fileformat.FileType]struct{}, error) {
+		calls.Add(1)
+		return nil, nil, nil
+	}
+	block := testhelpers.CreateTestBlockChain(t, 2)[1]
+	block.SizeInBytes = uint64(budget)
+	queue := make(chan workItem, 1)
+	queue <- workItem{block: block}
+	close(queue)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- server.blockWorker(ctx, 0, queue, make(chan resultItem, 1), "", "http://peer", block) }()
+	select {
+	case <-authority.denied:
+	case <-ctx.Done():
+		t.Fatal("prefetch did not reach paused admission")
+	}
+	require.False(t, server.catchupPrefetchBudget.TryAcquire(budget), "admission must follow reservation")
+	cancel()
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(5 * time.Second):
+		t.Fatal("paused worker did not stop")
+	}
+	require.Zero(t, calls.Load(), "paused prefetch must never start blob writes")
+	require.True(t, server.catchupPrefetchBudget.TryAcquire(budget), "canceled admission must release all reserved memory")
+	server.catchupPrefetchBudget.Release(budget)
 }

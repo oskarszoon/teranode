@@ -804,6 +804,11 @@ type ClientI interface {
 	// - Pointer to FSMStateType representing the current state of the blockchain FSM
 	// - Error if the state retrieval fails
 	GetFSMCurrentState(ctx context.Context) (*FSMStateType, error)
+
+	// ReadFSMState bypasses the subscription cache and returns a ready,
+	// persistence-confirmed state. Unavailable authority returns an error.
+	// The result is a snapshot, not a lease or a work-drain barrier.
+	ReadFSMState(ctx context.Context) (FSMStateType, error)
 	// IsFSMCurrentState checks if the FSM is in a specific state.
 	//
 	// This method compares the current state of the blockchain FSM with the provided state
@@ -870,10 +875,10 @@ type ClientI interface {
 	// - Error if the readiness check fails
 	IsFullyReady(ctx context.Context) (bool, error)
 
-	// Run requests an automatic, checkpoint-gated transition to normal operation.
+	// Run initiates the normal operation of the blockchain service.
 	//
-	// It cannot leave operator IDLE. Operators use SendFSMEvent for explicit
-	// transitions; automatic callers must not override a persisted pause.
+	// This method starts the blockchain service in its standard operational mode,
+	// processing blocks, validating transactions, and maintaining the blockchain state.
 	//
 	// Parameters:
 	// - ctx: Context for the operation with timeout and cancellation support
@@ -883,11 +888,11 @@ type ClientI interface {
 	// - Error if the service fails to start or encounters a critical issue
 	Run(ctx context.Context, source string) error
 
-	// CatchUpBlocks requests an automatic transition to CATCHINGBLOCKS.
+	// CatchUpBlocks requests automatic synchronization with peer nodes.
+	// It refuses operator IDLE; explicit resume uses SendFSMEvent(CATCHUPBLOCKS).
 	//
-	// Every call reaches the authority and is serialized with STOP. IDLE rejects
-	// automatic transitions; operators resume through SendFSMEvent(CATCHUPBLOCKS).
-	// Use AdmitCatchupWork for state-neutral work admission.
+	// This method initiates a process to catch up with the latest blocks from the network,
+	// downloading and validating any blocks that are missing from the local blockchain.
 	//
 	// Parameters:
 	// - ctx: Context for the operation with timeout and cancellation support
@@ -896,8 +901,10 @@ type ClientI interface {
 	// - Error if the catch-up process fails
 	CatchUpBlocks(ctx context.Context) error
 
-	// AdmitCatchupWork obtains a serialized, uncached active-state snapshot.
+	// AdmitCatchupWork obtains a ready, persistence-confirmed active snapshot.
 	// It admits one catchup unit without changing RUNNING/CATCHINGBLOCKS state.
+	// Confirmed IDLE returns ErrCatchupPaused; unavailable authority is an error.
+	// Admission is not a work-drain barrier: an admitted unit may finish after STOP.
 	AdmitCatchupWork(ctx context.Context) error
 
 	// ReportPeerFailure notifies the blockchain service about peer download failures.

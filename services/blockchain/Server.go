@@ -118,7 +118,8 @@ type Blockchain struct {
 	kafkaChan                     chan *kafka.Message                  // Channel for Kafka messages
 	stats                         *gocore.Stat                         // Statistics tracking
 	finiteStateMachine            *fsm.FSM                             // FSM for blockchain state
-	fsmMu                         sync.Mutex                           // Serialises SendFSMEvent transitions (FSM read-modify-write + stateChangeTimestamp)
+	fsmMu                         sync.RWMutex                         // Serialises SendFSMEvent transitions (FSM read-modify-write + stateChangeTimestamp)
+	fsmPersistenceUncertain       bool                                 // Guarded by fsmMu; last write may have committed despite returning an error
 	stateChangeTimestamp          time.Time                            // Timestamp of last state change
 	AppCtx                        context.Context                      // Application context
 	localTestStartState           string                               // Initial state for testing
@@ -378,9 +379,13 @@ func (b *Blockchain) HealthGRPC(ctx context.Context, _ *emptypb.Empty) (*blockch
 // This method sets up the finite state machine (FSM) that governs the service's
 // operational states. It handles three initialization scenarios:
 //
-// 1. Test mode: Uses a predefined state for testing, bypassing normal state persistence
-// 2. New deployment: Initializes a default state when no previous state exists in storage
+// 1. Test mode: Uses a predefined state, bypassing configured and persisted state selection
+// 2. New deployment: Uses the configured boot state, defaulting to CATCHINGBLOCKS
 // 3. Normal operation: Restores the previously persisted state from storage
+//
+// Starting in RUNNING is checkpoint-gated. An unsafe configured RUNNING state aborts
+// initialization, while persisted RUNNING with a known below-checkpoint tip resumes
+// in CATCHINGBLOCKS. An unreadable tip aborts without rewriting persisted state.
 //
 // The method ensures that the service state is persisted to survive service restarts
 // and updates metrics to reflect the current operational state. The FSM provides a
@@ -399,9 +404,8 @@ func (b *Blockchain) Init(ctx context.Context) error {
 	if b.localTestStartState != "" {
 		b.finiteStateMachine.SetState(b.localTestStartState)
 
-		err := b.store.SetFSMState(ctx, b.finiteStateMachine.Current())
-		if err != nil {
-			b.logger.Errorf("[Blockchain][Init] Error setting FSM state in blockchain store: %v", err)
+		if err := b.store.SetFSMState(ctx, b.finiteStateMachine.Current()); err != nil {
+			return errors.NewStorageError("[Blockchain][Init] failed to persist local test FSM state", err)
 		}
 
 		return nil
@@ -410,25 +414,26 @@ func (b *Blockchain) Init(ctx context.Context) error {
 	// Set the FSM to the latest persisted state
 	stateStr, err := b.store.GetFSMState(ctx)
 	if err != nil {
-		b.logger.Errorf("[Blockchain][Init] Error getting FSM state: %v", err)
+		return errors.NewStorageError("[Blockchain][Init] failed to get persisted FSM state", err)
 	}
 
 	if stateStr == "" { // no persisted state: this is a fresh node
-		// A fresh node has no chain (height 0) and is therefore behind the
-		// network. Boot it directly into CATCHINGBLOCKS (catch-up mode) rather
-		// than IDLE, so downstream services that block on FSM != IDLE start
-		// immediately and the node proactively catches up. We deliberately do
-		// NOT boot into RUNNING: RUNNING switches on live subtree validation /
-		// block-assembly tx feeding before the node is caught up. Promotion to
-		// RUNNING happens only when a catchup completes above the highest
-		// checkpoint (catchup.restoreFSMState + guardRunBelowHighestCheckpoint).
-		// This restores the boot-into-sync behaviour the removed
-		// IDLE->LEGACYSYNCING edge used to provide.
-		b.finiteStateMachine.SetState(blockchain_api.FSMStateType_CATCHINGBLOCKS.String())
-		b.logger.Infof("[Blockchain][Init] fresh node, booting FSM into %v (catch-up mode)", b.finiteStateMachine.Current())
+		bootState, err := b.fsmBootState()
+		if err != nil {
+			return err
+		}
 
-		if err = b.store.SetFSMState(ctx, b.finiteStateMachine.Current()); err != nil {
-			b.logger.Errorf("[Blockchain][Init] Error persisting initial CATCHINGBLOCKS state: %v", err)
+		if bootState == blockchain_api.FSMStateType_RUNNING.String() {
+			if err = b.guardRunBelowHighestCheckpoint(ctx); err != nil {
+				return err
+			}
+		}
+
+		b.finiteStateMachine.SetState(bootState)
+		b.logger.Infof("[Blockchain][Init] fresh node, booting FSM into %v", bootState)
+
+		if err = b.store.SetFSMState(ctx, bootState); err != nil {
+			return errors.NewStorageError("[Blockchain][Init] failed to persist initial %s state", bootState, err)
 		}
 	} else { // if there is a state stored, set the FSM to that state
 		// Migration: the LEGACYSYNCING state was removed. A node persisted in it
@@ -440,7 +445,26 @@ func (b *Blockchain) Init(ctx context.Context) error {
 			stateStr = blockchain_api.FSMStateType_CATCHINGBLOCKS.String()
 
 			if setErr := b.store.SetFSMState(ctx, stateStr); setErr != nil {
-				b.logger.Errorf("[Blockchain][Init] error persisting migrated FSM state: %v", setErr)
+				return errors.NewStorageError("[Blockchain][Init] failed to persist migrated FSM state", setErr)
+			}
+		}
+
+		if _, valid := blockchain_api.FSMStateType_value[stateStr]; !valid {
+			return errors.NewStateError("unrecognized persisted FSM state %q; repair stored state before restarting", stateStr)
+		}
+
+		if stateStr == blockchain_api.FSMStateType_RUNNING.String() {
+			if belowCheckpoint, gateErr := b.evaluateRunCheckpoint(ctx); gateErr != nil {
+				if !belowCheckpoint {
+					return gateErr
+				}
+
+				b.logger.Warnf("[Blockchain][Init] persisted RUNNING state is unsafe: %v; resuming in CATCHINGBLOCKS", gateErr)
+				stateStr = blockchain_api.FSMStateType_CATCHINGBLOCKS.String()
+
+				if setErr := b.store.SetFSMState(ctx, stateStr); setErr != nil {
+					return errors.NewStorageError("[Blockchain][Init] failed to persist safe FSM state after RUNNING gate rejection", setErr)
+				}
 			}
 		}
 
@@ -451,6 +475,29 @@ func (b *Blockchain) Init(ctx context.Context) error {
 	prometheusBlockchainFSMCurrentState.Set(float64(blockchain_api.FSMStateType_value[b.finiteStateMachine.Current()]))
 
 	return nil
+}
+
+func (b *Blockchain) fsmBootState() (string, error) {
+	configured := ""
+	if b.settings != nil {
+		configured = strings.TrimSpace(b.settings.BlockChain.InitializeNodeInState)
+	}
+
+	if configured == "" {
+		return blockchain_api.FSMStateType_CATCHINGBLOCKS.String(), nil
+	}
+
+	switch configured {
+	case blockchain_api.FSMStateType_IDLE.String(),
+		blockchain_api.FSMStateType_CATCHINGBLOCKS.String(),
+		blockchain_api.FSMStateType_RUNNING.String():
+		return configured, nil
+	default:
+		return "", errors.NewConfigurationError(
+			"invalid blockchain_initializeNodeInState %q: expected IDLE, CATCHINGBLOCKS, or RUNNING",
+			configured,
+		)
+	}
 }
 
 // Start begins the blockchain service operations.
@@ -480,10 +527,7 @@ func (b *Blockchain) Start(ctx context.Context, readyCh chan<- struct{}) error {
 	// Settings here still live under tSettings.P2P.* — the centralized
 	// registry inherits the existing operator-facing knobs unchanged. Moving
 	// them under tSettings.BlockChain.* is a follow-up rename.
-	registryTTL := b.settings.P2P.PeerRegistryTTL
-	if registryTTL <= 0 {
-		registryTTL = 24 * time.Hour
-	}
+	registryTTL := resolvePeerRegistryTTL(b.logger, b.settings.P2P.PeerRegistryTTL)
 	cleanupInterval := b.settings.P2P.PeerRegistryCleanupInterval
 	maxSize := b.settings.P2P.PeerRegistryMaxSize
 
@@ -865,6 +909,41 @@ func (b *Blockchain) startSubscriptions() {
 // the helper goroutine continues until Send eventually returns, then discards
 // the result — this residual goroutine is bounded to one per stuck stream.
 const sendDeadline = 5 * time.Second
+
+// minPeerRegistryTTL is the floor applied to an operator-configured
+// p2p_peer_registry_ttl. A connected peer republishes node_status every
+// nodeStatusPublishInterval (10s, see services/p2p/Server.go), which refreshes
+// LastSeen via Register (services/blockchain/peer_registry.go), and the
+// gossip-handler batcher coalesces those refreshes for up to one minute
+// (registryReassertTTL, services/p2p/peer_registry_batcher.go) before
+// re-asserting. A TTL below this floor risks the cleanup loop expiring an
+// actively-connected peer between its own batched refreshes — the peer then
+// fails IsPeerUnhealthy (services/p2p/handle_catchup_metrics.go), which gates
+// it out of catchup, and drops any not-yet-flushed validated-header progress
+// (RecordValidatedPeerProgress, services/blockchain/peer_registry.go). Five
+// minutes is 5x the batcher's reassert window and 30x the publish interval,
+// comfortably covering a missed beat or two of either.
+const minPeerRegistryTTL = 5 * time.Minute
+
+// resolvePeerRegistryTTL applies the same coercion Server.go has always
+// applied for ttl<=0 (select the 24h default) and adds a floor for a
+// configured-but-too-short positive value. Unlike maxSize<=0 and
+// cleanupInterval<=0 (both documented, permanent opt-outs — see StartCleanup
+// and Cleanup's doc comments), there is no legitimate reason to run the
+// registry with a TTL below minPeerRegistryTTL, so that range is coerced
+// rather than honoured. The coercion is logged because a silently-corrected
+// setting is exactly the failure mode this settings-wiring batch exists to
+// fix.
+func resolvePeerRegistryTTL(logger ulogger.Logger, configured time.Duration) time.Duration {
+	if configured <= 0 {
+		return 24 * time.Hour
+	}
+	if configured < minPeerRegistryTTL {
+		logger.Warnf("[Blockchain] p2p_peer_registry_ttl %s is below the minimum %s; using %s instead", configured, minPeerRegistryTTL, minPeerRegistryTTL)
+		return minPeerRegistryTTL
+	}
+	return configured
+}
 
 // runSubscriberDrain pulls notifications from the subscriber's pending buffer
 // and calls Send on its gRPC stream. One goroutine per subscriber preserves
@@ -2734,10 +2813,6 @@ func (b *Blockchain) GetBlocksSubtreesNotSet(ctx context.Context, _ *emptypb.Emp
 //   - *blockchain_api.GetFSMStateResponse: Response containing the current FSM state
 //   - error: Any error encountered during state retrieval (typically nil)
 func (b *Blockchain) GetFSMCurrentState(_ context.Context, _ *emptypb.Empty) (*blockchain_api.GetFSMStateResponse, error) {
-	// An uncached active snapshot admits one work unit. Serialize it with STOP
-	// persistence so reads cannot authorize new work during an accepted pause.
-	b.fsmMu.Lock()
-	defer b.fsmMu.Unlock()
 	startTime := time.Now()
 	defer func() {
 		prometheusBlockchainGetFSMCurrentState.Observe(float64(time.Since(startTime).Microseconds()) / 1_000_000)
@@ -2824,15 +2899,10 @@ func (b *Blockchain) IsFullyReady(ctx context.Context) (bool, error) {
 // SendFSMEvent sends an event to the finite state machine and returns the state
 // reached by an accepted, persisted transition. On a persistence error, memory
 // remains in its prior state and no success notification is sent. The database
-// may nevertheless have committed before returning an error; explicitly retry
-// the failed event to reconcile it before relying on state across a restart.
+// may nevertheless have committed before returning an error. Retry the failed
+// event or use a convenience RPC to reconcile its target before relying on
+// state across a restart.
 func (b *Blockchain) SendFSMEvent(ctx context.Context, eventReq *blockchain_api.SendFSMEventRequest) (*blockchain_api.GetFSMStateResponse, error) {
-	return b.sendFSMEvent(ctx, eventReq, false)
-}
-
-// sendFSMEvent serializes explicit operator events and automatic admission.
-// Only explicit operator requests may leave IDLE.
-func (b *Blockchain) sendFSMEvent(ctx context.Context, eventReq *blockchain_api.SendFSMEventRequest, automatic bool) (*blockchain_api.GetFSMStateResponse, error) {
 	// Serialise FSM transitions. SendFSMEvent performs a read-modify-write across
 	// the FSM (prior-state checks -> Event -> stateChangeTimestamp update) that
 	// must be atomic; concurrent callers (e.g. Run and CatchUpBlocks arriving as
@@ -2841,27 +2911,14 @@ func (b *Blockchain) sendFSMEvent(ctx context.Context, eventReq *blockchain_api.
 	// SendFSMEvent, so holding this lock does not cause recursive locking.
 	b.fsmMu.Lock()
 	defer b.fsmMu.Unlock()
-	return b.sendFSMEventLocked(ctx, eventReq, automatic)
+	return b.sendFSMEventLocked(ctx, eventReq)
 }
 
-// sendFSMEventLocked requires fsmMu. Keeping compatibility RPC no-ops under
-// this lock prevents them from racing an opposite operator transition.
-func (b *Blockchain) sendFSMEventLocked(ctx context.Context, eventReq *blockchain_api.SendFSMEventRequest, automatic bool) (*blockchain_api.GetFSMStateResponse, error) {
-	priorState := b.finiteStateMachine.Current()
-
-	if automatic {
-		if priorState == blockchain_api.FSMStateType_IDLE.String() {
-			return nil, errors.WrapGRPC(errors.NewStateError("automatic FSM transition refused while IDLE; use setfsmstate --fsmstate catchingblocks to resume"))
-		}
-		// Already-active admission is serialized with STOP too. Checking outside
-		// fsmMu could grant the next unit while STOP is persisting its pause.
-		if (eventReq.Event == blockchain_api.FSMEventType_RUN && priorState == blockchain_api.FSMStateType_RUNNING.String()) ||
-			(eventReq.Event == blockchain_api.FSMEventType_CATCHUPBLOCKS && priorState == blockchain_api.FSMStateType_CATCHINGBLOCKS.String()) {
-			return &blockchain_api.GetFSMStateResponse{State: blockchain_api.FSMStateType(blockchain_api.FSMStateType_value[priorState])}, nil
-		}
-	}
-
+// sendFSMEventLocked requires fsmMu to be held.
+func (b *Blockchain) sendFSMEventLocked(ctx context.Context, eventReq *blockchain_api.SendFSMEventRequest) (*blockchain_api.GetFSMStateResponse, error) {
 	b.logger.Infof("[Blockchain Server] Received FSM event req: %v, will send event to the FSM", eventReq)
+
+	priorState := b.finiteStateMachine.Current()
 
 	// Refuse a valid transition to RUNNING while the local chain tip is still below
 	// the network's highest hard-coded checkpoint. Pre-checkpoint heights are
@@ -2904,9 +2961,11 @@ func (b *Blockchain) sendFSMEventLocked(ctx context.Context, eventReq *blockchai
 	transitionCtx := context.WithoutCancel(ctx)
 	err := b.finiteStateMachine.Event(transitionCtx, eventReq.Event.String())
 	if err != nil {
-		b.logger.Debugf("[Blockchain Server] Error sending event to FSM, state has not changed.")
+		b.logger.Debugf("[Blockchain Server] Error sending event to FSM; in-memory state has not changed; a failed store write may have committed.")
 		switch eventErr := err.(type) {
-		case fsm.InvalidEventError, fsm.NoTransitionError, fsm.InTransitionError:
+		case fsm.InTransitionError:
+			return nil, errors.WrapGRPC(errors.NewStateError("[Blockchain Server] FSM event %s rejected: pending transition has not retired; restart required", eventReq.Event.String(), err))
+		case fsm.InvalidEventError, fsm.NoTransitionError:
 			return nil, errors.WrapGRPC(errors.NewStateError("[Blockchain Server] FSM event %s rejected in state %s", eventReq.Event.String(), priorState, err))
 		case fsm.CanceledError:
 			// looplab's cancellation wrapper does not unwrap its cause. Preserve
@@ -2959,33 +3018,44 @@ func (b *Blockchain) fsmStoreContext(ctx context.Context) (context.Context, cont
 // no checkpoints. Store failures, missing tip metadata, and a tip below the
 // checkpoint all fail closed.
 func (b *Blockchain) guardRunBelowHighestCheckpoint(ctx context.Context) error {
+	_, err := b.evaluateRunCheckpoint(ctx)
+	return err
+}
+
+// evaluateRunCheckpoint returns the RUN gate error and whether it reflects a
+// successfully observed below-checkpoint tip. Read failures and missing metadata
+// return false with an error: callers must not treat uncertainty as a low tip.
+func (b *Blockchain) evaluateRunCheckpoint(ctx context.Context) (belowCheckpoint bool, gateErr error) {
 	if b.settings == nil || b.settings.ChainCfgParams == nil {
-		return nil
+		return false, nil
 	}
 
 	highest := HighestCheckpointHeight(b.settings.ChainCfgParams.Checkpoints)
 	if highest == 0 {
-		return nil
+		return false, nil
 	}
 
 	storeCtx, cancel := b.fsmStoreContext(ctx)
 	defer cancel()
 	_, meta, err := b.store.GetBestBlockHeader(storeCtx)
 	if err != nil {
-		return errors.NewStateError("cannot read best block header to evaluate RUN gate", err)
+		if errors.Is(err, context.DeadlineExceeded) {
+			return false, errors.NewStateError("RUN gate best-header read timed out at the store or caller deadline; check blockchain_store_dbTimeoutMillis and caller timeout", err)
+		}
+		return false, errors.NewStateError("cannot read best block header to evaluate RUN gate", err)
 	}
 	if meta == nil {
-		return errors.NewStateError("best block header meta unavailable, cannot evaluate RUN gate")
+		return false, errors.NewStateError("best block header meta unavailable, cannot evaluate RUN gate")
 	}
 
 	if meta.Height < highest {
-		return errors.NewStateError(
+		return true, errors.NewStateError(
 			"refusing RUN: chain tip height %d is below highest checkpoint %d for %s; use setfsmstate --fsmstate catchingblocks to start synchronization",
 			meta.Height, highest, b.settings.ChainCfgParams.Name,
 		)
 	}
 
-	return nil
+	return false, nil
 }
 
 // HighestCheckpointHeight returns the largest Height in the supplied
@@ -2996,26 +3066,53 @@ func HighestCheckpointHeight(checkpoints []chaincfg.Checkpoint) uint32 {
 	return model.HighestCheckpointHeight(checkpoints)
 }
 
-// Run requests automatic promotion to RUNNING. It cannot leave operator IDLE,
-// and checkpoint admission still fails closed. Explicit operator requests use
-// SendFSMEvent instead.
-func (b *Blockchain) Run(ctx context.Context, _ *emptypb.Empty) (*emptypb.Empty, error) {
-	_, err := b.sendFSMEvent(ctx, &blockchain_api.SendFSMEventRequest{Event: blockchain_api.FSMEventType_RUN}, true)
-	if err != nil {
+// sendFSMConvenienceEvent checks authoritative state and reconciles ambiguous
+// persistence while holding the same lock as event admission. Clean no-ops do
+// not write or notify; uncertain no-ops succeed only after an acknowledged write.
+func (b *Blockchain) sendFSMConvenienceEvent(ctx context.Context, event blockchain_api.FSMEventType, target blockchain_api.FSMStateType) (*emptypb.Empty, error) {
+	b.fsmMu.Lock()
+	defer b.fsmMu.Unlock()
+
+	current := b.finiteStateMachine.Current()
+	if current == target.String() {
+		if b.fsmPersistenceUncertain {
+			if target == blockchain_api.FSMStateType_RUNNING {
+				if err := b.guardRunBelowHighestCheckpoint(ctx); err != nil {
+					return nil, errors.WrapGRPC(err)
+				}
+			}
+			storeCtx, cancel := b.fsmStoreContext(context.WithoutCancel(ctx))
+			defer cancel()
+			if err := b.store.SetFSMState(storeCtx, current); err != nil {
+				b.logger.Errorf("[Blockchain Server] Failed to reconcile FSM state %s; in-memory state unchanged; database write may have committed: %v", current, err)
+				return nil, errors.WrapGRPC(errors.NewStorageError("failed to reconcile FSM state %s", current, err))
+			}
+			b.fsmPersistenceUncertain = false
+		}
+		return &emptypb.Empty{}, nil
+	}
+	// Neither automatic entry into catchup nor promotion may undo an operator
+	// STOP. Explicit operator requests use SendFSMEvent to resume from IDLE.
+	if current == blockchain_api.FSMStateType_IDLE.String() &&
+		(event == blockchain_api.FSMEventType_RUN || event == blockchain_api.FSMEventType_CATCHUPBLOCKS) {
+		return nil, errors.WrapGRPC(errors.NewStateError("automatic %s refused from IDLE; use SendFSMEvent for an explicit operator %s", event.String(), event.String()))
+	}
+	if _, err := b.sendFSMEventLocked(ctx, &blockchain_api.SendFSMEventRequest{Event: event}); err != nil {
 		return nil, err
 	}
 	return &emptypb.Empty{}, nil
 }
 
-// CatchUpBlocks requests an automatic transition under the same lock as STOP.
-// IDLE requires explicit operator CATCHUPBLOCKS through SendFSMEvent. Work
-// admission uses a state-neutral GetFSMCurrentState snapshot instead.
+// Run automatically promotes a caught-up node to RUNNING. It preserves operator
+// IDLE; explicit operator RUN uses SendFSMEvent and the same checkpoint gate.
+func (b *Blockchain) Run(ctx context.Context, _ *emptypb.Empty) (*emptypb.Empty, error) {
+	return b.sendFSMConvenienceEvent(ctx, blockchain_api.FSMEventType_RUN, blockchain_api.FSMStateType_RUNNING)
+}
+
+// CatchUpBlocks automatically starts catchup from RUNNING and preserves operator
+// IDLE. Explicit operator catchup from IDLE uses SendFSMEvent(CATCHUPBLOCKS).
 func (b *Blockchain) CatchUpBlocks(ctx context.Context, _ *emptypb.Empty) (*emptypb.Empty, error) {
-	_, err := b.sendFSMEvent(ctx, &blockchain_api.SendFSMEventRequest{Event: blockchain_api.FSMEventType_CATCHUPBLOCKS}, true)
-	if err != nil {
-		return nil, err
-	}
-	return &emptypb.Empty{}, nil
+	return b.sendFSMConvenienceEvent(ctx, blockchain_api.FSMEventType_CATCHUPBLOCKS, blockchain_api.FSMStateType_CATCHINGBLOCKS)
 }
 
 // ReportPeerFailure handles reports of peer download failures and broadcasts to subscribers.
@@ -3044,24 +3141,7 @@ func (b *Blockchain) ReportPeerFailure(ctx context.Context, req *blockchain_api.
 }
 
 func (b *Blockchain) Idle(ctx context.Context, _ *emptypb.Empty) (*emptypb.Empty, error) {
-	b.fsmMu.Lock()
-	defer b.fsmMu.Unlock()
-	// check whether the FSM is already in the Idle state
-	if b.finiteStateMachine.Is(blockchain_api.FSMStateType_IDLE.String()) {
-		return &emptypb.Empty{}, nil
-	}
-
-	req := &blockchain_api.SendFSMEventRequest{
-		Event: blockchain_api.FSMEventType_STOP,
-	}
-
-	_, err := b.sendFSMEventLocked(ctx, req, false)
-	if err != nil {
-		// unable to send the event, no need to update the state.
-		return nil, err
-	}
-
-	return &emptypb.Empty{}, nil
+	return b.sendFSMConvenienceEvent(ctx, blockchain_api.FSMEventType_STOP, blockchain_api.FSMStateType_IDLE)
 }
 
 // Legacy endpoints

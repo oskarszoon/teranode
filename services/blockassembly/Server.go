@@ -103,7 +103,8 @@ type BlockAssembly struct {
 	subtreeStore blob.Store
 
 	// jobStore caches mining jobs with TTL
-	jobStore *ttlcache.Cache[chainhash.Hash, *subtreeprocessor.Job]
+	jobStore   *ttlcache.Cache[chainhash.Hash, *subtreeprocessor.Job]
+	jobStoreMu sync.Mutex
 
 	// blockSubmissionChan handles block submission requests
 	blockSubmissionChan chan *BlockSubmissionRequest
@@ -155,6 +156,13 @@ func New(logger ulogger.Logger, tSettings *settings.Settings, txStore blob.Store
 	// initialize Prometheus metrics, singleton, will only happen once
 	initPrometheusMetrics()
 
+	// A negative queue-full wait is a misconfiguration, not a tiny wait; warn
+	// once and treat it as 0 (shed immediately). The item cap itself is
+	// normalized where the queue is constructed.
+	if tSettings.BlockAssembly.QueueFullWaitTimeout < 0 {
+		logger.Warnf("BlockAssembly.QueueFullWaitTimeout=%s is negative; treating as 0 (shed immediately)", tSettings.BlockAssembly.QueueFullWaitTimeout)
+	}
+
 	ba := &BlockAssembly{
 		logger:              logger,
 		stats:               gocore.NewStat("blockassembly"),
@@ -167,6 +175,9 @@ func New(logger ulogger.Logger, tSettings *settings.Settings, txStore blob.Store
 		blockSubmissionChan: make(chan *BlockSubmissionRequest),
 	}
 
+	ba.jobStore.OnEviction(func(_ context.Context, _ ttlcache.EvictionReason, item *ttlcache.Item[chainhash.Hash, *subtreeprocessor.Job]) {
+		item.Value().Lease.Release()
+	})
 	go ba.jobStore.Start()
 
 	return ba
@@ -297,6 +308,13 @@ func (ba *BlockAssembly) Init(ctx context.Context) (err error) {
 				return
 			case <-time.After(5 * time.Second):
 				stallState = ba.sampleBlockAssemblerMetrics(stallState, time.Now())
+
+				// Queue-head age is a standalone gauge, not an input to the stall
+				// signal, so it is sampled here rather than inside
+				// sampleBlockAssemblerMetrics - that function's contract is the
+				// stall-state computation, and its unit tests mock only the reads
+				// that computation makes.
+				prometheusBlockAssemblyQueueHeadAge.Set(ba.blockAssembler.QueueHeadAge().Seconds())
 			}
 		}
 	}()
@@ -495,11 +513,11 @@ type subtreeStorageWork struct {
 
 // subtreeStorageResult represents the result of a subtree storage operation.
 type subtreeStorageResult struct {
-	seq              uint64                             // sequence number for ordering
-	request          subtreeprocessor.NewSubtreeRequest // original request
-	err              error                              // error from storage operation
-	skipNotification bool                               // whether notification should be skipped
-	storedOK         bool                               // true if subtree was stored successfully
+	seq              uint64         // sequence number for ordering
+	subtreeHash      chainhash.Hash // immutable root for notifications after storage releases the subtree
+	err              error          // error from storage operation
+	skipNotification bool           // whether notification should be skipped
+	storedOK         bool           // true if subtree was stored successfully
 }
 
 // runNewSubtreeListener handles incoming requests for new subtrees.
@@ -530,18 +548,28 @@ func (ba *BlockAssembly) runNewSubtreeListener(ctx context.Context, newSubtreeCh
 		ba.subtreeNotificationSender(ctx, resultChan)
 	}()
 
+	defer func() {
+		close(workChan)
+		wg.Wait()
+		close(resultChan)
+		<-notifyDone
+	}()
 	var seq uint64
 	for {
 		select {
 		case <-ctx.Done():
 			ba.logger.Infof("Stopping subtree listener")
-			close(workChan)
-			wg.Wait()
-			close(resultChan)
-			<-notifyDone
 			return
 
-		case newSubtreeRequest := <-newSubtreeChan:
+		case newSubtreeRequest, ok := <-newSubtreeChan:
+			if !ok {
+				return
+			}
+			ownedRequest, retained := newSubtreeRequest.TakeStorageOwnership()
+			if !retained {
+				continue
+			}
+			newSubtreeRequest = ownedRequest
 			ba.logger.Infof("[runNewSubtreeListener][%s] New subtree request: %d", newSubtreeRequest.Subtree.RootHash().String(), seq)
 			work := &subtreeStorageWork{
 				seq:     seq,
@@ -552,6 +580,7 @@ func (ba *BlockAssembly) runNewSubtreeListener(ctx context.Context, newSubtreeCh
 			select {
 			case workChan <- work:
 			case <-ctx.Done():
+				newSubtreeRequest.Release()
 				return
 			}
 		}
@@ -563,13 +592,14 @@ func (ba *BlockAssembly) subtreeStorageWorker(ctx context.Context, workChan <-ch
 	for work := range workChan {
 		select {
 		case <-ctx.Done():
-			return
+			work.request.Release()
+			continue
 		default:
 		}
 
 		result := &subtreeStorageResult{
 			seq:              work.seq,
-			request:          work.request,
+			subtreeHash:      *work.request.Subtree.RootHash(),
 			skipNotification: work.request.SkipNotification,
 		}
 
@@ -597,7 +627,7 @@ func (ba *BlockAssembly) subtreeStorageWorker(ctx context.Context, workChan <-ch
 		select {
 		case resultChan <- result:
 		case <-ctx.Done():
-			return
+			// Storage still owns the mapping; finish it and drain queued work.
 		}
 
 		// Wait for all work to complete before sending response to caller
@@ -654,10 +684,10 @@ func (ba *BlockAssembly) subtreeNotificationSender(ctx context.Context, resultCh
 
 			// Send notification if needed
 			if !r.skipNotification && r.storedOK {
-				ba.logger.Infof("[BlockAssembly:Init][%s] sending subtree notification", r.request.Subtree.RootHash().String())
-				ba.sendSubtreeNotification(ctx, *r.request.Subtree.RootHash())
+				ba.logger.Infof("[BlockAssembly:Init][%s] sending subtree notification", r.subtreeHash.String())
+				ba.sendSubtreeNotification(ctx, r.subtreeHash)
 			} else {
-				ba.logger.Infof("[BlockAssembly:Init][%s] skipping subtree notification (skip=%v, stored=%v)", r.request.Subtree.RootHash().String(), r.skipNotification, r.storedOK)
+				ba.logger.Infof("[BlockAssembly:Init][%s] skipping subtree notification (skip=%v, stored=%v)", r.subtreeHash.String(), r.skipNotification, r.storedOK)
 			}
 		}
 	}
@@ -834,6 +864,11 @@ func (ba *BlockAssembly) sendSubtreeNotification(ctx context.Context, subtreeHas
 //   - allDone: Channel that closes when all work is complete
 //   - err: Any error encountered during setup
 func (ba *BlockAssembly) storeSubtreeData(ctx context.Context, subtreeRequest subtreeprocessor.NewSubtreeRequest, subtreeRetryChan chan *subtreeRetrySend) (subtreeDone <-chan bool, allDone <-chan struct{}, err error) {
+	defer func() {
+		if allDone == nil {
+			subtreeRequest.Release()
+		}
+	}()
 	subtree := subtreeRequest.Subtree
 
 	ctx, _, deferFn := tracing.Tracer("blockassembly").Start(ctx, "storeSubtreeData",
@@ -914,11 +949,14 @@ func (ba *BlockAssembly) storeSubtreeData(ctx context.Context, subtreeRequest su
 					ba.logger.Debugf("[BlockAssembly:storeSubtreeData][%s] subtree meta already exists", subtree.RootHash().String())
 				} else {
 					ba.logger.Errorf("[BlockAssembly:storeSubtreeData][%s] failed to store subtree meta: %s", subtree.RootHash().String(), err)
-					subtreeRetryChan <- &subtreeRetrySend{
+					select {
+					case subtreeRetryChan <- &subtreeRetrySend{
 						subtreeHash:      *subtree.RootHash(),
 						subtreeBytes:     subtreeBytes,
 						subtreeMetaBytes: subtreeMetaBytes,
 						retries:          0,
+					}:
+					case <-ctx.Done():
 					}
 				}
 			}
@@ -941,10 +979,13 @@ func (ba *BlockAssembly) storeSubtreeData(ctx context.Context, subtreeRequest su
 				ba.logger.Debugf("[BlockAssembly:storeSubtreeData][%s] subtree already exists", subtree.RootHash().String())
 			} else {
 				ba.logger.Errorf("[BlockAssembly:storeSubtreeData][%s] failed to store subtree: %s", subtree.RootHash().String(), err)
-				subtreeRetryChan <- &subtreeRetrySend{
+				select {
+				case subtreeRetryChan <- &subtreeRetrySend{
 					subtreeHash:  *subtree.RootHash(),
 					subtreeBytes: subtreeBytes,
 					retries:      0,
+				}:
+				case <-ctx.Done():
 				}
 				storedOK = false
 			}
@@ -958,6 +999,7 @@ func (ba *BlockAssembly) storeSubtreeData(ctx context.Context, subtreeRequest su
 	// with the worker that reads the storedOK value from subtreeDoneCh.
 	go func() {
 		defer close(allDoneCh)
+		defer subtreeRequest.Release()
 		<-subtreeStorageDone
 		<-metaDoneCh
 		// Trigger cleanup of soft-deleted transactions
@@ -1074,6 +1116,7 @@ func (ba *BlockAssembly) Start(ctx context.Context, readyCh chan<- struct{}) (er
 func (ba *BlockAssembly) Stop(ctx context.Context) error {
 	ba.stopOnce.Do(func() {
 		ba.jobStore.Stop()
+		ba.jobStore.DeleteAll()
 
 		// Stop the subtree processor to stop the announcement ticker and cleanup resources
 		if ba.blockAssembler != nil && ba.blockAssembler.subtreeProcessor != nil {
@@ -1097,7 +1140,6 @@ func (ba *BlockAssembly) AddTx(ctx context.Context, req *blockassembly_api.AddTx
 	_, _, deferFn := tracing.Tracer("blockassembly").Start(ctx, "AddTx",
 		tracing.WithParentStat(ba.stats),
 		tracing.WithHistogram(prometheusBlockAssemblyAddTx),
-		tracing.WithCounter(prometheusBlockAssemblyAddTxCounter),
 		tracing.WithTag("txid", util.ReverseAndHexEncodeSlice(req.Txid)),
 		tracing.WithLogMessage(ba.logger, "[AddTx][%s] add tx called", util.ReverseAndHexEncodeSlice(req.Txid)),
 	)
@@ -1125,10 +1167,18 @@ func (ba *BlockAssembly) AddTx(ctx context.Context, req *blockassembly_api.AddTx
 	}
 
 	if !ba.settings.BlockAssembly.Disabled {
-		ba.blockAssembler.AddTxBatch(
+		if err = ba.addTxBatchWithBackpressure(ctx,
 			[]subtreepkg.Node{{Hash: chainhash.Hash(req.Txid), Fee: req.Fee, SizeInBytes: req.Size}},
 			[]*subtreepkg.TxInpoints{&txInpoints},
-		)
+		); err != nil {
+			return nil, err
+		}
+
+		// Counted after the enqueue, never before: a queue-full shed returns above,
+		// and a counter that moved anyway would make the add rate irreconcilable
+		// against queue_shed_total. The handler histogram still measures the shed,
+		// which is the right thing to measure there.
+		prometheusBlockAssemblyAddTxCounter.Inc()
 	}
 
 	return &blockassembly_api.AddTxResponse{
@@ -1180,6 +1230,92 @@ func (ba *BlockAssembly) RemoveTx(ctx context.Context, req *blockassembly_api.Re
 	}
 
 	return &blockassembly_api.EmptyMessage{}, nil
+}
+
+// queueFullPollInterval is how often the bounded wait rechecks for ingest-queue
+// room. It is short relative to the default 100ms wait so a freed slot is
+// picked up promptly, and coarse enough not to busy-spin.
+const queueFullPollInterval = 5 * time.Millisecond
+
+// addTxBatchWithBackpressure enqueues a batch into block assembly under the
+// configured capacity bound. It is the shared body of all three ingest
+// handlers, called only inside the enabled branch.
+//
+// On the fast path there is room and it returns immediately — this is also the
+// always-taken path when no bound is configured, so an unbounded node pays only
+// one atomic and no added latency. When the queue is full it waits up to
+// QueueFullWaitTimeout for the dispatcher to make room, polling on a short
+// ticker. If room never appears the batch is shed with a ResourceExhausted-
+// mapped error; the validator then unwinds its UTXO-store work for the shed
+// transactions (see unwindShed) so a resubmit is an ordinary first submission.
+//
+// Caller cancellation (ctx.Done) is NOT a shed: it returns a context-cancelled
+// error without incrementing the shed counter and without the resource-exhausted
+// class, whose shed recovery semantics do not apply to a cancelled call.
+//
+// The wait is strictly bounded so it can never wedge the validator, whose
+// block-assembly client honours the caller's context (group.Wait(ctx, 0)).
+func (ba *BlockAssembly) addTxBatchWithBackpressure(ctx context.Context, nodes []subtreepkg.Node, txInpoints []*subtreepkg.TxInpoints) error {
+	if ba.blockAssembler.AddTxBatchIfRoom(nodes, txInpoints) {
+		return nil
+	}
+
+	start := time.Now()
+
+	if ba.settings.BlockAssembly.QueueFullWaitTimeout > 0 {
+		ticker := time.NewTicker(queueFullPollInterval)
+		defer ticker.Stop()
+
+		timeout := time.After(ba.settings.BlockAssembly.QueueFullWaitTimeout)
+
+		for {
+			select {
+			case <-ctx.Done():
+				prometheusBlockAssemblyQueueWait.Observe(time.Since(start).Seconds())
+				return ba.contextCancelledDuringIngest(ctx)
+			case <-timeout:
+				return ba.shed(start)
+			case <-ticker.C:
+				if ba.blockAssembler.AddTxBatchIfRoom(nodes, txInpoints) {
+					prometheusBlockAssemblyQueueWait.Observe(time.Since(start).Seconds())
+					return nil
+				}
+			}
+		}
+	}
+
+	// No wait configured: shed immediately, but still honour an already-cancelled
+	// caller rather than mislabelling it as a shed.
+	if ctx.Err() != nil {
+		return ba.contextCancelledDuringIngest(ctx)
+	}
+
+	return ba.shed(start)
+}
+
+// shed records and returns the queue-full shed outcome: a ResourceExhausted-
+// mapped error the retry interceptor does not retry. The reported limit is the
+// enforced (normalized) cap, which can be clamped up from the raw configured
+// value, so operators see the limit actually in force.
+func (ba *BlockAssembly) shed(start time.Time) error {
+	prometheusBlockAssemblyQueueWait.Observe(time.Since(start).Seconds())
+	prometheusBlockAssemblyQueueShed.Inc()
+
+	return errors.WrapGRPC(errors.NewThresholdExceededError(
+		"block assembly queue full: %d items queued, limit %d",
+		ba.blockAssembler.QueueLength(), ba.blockAssembler.QueueMaxItems()))
+}
+
+// contextCancelledDuringIngest maps a cancelled/deadline-exceeded ingest wait to
+// the repo's context-cancelled error class. It is deliberately distinct from a
+// shed: no shed counter, no resource-exhausted class.
+func (ba *BlockAssembly) contextCancelledDuringIngest(ctx context.Context) error {
+	// Pass ctx.Err() as a string, not a trailing error: the errors constructor
+	// would otherwise extract it as a wrapped cause, and a wrapped cause changes
+	// how WrapGRPC serialises the status. The context-cancelled class is carried
+	// by the ERR_CONTEXT_CANCELED code alone.
+	return errors.WrapGRPC(errors.NewContextCanceledError(
+		"block assembly ingest cancelled while waiting for queue room: %s", ctx.Err().Error()))
 }
 
 // AddTxBatch processes a batch of transactions for block assembly.
@@ -1239,11 +1375,15 @@ func (ba *BlockAssembly) AddTxBatch(ctx context.Context, batch *blockassembly_ap
 		txInpointsList[i] = &txInpointsArr[i]
 	}
 
-	prometheusBlockAssemblyAddTxCounter.Add(float64(len(nodes))) // gosec:nolint
-
 	// Add entire batch in one call
 	if !ba.settings.BlockAssembly.Disabled {
-		ba.blockAssembler.AddTxBatch(nodes, txInpointsList)
+		if err := ba.addTxBatchWithBackpressure(ctx, nodes, txInpointsList); err != nil {
+			return nil, err
+		}
+
+		// Counted after the enqueue, never before: a shed returns above, so the add
+		// rate stays reconcilable against queue_shed_total.
+		prometheusBlockAssemblyAddTxCounter.Add(float64(len(nodes))) // gosec:nolint
 	}
 
 	return &blockassembly_api.AddTxBatchResponse{Ok: true}, nil
@@ -1419,9 +1559,13 @@ func (ba *BlockAssembly) AddTxBatchColumnar(ctx context.Context, req *blockassem
 		txInpointsList[i] = &txInpointsArr[i]
 	}
 
-	prometheusBlockAssemblyAddTxCounter.Add(float64(len(nodes))) // gosec:nolint
+	if err := ba.addTxBatchWithBackpressure(ctx, nodes, txInpointsList); err != nil {
+		return nil, err
+	}
 
-	ba.blockAssembler.AddTxBatch(nodes, txInpointsList)
+	// Counted after the enqueue, never before, as on the other two ingest handlers.
+	// Unreachable on a disabled node, which returns early above.
+	prometheusBlockAssemblyAddTxCounter.Add(float64(len(nodes))) // gosec:nolint
 
 	return &blockassembly_api.AddTxBatchResponse{Ok: true}, nil
 }
@@ -1462,20 +1606,28 @@ func (ba *BlockAssembly) GetMiningCandidate(ctx context.Context, req *blockassem
 
 	includeSubtreeHashes := req.IncludeSubtrees
 
-	miningCandidate, subtrees, err := ba.blockAssembler.GetMiningCandidate(ctx)
+	miningCandidate, subtrees, lease, err := ba.blockAssembler.GetMiningCandidate(ctx)
 	if err != nil {
 		return nil, errors.WrapGRPC(err)
 	}
+
+	defer lease.Release()
+	cacheLease, _ := lease.Retain()
 
 	ba.logger.Debugf("in GetMiningCandidate: miningCandidate: %+v", miningCandidate.Stringify(true))
 
 	id, _ := chainhash.NewHash(miningCandidate.Id)
 
+	ba.jobStoreMu.Lock()
+	// Delete first: ttlcache replacement does not invoke eviction callbacks.
+	ba.jobStore.Delete(*id)
 	ba.jobStore.Set(*id, &subtreeprocessor.Job{
 		ID:              id,
 		Subtrees:        subtrees,
 		MiningCandidate: miningCandidate,
+		Lease:           cacheLease,
 	}, jobTTL) // create a new job with a TTL, will be cleaned up automatically
+	ba.jobStoreMu.Unlock()
 
 	if includeSubtreeHashes {
 		miningCandidate.SubtreeHashes = make([][]byte, len(subtrees))
@@ -1634,6 +1786,25 @@ func coinbaseHasP2SHOutput(tx *bt.Tx) bool {
 	return false
 }
 
+// retainMiningJobForSubmission acquires the request's lease before eviction can
+// retire the cached job. The caller must release the returned lease.
+func (ba *BlockAssembly) retainMiningJobForSubmission(storeID *chainhash.Hash, jobID string) (*subtreeprocessor.Job, *subtreeprocessor.MiningSnapshotLease, error) {
+	ba.jobStoreMu.Lock()
+	jobItem := ba.jobStore.Get(*storeID)
+	if jobItem == nil {
+		ba.jobStoreMu.Unlock()
+		return nil, nil, errors.NewNotFoundError("[BlockAssembly][%s] job not found", jobID)
+	}
+
+	job := jobItem.Value()
+	requestLease, retained := job.Lease.Retain()
+	ba.jobStoreMu.Unlock()
+	if !retained {
+		return nil, nil, errors.NewNotFoundError("[BlockAssembly][%s] job expired", jobID)
+	}
+	return job, requestLease, nil
+}
+
 func (ba *BlockAssembly) submitMiningSolution(ctx context.Context, req *BlockSubmissionRequest) (*blockassembly_api.OKResponse, error) {
 	jobID := util.ReverseAndHexEncodeSlice(req.SubmitMiningSolutionRequest.Id)
 
@@ -1650,12 +1821,11 @@ func (ba *BlockAssembly) submitMiningSolution(ctx context.Context, req *BlockSub
 		return nil, err
 	}
 
-	jobItem := ba.jobStore.Get(*storeID)
-	if jobItem == nil {
-		return nil, errors.NewNotFoundError("[BlockAssembly][%s] job not found", jobID)
+	job, requestLease, err := ba.retainMiningJobForSubmission(storeID, jobID)
+	if err != nil {
+		return nil, err
 	}
-
-	job := jobItem.Value()
+	defer requestLease.Release()
 
 	hashPrevBlock, err := chainhash.NewHash(job.MiningCandidate.PreviousHash)
 	if err != nil {
@@ -1686,9 +1856,7 @@ func (ba *BlockAssembly) submitMiningSolution(ctx context.Context, req *BlockSub
 	// prevent. The comparison is against the consensus floor rather than the
 	// candidate's own Time, which is usually just the wall clock: rolling ntime
 	// back a few seconds within a job is normal pool behaviour and must stay
-	// legal. Rejecting here rather than letting it reach block.Valid matters
-	// because that failure path treats an invalid block as a subtree-processor
-	// fault and resets block assembly; a bad miner timestamp is not that. The
+	// legal. The
 	// floor is the memoized value the candidate was built from, so this costs no
 	// round-trip, and when it is unknown there is nothing to enforce.
 	if minTime, ok := ba.blockAssembler.MinCandidateTime(hashPrevBlock); ok && int64(nTime) < minTime {
@@ -1724,9 +1892,17 @@ func (ba *BlockAssembly) submitMiningSolution(ctx context.Context, req *BlockSub
 		if len(coinbaseTx.Inputs[0].UnlockingScript.Bytes()) < 2 || len(coinbaseTx.Inputs[0].UnlockingScript.Bytes()) > int(ba.blockAssembler.settings.ChainCfgParams.MaxCoinbaseScriptSigSize) {
 			return nil, errors.NewProcessingError("[BlockAssembly][%s] bad coinbase length", jobID)
 		}
+
+		// The submitted coinbase must have the shape consensus requires — a null prevout,
+		// not merely a null prevout hash. block.Valid below applies the same predicate and
+		// would also reject it, without resetting block assembly, but rejecting here fails
+		// fast with a message that names the submitter's input as the fault.
+		if !model.IsConsensusCoinbase(coinbaseTx) {
+			return nil, errors.NewProcessingError("[BlockAssembly][%s] submitted coinbase transaction is not a valid coinbase", jobID)
+		}
 	} else {
 		// recreate coinbase tx here, nothing was passed in
-		coinbaseTx, err = jobItem.Value().MiningCandidate.CreateCoinbaseTxCandidate(ba.blockAssembler.settings)
+		coinbaseTx, err = job.MiningCandidate.CreateCoinbaseTxCandidate(ba.blockAssembler.settings)
 		if err != nil {
 			return nil, errors.NewProcessingError("[BlockAssembly][%s] failed to create coinbase tx", jobID, err)
 		}
@@ -1792,10 +1968,12 @@ func (ba *BlockAssembly) submitMiningSolution(ctx context.Context, req *BlockSub
 
 	// Compute coinbase BUMP (merkle proof in BRC-74 format) while subtree data is in memory.
 	// This is a best-effort operation — failure does not block block submission.
-	_, currentHeight := ba.blockAssembler.CurrentBlock()
+	// The proof's height is the candidate's height, the same value the block below carries. The
+	// live tip is the wrong source: a candidate can be more than one block behind it, and the tip
+	// can move between reads, so tip+1 would stamp the proof with a height that is not this block's.
 	var coinbaseBUMP []byte
 	if len(subtreesInJob) > 0 {
-		coinbaseBUMP = ba.computeCoinbaseBUMP(jobID, subtreesInJob, subtreeHashes, currentHeight+1)
+		coinbaseBUMP = ba.computeCoinbaseBUMP(jobID, subtreesInJob, subtreeHashes, job.MiningCandidate.Height)
 	}
 
 	// sizeInBytes from the subtrees, 80 byte header and varint bytes for txcount
@@ -1825,17 +2003,40 @@ func (ba *BlockAssembly) submitMiningSolution(ctx context.Context, req *BlockSub
 		CoinbaseTx:       coinbaseTx,
 		TransactionCount: transactionCount,
 		SizeInBytes:      blockSize,
-		Subtrees:         jobSubtreeHashes, // we need to store the hashes of the subtrees in the block, without the coinbase
-		SubtreeSlices:    job.Subtrees,
-		CoinbaseBUMP:     coinbaseBUMP,
+		// Validation uses the candidate height for Genesis coinbase limits,
+		// BIP34 and the subsidy check; leaving it zero applies the wrong rules.
+		Height:   job.MiningCandidate.Height,
+		Subtrees: jobSubtreeHashes, // Original hashes before coinbase replacement.
+		// The request lease keeps these shared immutable subtrees mapped through
+		// validation and storage, even if a reset or cache eviction retires the job.
+		// Block.Valid must preserve the existing already-loaded fast path so it
+		// does not close storage owned by this lease.
+		SubtreeSlices: job.Subtrees,
+		CoinbaseBUMP:  coinbaseBUMP,
 	}
 
 	// check fully valid, including whether difficulty in header is low enough
 	// TODO add more checks to the Valid function, like whether the parent/child relationships are OK
 	if ok, err := block.Valid(ctx, ba.logger, ba.subtreeStore, nil, nil, nil, nil, ba.settings, nil); !ok {
+		// ErrBlockInvalid here means the submission breaks a consensus rule on data the miner
+		// chose: the proof of work, the timestamp, the block version, or the coinbase (its shape,
+		// BIP34 height, transaction rules or reward). Local assembly state did not cause it and a
+		// reset would not stop it recurring, so reject the submission and keep assembly running.
+		// Every other failure (corrupt body, duplicate transaction, merkle mismatch, processing or
+		// storage error) points at what this node built, so those still reset.
+		if errors.Is(err, errors.ErrBlockInvalid) {
+			ba.logger.Warnf("[BlockAssembly][%s][%s] rejected mining solution, block breaks a consensus rule: %v", jobID, block.Hash().String(), err)
+
+			// remove the job, the same solution would be rejected again
+			ba.jobStore.Delete(*storeID)
+
+			return nil, errors.NewProcessingError("[BlockAssembly][%s][%s] invalid block", jobID, block.Hash().String(), err)
+		}
+
 		ba.logger.Errorf("[BlockAssembly][%s][%s] invalid block: %v - %v", jobID, block.Hash().String(), block.Header, err)
 
-		// the subtreeprocessor created an invalid block, we must reset
+		// block assembly built a block that fails validation for a reason not attributable to the
+		// submitter, so its state is suspect and we must reset
 		ba.blockAssembler.Reset(false)
 
 		// remove the job, we cannot use it anymore
@@ -1985,12 +2186,20 @@ func (ba *BlockAssembly) GetCandidateBlock(ctx context.Context, req *blockassemb
 		return nil, errors.WrapGRPC(errors.NewInvalidArgumentError("invalid candidate ID", err))
 	}
 
+	ba.jobStoreMu.Lock()
 	jobItem := ba.jobStore.Get(*storeID)
 	if jobItem == nil {
+		ba.jobStoreMu.Unlock()
 		return nil, errors.WrapGRPC(errors.NewNotFoundError("[GetCandidateBlock][%s] candidate not found", candidateID))
 	}
 
 	job := jobItem.Value()
+	requestLease, retained := job.Lease.Retain()
+	ba.jobStoreMu.Unlock()
+	if !retained {
+		return nil, errors.WrapGRPC(errors.NewNotFoundError("[GetCandidateBlock][%s] candidate expired", candidateID))
+	}
+	defer requestLease.Release()
 
 	// Create default coinbase transaction from the mining candidate
 	coinbaseTx, err := job.MiningCandidate.CreateCoinbaseTxCandidate(ba.blockAssembler.settings)
@@ -2093,10 +2302,12 @@ func (ba *BlockAssembly) ResetBlockAssembly(ctx context.Context, _ *blockassembl
 	// Check if unmined transactions are still being loaded
 	if ba.blockAssembler.unminedTransactionsLoading.Load() {
 		ba.logger.Warnf("[ResetBlockAssembly] service not ready - unmined transactions are still being loaded")
-		return nil, errors.NewServiceError(errServiceNotReadyUnminedLoading)
+		return nil, errors.WrapGRPC(errors.NewServiceError(errServiceNotReadyUnminedLoading))
 	}
 
-	ba.blockAssembler.Reset(false)
+	if err := ba.blockAssembler.resetWithOptionsContext(ctx, false, false); err != nil {
+		return nil, errors.WrapGRPC(err)
+	}
 
 	return &blockassembly_api.EmptyMessage{}, nil
 }
@@ -2111,10 +2322,12 @@ func (ba *BlockAssembly) ResetBlockAssemblyFully(ctx context.Context, _ *blockas
 	// Check if unmined transactions are still being loaded
 	if ba.blockAssembler.unminedTransactionsLoading.Load() {
 		ba.logger.Warnf("[ResetBlockAssemblyFully] service not ready - unmined transactions are still being loaded")
-		return nil, errors.NewServiceError(errServiceNotReadyUnminedLoading)
+		return nil, errors.WrapGRPC(errors.NewServiceError(errServiceNotReadyUnminedLoading))
 	}
 
-	ba.blockAssembler.Reset(true)
+	if err := ba.blockAssembler.resetWithOptionsContext(ctx, true, false); err != nil {
+		return nil, errors.WrapGRPC(err)
+	}
 
 	return &blockassembly_api.EmptyMessage{}, nil
 }
@@ -2133,10 +2346,12 @@ func (ba *BlockAssembly) ResetBlockAssemblyValidateInputs(ctx context.Context, _
 
 	if ba.blockAssembler.unminedTransactionsLoading.Load() {
 		ba.logger.Warnf("[ResetBlockAssemblyValidateInputs] service not ready - unmined transactions are still being loaded")
-		return nil, errors.NewServiceError(errServiceNotReadyUnminedLoading)
+		return nil, errors.WrapGRPC(errors.NewServiceError(errServiceNotReadyUnminedLoading))
 	}
 
-	ba.blockAssembler.ResetWithInputValidation()
+	if err := ba.blockAssembler.resetWithOptionsContext(ctx, false, true); err != nil {
+		return nil, errors.WrapGRPC(err)
+	}
 
 	return &blockassembly_api.EmptyMessage{}, nil
 }
@@ -2246,6 +2461,36 @@ func (ba *BlockAssembly) GetBlockAssemblyState(ctx context.Context, _ *blockasse
 		CurrentHash:           currentHeader.Hash().String(),
 		RemoveMapCount:        removeMapLen32,
 		Subtrees:              subtreeHashesStrings,
+		QueueHeadAgeMillis:    ba.blockAssembler.QueueHeadAge().Milliseconds(),
+	}, nil
+}
+
+// GetBlockAssemblyQueueStats returns a slim, atomic-only view of the ingest
+// queue (depth + head-batch age) for high-frequency control reads such as the
+// validator's Kafka backpressure controller. Unlike GetBlockAssemblyState it
+// deliberately does not call GetSubtreeHashes, so it never blocks on the
+// subtree-processor main loop and always returns immediately even while that
+// loop is stalled.
+//
+// The reported double-spend window makes the signal self-describing: the head
+// age structurally includes this process's drain floor, and the reader that
+// subtracts it lives in a different process with its own settings context. It is
+// read from the same setting the drain loop applies, so the description cannot
+// drift from the behaviour it describes.
+//
+// Parameters:
+//   - ctx: Context for cancellation
+//   - _: Empty message request (unused)
+//
+// Returns:
+//   - *blockassembly_api.QueueStatsMessage: Queue depth, head-batch age, the applied double-spend window and the enforced item cap
+//   - error: Always nil; both queue values are atomic loads that cannot fail
+func (ba *BlockAssembly) GetBlockAssemblyQueueStats(_ context.Context, _ *blockassembly_api.EmptyMessage) (*blockassembly_api.QueueStatsMessage, error) {
+	return &blockassembly_api.QueueStatsMessage{
+		QueueCount:              ba.blockAssembler.QueueLength(),
+		QueueHeadAgeMillis:      ba.blockAssembler.QueueHeadAge().Milliseconds(),
+		DoubleSpendWindowMillis: ba.settings.BlockAssembly.DoubleSpendWindow.Milliseconds(),
+		QueueMaxItems:           ba.blockAssembler.QueueMaxItems(),
 	}, nil
 }
 
@@ -2384,10 +2629,12 @@ func (ba *BlockAssembly) CheckBlockAssembly(_ context.Context, _ *blockassembly_
 //   - *blockassembly_api.OKResponse: Response indicating success
 func (ba *BlockAssembly) GetBlockAssemblyBlockCandidate(ctx context.Context, _ *blockassembly_api.EmptyMessage) (*blockassembly_api.GetBlockAssemblyBlockCandidateResponse, error) {
 	// get a mining candidate
-	candidate, subtrees, err := ba.blockAssembler.GetMiningCandidate(ctx)
+	candidate, subtrees, lease, err := ba.blockAssembler.GetMiningCandidate(ctx)
 	if err != nil {
 		return nil, errors.WrapGRPC(errors.NewProcessingError("[CheckBlockAssemblyBlockTemplate] error getting mining candidate", err))
 	}
+
+	defer lease.Release()
 
 	subtreeHashes := make([]*chainhash.Hash, len(subtrees))
 	for i, subtree := range subtrees {

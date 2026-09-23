@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"net/url"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,7 +16,9 @@ import (
 	"github.com/bsv-blockchain/teranode/util/test"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/types/known/emptypb"
 )
@@ -135,9 +138,12 @@ func TestFSMPause_FailedStopRemainsResumable(t *testing.T) {
 	require.Equal(t, FSMStateIDLE.String(), state)
 }
 
-func TestFSMPause_AdmissionWaitsForStopPersistence(t *testing.T) {
-	b, store := newFSMPersistenceTestBlockchain(t, blockchain_api.FSMStateType_CATCHINGBLOCKS)
+func TestFSMPause_AdmissionRejectsDuringStopPersistence(t *testing.T) {
+	b, store := newFSMPersistenceTestBlockchain(t, FSMStateCATCHINGBLOCKS)
 	b.subscriptionManagerReady.Store(true)
+	client := &Client{client: blockchain_api.NewBlockchainAPIClient(newFSMReadTestConnection(t, b))}
+	// An admitted unit may finish later; its snapshot cannot authorize a successor.
+	require.NoError(t, client.AdmitCatchupWork(t.Context()))
 	writing := make(chan struct{})
 	release := make(chan struct{})
 	store.beforeWrite = func(context.Context) {
@@ -146,43 +152,73 @@ func TestFSMPause_AdmissionWaitsForStopPersistence(t *testing.T) {
 	}
 	stopResult := make(chan error, 1)
 	go func() {
-		_, err := b.SendFSMEvent(context.Background(), &blockchain_api.SendFSMEventRequest{Event: blockchain_api.FSMEventType_STOP})
+		_, err := b.SendFSMEvent(context.Background(), &blockchain_api.SendFSMEventRequest{Event: FSMEventIDLE})
 		stopResult <- err
 	}()
-	<-writing
-	admissionResult := make(chan error, 1)
-	go func() {
-		_, err := b.CatchUpBlocks(context.Background(), &emptypb.Empty{})
-		admissionResult <- err
-	}()
-	type stateReply struct {
-		state *blockchain_api.GetFSMStateResponse
-		err   error
-	}
-	stateResult := make(chan stateReply, 1)
-	go func() {
-		state, err := b.GetFSMCurrentState(context.Background(), &emptypb.Empty{})
-		stateResult <- stateReply{state: state, err: err}
-	}()
-	// CATCHINGBLOCKS is still visible in memory while STOP writes. An unlocked
-	// already-catching no-op or uncached state snapshot used by AdmitCatchupWork
-	// would incorrectly authorize another work unit.
+	finishStop := sync.OnceFunc(func() { close(release); require.NoError(t, <-stopResult) })
+	t.Cleanup(finishStop)
 	select {
-	case err := <-admissionResult:
-		close(release)
-		<-stopResult
-		t.Fatalf("admission bypassed STOP persistence: %v", err)
-	case reply := <-stateResult:
-		close(release)
-		<-stopResult
-		t.Fatalf("uncached admission snapshot bypassed STOP persistence: state=%v, error=%v", reply.state, reply.err)
-	case <-time.After(50 * time.Millisecond):
+	case <-writing:
+	case <-time.After(time.Second):
+		t.Fatal("STOP persistence did not start")
 	}
-	close(release)
-	require.NoError(t, <-stopResult)
-	require.Error(t, <-admissionResult)
-	reply := <-stateResult
-	require.NoError(t, reply.err)
-	require.NotNil(t, reply.state)
-	require.Equal(t, blockchain_api.FSMStateType_IDLE, reply.state.State)
+	require.Equal(t, FSMStateCATCHINGBLOCKS.String(), b.finiteStateMachine.Current())
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	err := client.AdmitCatchupWork(ctx)
+	require.Equal(t, codes.Unavailable, status.Code(err), "busy authority must reject rather than wait behind STOP persistence")
+	require.NoError(t, ctx.Err(), "admission must return before its deadline")
+	require.NotErrorIs(t, err, ErrCatchupPaused, "unacknowledged STOP is not confirmed operator pause")
+	finishStop()
+	require.ErrorIs(t, client.AdmitCatchupWork(t.Context()), ErrCatchupPaused, "the next unit cannot use the pre-STOP admission")
+	state, err := store.GetFSMState(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, FSMStateIDLE.String(), state)
+}
+
+func TestFSMPause_AdmissionDoesNotWaitForNotification(t *testing.T) {
+	b, store := newFSMPersistenceTestBlockchain(t, FSMStateCATCHINGBLOCKS)
+	b.subscriptionManagerReady.Store(true)
+	b.notifications = make(chan *blockchain_api.Notification)
+	client := &Client{client: blockchain_api.NewBlockchainAPIClient(newFSMReadTestConnection(t, b))}
+	stopResult := make(chan error, 1)
+	go func() {
+		_, err := b.SendFSMEvent(context.Background(), &blockchain_api.SendFSMEventRequest{Event: FSMEventIDLE})
+		stopResult <- err
+	}()
+	finishStop := sync.OnceFunc(func() { <-b.notifications; require.NoError(t, <-stopResult) })
+	t.Cleanup(finishStop)
+	require.Eventually(t, func() bool { return b.finiteStateMachine.Current() == FSMStateIDLE.String() }, time.Second, time.Millisecond)
+	persisted, err := store.GetFSMState(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, FSMStateIDLE.String(), persisted)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	err = client.AdmitCatchupWork(ctx)
+	require.Equal(t, codes.Unavailable, status.Code(err))
+	require.NoError(t, ctx.Err(), "a blocked notification consumer must not hold the admission RPC")
+	finishStop()
+	require.ErrorIs(t, client.AdmitCatchupWork(t.Context()), ErrCatchupPaused)
+}
+
+func TestFSMPause_AmbiguousStopDoesNotAuthorizeWork(t *testing.T) {
+	b, store := newFSMPersistenceTestBlockchain(t, FSMStateCATCHINGBLOCKS)
+	b.subscriptionManagerReady.Store(true)
+	client := &Client{client: blockchain_api.NewBlockchainAPIClient(newFSMReadTestConnection(t, b))}
+	store.writeErr = errors.NewStorageError("lost STOP write acknowledgement")
+	store.commitBeforeError = true
+	_, err := b.SendFSMEvent(t.Context(), &blockchain_api.SendFSMEventRequest{Event: FSMEventIDLE})
+	require.Error(t, err)
+	require.Equal(t, FSMStateCATCHINGBLOCKS.String(), b.finiteStateMachine.Current())
+	persisted, err := store.GetFSMState(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, FSMStateIDLE.String(), persisted)
+	err = client.AdmitCatchupWork(t.Context())
+	require.Equal(t, codes.Unavailable, status.Code(err), "in-memory CATCHINGBLOCKS must not grant work after an ambiguous STOP write")
+	require.NotErrorIs(t, err, ErrCatchupPaused)
+	require.Empty(t, b.notifications)
+	store.writeErr = nil
+	_, err = b.Idle(t.Context(), &emptypb.Empty{})
+	require.NoError(t, err)
+	require.ErrorIs(t, client.AdmitCatchupWork(t.Context()), ErrCatchupPaused)
 }

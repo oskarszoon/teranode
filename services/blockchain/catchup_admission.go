@@ -2,7 +2,7 @@ package blockchain
 
 import (
 	"context"
-	stderrors "errors"
+	stderrors "errors" //nolint:depguard // Pause needs identity matching; domain errors match every error sharing a code.
 
 	"github.com/bsv-blockchain/teranode/errors"
 	"google.golang.org/grpc/status"

@@ -41,12 +41,26 @@ import (
 type Interface interface {
 	// AddBatch adds a batch of transaction nodes to the subtree processor for processing.
 	// The transactions will be organized into appropriate subtrees based on
-	// their dependencies and relationships with other transactions.
+	// their dependencies and relationships with other transactions. This path is
+	// unconditional: it bypasses any configured capacity bound and does not
+	// uphold the queueLength >= published-outstanding invariant.
 	//
 	// Parameters:
 	//   - nodes: The transaction nodes to add to processing
 	//   - txInpoints: Transaction input points for each node for dependency tracking
 	AddBatch(nodes []subtreepkg.Node, txInpoints []*subtreepkg.TxInpoints)
+
+	// AddBatchIfRoom adds a batch only if the configured capacity bound would not
+	// be exceeded, reporting whether it did. When no bound is configured it never
+	// refuses and behaves identically to AddBatch.
+	//
+	// Parameters:
+	//   - nodes: The transaction nodes to add to processing
+	//   - txInpoints: Transaction input points for each node for dependency tracking
+	//
+	// Returns:
+	//   - bool: true if the batch was enqueued, false if it was refused for room
+	AddBatchIfRoom(nodes []subtreepkg.Node, txInpoints []*subtreepkg.TxInpoints) bool
 
 	// Start starts the main processing goroutine for the SubtreeProcessor.
 	// This should be called after loading unmined transactions at startup to avoid race conditions.
@@ -117,6 +131,19 @@ type Interface interface {
 	//   - error: Any error encountered during block processing
 	MoveForwardBlock(block *model.Block) error
 
+	// DrainPendingInvalidations returns and clears the blocks whose conflict
+	// resolution was refused because demoting a losing transaction would have
+	// reversed a spend confirmed on that block's own ancestry. Such a block is
+	// an ancestor double spend and must be invalidated — but only after block
+	// movement has completed, which is why the hashes are parked rather than
+	// acted on inline.
+	DrainPendingInvalidations() []chainhash.Hash
+
+	// QueueInvalidation records a block that must be invalidated because its
+	// conflict resolution would have reversed a spend confirmed in its own
+	// ancestry, or re-queues one whose invalidation attempt failed.
+	QueueInvalidation(blockHash chainhash.Hash)
+
 	// Reorg handles blockchain reorganization by processing blocks that need
 	// to be removed and added during the reorganization process.
 	//
@@ -140,6 +167,13 @@ type Interface interface {
 	// Returns:
 	//   - ResetResponse: Response containing reset operation results
 	Reset(blockHeader *model.BlockHeader, moveBackBlocks []*model.Block, moveForwardBlocks []*model.Block, useFastForwardReset bool, postProcess func() error) ResetResponse
+
+	// RecoverUnmined rebuilds the current assembly from a read-only prepared
+	// selection while preserving feeds published after its queue snapshot.
+	RecoverUnmined(ctx context.Context, header *model.BlockHeader, scanHashes []chainhash.Hash, prepare func(context.Context, []chainhash.Hash, func(chainhash.Hash) bool) ([]*utxostore.UnminedTransaction, error)) error
+
+	// RecoveryPending reports an incomplete memory rebuild requiring a read-only retry.
+	RecoveryPending() bool
 
 	// Remove removes a specific transaction from the processor by its hash.
 	// This is used when transactions become invalid or need to be excluded.
@@ -294,10 +328,30 @@ type Interface interface {
 
 	// QueueLength returns the number of transactions currently queued, not
 	// the number of batches. This indicates the processor's current workload.
+	// For items added through the bounded AddBatchIfRoom path it counts
+	// reserved-or-published items and never reads below the published-outstanding
+	// count; the unbounded AddBatch path now reserves before publishing too, so it
+	// upholds that same guarantee and additionally does not participate in the cap.
 	//
 	// Returns:
 	//   - int64: Current queue length, in transactions
 	QueueLength() int64
+
+	// QueueMaxItems returns the enforced (normalized) ingest-queue item cap, or
+	// a value <= 0 when the queue is unbounded. It is the cap the reservation
+	// path actually enforces, reported in the queue-full shed message.
+	//
+	// Returns:
+	//   - int64: The enforced item cap (<= 0 when unbounded)
+	QueueMaxItems() int64
+
+	// QueueHeadAge returns how long the oldest queued batch has been waiting.
+	// It is a diagnostic gauge for dispatcher-stall visibility and returns 0
+	// when the queue is empty.
+	//
+	// Returns:
+	//   - time.Duration: Age of the oldest queued batch, or 0 if empty
+	QueueHeadAge() time.Duration
 
 	// LastDequeueTime returns the wall-clock time the consumer goroutine last
 	// passed through the queue's dequeue branch. Combined with QueueLength,
@@ -343,8 +397,8 @@ type Interface interface {
 	//   - uint64: Total size in bytes of all chained subtrees
 	GetChainedSubtreesTotalSize() uint64
 
-	// GetPrecomputedMiningData returns the pre-computed mining data for lock-free reads.
-	// This can be called from any goroutine without synchronization.
+	// GetPrecomputedMiningData returns a snapshot whose Lease must be released
+	// after the caller finishes reading its subtree nodes.
 	GetPrecomputedMiningData() *PrecomputedMiningData
 
 	// GetIncompleteSubtreeMiningData requests a snapshot of the incomplete subtree

@@ -244,11 +244,11 @@ func TestGetBlockAssemblyBlockCandidate(t *testing.T) {
 		genesisHash := chainhash.HashH([]byte("genesis"))
 		for i := uint64(0); i < 10; i++ {
 			// Different output index for each tx
-			server.blockAssembler.AddTxBatch([]subtreepkg.Node{{
+			require.True(t, server.blockAssembler.AddTxBatchIfRoom([]subtreepkg.Node{{
 				Hash:        chainhash.HashH([]byte(fmt.Sprintf("%d", i))),
 				Fee:         i,
 				SizeInBytes: i,
-			}}, []*subtreepkg.TxInpoints{singleParentInpointsPtr(genesisHash, uint32(i))})
+			}}, []*subtreepkg.TxInpoints{singleParentInpointsPtr(genesisHash, uint32(i))}))
 		}
 
 		require.Eventually(t, func() bool {
@@ -554,11 +554,11 @@ func TestTxCount(t *testing.T) {
 		// to avoid TxInpoints serialization issues
 		for i := 0; i < 3; i++ {
 			txHash := chainhash.HashH([]byte(fmt.Sprintf("tx-%d", i)))
-			server.blockAssembler.AddTxBatch([]subtreepkg.Node{{
+			require.True(t, server.blockAssembler.AddTxBatchIfRoom([]subtreepkg.Node{{
 				Hash:        txHash,
 				Fee:         uint64(100),
 				SizeInBytes: uint64(250),
-			}}, []*subtreepkg.TxInpoints{{}})
+			}}, []*subtreepkg.TxInpoints{{}}))
 		}
 
 		// Wait for processing - expect initial count + 3 added transactions
@@ -577,11 +577,11 @@ func TestSubmitMiningSolution_InvalidBlock_HandlesReset(t *testing.T) {
 		// Add some transactions to create a mining candidate
 		for i := 0; i < 5; i++ {
 			txHash := chainhash.HashH([]byte(fmt.Sprintf("tx%d", i)))
-			server.blockAssembler.AddTxBatch([]subtreepkg.Node{{
+			require.True(t, server.blockAssembler.AddTxBatchIfRoom([]subtreepkg.Node{{
 				Hash:        txHash,
 				Fee:         uint64(100),
 				SizeInBytes: uint64(250),
-			}}, []*subtreepkg.TxInpoints{{}})
+			}}, []*subtreepkg.TxInpoints{{}}))
 		}
 
 		// Wait for transactions to be processed
@@ -643,19 +643,12 @@ func TestGetCurrentDifficultyCoverage(t *testing.T) {
 
 // TestResetBlockAssemblyCoverage tests the ResetBlockAssembly function coverage
 func TestResetBlockAssemblyCoverage(t *testing.T) {
-	server, _, _, _ := setup(t)
-	ctx := t.Context()
-
-	t.Run("reset block assembly", func(t *testing.T) {
-		// Call reset function - testing for coverage
-		resp, err := server.ResetBlockAssembly(ctx, &blockassembly_api.EmptyMessage{})
-		if err == nil {
-			assert.NotNil(t, resp)
-		} else {
-			// Error case also provides coverage
-			assert.NotNil(t, err)
-		}
-	})
+	server := newResetRPCListeningServer(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	resp, err := server.ResetBlockAssembly(ctx, &blockassembly_api.EmptyMessage{})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
 }
 
 // TestGetBlockAssemblyStateCoverage tests the GetBlockAssemblyState function coverage
@@ -1400,11 +1393,11 @@ func TestRemoveTxIntensive(t *testing.T) {
 
 		// First add a transaction
 		txHash := chainhash.HashH([]byte("test-tx-to-remove"))
-		server.blockAssembler.AddTxBatch([]subtreepkg.Node{{
+		require.True(t, server.blockAssembler.AddTxBatchIfRoom([]subtreepkg.Node{{
 			Hash:        txHash,
 			Fee:         100,
 			SizeInBytes: 250,
-		}}, []*subtreepkg.TxInpoints{{}})
+		}}, []*subtreepkg.TxInpoints{{}}))
 
 		// Wait for it to be added
 		time.Sleep(10 * time.Millisecond)
@@ -1548,11 +1541,11 @@ func TestGetMiningCandidateIntensive(t *testing.T) {
 		// Add some transactions to create subtrees
 		for i := 0; i < 5; i++ {
 			txHash := chainhash.HashH([]byte(fmt.Sprintf("mining-tx-%d", i)))
-			server.blockAssembler.AddTxBatch([]subtreepkg.Node{{
+			require.True(t, server.blockAssembler.AddTxBatchIfRoom([]subtreepkg.Node{{
 				Hash:        txHash,
 				Fee:         uint64(100),
 				SizeInBytes: uint64(250),
-			}}, []*subtreepkg.TxInpoints{{}})
+			}}, []*subtreepkg.TxInpoints{{}}))
 		}
 
 		time.Sleep(50 * time.Millisecond) // Allow processing
@@ -1678,12 +1671,13 @@ func TestResetFunctionsIntensive(t *testing.T) {
 	})
 
 	t.Run("ResetBlockAssembly normal operation", func(t *testing.T) {
-		server, _ := setupServer(t)
-		server.blockAssembler.unminedTransactionsLoading.Store(false)
+		server := newResetRPCListeningServer(t)
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		defer cancel()
 
-		resp, err := server.ResetBlockAssembly(context.Background(), &blockassembly_api.EmptyMessage{})
-		assert.NoError(t, err)
-		assert.NotNil(t, resp)
+		resp, err := server.ResetBlockAssembly(ctx, &blockassembly_api.EmptyMessage{})
+		require.NoError(t, err)
+		require.NotNil(t, resp)
 	})
 
 	t.Run("ResetBlockAssemblyFully with unmined transactions loading", func(t *testing.T) {
@@ -1697,12 +1691,13 @@ func TestResetFunctionsIntensive(t *testing.T) {
 	})
 
 	t.Run("ResetBlockAssemblyFully normal operation", func(t *testing.T) {
-		server, _ := setupServer(t)
-		server.blockAssembler.unminedTransactionsLoading.Store(false)
+		server := newResetRPCListeningServer(t)
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		defer cancel()
 
-		resp, err := server.ResetBlockAssemblyFully(context.Background(), &blockassembly_api.EmptyMessage{})
-		assert.NoError(t, err)
-		assert.NotNil(t, resp)
+		resp, err := server.ResetBlockAssemblyFully(ctx, &blockassembly_api.EmptyMessage{})
+		require.NoError(t, err)
+		require.NotNil(t, resp)
 	})
 }
 
@@ -2022,12 +2017,13 @@ func TestResetBlockAssemblyFully(t *testing.T) {
 	})
 
 	t.Run("reset fully successful", func(t *testing.T) {
-		server, _ := setupServer(t)
-		server.blockAssembler.unminedTransactionsLoading.Store(false)
+		server := newResetRPCListeningServer(t)
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		defer cancel()
 
-		resp, err := server.ResetBlockAssemblyFully(context.Background(), &blockassembly_api.EmptyMessage{})
-		assert.NoError(t, err)
-		assert.NotNil(t, resp)
+		resp, err := server.ResetBlockAssemblyFully(ctx, &blockassembly_api.EmptyMessage{})
+		require.NoError(t, err)
+		require.NotNil(t, resp)
 	})
 }
 
@@ -2057,11 +2053,11 @@ func TestRemoveTxEdgeCases(t *testing.T) {
 
 		// Add a transaction first
 		txHash := chainhash.HashH([]byte("test-tx-remove"))
-		server.blockAssembler.AddTxBatch([]subtreepkg.Node{{
+		require.True(t, server.blockAssembler.AddTxBatchIfRoom([]subtreepkg.Node{{
 			Hash:        txHash,
 			Fee:         100,
 			SizeInBytes: 250,
-		}}, []*subtreepkg.TxInpoints{{}})
+		}}, []*subtreepkg.TxInpoints{{}}))
 
 		// Now remove it to cover the success path
 		req := &blockassembly_api.RemoveTxRequest{

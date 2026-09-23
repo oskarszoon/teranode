@@ -141,12 +141,16 @@ pruner_grpcListenAddress.docker.host = localhost:${PORT_PREFIX}${PRUNER_GRPC_POR
 
 When enabled, the pruner starts a cycle only when the blockchain FSM is known to be `RUNNING`. `CATCHINGBLOCKS`, `IDLE`, unknown or missing states, and FSM read errors suppress preservation, expiry, transaction deletion, and blob-deletion scheduling for that cycle. Catchup writes already in progress may finish after STOP enters IDLE, so IDLE must not authorize new pruning.
 
+**Upgrade note:** Earlier versions did not load `pruner_skipDuringCatchup`, so a configured `true` value had no effect. Upgrading activates that existing configuration for the first time. Pruning is then deferred throughout CATCHINGBLOCKS, IDLE, unknown or missing state, and FSM read failures. Long catchup or pause periods can increase retained data and disk usage; review available disk capacity and monitor pruning skips before upgrading. The default remains `false`.
+
 This admission check does not interrupt a pruning cycle or blob-deletion work already in progress. It does not make IDLE an offline maintenance barrier.
 
 **Values:**
 
 - `false` (default): Normal pruning during catchup (safe with retention >= 288 blocks)
 - `true`: Start pruning only in RUNNING; skip new cycles during catchup, IDLE, or unavailable FSM state
+
+Note: this defers rather than eliminates the prune burst - a node that skips a long catchup hits one much larger DAH sweep on entering the RUNNING state.
 
 ### pruner_blockAssemblyWaitTimeout
 
@@ -187,17 +191,7 @@ When Aerospike connection pool utilization exceeds this threshold, the pruner au
 - `OnBlockPersisted` (default): Triggers on BlockPersisted notifications (coordinated with Block Persister)
 - `OnBlockMined`: Triggers on Block notifications with mined_set=true
 
-### pruner_force_ignore_block_persister_height
-
-**Type**: Boolean
-
-**Default**: `false`
-
-**Environment Variable**: `pruner_force_ignore_block_persister_height`
-
-**Description**: Force ignore block persister height tracking
-
-When enabled, uses Block notifications with mined_set=true instead of BlockPersisted notifications from Block Persister for determining safe prune height.
+To use Block notifications with mined_set=true instead of BlockPersisted notifications from Block Persister for determining safe prune height, set `pruner_block_trigger=OnBlockMined`.
 
 ### pruner_utxoSetTTL
 
@@ -364,7 +358,7 @@ pruner_jobTimeout = 10m
 - Too short: Frequent timeouts logged
 - Too long: Blocks other operations unnecessarily
 
-**Metrics**: Monitor `pruner_duration_seconds` to determine appropriate timeout
+**Metrics**: Monitor `teranode_pruner_duration_seconds` to determine appropriate timeout
 
 ## UTXO Store Settings
 
@@ -845,9 +839,9 @@ export UTXOSTORE_PARENTPRESERVATIONBLOCKS=20000
 
 While not configuration settings, these Prometheus metrics should be monitored:
 
-- `pruner_duration_seconds`: Adjust `jobTimeout` if consistently near timeout
-- `pruner_skipped_total{reason="not_running"}`: Indicates Block Assembly issues
-- `pruner_errors_total`: Indicates database or connectivity issues
+- `teranode_pruner_duration_seconds`: Adjust `jobTimeout` if consistently near timeout
+- `teranode_pruner_skipped_total{reason="block_assembly_timeout"}`: Indicates Block Assembly issues
+- `teranode_pruner_errors_total`: Indicates database or connectivity issues
 - `utxo_cleanup_batch_duration_seconds`: Indicates Aerospike performance
 
 ## Troubleshooting Configuration Issues
@@ -882,7 +876,7 @@ pruner_jobTimeout = 20m  # or higher
 
 ### Slow Pruning
 
-**Symptoms**: High `pruner_duration_seconds` values
+**Symptoms**: High `teranode_pruner_duration_seconds` values
 
 **Solutions:**
 
@@ -916,13 +910,13 @@ pruner_jobTimeout = 20m  # or higher
 1. Verify pruner running:
 
     ```bash
-    curl http://localhost:8096/metrics | grep pruner_processed_total
+    curl http://localhost:8096/metrics | grep teranode_pruner_active
     ```
 
-2. Check `pruner_skipped_total` reasons:
+2. Check `teranode_pruner_skipped_total` reasons:
 
     ```bash
-    curl http://localhost:8096/metrics | grep pruner_skipped_total
+    curl http://localhost:8096/metrics | grep teranode_pruner_skipped_total
     ```
 
 3. Verify Block Assembly in RUNNING state

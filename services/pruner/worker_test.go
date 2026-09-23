@@ -310,6 +310,134 @@ func TestWaitForBlockMinedStatusSkippedWhenNoBAClient(t *testing.T) {
 	}
 }
 
+// TestSkipDuringCatchupSkipsWhenCatchingUp verifies that when
+// pruner_skipDuringCatchup=true and the FSM reports CATCHINGBLOCKS, the
+// pruner records prunerSkipped("fsm_not_running"), never notifies the blob
+// deletion worker, and never advances lastProcessedHeight.
+func TestSkipDuringCatchupSkipsWhenCatchingUp(t *testing.T) {
+	initPrometheusMetrics()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	logger := ulogger.New("test")
+
+	blockchainMock := &blockchain.Mock{}
+	catchingUp := blockchain.FSMStateCATCHINGBLOCKS
+	blockchainMock.On("GetFSMCurrentState", mock.Anything).Return(&catchingUp, nil)
+
+	server := &Server{
+		ctx:              ctx,
+		logger:           logger,
+		pruneNotify:      make(chan pruneSignal, 1),
+		blobNotify:       make(chan pruneSignal, 1),
+		blockchainClient: blockchainMock,
+		settings: &settings.Settings{
+			Pruner: settings.PrunerSettings{
+				SkipDuringCatchup: true,
+			},
+		},
+	}
+
+	skipsBefore := getCounterValue(t, prunerSkipped, "fsm_not_running")
+
+	go server.prunerProcessor(ctx)
+
+	server.pruneNotify <- pruneSignal{blockHeight: 500, blockHash: chainhash.Hash{0x04}}
+
+	require.Eventually(t, func() bool {
+		return getCounterValue(t, prunerSkipped, "fsm_not_running")-skipsBefore >= 1
+	}, time.Second, 10*time.Millisecond)
+
+	select {
+	case <-server.blobNotify:
+		t.Fatal("blob deletion worker should not have been notified while catching up")
+	default:
+		// Expected: no blob notification
+	}
+
+	require.Equal(t, uint32(0), server.lastProcessedHeight.Load(),
+		"lastProcessedHeight should remain 0 when the block is skipped for catchup")
+
+	blockchainMock.AssertExpectations(t)
+}
+
+// TestSkipDuringCatchupProceedsWhenRunning verifies that when
+// pruner_skipDuringCatchup=true but the FSM reports RUNNING, pruning
+// proceeds normally and the blob deletion worker is notified.
+func TestSkipDuringCatchupProceedsWhenRunning(t *testing.T) {
+	initPrometheusMetrics()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	logger := ulogger.New("test")
+
+	blockchainMock := &blockchain.Mock{}
+	running := blockchain.FSMStateRUNNING
+	blockchainMock.On("GetFSMCurrentState", mock.Anything).Return(&running, nil)
+
+	server := &Server{
+		ctx:              ctx,
+		logger:           logger,
+		pruneNotify:      make(chan pruneSignal, 1),
+		blobNotify:       make(chan pruneSignal, 1),
+		blockchainClient: blockchainMock,
+		settings: &settings.Settings{
+			Pruner: settings.PrunerSettings{
+				SkipDuringCatchup: true,
+			},
+		},
+	}
+
+	go server.prunerProcessor(ctx)
+
+	server.pruneNotify <- pruneSignal{blockHeight: 501, blockHash: chainhash.Hash{0x05}}
+
+	select {
+	case sig := <-server.blobNotify:
+		require.Equal(t, uint32(501), sig.blockHeight, "blob worker should be notified when FSM is RUNNING")
+	case <-time.After(time.Second):
+		t.Fatal("pruning should have proceeded when FSM state is RUNNING")
+	}
+
+	blockchainMock.AssertExpectations(t)
+}
+
+// TestSkipDuringCatchupWithNilBlockchainClientDoesNotPanic retains nil-client
+// safety while requiring positive RUNNING authority before pruning is admitted.
+func TestSkipDuringCatchupWithNilBlockchainClientDoesNotPanic(t *testing.T) {
+	initPrometheusMetrics()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	server := &Server{
+		ctx:              ctx,
+		logger:           ulogger.New("test"),
+		pruneNotify:      make(chan pruneSignal, 1),
+		blobNotify:       make(chan pruneSignal, 1),
+		blockchainClient: nil,
+		settings: &settings.Settings{
+			Pruner: settings.PrunerSettings{
+				SkipDuringCatchup: true,
+			},
+		},
+	}
+
+	skipsBefore := getCounterValue(t, prunerSkipped, "fsm_error")
+	done := make(chan struct{})
+	go func() { defer close(done); server.prunerProcessor(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+	server.pruneNotify <- pruneSignal{blockHeight: 502, blockHash: chainhash.Hash{0x06}}
+
+	require.Eventually(t, func() bool {
+		return getCounterValue(t, prunerSkipped, "fsm_error") > skipsBefore
+	}, time.Second, time.Millisecond, "missing authority must defer pruning without panicking")
+	require.Empty(t, server.blobNotify, "missing authority must not schedule blob deletion")
+	require.Zero(t, server.lastProcessedHeight.Load())
+}
+
 // TestStart_FSMContextCancellation verifies graceful shutdown handling when
 // the context is cancelled during the FSM wait. The error must be returned
 // (not swallowed) and must be a context error so the service manager can

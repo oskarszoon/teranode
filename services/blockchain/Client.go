@@ -26,6 +26,8 @@ import (
 	"github.com/bsv-blockchain/teranode/util"
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
 )
 
@@ -2002,19 +2004,22 @@ func (c *Client) SendFSMEvent(ctx context.Context, event blockchain_api.FSMEvent
 
 // Run sends a run FSM event to the blockchain service.
 func (c *Client) Run(ctx context.Context, source string) error {
-	// The authority serializes this request with operator STOP. A cached state
-	// cannot establish that the node is still running or authorize a transition.
-	c.logger.Infof("[Blockchain Client] Sending Run event (%s)", source)
+	c.logger.Infof("[Blockchain Client] Sending Run event %s", source)
 
 	_, err := c.client.Run(ctx, &emptypb.Empty{})
 	if err != nil {
+		// Keep transport status available to bounded catchup promotion retries.
+		if code := status.Code(err); code == codes.Unavailable || code == codes.DeadlineExceeded {
+			return err
+		}
 		return errors.UnwrapGRPC(err)
 	}
 
 	return nil
 }
 
-// CatchUpBlocks sends a catchup blocks FSM event to the blockchain service.
+// CatchUpBlocks requests automatic catchup from the blockchain authority.
+// Operator IDLE is refused; explicit operator resume uses SendFSMEvent(CATCHUPBLOCKS).
 // This method initiates a blockchain synchronization process by transitioning the
 // blockchain service's finite state machine to the CATCHING_BLOCKS state, which
 // triggers the service to synchronize with the network and catch up on any
@@ -2027,8 +2032,9 @@ func (c *Client) Run(ctx context.Context, source string) error {
 // - Maintaining consensus with the BSV Blockchain network
 // - Coordinating synchronization across distributed Teranode components
 //
-// Every call reaches the blockchain authority, which serializes transitions with
-// operator STOP. Use AdmitCatchupWork for state-neutral work admission.
+// The server checks authoritative state and reconciles uncertain persistence
+// before acknowledging an already-current target state. Use AdmitCatchupWork
+// for state-neutral admission; confirmed operator IDLE returns ErrCatchupPaused.
 //
 // This operation is typically used during:
 // - Service startup when the local chain may be behind
@@ -2088,9 +2094,8 @@ func (c *Client) ReportPeerFailure(ctx context.Context, hash *chainhash.Hash, pe
 // causing it to transition to the IDLE state where it stops active processing
 // and waits for further commands.
 //
-// The method first checks if the FSM is already in the IDLE state to avoid
-// unnecessary transitions. If the current state is already IDLE, it returns
-// immediately without sending the event.
+// The server checks authoritative state and reconciles uncertain persistence
+// before acknowledging an already-current target state.
 //
 // The IDLE state is used for:
 // - Graceful shutdown preparation
@@ -2108,7 +2113,6 @@ func (c *Client) ReportPeerFailure(ctx context.Context, hash *chainhash.Hash, pe
 // Returns:
 //   - error: Any error encountered during the FSM event transmission
 func (c *Client) Idle(ctx context.Context) error {
-	// A cached IDLE may be synthetic or stale; only the authority can confirm STOP.
 	c.logger.Infof("[Blockchain Client] Sending IDLE event")
 
 	_, err := c.client.Idle(ctx, &emptypb.Empty{})
