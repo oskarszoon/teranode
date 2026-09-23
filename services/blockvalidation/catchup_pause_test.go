@@ -61,7 +61,7 @@ func TestCatchupAdmission_RetryAndCancel(t *testing.T) {
 			attempts++
 			switch attempts {
 			case 1:
-				return errors.NewStateError("paused")
+				return blockchain.ErrCatchupPaused
 			case 2:
 				return errors.NewServiceError("transport unavailable")
 			default:
@@ -88,7 +88,7 @@ func TestCatchupAdmission_RetryAndCancel(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		attempts := 0
-		err := waitForCatchupAdmission(ctx, func(context.Context) error { attempts++; cancel(); return errors.NewStateError("paused") }, time.Second, time.Hour)
+		err := waitForCatchupAdmission(ctx, func(context.Context) error { attempts++; cancel(); return blockchain.ErrCatchupPaused }, time.Second, time.Hour)
 		require.ErrorIs(t, err, context.Canceled)
 		require.Equal(t, 1, attempts)
 	})
@@ -115,7 +115,17 @@ func (c *catchupAdmissionAuthority) CatchUpBlocks(ctx context.Context) error {
 		}
 	}
 	if err != nil {
-		return errors.UnwrapGRPC(err)
+		decoded := errors.UnwrapGRPC(err)
+		if errors.Is(decoded, errors.ErrStateError) {
+			state, readErr := c.server.ReadFSMState(ctx, &emptypb.Empty{})
+			if readErr != nil {
+				return readErr
+			}
+			if state.State == blockchain.FSMStateIDLE {
+				return blockchain.ErrCatchupPaused
+			}
+		}
+		return decoded
 	}
 	return nil
 }
@@ -379,16 +389,16 @@ func TestCatchupAdmission_EarlyExitPreservesRunning(t *testing.T) {
 }
 
 func (c *catchupAdmissionAuthority) AdmitCatchupWork(ctx context.Context) error {
-	state, err := c.server.GetFSMCurrentState(ctx, &emptypb.Empty{})
-	if err != nil {
-		return errors.UnwrapGRPC(err)
-	}
-	if state.State != blockchain.FSMStateRUNNING && state.State != blockchain.FSMStateCATCHINGBLOCKS {
+	state, err := c.server.ReadFSMState(ctx, &emptypb.Empty{})
+	if err != nil || state.State == blockchain.FSMStateIDLE {
 		select {
 		case c.denied <- struct{}{}:
 		default:
 		}
-		return errors.NewStateError("catchup admission is paused")
+		if err != nil {
+			return err
+		}
+		return blockchain.ErrCatchupPaused
 	}
 	return nil
 }

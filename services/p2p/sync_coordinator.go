@@ -47,9 +47,9 @@ type SyncCoordinator struct {
 	// clear a peer another path just activated. decisionMu is always acquired
 	// before mu and never while holding mu; mu remains the field-level lock.
 	decisionMu sync.Mutex
-	// syncSuspended is protected by decisionMu. It is a temporary scheduling
-	// observation, not durable operator pause state: cached IDLE may be synthetic.
-	syncSuspended bool
+	// syncPausedAt is protected by decisionMu. Only an authoritative IDLE
+	// observation starts a pause; unavailable reads never reset the stall clock.
+	syncPausedAt time.Time
 
 	// Current sync state. currentSyncPeer holds the canonical libp2p ID string.
 	mu                         sync.RWMutex
@@ -785,36 +785,54 @@ func (sc *SyncCoordinator) monitorFSM(ctx context.Context) {
 	}
 }
 
-// activeSyncStateLocked conservatively suspends decisions while the observed FSM
-// is IDLE or unavailable. It never changes the FSM or discards an active peer.
-// On observed resume the peer gets a fresh progress interval, so time spent
-// paused cannot be counted as a delivery failure. Requires decisionMu.
+// activeSyncStateLocked admits decisions only from a ready, persistence-confirmed
+// FSM snapshot. Cached IDLE may be synthetic after notification failure, so it
+// cannot establish an operator pause. Unknown authority defers admission without
+// forgiving existing lack of progress. Requires decisionMu.
 func (sc *SyncCoordinator) activeSyncStateLocked() *blockchain_api.FSMStateType {
 	if sc.blockchainClient == nil {
-		sc.syncSuspended = true
 		return nil
 	}
 
 	ctx, cancel := sc.boundedRPCContext()
 	defer cancel()
-	state, err := sc.blockchainClient.GetFSMCurrentState(ctx)
+	state, err := sc.blockchainClient.ReadFSMState(ctx)
 	if err != nil {
-		sc.warnfUnlessStopping("[SyncCoordinator] Failed to get FSM state: %v", err)
+		sc.warnfUnlessStopping("[SyncCoordinator] Failed to read authoritative FSM state: %v", err)
+		return nil
 	}
-	if err != nil || state == nil || (*state != blockchain_api.FSMStateType_RUNNING && *state != blockchain_api.FSMStateType_CATCHINGBLOCKS) {
-		sc.syncSuspended = true
+	if state == blockchain.FSMStateIDLE {
+		if sc.syncPausedAt.IsZero() {
+			sc.syncPausedAt = time.Now()
+		}
+		return nil
+	}
+	if state != blockchain.FSMStateRUNNING && state != blockchain.FSMStateCATCHINGBLOCKS {
 		return nil
 	}
 
-	if sc.syncSuspended {
+	if !sc.syncPausedAt.IsZero() {
+		now := time.Now()
 		sc.mu.Lock()
 		if sc.currentSyncPeer != "" {
-			sc.lastSyncProgressTime = time.Now()
+			lastProgress := sc.lastSyncProgressTime
+			if lastProgress.IsZero() {
+				lastProgress = sc.syncStartTime
+			}
+			if !lastProgress.IsZero() {
+				// Work already admitted before STOP can finish during the pause.
+				// Exclude only the paused time since the most recent progress.
+				pauseStart := sc.syncPausedAt
+				if lastProgress.After(pauseStart) {
+					pauseStart = lastProgress
+				}
+				sc.lastSyncProgressTime = lastProgress.Add(now.Sub(pauseStart))
+			}
 		}
 		sc.mu.Unlock()
-		sc.syncSuspended = false
+		sc.syncPausedAt = time.Time{}
 	}
-	return state
+	return &state
 }
 
 // checkFSMState checks FSM state and triggers sync if needed. It holds
@@ -1150,11 +1168,6 @@ func (sc *SyncCoordinator) evaluateSyncPeer() {
 	sc.decisionMu.Lock()
 	defer sc.decisionMu.Unlock()
 
-	if sc.activeSyncStateLocked() == nil {
-		return
-	}
-
-	now := time.Now()
 	sc.mu.RLock()
 	currentPeer := sc.currentSyncPeer
 	sc.mu.RUnlock()
@@ -1183,6 +1196,14 @@ func (sc *SyncCoordinator) evaluateSyncPeer() {
 		_ = sc.triggerSyncLocked()
 		return
 	}
+
+	// Removing a vanished or failed peer is safe even while authority is
+	// unavailable or the operator has paused. Only replacement and progress
+	// evaluation require a confirmed active state.
+	if sc.activeSyncStateLocked() == nil {
+		return
+	}
+	now := time.Now()
 
 	_, localChainWork, localWorkOK := sc.getLocalTipWorkSafe()
 	if localWorkOK {

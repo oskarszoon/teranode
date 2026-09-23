@@ -2047,22 +2047,21 @@ func (c *Client) CatchUpBlocks(ctx context.Context) error {
 	c.logger.Debugf("[Blockchain Client] Requesting CATCHINGBLOCKS transition")
 
 	_, err := c.client.CatchUpBlocks(ctx, &emptypb.Empty{})
-	if err != nil {
-		return errors.UnwrapGRPC(err)
-	}
-
-	return nil
+	return catchupTransitionError(ctx, err, c.ReadFSMState)
 }
 
-// AdmitCatchupWork obtains a state-neutral snapshot serialized with STOP at the
-// authority. Bypass fmsState: either IDLE or CATCHINGBLOCKS there can be stale.
+// AdmitCatchupWork obtains a ready, persistence-confirmed state snapshot
+// serialized with STOP. Subscription cache entries cannot authorize work.
 func (c *Client) AdmitCatchupWork(ctx context.Context) error {
-	state, err := c.client.GetFSMCurrentState(ctx, &emptypb.Empty{})
+	state, err := c.ReadFSMState(ctx)
 	if err != nil {
-		return errors.UnwrapGRPC(err)
+		return err
 	}
-	if state == nil || (state.State != FSMStateRUNNING && state.State != FSMStateCATCHINGBLOCKS) {
-		return errors.NewStateError("catchup work is not admitted while the blockchain service is idle or unavailable")
+	if state == FSMStateIDLE {
+		return ErrCatchupPaused
+	}
+	if state != FSMStateRUNNING && state != FSMStateCATCHINGBLOCKS {
+		return errors.NewStateError("catchup work is not admitted in state %s", state)
 	}
 	return nil
 }

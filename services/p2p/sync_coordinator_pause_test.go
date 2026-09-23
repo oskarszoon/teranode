@@ -21,11 +21,26 @@ import (
 // while keeping the actual SQLite chain reads and real peer registry.
 type syncCoordinatorStateClient struct {
 	blockchain.ClientI
-	state func(context.Context) (*blockchain_api.FSMStateType, error)
+	state       func(context.Context) (*blockchain_api.FSMStateType, error)
+	cachedState *blockchain_api.FSMStateType
 }
 
 func (c *syncCoordinatorStateClient) GetFSMCurrentState(ctx context.Context) (*blockchain_api.FSMStateType, error) {
+	if c.cachedState != nil {
+		return c.cachedState, nil
+	}
 	return c.state(ctx)
+}
+
+func (c *syncCoordinatorStateClient) ReadFSMState(ctx context.Context) (blockchain.FSMStateType, error) {
+	state, err := c.state(ctx)
+	if err != nil {
+		return blockchain.FSMStateIDLE, err
+	}
+	if state == nil {
+		return blockchain.FSMStateIDLE, errors.NewServiceError("FSM state unavailable")
+	}
+	return *state, nil
 }
 
 func (c *syncCoordinatorStateClient) GetBestBlockHeader(ctx context.Context) (*model.BlockHeader, *model.BlockHeaderMeta, error) {
@@ -60,12 +75,12 @@ func newPauseTestSyncCoordinator(t *testing.T) (*SyncCoordinator, *blockchain.Ce
 	return sc, reg, store
 }
 
-func TestSyncCoordinator_PausePreservesPeerAndResetsStallClockOnResume(t *testing.T) {
+func TestSyncCoordinator_PausePreservesPeerAndStallAgeOnResume(t *testing.T) {
 	for _, path := range []string{"evaluation", "fsm monitor"} {
 		t.Run(path, func(t *testing.T) {
 			sc, reg, store := newPauseTestSyncCoordinator(t)
 			sc.currentSyncPeer = "current"
-			sc.lastSyncProgressTime = time.Now().Add(-2 * defaultSyncPeerNoProgressLimit)
+			sc.lastSyncProgressTime = time.Now().Add(-time.Minute)
 			require.NoError(t, store.SetFSMState(context.Background(), "IDLE"))
 			check := sc.evaluateSyncPeer
 			if path == "fsm monitor" {
@@ -81,10 +96,11 @@ func TestSyncCoordinator_PausePreservesPeerAndResetsStallClockOnResume(t *testin
 			require.NoError(t, store.SetFSMState(context.Background(), "CATCHINGBLOCKS"))
 			check()
 			sc.evaluateSyncPeer()
-			require.Equal(t, "current", sc.GetCurrentSyncPeer(), "resume must give the preserved peer a fresh progress interval")
+			require.Equal(t, "current", sc.GetCurrentSyncPeer(), "resume must preserve the peer and its pre-pause progress age")
 			_, age, timedOut := sc.syncPeerNoProgressTimedOut(time.Now())
 			require.False(t, timedOut)
-			require.Less(t, age, time.Second)
+			require.GreaterOrEqual(t, age, time.Minute)
+			require.Less(t, age, time.Minute+time.Second)
 
 			sc.lastSyncProgressTime = time.Now().Add(-2 * defaultSyncPeerNoProgressLimit)
 			sc.evaluateSyncPeer()
@@ -169,6 +185,99 @@ func TestSyncCoordinator_PausedTriggersDoNotActivatePeer(t *testing.T) {
 			state, err := store.GetFSMState(context.Background())
 			require.NoError(t, err)
 			require.Equal(t, "IDLE", state, "coordinator must never resume the FSM")
+		})
+	}
+}
+
+func TestSyncCoordinator_StaleCachedIdleDoesNotPreventReplacement(t *testing.T) {
+	for _, path := range []string{"trigger", "evaluation", "catchup failure"} {
+		t.Run(path, func(t *testing.T) {
+			sc, reg, store := newPauseTestSyncCoordinator(t)
+			require.NoError(t, store.SetFSMState(context.Background(), "RUNNING"))
+			idle := blockchain_api.FSMStateType_IDLE
+			sc.blockchainClient.(*syncCoordinatorStateClient).cachedState = &idle
+			switch path {
+			case "trigger":
+				require.NoError(t, sc.TriggerSync())
+			case "evaluation":
+				sc.currentSyncPeer = "removed"
+				sc.evaluateSyncPeer()
+			case "catchup failure":
+				reg.Register(&blockchain.PeerInfo{ID: "failed"})
+				sc.currentSyncPeer = "failed"
+				sc.HandleCatchupFailure("request failed")
+			}
+			require.Equal(t, "current", sc.GetCurrentSyncPeer())
+		})
+	}
+}
+
+func TestSyncCoordinator_TransientFSMFailuresDoNotResetStallClock(t *testing.T) {
+	sc, reg, store := newPauseTestSyncCoordinator(t)
+	require.NoError(t, store.SetFSMState(context.Background(), "RUNNING"))
+	sc.currentSyncPeer = "current"
+	lastProgress := time.Now().Add(-2 * defaultSyncPeerNoProgressLimit)
+	sc.lastSyncProgressTime = lastProgress
+	client := sc.blockchainClient.(*syncCoordinatorStateClient)
+	readState := client.state
+	for range 3 {
+		client.state = func(context.Context) (*blockchain_api.FSMStateType, error) {
+			return nil, errors.NewServiceError("temporary read failure")
+		}
+		sc.evaluateSyncPeer()
+		client.state = readState
+		sc.decisionMu.Lock()
+		require.NotNil(t, sc.activeSyncStateLocked())
+		sc.decisionMu.Unlock()
+		require.Equal(t, lastProgress, sc.lastSyncProgressTime)
+	}
+	sc.evaluateSyncPeer()
+	require.Empty(t, sc.GetCurrentSyncPeer())
+	info, ok := reg.Get("current")
+	require.True(t, ok)
+	require.Equal(t, int32(1), info.SyncAttemptCount)
+}
+
+func TestSyncCoordinator_UnavailableFSMStillClearsMissingPeer(t *testing.T) {
+	sc, _, _ := newPauseTestSyncCoordinator(t)
+	sc.currentSyncPeer = "removed"
+	sc.blockchainClient.(*syncCoordinatorStateClient).state = func(context.Context) (*blockchain_api.FSMStateType, error) {
+		return nil, errors.NewServiceError("blockchain restarting")
+	}
+	sc.evaluateSyncPeer()
+	require.Empty(t, sc.GetCurrentSyncPeer())
+}
+
+func TestSyncCoordinator_PauseExcludesOnlyPausedProgressTime(t *testing.T) {
+	for _, scenario := range []string{"prior progress", "initial deadline", "progress during pause"} {
+		t.Run(scenario, func(t *testing.T) {
+			sc, _, store := newPauseTestSyncCoordinator(t)
+			sc.currentSyncPeer = "current"
+			require.NoError(t, store.SetFSMState(context.Background(), "IDLE"))
+			sc.decisionMu.Lock()
+			defer sc.decisionMu.Unlock()
+			require.Nil(t, sc.activeSyncStateLocked())
+			// Advance a long confirmed pause without sleeping. The peer had
+			// already used one minute of its delivery budget before STOP.
+			sc.syncPausedAt = time.Now().Add(-2 * defaultSyncPeerNoProgressLimit)
+			priorProgress := sc.syncPausedAt.Add(-time.Minute)
+			wantAge := time.Minute
+			switch scenario {
+			case "prior progress":
+				sc.lastSyncProgressTime = priorProgress
+			case "initial deadline":
+				sc.syncStartTime = priorProgress
+			case "progress during pause":
+				sc.lastSyncProgressTime = sc.syncPausedAt.Add(time.Minute)
+				wantAge = 0
+			}
+			require.NoError(t, store.SetFSMState(context.Background(), "RUNNING"))
+			require.NotNil(t, sc.activeSyncStateLocked())
+			_, age, timedOut := sc.syncPeerNoProgressTimedOut(time.Now())
+			require.False(t, timedOut)
+			require.GreaterOrEqual(t, age, wantAge)
+			require.Less(t, age, wantAge+time.Second)
+			require.True(t, sc.syncPausedAt.IsZero())
 		})
 	}
 }

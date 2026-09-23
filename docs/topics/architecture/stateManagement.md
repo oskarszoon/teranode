@@ -114,15 +114,21 @@ operator `CATCHUPBLOCKS` event:
 teranode-cli setfsmstate --fsmstate catchingblocks
 ```
 
-Each catchup work unit uses an uncached active-state snapshot taken by the
-blockchain authority under the same transition lock as STOP. The native client
-method `AdmitCatchupWork` obtains this snapshot through the existing
-`GetFSMCurrentState` RPC without changing the operating state. A unit admitted
-before STOP may finish, including its
-asynchronous writes; later units wait. Paused workers retain pending items and
-progress markers. Synthetic client-cache IDLE from heartbeat/subscription failure
-cannot authorize or cancel work. After restart, catchup is reconstructed from
-durable chain progress rather than replaying an exact in-memory queue.
+Each catchup work unit uses a ready, persistence-confirmed snapshot from the
+blockchain authority, serialized with STOP. The native `AdmitCatchupWork` method
+uses `ReadFSMState` without changing the operating state. Busy, unready or
+persistence-uncertain authority returns unavailable; it does not fabricate IDLE.
+A unit admitted before STOP may finish, including asynchronous writes. Later
+units wait while IDLE is confirmed, retaining pending items and progress markers.
+Transient admission failures retry at most five times; permanent errors return
+immediately. These local failures are not evidence of peer misbehavior.
+
+Synthetic client-cache IDLE from heartbeat/subscription failure cannot authorize
+or cancel work. Peer selection also reads authority directly: a confirmed pause
+freezes elapsed stall time, while transient read errors do not reset that clock.
+Disconnected or failed peers can still be removed while authority is unavailable.
+After restart, catchup is reconstructed from durable chain progress rather than
+replaying an exact in-memory queue.
 
 IDLE does not stop every service or establish live-store quiescence. Background
 recovery and already admitted work may continue. Rewind requires verified
