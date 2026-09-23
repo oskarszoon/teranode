@@ -320,6 +320,8 @@ func newRelayTestServerPeer(t *testing.T, onInv func(*peer.Peer, *wire.MsgInv)) 
 	t.Cleanup(func() {
 		localPeer.DisconnectWithInfo("test cleanup")
 		remotePeer.DisconnectWithInfo("test cleanup")
+		localPeer.WaitForDisconnect()
+		remotePeer.WaitForDisconnect()
 	})
 
 	// The inv is dropped by the peer's queue handler until the version handshake
