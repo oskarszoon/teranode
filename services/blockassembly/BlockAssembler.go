@@ -1680,7 +1680,7 @@ func (b *BlockAssembler) executeResetRequest(ctx context.Context, fullReset bool
 	}
 	if fullReset {
 		if err := b.fixUnminedSinceInconsistencies(ctx); err != nil {
-			return errors.NewProcessingError("error fixing unmined_since inconsistencies", err)
+			b.logger.Warnf("[BlockAssembler] error fixing unmined_since inconsistencies; continuing template reset: %v", err)
 		}
 	}
 	return b.reset(ctx, validateInputs)
@@ -1720,6 +1720,9 @@ func (b *BlockAssembler) GetMiningCandidate(ctx context.Context) (*model.MiningC
 		}
 
 		candidate, trees, candidateErr := b.generateEmptyBlockCandidate(ctx, bestBlockHeader, bestBlockMeta.Height)
+		if b.recoveryMiningBlocked.Load() || b.subtreeProcessor.RecoveryPending() {
+			return nil, nil, nil, errors.NewProcessingError("mining is waiting for unmined recovery and chain reconciliation")
+		}
 		return candidate, trees, nil, candidateErr
 	}
 
@@ -1763,8 +1766,17 @@ func (b *BlockAssembler) GetMiningCandidate(ctx context.Context) (*model.MiningC
 				return nil, nil, nil, errors.NewProcessingError("mining is waiting for unmined recovery and chain reconciliation")
 			}
 			candidate, trees, candidateErr := b.generateEmptyBlockCandidate(ctx, baBestBlockHeader, baBestBlockHeight)
+			if b.recoveryMiningBlocked.Load() || b.subtreeProcessor.RecoveryPending() {
+				return nil, nil, nil, errors.NewProcessingError("mining is waiting for unmined recovery and chain reconciliation")
+			}
 			return candidate, trees, nil, candidateErr
 		}
+	}
+
+	// Snapshot acquisition can wait behind recovery on the dispatcher. A newly
+	// published snapshot must remain gated until BA reconciles its chain anchor.
+	if b.recoveryMiningBlocked.Load() || b.subtreeProcessor.RecoveryPending() {
+		return nil, nil, nil, errors.NewProcessingError("mining is waiting for unmined recovery and chain reconciliation")
 	}
 
 	// Apply max block size limit if configured
@@ -1869,6 +1881,11 @@ func (b *BlockAssembler) GetMiningCandidate(ctx context.Context) (*model.MiningC
 
 	b.logger.Debugf("[GetMiningCandidate] Returning mining candidate: height=%d, fees=%d, subsidy=%d, txCount=%d, subtreeCount=%d", candidate.Height, totalFees, blockSubsidy, txCount, subtreeCountUint32)
 
+	// Chain/time reads above may also span a recovery pass. Reject before
+	// transferring ownership so the deferred cleanup releases any mmap lease.
+	if b.recoveryMiningBlocked.Load() || b.subtreeProcessor.RecoveryPending() {
+		return nil, nil, nil, errors.NewProcessingError("mining is waiting for unmined recovery and chain reconciliation")
+	}
 	transferred = true
 	return candidate, subtrees, lease, nil
 }

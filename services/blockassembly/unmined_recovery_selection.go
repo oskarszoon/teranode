@@ -18,6 +18,7 @@ const (
 	recoveryIncluded
 	recoveryMined
 	recoveryExcluded
+	recoveryDeferred
 )
 
 type recoverySelectionEntry struct {
@@ -56,7 +57,20 @@ func (b *BlockAssembler) prepareUnminedRecovery(ctx context.Context, hashes []ch
 	if err != nil {
 		return nil, err
 	}
-	return orderRecoveryTransactions(ctx, hashes, cache)
+	selected, err := orderRecoveryTransactions(ctx, hashes, cache)
+	if err != nil {
+		return nil, err
+	}
+	// Success authorizes replacing the template and discarding the captured
+	// queue prefix. Unknown eligibility must never relinquish responsibility
+	// for an already accepted transaction, including a descendant of a missing
+	// or incomplete ancestor. Retain the old state and retry fresh metadata.
+	for _, hash := range hashes {
+		if cache[hash].state == recoveryDeferred && accepted != nil && accepted(hash) {
+			return nil, errors.NewProcessingError("unmined recovery deferred: accepted transaction %s has incomplete metadata or ancestry", hash.String())
+		}
+	}
+	return selected, nil
 }
 
 // readRecoveryGraph hydrates candidates and ancestor frontiers with bounded
@@ -78,7 +92,7 @@ func (b *BlockAssembler) readRecoveryGraph(ctx context.Context, hashes []chainha
 		batchSize = 1000
 	}
 	// Hydrate initial candidates and newly discovered ancestor frontiers in
-	// batches. Missing records are exclusions; backend failures abort the
+	// batches. Missing records defer eligibility; backend failures abort the
 	// entire selection before any template/queue mutation.
 	for len(frontier) > 0 {
 		pending := frontier
@@ -123,6 +137,8 @@ func (b *BlockAssembler) readRecoveryGraph(ctx context.Context, hashes []chainha
 func classifyRecoveryMetadata(item *utxo.UnresolvedMetaData, entry *recoverySelectionEntry, chainIDs map[uint32]struct{}, accepted func(chainhash.Hash) bool) error {
 	if item.Err != nil {
 		if errors.Is(item.Err, errors.ErrTxNotFound) {
+			// Absence is not evidence of membership in the anchored chain.
+			entry.state = recoveryDeferred
 			return nil
 		}
 		return errors.NewProcessingError("unmined recovery failed to read transaction %s", item.Hash.String(), item.Err)
@@ -131,7 +147,11 @@ func classifyRecoveryMetadata(item *utxo.UnresolvedMetaData, entry *recoverySele
 	if data == nil {
 		return errors.NewProcessingError("unmined recovery received no metadata for %s", item.Hash.String())
 	}
-	if data.Creating || data.Conflicting {
+	if data.Conflicting {
+		return nil
+	}
+	if data.Creating {
+		entry.state = recoveryDeferred
 		return nil
 	}
 	for _, id := range data.BlockIDs {
@@ -141,7 +161,11 @@ func classifyRecoveryMetadata(item *utxo.UnresolvedMetaData, entry *recoverySele
 		}
 	}
 	wasAccepted := accepted != nil && accepted(item.Hash)
-	if data.IsCoinbase || (data.Locked && !wasAccepted) || (data.UnminedSince == 0 && !wasAccepted) {
+	if data.IsCoinbase {
+		return nil
+	}
+	if (data.Locked || data.UnminedSince == 0) && !wasAccepted {
+		entry.state = recoveryDeferred
 		return nil
 	}
 	entry.tx = &utxo.UnminedTransaction{
@@ -187,6 +211,9 @@ func orderRecoveryTransactions(ctx context.Context, hashes []chainhash.Hash, cac
 				stack = append(stack, recoverySelectionFrame{hash: parentHash})
 			case recoveryIncluded, recoveryMined:
 				frame.nextParent++
+			case recoveryDeferred:
+				entry.state = recoveryDeferred
+				stack = stack[:len(stack)-1]
 			case recoveryVisiting, recoveryExcluded:
 				entry.state = recoveryExcluded
 				stack = stack[:len(stack)-1]

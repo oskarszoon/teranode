@@ -51,6 +51,15 @@ func (b *BlockAssembler) recoverUnminedTransactions(ctx context.Context) (bool, 
 	if b.unminedRecoveryInterval() == 0 && !b.subtreeProcessor.RecoveryPending() && !b.recoveryMiningBlocked.Load() {
 		return false, nil
 	}
+	// Bound the serialized pass, including the dispatcher's storage wait and
+	// reconstruction. Cancellation before mutation preserves the old template;
+	// cancellation during reconstruction retains the read-only repair latch.
+	timeout := b.settings.BlockAssembly.UnminedRecoveryTimeout
+	if timeout <= 0 {
+		timeout = 5 * time.Minute
+	}
+	ctx, stopRecovery := context.WithTimeout(ctx, timeout)
+	defer stopRecovery()
 	// State and tip reads must not hold the assembly listener indefinitely.
 	readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	state, err := b.blockchainClient.ReadFSMState(readCtx)
@@ -62,10 +71,16 @@ func (b *BlockAssembler) recoverUnminedTransactions(ctx context.Context) (bool, 
 		cancel()
 		return false, nil
 	}
-	// IDLE/catchup need no mined-flag wait. RUNNING still waits before reading the tip.
-	if err := b.subtreeProcessor.WaitForPendingBlocks(readCtx); err != nil {
+	// Periodic recovery defers quietly while mined flags are in flight. Unlike
+	// startup/reset, it must not wait here and stall the assembly listener.
+	pending, err := b.blockchainClient.GetBlocksMinedNotSet(readCtx)
+	if err != nil {
 		cancel()
 		return false, err
+	}
+	if len(pending) != 0 {
+		cancel()
+		return false, nil
 	}
 	bestHeader, bestMeta, err := b.blockchainClient.GetBestBlockHeader(readCtx)
 	cancel()
@@ -90,7 +105,7 @@ func (b *BlockAssembler) recoverUnminedTransactions(ctx context.Context) (bool, 
 	if err != nil {
 		return false, err
 	}
-	wasBlocked := b.recoveryMiningBlocked.Swap(true)
+	wasBlocked := b.recoveryMiningBlocked.Load()
 	err = b.subtreeProcessor.RecoverUnmined(ctx, header, hashes,
 		func(ctx context.Context, candidates []chainhash.Hash, accepted func(chainhash.Hash) bool) ([]*utxo.UnminedTransaction, error) {
 			// The index scan may be long. Recheck authority and tip before the
@@ -113,7 +128,15 @@ func (b *BlockAssembler) recoverUnminedTransactions(ctx context.Context) (bool, 
 				b.triggerReconcile()
 				return nil, errors.NewProcessingError("unmined recovery deferred because the chain tip changed")
 			}
-			return b.prepareUnminedRecovery(ctx, candidates, accepted)
+			selected, err := b.prepareUnminedRecovery(ctx, candidates, accepted)
+			if err != nil {
+				return nil, err
+			}
+			// Preserve usable mining work throughout read-only selection. The
+			// processor owns the mutation gate; this additional gate spans its
+			// publication until the assembly anchor has been rechecked below.
+			b.recoveryMiningBlocked.Store(true)
+			return selected, nil
 		})
 	if err != nil {
 		if !wasBlocked && !b.subtreeProcessor.RecoveryPending() {
@@ -140,7 +163,19 @@ func (b *BlockAssembler) recoverUnminedTransactions(ctx context.Context) (bool, 
 // metadata on the dispatcher, together with queued and already assembled work.
 // In particular, startup's unlock/cleanup behavior is never used live.
 func (b *BlockAssembler) scanUnminedRecoveryHashes(ctx context.Context) (hashes []chainhash.Hash, resultErr error) {
-	iterator, err := b.utxoStore.GetUnminedTxIterator()
+	var iterator utxo.UnminedTxIterator
+	var err error
+	if store, ok := b.utxoStore.(interface {
+		GetUnminedTxIteratorContext(context.Context) (utxo.UnminedTxIterator, error)
+	}); ok {
+		// SQL must bind the initial query and Rows.Next to this deadline too.
+		iterator, err = store.GetUnminedTxIteratorContext(ctx)
+	} else {
+		// Aerospike observes ctx in Next; its context-free configuration lookup
+		// retains the client info timeout. Other legacy/custom constructors
+		// must also provide their own bound until they support this API.
+		iterator, err = b.utxoStore.GetUnminedTxIterator()
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -157,16 +192,20 @@ func (b *BlockAssembler) scanUnminedRecoveryHashes(ctx context.Context) (hashes 
 		if err != nil {
 			return nil, err
 		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if len(batch) == 0 {
 			return hashes, iterator.Err()
 		}
 		for _, tx := range batch {
+			if tx != nil && tx.Skip {
+				continue
+			}
 			if tx == nil || tx.Node == nil {
 				return nil, errors.NewProcessingError("unmined recovery encountered missing transaction metadata")
 			}
-			if !tx.Skip {
-				hashes = append(hashes, tx.Hash)
-			}
+			hashes = append(hashes, tx.Hash)
 		}
 	}
 }

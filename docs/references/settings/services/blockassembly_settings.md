@@ -11,10 +11,23 @@ assembly. Disabling recovery does not undo a partial rebuild or clear its mining
 gate: already-started repair must complete. Stored transactions missed by assembly
 may remain absent until a later restart/reset when automatic recovery is disabled.
 
+`blockassembly_unminedRecoveryTimeout` sets the deadline for each pass (default `5m`; nonpositive
+values use that default), including storage-reader waits and rebuilding. Increase
+it for large templates if repair repeatedly reaches its deadline. A timeout before
+replacement preserves the old template; a timeout during replacement keeps mining
+closed until repair succeeds. SQL index reads use the pass context; custom stores
+without context-aware iterator creation may still block while opening an iterator.
+Aerospike iterator setup retains its client info timeout; iteration observes the
+recovery context.
+
 Block assembly reads
 the unmined index and rebuilds eligible stored, queued and assembled transactions
 in parent-before-child order. It does not unlock transactions, alter their mined
-status or run the full-store consistency scan.
+status or run the full-store consistency scan. If a queued or already assembled
+transaction has incomplete metadata or an unproven ancestor, the entire pass
+defers before changing the template or queue. A missing parent record is not
+proof that the parent was mined; restore the missing metadata or investigate
+pruning rather than treating absence as confirmation.
 
 Recovery starts only with an authoritative RUNNING state and matching assembly
 and blockchain tips. Unavailable, unready or persistence-uncertain authority,
@@ -61,6 +74,7 @@ remain warnings. Cached or synthetic IDLE is never treated as authoritative RUNN
 |--------------------------------------|---------------|------------------|----------------------------------------------------|--------------------------------------------------------------------------------------|
 | Disabled                             | bool          | false            | blockassembly_disabled                             | Service-level kill switch, all operations return early                               |
 | GenerateTipWaitTimeout               | time.Duration | 90s              | blockassembly_generateTipWaitTimeout               | Bounds the generate readiness wait; effective bound is min(this, caller deadline)     |
+| UnminedRecoveryTimeout | time.Duration | 5m | blockassembly_unminedRecoveryTimeout | Per-pass time budget; nonpositive uses 5m |
 | UnminedRecoveryInterval              | time.Duration | 1h               | blockassembly_unminedRecoveryInterval              | Recovery delay while authoritatively RUNNING; zero uses 1h, negative disables new passes       |
 | GRPCAddress                          | string        | "localhost:8085" | blockassembly_grpcAddress                          | Client connection address                                                            |
 | GRPCListenAddress                    | string        | ":8085"          | blockassembly_grpcListenAddress                    | **CRITICAL** - gRPC server binding (service skipped if empty)                        |

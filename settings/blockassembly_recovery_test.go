@@ -28,3 +28,12 @@ func TestUnminedRecoveryIntervalLoadsConfiguration(t *testing.T) {
 		})
 	}
 }
+
+func TestUnminedRecoveryTimeoutLoadsConfiguration(t *testing.T) {
+	const testContext = "assembly_recovery_timeout_loader_test"
+	config := gocore.Config(testContext)
+	const key = "blockassembly_unminedRecoveryTimeout." + testContext
+	previous := config.Set(key, "12m")
+	t.Cleanup(func() { config.Set(key, previous) })
+	require.Equal(t, 12*time.Minute, NewSettings(testContext).BlockAssembly.UnminedRecoveryTimeout)
+}

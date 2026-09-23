@@ -23,10 +23,10 @@ func (b *Blockchain) ReadFSMState(ctx context.Context, _ *emptypb.Empty) (*block
 	if !b.subscriptionManagerReady.Load() {
 		return nil, status.Error(codes.Unavailable, "FSM authority is not ready")
 	}
-	if !b.fsmMu.TryLock() {
+	if !b.fsmMu.TryRLock() {
 		return nil, status.Error(codes.Unavailable, "FSM authority is busy")
 	}
-	defer b.fsmMu.Unlock()
+	defer b.fsmMu.RUnlock()
 	if err := ctx.Err(); err != nil {
 		return nil, status.FromContextError(err).Err()
 	}

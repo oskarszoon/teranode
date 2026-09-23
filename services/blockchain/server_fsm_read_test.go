@@ -3,6 +3,7 @@ package blockchain
 import (
 	"context"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -203,4 +204,32 @@ func TestLocalClientReadFSMState_DoesNotFabricateAuthority(t *testing.T) {
 	cancel()
 	_, err = client.ReadFSMState(ctx)
 	require.Equal(t, codes.Canceled, status.Code(err))
+}
+
+// Concurrent readers must not make a ready authority look unavailable.
+func TestReadFSMState_ConcurrentReaders(t *testing.T) {
+	b, _ := newFSMPersistenceTestBlockchain(t, FSMStateRUNNING)
+	b.subscriptionManagerReady.Store(true)
+	start := make(chan struct{})
+	results := make(chan error, 32)
+	var wg sync.WaitGroup
+	for range 32 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for range 100 {
+				if _, err := b.ReadFSMState(t.Context(), &emptypb.Empty{}); err != nil {
+					results <- err
+					return
+				}
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	for err := range results {
+		require.NoError(t, err)
+	}
 }

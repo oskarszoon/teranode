@@ -3,13 +3,16 @@ package blockassembly
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/bsv-blockchain/go-bt/v2"
 	"github.com/bsv-blockchain/go-bt/v2/bscript"
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
+	"github.com/bsv-blockchain/go-subtree"
 	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/model"
 	"github.com/bsv-blockchain/teranode/services/blockchain"
+	"github.com/bsv-blockchain/teranode/settings"
 	"github.com/bsv-blockchain/teranode/stores/blockchain/options"
 	"github.com/bsv-blockchain/teranode/stores/utxo"
 	"github.com/bsv-blockchain/teranode/stores/utxo/fields"
@@ -199,8 +202,8 @@ func TestPrepareUnminedRecoveryCreatingAndReadFailure(t *testing.T) {
 	fault := &recoverySelectionReadFault{Store: b.utxoStore, hash: chain[0], creating: true}
 	b.utxoStore = fault
 	selected, err := b.prepareUnminedRecovery(t.Context(), []chainhash.Hash{chain[1]}, func(chainhash.Hash) bool { return true })
-	require.NoError(t, err)
-	require.Empty(t, selected, "accepted handoff cannot override incomplete record creation")
+	require.Error(t, err)
+	require.Nil(t, selected, "accepted handoff with incomplete creation must preserve the previous assembly and queue")
 	fault.creating = false
 	fault.err = errors.NewStorageError("injected transient metadata failure")
 	selected, err = b.prepareUnminedRecovery(t.Context(), []chainhash.Hash{chain[1]}, nil)
@@ -226,4 +229,100 @@ func TestPrepareUnminedRecoveryMissingAndConflictingParents(t *testing.T) {
 	selected, err = b.prepareUnminedRecovery(t.Context(), []chainhash.Hash{chain[1]}, nil)
 	require.NoError(t, err)
 	require.Empty(t, selected)
+}
+
+// A successful selection authorizes discarding the captured queue prefix. A
+// transient exclusion must therefore fail the whole selection when that prefix
+// or the current template still owns the transaction (or a dependent child).
+func TestPrepareUnminedRecoveryPreservesAcceptedTransientTransactions(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		creating      bool
+		missing       bool
+		locked        bool
+		acceptedChild bool
+	}{
+		{name: "creating accepted transaction", creating: true},
+		{name: "missing accepted transaction", missing: true},
+		{name: "creating ancestor of accepted child", creating: true, acceptedChild: true},
+		{name: "missing ancestor of accepted child", missing: true, acceptedChild: true},
+		{name: "unacknowledged locked ancestor of accepted child", locked: true, acceptedChild: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, _ := newUnminedRecoveryTestAssembler(t, blockchain.FSMStateRUNNING)
+			chain := storeRecoverySelectionChain(t, b, 3)
+			if tc.locked {
+				require.NoError(t, b.utxoStore.SetLocked(t.Context(), []chainhash.Hash{chain[0]}, true))
+			}
+			fault := &recoverySelectionReadFault{Store: b.utxoStore, hash: chain[0], creating: tc.creating}
+			if tc.missing {
+				fault.err = errors.ErrTxNotFound
+			}
+			b.utxoStore = fault
+			owned := chain[0]
+			if tc.acceptedChild {
+				owned = chain[2]
+			}
+			accepted := func(hash chainhash.Hash) bool { return hash == owned }
+			selected, err := b.prepareUnminedRecovery(t.Context(), []chainhash.Hash{owned}, accepted)
+			require.Error(t, err, "must not authorize discarding an accepted transaction with unknown eligibility")
+			require.Nil(t, selected)
+			fault.creating, fault.err = false, nil
+			require.NoError(t, fault.Store.SetLocked(t.Context(), []chainhash.Hash{chain[0]}, false))
+			selected, err = b.prepareUnminedRecovery(t.Context(), []chainhash.Hash{owned}, accepted)
+			require.NoError(t, err)
+			if tc.acceptedChild {
+				require.Equal(t, chain, selectionHashes(selected))
+			} else {
+				require.Equal(t, chain[:1], selectionHashes(selected))
+			}
+		})
+	}
+}
+
+func TestPrepareUnminedRecoveryDefersUnacceptedCreatingTransactions(t *testing.T) {
+	b, _ := newUnminedRecoveryTestAssembler(t, blockchain.FSMStateRUNNING)
+	chain := storeRecoverySelectionChain(t, b, 2)
+	b.utxoStore = &recoverySelectionReadFault{Store: b.utxoStore, hash: chain[0], creating: true}
+	selected, err := b.prepareUnminedRecovery(t.Context(), []chainhash.Hash{chain[1]}, nil)
+	require.NoError(t, err)
+	require.Empty(t, selected, "unaccepted index rows do not prevent recovery of other eligible transactions")
+}
+
+func TestUnminedRecoveryTransientSelectionRetainsPublishedQueue(t *testing.T) {
+	for _, creating := range []bool{true, false} {
+		name := "missing"
+		if creating {
+			name = "creating"
+		}
+		t.Run(name, func(t *testing.T) {
+			b, _ := newUnminedRecoveryTestAssembler(t, blockchain.FSMStateRUNNING, func(s *settings.Settings) {
+				// Keep the real dispatcher from consuming the newly published batch
+				// before recovery captures it; recovery itself does not wait this window.
+				s.BlockAssembly.DoubleSpendWindow = time.Hour
+			})
+			chain := storeRecoverySelectionChain(t, b, 2)
+			rows, err := b.prepareUnminedRecovery(t.Context(), chain, nil)
+			require.NoError(t, err)
+			b.subtreeProcessor.AddBatch([]subtree.Node{*rows[0].Node, *rows[1].Node}, []*subtree.TxInpoints{rows[0].TxInpoints, rows[1].TxInpoints})
+			before := recoveryCandidateHashes(t, b)
+			require.Equal(t, int64(2), b.subtreeProcessor.QueueLength())
+			fault := &recoverySelectionReadFault{Store: b.utxoStore, hash: chain[0], creating: creating}
+			if !creating {
+				fault.err = errors.ErrTxNotFound
+			}
+			b.utxoStore = fault
+			header, _ := b.CurrentBlock()
+			err = b.subtreeProcessor.RecoverUnmined(t.Context(), header, nil, b.prepareUnminedRecovery)
+			require.Error(t, err)
+			require.Equal(t, int64(2), b.subtreeProcessor.QueueLength(), "published handoffs remain owned after incomplete metadata")
+			require.Equal(t, before, recoveryCandidateHashes(t, b), "read-only failure preserves the previous template")
+			require.False(t, b.subtreeProcessor.RecoveryPending(), "selection has not started destructive reconstruction")
+			fault.creating, fault.err = false, nil
+			require.NoError(t, b.subtreeProcessor.RecoverUnmined(t.Context(), header, nil, b.prepareUnminedRecovery))
+			require.Zero(t, b.subtreeProcessor.QueueLength())
+			after := recoveryCandidateHashes(t, b)
+			require.ElementsMatch(t, append([]chainhash.Hash{*subtree.CoinbasePlaceholderHash}, chain...), after, "retry must publish every accepted transaction exactly once")
+		})
+	}
 }

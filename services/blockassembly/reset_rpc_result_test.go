@@ -5,11 +5,14 @@ import (
 	"testing"
 	"time"
 
+	terrors "github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/services/blockassembly/blockassembly_api"
 	"github.com/bsv-blockchain/teranode/services/blockchain"
+	"github.com/bsv-blockchain/teranode/stores/utxo"
 	"github.com/bsv-blockchain/teranode/ulogger"
 	"github.com/ordishs/gocore"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/status"
 )
 
 func resetRPCs(ba *BlockAssembly) map[string]func(context.Context, *blockassembly_api.EmptyMessage) (*blockassembly_api.EmptyMessage, error) {
@@ -41,6 +44,7 @@ func TestResetRPCsReturnRecoveryPendingError(t *testing.T) {
 			response, err := rpc(callCtx, &blockassembly_api.EmptyMessage{})
 			require.ErrorContains(t, err, "read-only repair before reset")
 			require.Nil(t, response)
+			require.Equal(t, terrors.NewProcessingError("expected").Code(), terrors.UnwrapGRPC(status.Convert(err).Err()).Code())
 			require.True(t, assembler.subtreeProcessor.RecoveryPending())
 		})
 	}
@@ -214,4 +218,18 @@ func TestResetRPCAcceptedWorkSurvivesCallerCancellation(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("accepted reset did not complete")
 	}
+}
+
+// A failed consistency scan must not prevent the independent template reset.
+type failedConsistencyScanStore struct{ utxo.Store }
+
+func (s failedConsistencyScanStore) ScanInconsistentUnminedTxs() (utxo.ConsistencyScanIterator, error) {
+	return nil, terrors.NewStorageError("temporary consistency scan failure")
+}
+func TestFullResetContinuesAfterConsistencyScanFailure(t *testing.T) {
+	assembler, _ := newUnminedRecoveryTestAssembler(t, blockchain.FSMStateRUNNING)
+	hash := storeSuppressedRecoveryTransaction(t, assembler)
+	assembler.utxoStore = failedConsistencyScanStore{assembler.utxoStore}
+	require.NoError(t, assembler.executeResetRequest(t.Context(), true, false))
+	require.Contains(t, recoveryCandidateHashes(t, assembler), hash)
 }

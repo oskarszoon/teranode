@@ -118,7 +118,7 @@ type Blockchain struct {
 	kafkaChan                     chan *kafka.Message                  // Channel for Kafka messages
 	stats                         *gocore.Stat                         // Statistics tracking
 	finiteStateMachine            *fsm.FSM                             // FSM for blockchain state
-	fsmMu                         sync.Mutex                           // Serialises SendFSMEvent transitions (FSM read-modify-write + stateChangeTimestamp)
+	fsmMu                         sync.RWMutex                         // Serialises SendFSMEvent transitions (FSM read-modify-write + stateChangeTimestamp)
 	fsmPersistenceUncertain       bool                                 // Guarded by fsmMu; last write may have committed despite returning an error
 	stateChangeTimestamp          time.Time                            // Timestamp of last state change
 	AppCtx                        context.Context                      // Application context

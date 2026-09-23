@@ -2265,11 +2265,11 @@ func (ba *BlockAssembly) ResetBlockAssembly(ctx context.Context, _ *blockassembl
 	// Check if unmined transactions are still being loaded
 	if ba.blockAssembler.unminedTransactionsLoading.Load() {
 		ba.logger.Warnf("[ResetBlockAssembly] service not ready - unmined transactions are still being loaded")
-		return nil, errors.NewServiceError(errServiceNotReadyUnminedLoading)
+		return nil, errors.WrapGRPC(errors.NewServiceError(errServiceNotReadyUnminedLoading))
 	}
 
 	if err := ba.blockAssembler.resetWithOptionsContext(ctx, false, false); err != nil {
-		return nil, err
+		return nil, errors.WrapGRPC(err)
 	}
 
 	return &blockassembly_api.EmptyMessage{}, nil
@@ -2285,11 +2285,11 @@ func (ba *BlockAssembly) ResetBlockAssemblyFully(ctx context.Context, _ *blockas
 	// Check if unmined transactions are still being loaded
 	if ba.blockAssembler.unminedTransactionsLoading.Load() {
 		ba.logger.Warnf("[ResetBlockAssemblyFully] service not ready - unmined transactions are still being loaded")
-		return nil, errors.NewServiceError(errServiceNotReadyUnminedLoading)
+		return nil, errors.WrapGRPC(errors.NewServiceError(errServiceNotReadyUnminedLoading))
 	}
 
 	if err := ba.blockAssembler.resetWithOptionsContext(ctx, true, false); err != nil {
-		return nil, err
+		return nil, errors.WrapGRPC(err)
 	}
 
 	return &blockassembly_api.EmptyMessage{}, nil
@@ -2309,11 +2309,11 @@ func (ba *BlockAssembly) ResetBlockAssemblyValidateInputs(ctx context.Context, _
 
 	if ba.blockAssembler.unminedTransactionsLoading.Load() {
 		ba.logger.Warnf("[ResetBlockAssemblyValidateInputs] service not ready - unmined transactions are still being loaded")
-		return nil, errors.NewServiceError(errServiceNotReadyUnminedLoading)
+		return nil, errors.WrapGRPC(errors.NewServiceError(errServiceNotReadyUnminedLoading))
 	}
 
 	if err := ba.blockAssembler.resetWithOptionsContext(ctx, false, true); err != nil {
-		return nil, err
+		return nil, errors.WrapGRPC(err)
 	}
 
 	return &blockassembly_api.EmptyMessage{}, nil

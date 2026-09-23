@@ -269,6 +269,7 @@ func NewSettings(alternativeContext ...string) *Settings {
 			ProcessUTXOFiles:         getBool("blockpersister_processUTXOFiles", true, alternativeContext...),
 		},
 		BlockAssembly: BlockAssemblySettings{
+			UnminedRecoveryTimeout:               getDuration("blockassembly_unminedRecoveryTimeout", 5*time.Minute, alternativeContext...),
 			UnminedRecoveryInterval:              getDuration("blockassembly_unminedRecoveryInterval", DefaultUnminedRecoveryInterval, alternativeContext...),
 			Disabled:                             getBool("blockassembly_disabled", false, alternativeContext...),
 			GenerateTipWaitTimeout:               getDuration("blockassembly_generateTipWaitTimeout", DefaultGenerateTipWaitTimeout, alternativeContext...),

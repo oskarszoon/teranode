@@ -18,6 +18,7 @@ import (
 	blockchainstore "github.com/bsv-blockchain/teranode/stores/blockchain"
 	"github.com/bsv-blockchain/teranode/stores/blockchain/options"
 	"github.com/bsv-blockchain/teranode/stores/utxo"
+	"github.com/bsv-blockchain/teranode/stores/utxo/fields"
 	utxosql "github.com/bsv-blockchain/teranode/stores/utxo/sql"
 	"github.com/bsv-blockchain/teranode/ulogger"
 	"github.com/bsv-blockchain/teranode/util"
@@ -392,12 +393,8 @@ func TestUnminedRecoveryChecksStateBeforePendingBlocks(t *testing.T) {
 			defer cancel()
 			recovered, err := assembler.recoverUnminedTransactions(ctx)
 			require.False(t, recovered)
-			if state == blockchain.FSMStateRUNNING {
-				require.Error(t, err, "RUNNING must still wait for pending mined flags")
-			} else {
-				require.NoError(t, err, "IDLE and catchup must defer without waiting for mined flags")
-				require.NoError(t, ctx.Err())
-			}
+			require.NoError(t, err, "pending mined flags must quietly defer periodic recovery")
+			require.NoError(t, ctx.Err(), "a deferred pass must leave the listener available")
 		})
 	}
 }
@@ -433,4 +430,108 @@ func TestUnminedRecoveryDisabledKeepsPendingRepair(t *testing.T) {
 	require.False(t, processor.RecoveryPending())
 	require.Contains(t, recoveryCandidateHashes(t, assembler), txID)
 	require.Zero(t, assembler.nextUnminedRecoveryDelay(true))
+}
+
+// Add the exact Skip sentinel emitted by both stores ahead of a real SQLite scan.
+type recoverySkipIterator struct {
+	utxo.UnminedTxIterator
+	skipped bool
+}
+
+func (it *recoverySkipIterator) Next(ctx context.Context) ([]*utxo.UnminedTransaction, error) {
+	if !it.skipped {
+		it.skipped = true
+		return []*utxo.UnminedTransaction{{Skip: true}}, nil
+	}
+	return it.UnminedTxIterator.Next(ctx)
+}
+
+type recoverySkipStore struct{ utxo.Store }
+
+func (s *recoverySkipStore) GetUnminedTxIterator() (utxo.UnminedTxIterator, error) {
+	it, err := s.Store.GetUnminedTxIterator()
+	if err != nil {
+		return nil, err
+	}
+	return &recoverySkipIterator{UnminedTxIterator: it}, nil
+}
+func TestUnminedRecoverySkipsNilNodeSentinel(t *testing.T) {
+	assembler, _ := newUnminedRecoveryTestAssembler(t, blockchain.FSMStateRUNNING)
+	txID := storeSuppressedRecoveryTransaction(t, assembler)
+	assembler.utxoStore = &recoverySkipStore{Store: assembler.utxoStore}
+	recovered, err := assembler.recoverUnminedTransactions(t.Context())
+	require.NoError(t, err)
+	require.True(t, recovered)
+	require.Contains(t, recoveryCandidateHashes(t, assembler), txID)
+}
+
+// All metadata still comes from SQLite; observe mining while selection is reading it.
+type recoveryObservedMetadataStore struct {
+	utxo.Store
+	beforeRead func(context.Context)
+}
+
+func (s *recoveryObservedMetadataStore) BatchDecorate(ctx context.Context, rows []*utxo.UnresolvedMetaData, requested ...fields.FieldName) error {
+	s.beforeRead(ctx)
+	return s.Store.BatchDecorate(ctx, rows, requested...)
+}
+func TestUnminedRecoveryKeepsMiningDuringSelection(t *testing.T) {
+	assembler, _ := newUnminedRecoveryTestAssembler(t, blockchain.FSMStateRUNNING)
+	assembler.subtreeProcessor.SetCurrentItemsPerFile(2)
+	hashes := storeRecoverySelectionChain(t, assembler, 3)
+	recovered, err := assembler.recoverUnminedTransactions(t.Context())
+	require.NoError(t, err)
+	require.True(t, recovered)
+	require.Contains(t, recoveryCandidateHashes(t, assembler), hashes[0])
+	observations := make(chan error, 10)
+	assembler.utxoStore = &recoveryObservedMetadataStore{Store: assembler.utxoStore, beforeRead: func(ctx context.Context) {
+		_, _, lease, candidateErr := assembler.GetMiningCandidate(ctx)
+		lease.Release()
+		observations <- candidateErr
+	}}
+	recovered, err = assembler.recoverUnminedTransactions(t.Context())
+	require.NoError(t, err)
+	require.True(t, recovered)
+	close(observations)
+	require.NotEmpty(t, observations)
+	for candidateErr := range observations {
+		require.NoError(t, candidateErr, "read-only metadata selection must preserve usable mining work")
+	}
+}
+
+func TestUnminedRecoveryBoundsMetadataSelection(t *testing.T) {
+	assembler, _ := newUnminedRecoveryTestAssembler(t, blockchain.FSMStateRUNNING, func(s *settings.Settings) {
+		s.BlockAssembly.UnminedRecoveryTimeout = time.Second
+	})
+	txID := storeSuppressedRecoveryTransaction(t, assembler)
+	deadlineObserved := make(chan bool, 1)
+	var once sync.Once
+	original := assembler.utxoStore
+	assembler.utxoStore = &recoveryObservedMetadataStore{Store: original, beforeRead: func(ctx context.Context) {
+		once.Do(func() {
+			deadline, bounded := ctx.Deadline()
+			bounded = bounded && time.Until(deadline) <= 2*time.Second
+			deadlineObserved <- bounded
+			if bounded {
+				<-ctx.Done()
+			}
+		})
+	}}
+	recovered, err := assembler.recoverUnminedTransactions(t.Context())
+	select {
+	case bounded := <-deadlineObserved:
+		require.True(t, bounded, "periodic recovery must bound metadata and dispatcher waits without a caller deadline")
+	default:
+		t.Fatal("recovery did not reach metadata selection")
+	}
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.False(t, recovered)
+	require.False(t, assembler.subtreeProcessor.RecoveryPending(), "selection expiry must leave the published template intact")
+	require.False(t, assembler.recoveryMiningBlocked.Load())
+	require.NotContains(t, recoveryCandidateHashes(t, assembler), txID)
+	assembler.utxoStore = original
+	recovered, err = assembler.recoverUnminedTransactions(t.Context())
+	require.NoError(t, err)
+	require.True(t, recovered)
+	require.Contains(t, recoveryCandidateHashes(t, assembler), txID)
 }
