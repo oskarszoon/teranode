@@ -3935,6 +3935,7 @@ func (sm *SyncManager) kafkaBlocksFinalListener(ctx context.Context, kafkaURL *u
 
 		sm.logger.Infof("[kafkaBlocksFinalListener] received block final message from Kafka: %s, %s", hash, header.String())
 		sm.peerNotifier.RelayInventory(wire.NewInvVect(wire.InvTypeBlock, hash), wireBlockHeader)
+		sm.peerNotifier.BlockConnected()
 
 		return nil
 	}, &sm.settings.Kafka)
