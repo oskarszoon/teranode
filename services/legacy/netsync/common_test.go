@@ -214,6 +214,8 @@ func (mock *MockPeerNotifier) RelayInventory(invVect *wire.InvVect, data interfa
 	}
 }
 
+func (mock *MockPeerNotifier) BlockConnected() {}
+
 func (mock *MockPeerNotifier) TransactionConfirmed(tx *bsvutil.Tx) {
 	mock.transactionConfirmedChan <- &transactionConfirmedCall{tx: tx}
 }
