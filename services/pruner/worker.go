@@ -114,6 +114,11 @@ func (s *Server) isFSMReadyForPruning(ctx context.Context, blockHash string, hei
 	if !s.settings.Pruner.SkipDuringCatchup {
 		return true
 	}
+	if s.blockchainClient == nil {
+		s.logger.Warnf("Blockchain client unavailable, skipping pruner")
+		prunerSkipped.WithLabelValues("fsm_error").Inc()
+		return false
+	}
 	state, err := s.blockchainClient.GetFSMCurrentState(ctx)
 	if err != nil {
 		s.logger.Warnf("Failed to get FSM state, skipping pruner: %v", err)
@@ -226,7 +231,7 @@ func (s *Server) prunerProcessor(ctx context.Context) {
 					ctx, s.utxoStore, blockHeight, blockHashStr, s.settings, s.logger,
 				); err != nil {
 					s.logger.Warnf("[pruner][%s:%d] phase 1: failed to preserve parents: %v", blockHashStr, blockHeight, err)
-					prunerErrors.WithLabelValues("parent_preservation").Inc()
+					prunerErrors.WithLabelValues("preserve_parents").Inc()
 				} else {
 					prunerDuration.WithLabelValues("preserve_parents").Observe(time.Since(startTime).Seconds())
 					if recordsProcessed > 0 {
