@@ -335,6 +335,7 @@ func NewSettings(alternativeContext ...string) *Settings {
 			InitializeNodeInState:    strings.TrimSpace(getString("blockchain_initializeNodeInState", "", alternativeContext...)),
 			PostgresPool:             getPostgresPoolSettings("blockchain", alternativeContext...),
 			UseInMemoryChainCheck:    getBool("blockchain_use_in_memory_chain_check", false, alternativeContext...),
+			ChainCheckShadowCompare:  getBool("blockchain_chain_check_shadow_compare", true, alternativeContext...),
 			HeartbeatInterval:        getDuration("blockchain_heartbeat_interval", 10*time.Second, alternativeContext...),
 			RawMinerTag:              getBool("blockchain_raw_miner_tag", false, alternativeContext...),
 			PeerRegistryStore:        getURL("blockchain_peerRegistryStore", "", alternativeContext...),
