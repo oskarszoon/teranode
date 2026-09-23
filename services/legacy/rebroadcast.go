@@ -270,10 +270,15 @@ func (s *server) RebroadcastDropCounts() (adds, capHits uint64) {
 
 // relayRebroadcastBatch hands a retry batch to the peerHandler in order. One
 // goroutine sends the whole batch, unlike RelayInventory's goroutine per inv,
-// so each peer is offered parents before their children.
+// so each peer is offered parents before their children. Like
+// RelayInventory, it stops relaying txs as soon as the node leaves RUNNING.
 func (s *server) relayRebroadcastBatch(batch []relayMsg) {
 	go func() {
 		for _, msg := range batch {
+			if !s.canRelayTx() {
+				return
+			}
+
 			select {
 			case s.relayInv <- msg:
 			case <-s.quit:
