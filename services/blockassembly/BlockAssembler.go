@@ -53,6 +53,7 @@ const (
 	errGettingBestBlockHeaders  = "error getting best block headers"
 	errMarkingTxsMined          = "error marking transactions as mined on longest chain"
 	errGettingUnminedTxIterator = "error getting unmined tx iterator"
+	errMiningRecoveryPending    = "mining is waiting for unmined recovery and chain reconciliation"
 )
 
 // create state strings for the processor
@@ -1776,7 +1777,7 @@ func (b *BlockAssembler) executeResetRequest(ctx context.Context, fullReset bool
 //   - error: Any error encountered during retrieval
 func (b *BlockAssembler) GetMiningCandidate(ctx context.Context) (*model.MiningCandidate, []*subtree.Subtree, *subtreeprocessor.MiningSnapshotLease, error) {
 	if b.recoveryMiningBlocked.Load() || b.subtreeProcessor.RecoveryPending() {
-		return nil, nil, nil, errors.NewProcessingError("mining is waiting for unmined recovery and chain reconciliation")
+		return nil, nil, nil, errors.NewProcessingError(errMiningRecoveryPending)
 	}
 	ctx, _, deferFn := tracing.Tracer("blockassembly").Start(ctx, "GetMiningCandidate",
 		tracing.WithParentStat(b.stats),
@@ -1799,7 +1800,7 @@ func (b *BlockAssembler) GetMiningCandidate(ctx context.Context) (*model.MiningC
 
 		candidate, trees, candidateErr := b.generateEmptyBlockCandidate(ctx, bestBlockHeader, bestBlockMeta.Height)
 		if b.recoveryMiningBlocked.Load() || b.subtreeProcessor.RecoveryPending() {
-			return nil, nil, nil, errors.NewProcessingError("mining is waiting for unmined recovery and chain reconciliation")
+			return nil, nil, nil, errors.NewProcessingError(errMiningRecoveryPending)
 		}
 		return candidate, trees, nil, candidateErr
 	}
@@ -1841,11 +1842,11 @@ func (b *BlockAssembler) GetMiningCandidate(ctx context.Context) (*model.MiningC
 			subtrees = incompleteData.Subtrees
 		} else {
 			if b.recoveryMiningBlocked.Load() || b.subtreeProcessor.RecoveryPending() {
-				return nil, nil, nil, errors.NewProcessingError("mining is waiting for unmined recovery and chain reconciliation")
+				return nil, nil, nil, errors.NewProcessingError(errMiningRecoveryPending)
 			}
 			candidate, trees, candidateErr := b.generateEmptyBlockCandidate(ctx, baBestBlockHeader, baBestBlockHeight)
 			if b.recoveryMiningBlocked.Load() || b.subtreeProcessor.RecoveryPending() {
-				return nil, nil, nil, errors.NewProcessingError("mining is waiting for unmined recovery and chain reconciliation")
+				return nil, nil, nil, errors.NewProcessingError(errMiningRecoveryPending)
 			}
 			return candidate, trees, nil, candidateErr
 		}
@@ -1854,7 +1855,7 @@ func (b *BlockAssembler) GetMiningCandidate(ctx context.Context) (*model.MiningC
 	// Snapshot acquisition can wait behind recovery on the dispatcher. A newly
 	// published snapshot must remain gated until BA reconciles its chain anchor.
 	if b.recoveryMiningBlocked.Load() || b.subtreeProcessor.RecoveryPending() {
-		return nil, nil, nil, errors.NewProcessingError("mining is waiting for unmined recovery and chain reconciliation")
+		return nil, nil, nil, errors.NewProcessingError(errMiningRecoveryPending)
 	}
 
 	// Apply max block size limit if configured
@@ -1962,7 +1963,7 @@ func (b *BlockAssembler) GetMiningCandidate(ctx context.Context) (*model.MiningC
 	// Chain/time reads above may also span a recovery pass. Reject before
 	// transferring ownership so the deferred cleanup releases any mmap lease.
 	if b.recoveryMiningBlocked.Load() || b.subtreeProcessor.RecoveryPending() {
-		return nil, nil, nil, errors.NewProcessingError("mining is waiting for unmined recovery and chain reconciliation")
+		return nil, nil, nil, errors.NewProcessingError(errMiningRecoveryPending)
 	}
 	transferred = true
 	return candidate, subtrees, lease, nil

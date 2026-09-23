@@ -1786,6 +1786,25 @@ func coinbaseHasP2SHOutput(tx *bt.Tx) bool {
 	return false
 }
 
+// retainMiningJobForSubmission acquires the request's lease before eviction can
+// retire the cached job. The caller must release the returned lease.
+func (ba *BlockAssembly) retainMiningJobForSubmission(storeID *chainhash.Hash, jobID string) (*subtreeprocessor.Job, *subtreeprocessor.MiningSnapshotLease, error) {
+	ba.jobStoreMu.Lock()
+	jobItem := ba.jobStore.Get(*storeID)
+	if jobItem == nil {
+		ba.jobStoreMu.Unlock()
+		return nil, nil, errors.NewNotFoundError("[BlockAssembly][%s] job not found", jobID)
+	}
+
+	job := jobItem.Value()
+	requestLease, retained := job.Lease.Retain()
+	ba.jobStoreMu.Unlock()
+	if !retained {
+		return nil, nil, errors.NewNotFoundError("[BlockAssembly][%s] job expired", jobID)
+	}
+	return job, requestLease, nil
+}
+
 func (ba *BlockAssembly) submitMiningSolution(ctx context.Context, req *BlockSubmissionRequest) (*blockassembly_api.OKResponse, error) {
 	jobID := util.ReverseAndHexEncodeSlice(req.SubmitMiningSolutionRequest.Id)
 
@@ -1802,18 +1821,9 @@ func (ba *BlockAssembly) submitMiningSolution(ctx context.Context, req *BlockSub
 		return nil, err
 	}
 
-	ba.jobStoreMu.Lock()
-	jobItem := ba.jobStore.Get(*storeID)
-	if jobItem == nil {
-		ba.jobStoreMu.Unlock()
-		return nil, errors.NewNotFoundError("[BlockAssembly][%s] job not found", jobID)
-	}
-
-	job := jobItem.Value()
-	requestLease, retained := job.Lease.Retain()
-	ba.jobStoreMu.Unlock()
-	if !retained {
-		return nil, errors.NewNotFoundError("[BlockAssembly][%s] job expired", jobID)
+	job, requestLease, err := ba.retainMiningJobForSubmission(storeID, jobID)
+	if err != nil {
+		return nil, err
 	}
 	defer requestLease.Release()
 
@@ -1892,7 +1902,7 @@ func (ba *BlockAssembly) submitMiningSolution(ctx context.Context, req *BlockSub
 		}
 	} else {
 		// recreate coinbase tx here, nothing was passed in
-		coinbaseTx, err = jobItem.Value().MiningCandidate.CreateCoinbaseTxCandidate(ba.blockAssembler.settings)
+		coinbaseTx, err = job.MiningCandidate.CreateCoinbaseTxCandidate(ba.blockAssembler.settings)
 		if err != nil {
 			return nil, errors.NewProcessingError("[BlockAssembly][%s] failed to create coinbase tx", jobID, err)
 		}
