@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/bsv-blockchain/go-bt/v2"
+	"github.com/bsv-blockchain/go-bt/v2/bscript"
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	"github.com/bsv-blockchain/go-wire"
 	"github.com/bsv-blockchain/teranode/stores/utxo"
@@ -70,10 +71,8 @@ func TestRebroadcastQueue_DropsAtCap(t *testing.T) {
 	require.True(t, q.add(testTxInv(0xff), "fits"), "add must succeed once an entry is removed")
 }
 
-// TestRebroadcastQueue_RetryKeepsInsertionOrder covers the parent-first
-// requirement from issue 1826: a child is only accepted by SV Node once its
-// parent is, so every retry must go out in announce order, which is
-// validation order.
+// TestRebroadcastQueue_RetryKeepsInsertionOrder checks that entries with no
+// known dependency between them go out in queue order, not map order.
 func TestRebroadcastQueue_RetryKeepsInsertionOrder(t *testing.T) {
 	const n = 200
 
@@ -101,6 +100,37 @@ func TestRebroadcastQueue_RetryKeepsInsertionOrder(t *testing.T) {
 			require.True(t, msg.requeue, "rebroadcasts must bypass the peers' known inventory")
 		}
 	}
+}
+
+// TestRebroadcastQueue_RetrySortsParentsFirst covers the parent-first
+// requirement from issue 1826: SV Node only accepts a child once it has the
+// parent, and txmeta Kafka reads can queue a child before its parent.
+func TestRebroadcastQueue_RetrySortsParentsFirst(t *testing.T) {
+	q := newRebroadcastQueue(10)
+
+	root, child, grandchild, unrelated := testTxInv(1), testTxInv(2), testTxInv(3), testTxInv(4)
+
+	// Queued in the worst order a partitioned read could give.
+	for _, iv := range []wire.InvVect{grandchild, unrelated, child, root} {
+		require.True(t, q.add(iv, nil))
+	}
+
+	parents := map[wire.InvVect][]chainhash.Hash{
+		grandchild: {child.Hash, {0xaa}}, // second parent is not queued
+		child:      {root.Hash},
+	}
+	for _, entry := range q.entries() {
+		entry.parents = parents[entry.iv]
+	}
+
+	batch, _ := retryBatch(q, 10)
+
+	got := make([]wire.InvVect, len(batch))
+	for i, msg := range batch {
+		got[i] = *msg.invVect
+	}
+
+	require.Equal(t, []wire.InvVect{root, child, grandchild, unrelated}, got)
 }
 
 // TestRebroadcastQueue_AgesOutAfterMaxTips asserts the per-entry budget: an
@@ -151,13 +181,26 @@ func TestPruneRebroadcastQueue(t *testing.T) {
 	}
 
 	unminedA := newTx(1000)
+
+	parentTx := bt.NewTx()
+	require.NoError(t, parentTx.AddP2PKHOutputFromAddress("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", 5000))
+
+	childTx := bt.NewTx()
+	require.NoError(t, childTx.From(parentTx.TxID(), 0, parentTx.Outputs[0].LockingScript.String(), 5000))
+	require.NoError(t, childTx.AddP2PKHOutputFromAddress("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", 4000))
+	childTx.Inputs[0].UnlockingScript = bscript.NewFromBytes([]byte{0x51})
+
+	_, err = store.Create(ctx, childTx, 100)
+	require.NoError(t, err)
+
+	withParent := wire.InvVect{Type: wire.InvTypeTx, Hash: *childTx.TxIDChainHash()}
 	mined := newTx(2000, utxo.WithMinedBlockInfo(utxo.MinedBlockInfo{BlockID: 1, BlockHeight: 100}))
 	conflicting := newTx(3000, utxo.WithConflicting(true))
 	unminedB := newTx(4000)
 	notFound := testTxInv(0xee)
 
 	q := newRebroadcastQueue(10)
-	for _, iv := range []wire.InvVect{unminedA, mined, conflicting, notFound, unminedB} {
+	for _, iv := range []wire.InvVect{unminedA, mined, conflicting, notFound, unminedB, withParent} {
 		require.True(t, q.add(iv, nil))
 	}
 
@@ -166,15 +209,20 @@ func TestPruneRebroadcastQueue(t *testing.T) {
 	require.Equal(t, rebroadcastPruneResult{mined: 1, conflicting: 1, notFound: 1}, result)
 
 	entries := q.entries()
-	require.Len(t, entries, 2)
+	require.Len(t, entries, 3)
 	require.Equal(t, unminedA, entries[0].iv)
 	require.Equal(t, unminedB, entries[1].iv)
+	require.Equal(t, withParent, entries[2].iv)
+
+	require.Empty(t, entries[0].parents)
+	require.Equal(t, []chainhash.Hash{*parentTx.TxIDChainHash()}, entries[2].parents,
+		"prune must record the parents retry orders by")
 
 	t.Run("nil store keeps every entry", func(t *testing.T) {
 		result, err := pruneRebroadcastQueue(ctx, nil, q)
 		require.NoError(t, err)
 		require.Zero(t, result)
-		require.Equal(t, 2, q.len())
+		require.Equal(t, 3, q.len())
 	})
 }
 

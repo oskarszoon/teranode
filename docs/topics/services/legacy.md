@@ -367,9 +367,12 @@ keeps a bounded retry queue.
   schedules one retry `rebroadcastTipDelay` (30 seconds) later; blocks
   arriving during that delay share the retry.
 - Before each retry, the queue is checked against the UTXO store. Txs that
-  are mined, marked conflicting, or no longer stored are removed.
-- The remaining entries are re-offered to every connected peer in the order
-  they were announced, so parents go out before their children. Retries
+  are mined, marked conflicting, or no longer stored are removed, and the
+  parent tx hashes of the rest are read.
+- The remaining entries are re-offered to every connected peer with parents
+  before their children. Queue order alone is not enough: txs are read from
+  the txmeta Kafka topic across partitions, so a child can be queued before
+  its parent, and SV Node only accepts a child once it has the parent. Retries
   bypass each peer's known-inventory filter, so a peer that already saw the
   first announce is offered the tx again.
 - Each entry has a budget of `maxRebroadcastTips` (6) retries, about an
