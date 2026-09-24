@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -172,6 +173,7 @@ type MockPeerNotifier struct {
 	updatePeerHeightsChan       chan *updatePeerHeightsCall
 	relayInventoryChan          chan *relayInventoryCall
 	transactionConfirmedChan    chan *transactionConfirmedCall
+	blockConnectedCalls         atomic.Int32
 }
 
 type announceNewTransactionsCall struct {
@@ -214,7 +216,9 @@ func (mock *MockPeerNotifier) RelayInventory(invVect *wire.InvVect, data interfa
 	}
 }
 
-func (mock *MockPeerNotifier) BlockConnected() {}
+func (mock *MockPeerNotifier) BlockConnected() {
+	mock.blockConnectedCalls.Add(1)
+}
 
 func (mock *MockPeerNotifier) TransactionConfirmed(tx *bsvutil.Tx) {
 	mock.transactionConfirmedChan <- &transactionConfirmedCall{tx: tx}
