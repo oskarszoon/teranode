@@ -759,7 +759,10 @@ func (v *Server) ValidateTransactionBatch(ctx context.Context, req *validator_ap
 
 		g.Go(func() error {
 			validatorResponse, err := v.validateTransaction(gCtx, reqItem)
-			metaData[idx] = validatorResponse.Metadata
+			// A failing item returns (nil, err) — e.g. an MTP load failure — so read
+			// metadata through the nil-safe generated accessor: no response means
+			// empty metadata at this index, with the error recorded alongside it.
+			metaData[idx] = validatorResponse.GetMetadata()
 			errReasons[idx] = errors.Wrap(err)
 
 			// Never return an error because we don't want to cancel the context for other transactions in the batch.
