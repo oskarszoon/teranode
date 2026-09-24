@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	"github.com/bsv-blockchain/go-wire"
 	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/stores/utxo"
@@ -46,20 +47,22 @@ const (
 )
 
 // rebroadcastEntry is a pending rebroadcast inv: the original `data`
-// payload handed to RelayInventory, plus the number of new blocks it has
-// been retried on. Once tips reaches maxRebroadcastTips the entry ages out.
+// payload handed to RelayInventory, the number of new blocks it has been
+// retried on, and its parent tx hashes as last read from the UTXO store.
+// Once tips reaches maxRebroadcastTips the entry ages out.
 type rebroadcastEntry struct {
-	iv   wire.InvVect
-	data interface{}
-	tips int
+	iv      wire.InvVect
+	data    interface{}
+	tips    int
+	parents []chainhash.Hash
 }
 
 // rebroadcastQueue is the set of pending rebroadcast entries in insertion
-// order. Insertion order follows the order txs were announced, which is the
-// order they were validated, so a parent is always retried before its
-// children. Retrying in map order instead would put children ahead of the
-// parent they depend on. Not safe for concurrent use; owned by
-// rebroadcastHandler.
+// order. Insertion order is the order txs were read from the txmeta Kafka
+// topic, which is spread over partitions and so is not validation order: a
+// child can be queued before its parent. retry therefore sorts each batch
+// parents-first using the parent hashes pruneRebroadcastQueue records. Not
+// safe for concurrent use; owned by rebroadcastHandler.
 type rebroadcastQueue struct {
 	capacity int
 	order    *list.List
@@ -118,32 +121,36 @@ func (q *rebroadcastQueue) entries() []*rebroadcastEntry {
 	return out
 }
 
-// retry hands every pending entry to relay as one ordered batch, counts the
-// retry against each entry's budget, and ages out entries that have reached
-// maxTips. Returns the number of entries relayed and aged out.
+// retry hands every pending entry to relay as one batch with parents before
+// their children, counts the retry against each entry's budget, and ages out
+// entries that have reached maxTips. Entries whose parents are unknown keep
+// their queue order. Returns the number of entries relayed and aged out.
 func (q *rebroadcastQueue) retry(maxTips int, relay func([]relayMsg)) (relayed, agedOut int) {
 	if q.len() == 0 {
 		return 0, 0
 	}
 
-	batch := make([]relayMsg, 0, q.len())
+	entries := q.entries()
 
-	for el := q.order.Front(); el != nil; {
-		next := el.Next()
-		entry := el.Value.(*rebroadcastEntry)
+	hashes := make([]chainhash.Hash, len(entries))
+	for i, entry := range entries {
+		hashes[i] = entry.iv.Hash
+	}
 
-		iv := entry.iv
-		batch = append(batch, relayMsg{invVect: &iv, data: entry.data, requeue: true})
+	batch := make([]relayMsg, 0, len(entries))
 
+	for _, i := range parentsFirst(hashes, func(i int) []chainhash.Hash { return entries[i].parents }) {
+		iv := entries[i].iv
+		batch = append(batch, relayMsg{invVect: &iv, data: entries[i].data, requeue: true})
+	}
+
+	for _, entry := range entries {
 		entry.tips++
 		if entry.tips >= maxTips {
-			q.order.Remove(el)
-			delete(q.index, entry.iv)
+			q.remove(entry.iv)
 
 			agedOut++
 		}
-
-		el = next
 	}
 
 	relay(batch)
@@ -162,7 +169,8 @@ type rebroadcastPruneResult struct {
 // pruneRebroadcastQueue drops entries that no longer need retrying: txs that
 // have been mined, txs marked conflicting, and txs no longer in the UTXO
 // store (which a peer could not fetch from us anyway). A lookup error keeps
-// the entry: a failed prune costs one wasted retry, not a lost tx.
+// the entry: a failed prune costs one wasted retry, not a lost tx. Entries
+// that stay record their parent tx hashes, which retry orders by.
 //
 // Looking the pending txs up is cheaper than walking the new block's
 // subtrees: the queue holds at most maxRebroadcastInventory entries, while a
@@ -179,7 +187,7 @@ func pruneRebroadcastQueue(ctx context.Context, store utxo.Store, q *rebroadcast
 	}
 
 	entries := q.entries()
-	lookupFields := []fields.FieldName{fields.BlockIDs, fields.Conflicting}
+	lookupFields := []fields.FieldName{fields.BlockIDs, fields.Conflicting, fields.TxInpoints}
 
 	items := make([]*utxo.UnresolvedMetaData, len(entries))
 	for i, entry := range entries {
@@ -204,6 +212,8 @@ func pruneRebroadcastQueue(ctx context.Context, store utxo.Store, q *rebroadcast
 		case item.Data.Conflicting:
 			q.remove(entries[i].iv)
 			result.conflicting++
+		default:
+			entries[i].parents = item.Data.TxInpoints.ParentTxHashes
 		}
 	}
 
@@ -270,7 +280,7 @@ func (s *server) RebroadcastDropCounts() (adds, capHits uint64) {
 
 // relayRebroadcastBatch hands a retry batch to the peerHandler in order. One
 // goroutine sends the whole batch, unlike RelayInventory's goroutine per inv,
-// so each peer is offered parents before their children. Like
+// so each peer is offered the invs in batch order, parents first. Like
 // RelayInventory, it stops relaying txs as soon as the node leaves RUNNING.
 func (s *server) relayRebroadcastBatch(batch []relayMsg) {
 	go func() {
