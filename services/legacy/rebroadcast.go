@@ -9,6 +9,7 @@ import (
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	"github.com/bsv-blockchain/go-wire"
 	"github.com/bsv-blockchain/teranode/errors"
+	"github.com/bsv-blockchain/teranode/services/legacy/netsync"
 	"github.com/bsv-blockchain/teranode/stores/utxo"
 	"github.com/bsv-blockchain/teranode/stores/utxo/fields"
 )
@@ -139,7 +140,7 @@ func (q *rebroadcastQueue) retry(maxTips int, relay func([]relayMsg)) (relayed, 
 
 	batch := make([]relayMsg, 0, len(entries))
 
-	for _, i := range parentsFirst(hashes, func(i int) []chainhash.Hash { return entries[i].parents }) {
+	for _, i := range netsync.ParentsFirst(hashes, func(i int) []chainhash.Hash { return entries[i].parents }) {
 		iv := entries[i].iv
 		batch = append(batch, relayMsg{invVect: &iv, data: entries[i].data, requeue: true})
 	}
@@ -278,26 +279,6 @@ func (s *server) RebroadcastDropCounts() (adds, capHits uint64) {
 	return s.droppedRebroadcastAdds.Load(), s.droppedRebroadcastCapHits.Load()
 }
 
-// relayRebroadcastBatch hands a retry batch to the peerHandler in order. One
-// goroutine sends the whole batch, unlike RelayInventory's goroutine per inv,
-// so each peer is offered the invs in batch order, parents first. Like
-// RelayInventory, it stops relaying txs as soon as the node leaves RUNNING.
-func (s *server) relayRebroadcastBatch(batch []relayMsg) {
-	go func() {
-		for _, msg := range batch {
-			if !s.canRelayTx() {
-				return
-			}
-
-			select {
-			case s.relayInv <- msg:
-			case <-s.quit:
-				return
-			}
-		}
-	}()
-}
-
 // retryRebroadcasts runs one retry of the pending queue: it prunes entries
 // that no longer need retrying, then re-offers the rest to every connected
 // peer, parents first. Skipped entirely, without spending any budget, while
@@ -319,7 +300,7 @@ func (s *server) retryRebroadcasts(q *rebroadcastQueue) {
 	prometheusLegacyRebroadcastRemoved.WithLabelValues("conflicting").Add(float64(pruned.conflicting))
 	prometheusLegacyRebroadcastRemoved.WithLabelValues("not_found").Add(float64(pruned.notFound))
 
-	relayed, agedOut := q.retry(maxRebroadcastTips, s.relayRebroadcastBatch)
+	relayed, agedOut := q.retry(maxRebroadcastTips, s.relayTxBatch)
 
 	prometheusLegacyRebroadcastRetries.Add(float64(relayed))
 	prometheusLegacyRebroadcastRemoved.WithLabelValues("aged_out").Add(float64(agedOut))

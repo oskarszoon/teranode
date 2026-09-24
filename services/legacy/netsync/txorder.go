@@ -1,10 +1,10 @@
-package legacy
+package netsync
 
 import (
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 )
 
-// parentsFirst returns the indexes 0..len(hashes)-1 reordered so that every
+// ParentsFirst returns the indexes 0..len(hashes)-1 reordered so that every
 // tx comes after any of its parents that are also in hashes. SV Node only
 // accepts a child once it has the parent, so invs must reach a peer in this
 // order. Txs with no dependency between them keep their relative order.
@@ -14,7 +14,7 @@ import (
 // dependency target. Cycles cannot occur between valid txs, but a tx is
 // marked visited before its parents are walked, so malformed input still
 // terminates.
-func parentsFirst(hashes []chainhash.Hash, parents func(i int) []chainhash.Hash) []int {
+func ParentsFirst(hashes []chainhash.Hash, parents func(i int) []chainhash.Hash) []int {
 	index := make(map[chainhash.Hash]int, len(hashes))
 
 	for i, hash := range hashes {
