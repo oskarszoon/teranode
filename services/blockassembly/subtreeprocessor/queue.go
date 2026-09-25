@@ -14,11 +14,22 @@ import (
 // snapshotPublished visits a fixed queue prefix without removing it. Only the
 // processor goroutine may call it. Producers can append while selection runs.
 func (q *LockFreeQueue) snapshotPublished(ctx context.Context, visit func(chainhash.Hash)) (*TxBatch, error) {
-	boundary := q.tail.Load()
+	head, boundary := q.publishedCursor()
+	return visitPublishedCursor(ctx, head, boundary, visit)
+}
+
+// publishedCursor must be called on the consumer goroutine. Linked batches
+// and their node slices are immutable, so a retained prefix can be visited
+// elsewhere after the consumer advances head.
+func (q *LockFreeQueue) publishedCursor() (*TxBatch, *TxBatch) {
+	return q.head, q.tail.Load()
+}
+
+func visitPublishedCursor(ctx context.Context, head, boundary *TxBatch, visit func(chainhash.Hash)) (*TxBatch, error) {
 	if boundary == nil {
 		return nil, nil
 	}
-	for cursor := q.head; cursor != boundary; {
+	for cursor := head; cursor != boundary; {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -28,7 +39,12 @@ func (q *LockFreeQueue) snapshotPublished(ctx context.Context, visit func(chainh
 			runtime.Gosched()
 			continue
 		}
-		for _, node := range next.nodes {
+		for i, node := range next.nodes {
+			if i%1024 == 0 {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+			}
 			visit(node.Hash)
 		}
 		cursor = next
@@ -54,10 +70,11 @@ func (q *LockFreeQueue) discardThrough(boundary *TxBatch) {
 // A negative cap is a misconfiguration, not a tiny cap, and is treated as
 // disabled (0). A positive cap below one full drain pass
 // (maxBatchesPerIteration x sendBatchSize items) would refuse every batch and
-// wedge ingest, so it is clamped up to that floor.
+// wedge ingest, so it is clamped up to that floor. Every call also logs exactly
+// one line stating the bound actually in force.
 //
 // Parameters:
-//   - logger: used to warn when a value is clamped
+//   - logger: used to report the bound in force, and to warn when a value is clamped
 //   - maxItems: the configured item cap (0 disables the bound)
 //   - sendBatchSize: the configured per-batch item count
 //
@@ -70,6 +87,7 @@ func normalizeMaxQueueItems(logger ulogger.Logger, maxItems int64, sendBatchSize
 	}
 
 	if maxItems == 0 {
+		logger.Infof("BlockAssembly.MaxQueueItems=0; ingest queue is unbounded, set blockassembly_maxQueueItems to bound memory during long state transitions")
 		return 0
 	}
 
@@ -80,6 +98,8 @@ func normalizeMaxQueueItems(logger ulogger.Logger, maxItems int64, sendBatchSize
 
 		return floor
 	}
+
+	logger.Infof("BlockAssembly.MaxQueueItems=%d; ingest queue bounded at %d items", maxItems, maxItems)
 
 	return maxItems
 }
@@ -320,6 +340,24 @@ func (q *LockFreeQueue) enqueueBatchIfRoom(nodes []subtree.Node, txInpoints []*s
 
 	q.queueLength.Add(-n) // roll back
 
+	return false
+}
+
+// enqueueRecoveryBatch applies an independent ceiling even when normal ingest
+// is configured unbounded. Atomic reservation shares queueLength with producers,
+// so a repair batch itself cannot push the queue past this ceiling. Ordinary
+// unbounded ingest may independently do so.
+func (q *LockFreeQueue) enqueueRecoveryBatch(nodes []subtree.Node, txInpoints []*subtree.TxInpoints) bool {
+	n := int64(len(nodes))
+	limit := maxRecoveryQueuedItems
+	if q.maxItems > 0 && q.maxItems < limit {
+		limit = q.maxItems
+	}
+	if q.queueLength.Add(n) <= limit {
+		q.publish(nodes, txInpoints)
+		return true
+	}
+	q.queueLength.Add(-n)
 	return false
 }
 

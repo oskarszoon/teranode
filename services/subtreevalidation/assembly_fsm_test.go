@@ -27,12 +27,26 @@ import (
 // assemblyFSMClient only overrides FSM observations; all chain reads use SQLite.
 type assemblyFSMClient struct {
 	blockchain.ClientI
-	state *blockchain.FSMStateType
-	err   error
+	state       *blockchain.FSMStateType
+	err         error
+	cachedState *blockchain.FSMStateType
 }
 
 func (c *assemblyFSMClient) GetFSMCurrentState(context.Context) (*blockchain.FSMStateType, error) {
+	if c.cachedState != nil {
+		return c.cachedState, nil
+	}
 	return c.state, c.err
+}
+
+func (c *assemblyFSMClient) ReadFSMState(context.Context) (blockchain.FSMStateType, error) {
+	if c.err != nil {
+		return blockchain.FSMStateIDLE, c.err
+	}
+	if c.state == nil {
+		return blockchain.FSMStateIDLE, errors.NewProcessingError("FSM authority returned no state")
+	}
+	return *c.state, nil
 }
 
 func TestBlockSubtreeAssemblyRequiresRunning(t *testing.T) {
@@ -49,7 +63,6 @@ func TestBlockSubtreeAssemblyRequiresRunning(t *testing.T) {
 				{"catchup", state(blockchain.FSMStateCATCHINGBLOCKS), nil, false},
 				{"idle", state(blockchain.FSMStateIDLE), nil, false},
 				{"unknown", state(blockchain.FSMStateType(99)), nil, false},
-				{"missing", nil, nil, false},
 				{"read error", nil, errors.NewProcessingError("FSM unavailable"), false},
 				{"read error with state", state(blockchain.FSMStateRUNNING), errors.NewProcessingError("FSM unavailable"), false},
 			} {
@@ -79,7 +92,8 @@ func TestBlockSubtreeAssemblyRequiresRunning(t *testing.T) {
 					subtreeStore, txStore := blobmemory.New(), blobmemory.New()
 					localClient, err := blockchain.NewLocalClient(logger, tSettings, chainStore, subtreeStore, utxoStore)
 					require.NoError(t, err)
-					client := &assemblyFSMClient{ClientI: localClient, state: tt.state, err: tt.err}
+					cachedIDLE := blockchain.FSMStateIDLE
+					client := &assemblyFSMClient{ClientI: localClient, state: tt.state, err: tt.err, cachedState: &cachedIDLE}
 					recorder := newRecordingValidatorClient(&validator.MockValidator{UtxoStore: utxoStore})
 					consumer := &kafka.KafkaConsumerGroup{}
 					server, err := New(ctx, logger, tSettings, subtreeStore, txStore, utxoStore, recorder, client, consumer, consumer, nil, nil)

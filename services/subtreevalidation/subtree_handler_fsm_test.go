@@ -30,9 +30,9 @@ type subtreeMessageFSMClient struct {
 	reads atomic.Int32
 }
 
-func (c *subtreeMessageFSMClient) GetFSMCurrentState(ctx context.Context) (*blockchain.FSMStateType, error) {
+func (c *subtreeMessageFSMClient) ReadFSMState(ctx context.Context) (blockchain.FSMStateType, error) {
 	c.reads.Add(1)
-	return c.assemblyFSMClient.GetFSMCurrentState(ctx)
+	return c.assemblyFSMClient.ReadFSMState(ctx)
 }
 
 // Exercise the Kafka entry point: its options must reach the validator even
@@ -50,7 +50,6 @@ func TestSubtreeMessageHandlerAssemblyRequiresRunning(t *testing.T) {
 		{"running", state(blockchain.FSMStateRUNNING), nil, true, true, false},
 		{"idle", state(blockchain.FSMStateIDLE), nil, true, false, false},
 		{"unknown", state(blockchain.FSMStateType(99)), nil, true, false, false},
-		{"missing", nil, nil, true, false, false},
 		{"catchup", state(blockchain.FSMStateCATCHINGBLOCKS), nil, false, false, false},
 		{"read error", nil, errors.NewProcessingError("FSM unavailable"), false, false, false},
 		{"blocks only skips failing FSM read", nil, errors.NewProcessingError("FSM unavailable"), false, false, true},
@@ -78,7 +77,8 @@ func TestSubtreeMessageHandlerAssemblyRequiresRunning(t *testing.T) {
 			subtreeStore, txStore := blobmemory.New(), blobmemory.New()
 			localClient, err := blockchain.NewLocalClient(logger, tSettings, chainStore, subtreeStore, utxoStore)
 			require.NoError(t, err)
-			client := &subtreeMessageFSMClient{assemblyFSMClient: &assemblyFSMClient{ClientI: localClient, state: tt.state, err: tt.err}}
+			cachedIDLE := blockchain.FSMStateIDLE
+			client := &subtreeMessageFSMClient{assemblyFSMClient: &assemblyFSMClient{ClientI: localClient, state: tt.state, err: tt.err, cachedState: &cachedIDLE}}
 			recorder := newRecordingValidatorClient(&validator.MockValidator{UtxoStore: utxoStore})
 			consumer := &kafka.KafkaConsumerGroup{}
 			server, err := New(ctx, logger, tSettings, subtreeStore, txStore, utxoStore, recorder, client, consumer, consumer, nil, nil)

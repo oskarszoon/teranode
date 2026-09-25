@@ -27,6 +27,7 @@ import (
 	"github.com/bsv-blockchain/teranode/stores/utxo/meta"
 	"github.com/bsv-blockchain/teranode/ulogger"
 	"github.com/bsv-blockchain/teranode/util"
+	"github.com/bsv-blockchain/teranode/util/health"
 	"github.com/bsv-blockchain/teranode/util/retry"
 	"github.com/bsv-blockchain/teranode/util/tracing"
 	"github.com/ordishs/gocore"
@@ -146,6 +147,18 @@ type BlockAssembler struct {
 	// Protected by stateChangeMu to prevent race conditions
 	stateChangeMu sync.RWMutex
 	stateChangeCh chan BestBlockInfo
+
+	// heartbeat records that the main select loop is still being serviced, so
+	// the liveness probe can distinguish a wedged assembler from an idle one
+	// (issue 1447)
+	heartbeat health.Heartbeat
+
+	// heartbeatInterval is how often the main loop's idle tick fires. It only
+	// needs to be comfortably shorter than any liveness timeout an operator
+	// would configure. Held per-assembler rather than as a package variable so
+	// a test that shrinks it cannot race another test's running loop.
+	// Set by NewBlockAssembler; read once when the loop starts.
+	heartbeatInterval time.Duration
 
 	// currentChainMap maps block hashes to their heights
 	currentChainMap map[chainhash.Hash]uint32
@@ -279,6 +292,7 @@ func NewBlockAssembler(ctx context.Context, logger ulogger.Logger, tSettings *se
 		resetStopped:        make(chan struct{}),
 		reconcileCh:         make(chan struct{}, 1),
 		currentRunningState: atomic.Value{},
+		heartbeatInterval:   defaultHeartbeatInterval,
 	}
 
 	b.setCurrentRunningState(StateStarting)
@@ -379,11 +393,43 @@ func (b *BlockAssembler) GetChainedSubtreesTotalSize() uint64 {
 	return b.subtreeProcessor.GetChainedSubtreesTotalSize()
 }
 
+// defaultHeartbeatInterval is the idle-tick period every assembler starts with.
+// Tests shrink the per-assembler field instead, so waiting several tick
+// intervals costs milliseconds rather than tens of seconds.
+const defaultHeartbeatInterval = 5 * time.Second
+
+// effectiveHeartbeatInterval is the idle tick the listener goroutine will
+// actually use. NewBlockAssembler always sets a positive interval, but the
+// package builds &BlockAssembler{} literals in a lot of tests, and
+// time.NewTicker panics on a non-positive interval from inside a goroutine,
+// which takes the process down rather than failing a test.
+func effectiveHeartbeatInterval(configured time.Duration) time.Duration {
+	if configured <= 0 {
+		return defaultHeartbeatInterval
+	}
+
+	return configured
+}
+
+// livenessTimeoutTooTight reports whether a configured liveness stall timeout
+// sits close enough to the idle tick that it cannot tell an idle loop from a
+// wedged one. Split out from the warning it drives so the rule can be tested
+// without capturing log output. Zero or less means the check is disabled, which
+// is never too tight.
+func livenessTimeoutTooTight(stallTimeout, heartbeatInterval time.Duration) bool {
+	return stallTimeout > 0 && stallTimeout <= 2*heartbeatInterval
+}
+
 // startChannelListeners initializes and starts all channel listeners for block assembly operations.
 // It handles blockchain notifications, mining candidate requests, and reset operations.
+// The listener goroutine also owns the liveness heartbeat, beating on every pass
+// of its select so a wedged loop can be told apart from an idle one.
 //
 // Parameters:
 //   - ctx: Context for cancellation
+//
+// Returns:
+//   - error: Any error encountered subscribing to blockchain notifications
 func (b *BlockAssembler) startChannelListeners(ctx context.Context) (err error) {
 	// start a subscription for the best block header and the FSM state
 	// this will be used to reset the subtree processor when a new block is mined
@@ -399,6 +445,16 @@ func (b *BlockAssembler) startChannelListeners(ctx context.Context) (err error) 
 	// node it returns early when hashes match.
 	b.triggerReconcile()
 
+	heartbeatInterval := effectiveHeartbeatInterval(b.heartbeatInterval)
+
+	// A liveness timeout at or below the idle tick cannot tell an idle loop from
+	// a wedged one, so it would restart a healthy node. Warn rather than clamp:
+	// the operator chose the value and silently overriding it would hide the
+	// mistake (issue 1447).
+	if stallTimeout := b.settings.BlockAssembly.LivenessStallTimeout; livenessTimeoutTooTight(stallTimeout, heartbeatInterval) {
+		b.logger.Warnf("[BlockAssembler] blockassembly_livenessStallTimeout %s is not comfortably longer than the %s heartbeat interval: a healthy idle node may be reported as wedged and restarted", stallTimeout, heartbeatInterval)
+	}
+
 	b.wg.Add(1)
 	go func() {
 		defer b.wg.Done()
@@ -411,32 +467,96 @@ func (b *BlockAssembler) startChannelListeners(ctx context.Context) (err error) 
 		// another expensive scan immediately upon completion.
 		var recoveryTimer *time.Timer
 		var recoveryTick <-chan time.Time
+		type recoveryResult struct {
+			recovered bool
+			err       error
+		}
+		recoveryDone := make(chan recoveryResult, 1)
 		if delay := b.nextUnminedRecoveryDelay(true); delay > 0 {
 			recoveryTimer = time.NewTimer(delay)
 			recoveryTick = recoveryTimer.C
 			defer recoveryTimer.Stop()
 		}
 
+		// Beat on every pass of the select, including the idle tick below: this
+		// records that the loop can still be SERVICED, not that work arrived.
+		// A node with no blocks is healthy — on mainnet the gap between blocks
+		// is routinely tens of minutes — but a deadlocked loop cannot service
+		// the tick either, which is the freeze the liveness probe must catch.
+		heartbeatTicker := time.NewTicker(heartbeatInterval)
+		defer heartbeatTicker.Stop()
+
+		// First beat happens HERE, not at construction: everything before this
+		// point is startup work that is legitimately unbounded (waiting on
+		// pending block validation, reloading a large unmined set), and the
+		// heartbeat must not age through it. The beat is at the top of the loop
+		// body, so the first pass is what claims the heartbeat for this
+		// goroutine and every later pass renews it.
+		//
+		// The first pass is not necessarily idle: triggerReconcile above queued
+		// a reconcile before this goroutine existed, so on a node that restarts
+		// behind the tip the loop claims the heartbeat and immediately runs a
+		// catch-up. getReorgBlocks beats once per block through the fetch, but
+		// subtreeProcessor.Reorg applies the whole set in one call and is not
+		// beaten — see the setting's "What it cannot bound".
 		for {
+			b.heartbeat.Beat()
+
 			select {
 			case <-ctx.Done():
 				b.logger.Infof("Stopping blockassembler as ctx is done")
+
+				// A deliberate stop is not a wedge. On the OS-signal shutdown
+				// path the health server stays up through the whole drain, so
+				// without this the heartbeat would age past the timeout and the
+				// probe would report a node that is stopping on purpose as
+				// wedged. On Kubernetes that kills the container immediately
+				// instead of letting the grace period finish the drain.
+				b.heartbeat.Disable()
+
 				// Note: We don't close blockchainSubscriptionCh here because we don't own it -
 				// it's created by the blockchain client's Subscribe method
 				return
 
 			case <-recoveryTick:
-				recovered, recoveryErr := b.recoverUnminedTransactions(ctx)
-				if recoveryErr != nil && ctx.Err() == nil {
-					b.logUnminedRecoveryError(recoveryErr)
-				}
-				if delay := b.nextUnminedRecoveryDelay(recovered); delay > 0 {
-					recoveryTimer.Reset(delay)
-				} else {
-					recoveryTick = nil
-				}
+				// Selection and metadata reads run outside the listener. The
+				// processor rechecks its chain anchor before queue admission.
+				recoveryTick = nil
+				b.wg.Add(1)
+				go func() {
+					defer b.wg.Done()
+					recovered, err := b.recoverUnminedTransactions(ctx)
+					select {
+					case recoveryDone <- recoveryResult{recovered: recovered, err: err}:
+					case <-ctx.Done():
+					}
+				}()
 
-			case resetReq := <-b.resetCh:
+			case result := <-recoveryDone:
+				if result.err != nil && ctx.Err() == nil {
+					b.logUnminedRecoveryError(result.err)
+				}
+				if delay := b.nextUnminedRecoveryDelay(result.recovered); delay > 0 {
+					recoveryTimer.Reset(delay)
+					recoveryTick = recoveryTimer.C
+				}
+			case <-heartbeatTicker.C:
+				// Idle tick: proves the loop is alive without requiring work.
+
+			case resetReq, ok := <-b.resetCh:
+				if !ok {
+					b.logger.Errorf("[BlockAssembler] reset request channel closed unexpectedly")
+					b.heartbeat.Disable()
+					return
+				}
+				if resetReq.run == nil {
+					err := errors.NewProcessingError("[BlockAssembler] reset request has no operation")
+					b.logger.Errorf("%v", err)
+					if resetReq.ErrCh != nil {
+						resetReq.ErrCh <- err
+					}
+					continue
+				}
 				b.setCurrentRunningState(StateResetting)
 				err := resetReq.run(ctx)
 				if err != nil {
@@ -1497,7 +1617,10 @@ func (b *BlockAssembler) unlockConflictParents(ctx context.Context, txHashes []c
 	for i := range txHashes {
 		h := txHashes[i]
 
-		txMeta, err := b.utxoStore.Get(ctx, &h, fields.Tx)
+		// Only the parent hashes are read below, so ask for the inpoints rather
+		// than the whole transaction: fields.Tx pulls every output and, on
+		// aerospike, the external blob of a spilled transaction.
+		txMeta, err := b.utxoStore.Get(ctx, &h, fields.TxInpoints)
 		if err != nil {
 			if errors.Is(err, errors.ErrTxNotFound) {
 				continue
@@ -1506,12 +1629,12 @@ func (b *BlockAssembler) unlockConflictParents(ctx context.Context, txHashes []c
 			return errors.NewProcessingError("[unlockConflictParents][%s] failed to load tx", h.String(), err)
 		}
 
-		if txMeta == nil || txMeta.Tx == nil {
+		if txMeta == nil {
 			continue
 		}
 
-		for _, in := range txMeta.Tx.Inputs {
-			parentSet[*in.PreviousTxIDChainHash()] = struct{}{}
+		for _, parentHash := range txMeta.TxInpoints.GetParentTxHashes() {
+			parentSet[parentHash] = struct{}{}
 		}
 	}
 
@@ -2192,8 +2315,23 @@ func (b *BlockAssembler) getReorgBlocks(ctx context.Context, header *model.Block
 	// moveBackBlocks will contain all blocks we need to move down to get to the common ancestor
 	moveBackBlocks := make([]blockWithMeta, 0, len(moveBackBlockHeadersWithMeta))
 
+	// Both loops below run one blockchainClient.GetBlock round trip per block, from
+	// inside a single pass of the main select, so without a beat a long-but-
+	// progressing catch-up is indistinguishable from a wedge. That is not a rare
+	// path: startChannelListeners queues an initial reconcile before the loop
+	// starts, so on any node that restarts behind the tip this is the FIRST thing
+	// the loop does after it claims the heartbeat, and a spurious restart would
+	// re-enter the same work (issue 1447).
+	//
+	// The beat sits at the top of the iteration, so for every block after the first
+	// it is proof the previous GetBlock returned: it tracks FORWARD PROGRESS, and a
+	// fetch that stops progressing still goes stale. BeatIfStarted, not Beat, for
+	// the same reason as validateParentChain — every caller today is inside the
+	// loop, but a future startup caller must not be able to arm the probe.
 	var block *model.Block
 	for _, headerWithMeta := range moveForwardBlockHeadersWithMeta {
+		b.heartbeat.BeatIfStarted()
+
 		block, err = b.blockchainClient.GetBlock(ctx, headerWithMeta.header.Hash())
 		if err != nil {
 			return nil, nil, errors.NewServiceError("error getting block", err)
@@ -2206,6 +2344,8 @@ func (b *BlockAssembler) getReorgBlocks(ctx context.Context, header *model.Block
 	}
 
 	for _, headerWithMeta := range moveBackBlockHeadersWithMeta {
+		b.heartbeat.BeatIfStarted()
+
 		block, err = b.blockchainClient.GetBlock(ctx, headerWithMeta.header.Hash())
 		if err != nil {
 			return nil, nil, errors.NewServiceError("error getting block", err)
@@ -2416,6 +2556,20 @@ func (b *BlockAssembler) validateParentChain(
 
 	// Process transactions in batches for performance
 	for i := 0; i < len(unminedTxs); i += batchSize {
+		// Beat once per batch: when this runs from the reset path it is inside a
+		// select case, so without it a large-but-progressing validation looks
+		// identical to a wedge. The beat sits at the top of the batch, which for
+		// every batch after the first is proof the previous one finished, so it
+		// tracks FORWARD PROGRESS: a run that stops progressing gets no further
+		// beats and still goes stale (issue 1447).
+		//
+		// BeatIfStarted, not Beat: this same code also runs from Start, before
+		// the main loop owns the heartbeat, and the rest of that startup path
+		// (bulk-loading the unmined set into the subtree processor) is
+		// legitimately unbounded. A plain Beat here would start the clock
+		// mid-startup and let the probe report a still-starting node as wedged.
+		b.heartbeat.BeatIfStarted()
+
 		// Check for context cancellation at start of each batch
 		select {
 		case <-ctx.Done():
@@ -3372,7 +3526,29 @@ type sortEntry struct {
 //
 // Returns true if the transaction is valid for inclusion in block assembly.
 func (b *BlockAssembler) validateUnminedTxInputs(ctx context.Context, txHash chainhash.Hash, bestBlockIDsMap map[uint32]bool, dryRun bool) bool {
-	// Load only inputs and conflicting flag — NOT full Tx (avoids loading heavy output data)
+	// NOTE: fields.Inputs, not fields.TxInpoints, and deliberately so for now.
+	//
+	// The two stores disagree about what fields.Inputs populates. Aerospike sets
+	// Data.Tx from the inputs bin (stores/utxo/aerospike/get.go, case
+	// fields.Inputs); the SQL store assigns Data.Tx only when fields.Tx was asked
+	// for, so this request comes back with a nil Tx and the guard below returns
+	// false for every transaction. This check is therefore live on aerospike and
+	// dead on SQL today, and on SQL every unmined transaction is dropped by the
+	// caller when input validation is enabled.
+	//
+	// That is not confined to a redundant path. Input validation is enabled by
+	// every large reorg (handleReorg calls b.reset(ctx, true) unconditionally), by
+	// the fallback reset when subtreeProcessor.Reorg fails, and by the
+	// ResetBlockAssemblyValidateInputs RPC. So a SQL-backed node discards its
+	// whole unmined set on any of those.
+	//
+	// Switching to fields.TxInpoints makes it live on SQL, which is correct but
+	// not a mechanical change: the first transaction that fails takes the
+	// markAsConflicting branch below, which writes to the store while
+	// loadUnminedTransactions still holds the unmined iterator open, and on
+	// SQLite that deadlocks. Fixing it means restructuring who writes during the
+	// reload, so it is tracked separately, in bsv-blockchain/teranode issue 1657
+	// section 1, rather than smuggled into a field-set trim.
 	txMeta, err := b.utxoStore.Get(ctx, &txHash, fields.Inputs, fields.Conflicting)
 	if err != nil || txMeta == nil || txMeta.Tx == nil || txMeta.Tx.Inputs == nil {
 		return false

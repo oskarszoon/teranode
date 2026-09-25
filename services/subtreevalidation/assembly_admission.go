@@ -7,8 +7,7 @@ import (
 )
 
 // allowAssemblyForObservedFSM records suppression at an admission boundary.
-// GetFSMCurrentState can return synthetic IDLE after notification-stream loss:
-// this metric exposes that fail-closed window, not an authoritative pause state.
+// Callers use ReadFSMState so IDLE means an authoritative operator pause.
 // Paths are fixed labels supplied only by the four internal entry paths.
 func (s *Server) allowAssemblyForObservedFSM(state *blockchain.FSMStateType, path string) bool {
 	if state != nil && *state == blockchain.FSMStateRUNNING {
@@ -35,7 +34,7 @@ func (s *Server) allowAssemblyForObservedFSM(state *blockchain.FSMStateType, pat
 	now := time.Now().UnixNano()
 	last := s.assemblySuppressionLastWarning.Load()
 	if (last == 0 || now-last >= int64(time.Minute)) && s.assemblySuppressionLastWarning.CompareAndSwap(last, now) {
-		s.logger.Warnf("[SubtreeValidation] Assembly feeding suppressed: path=%s observed_state=%s; cached or synthetic IDLE may indicate subscription loss; check blockchain connectivity and FSM state; recovery may require an unmined transaction reload", path, observedState)
+		s.logger.Warnf("[SubtreeValidation] Assembly feeding suppressed: path=%s observed_state=%s; check blockchain connectivity and authoritative FSM state; recovery may require an unmined transaction reload", path, observedState)
 	}
 	return false
 }

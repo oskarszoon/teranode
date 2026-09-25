@@ -823,14 +823,16 @@ func (u *Server) checkSubtreeFromBlock(ctx context.Context, request *subtreevali
 		}
 	}
 
-	currentState, err := u.blockchainClient.GetFSMCurrentState(ctx)
+	currentState, err := u.blockchainClient.ReadFSMState(ctx)
+	var observedState *blockchain.FSMStateType
 	if err != nil {
 		if request.BaseUrl == "legacy" {
 			return false, errors.NewProcessingError("[CheckSubtree] Failed to get FSM current state", err)
 		}
 		// Peer validation does not require FSM availability. Fail closed only
 		// on assembly feeding, including when a failed read returns a state.
-		currentState = nil
+	} else {
+		observedState = &currentState
 	}
 
 	// Only known RUNNING state permits either entry path to feed block
@@ -841,7 +843,7 @@ func (u *Server) checkSubtreeFromBlock(ctx context.Context, request *subtreevali
 	if request.BaseUrl == "legacy" {
 		assemblyPath = "check_subtree_legacy"
 	}
-	addToAssembly := u.allowAssemblyForObservedFSM(currentState, assemblyPath)
+	addToAssembly := u.allowAssemblyForObservedFSM(observedState, assemblyPath)
 
 	// Check if the base URL is "legacy", which indicates that the subtree is coming from a block from the legacy service.
 	if request.BaseUrl == "legacy" {

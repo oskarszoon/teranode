@@ -57,19 +57,19 @@ func (u *Server) subtreeMessageHandler(ctx context.Context) func(msg *kafka.Kafk
 			return nil
 		}
 
-		state, err := u.blockchainClient.GetFSMCurrentState(gCtx)
+		state, err := u.blockchainClient.ReadFSMState(gCtx)
 		if err != nil {
 			return errors.NewProcessingError("[subtreeMessageHandler] failed to get FSM current state", err)
 		}
 
 		// Catchup skips peer validation entirely; no assembly-feeding decision
 		// is made for these messages.
-		if state != nil && *state == blockchain.FSMStateCATCHINGBLOCKS {
+		if state == blockchain.FSMStateCATCHINGBLOCKS {
 			return nil
 		}
 		// Ordinary peer validation may continue in IDLE, but only known
 		// RUNNING state permits feeding its transactions into block assembly.
-		addToAssembly := u.allowAssemblyForObservedFSM(state, "kafka_subtree")
+		addToAssembly := u.allowAssemblyForObservedFSM(&state, "kafka_subtree")
 		var kafkaMsg kafkamessage.KafkaSubtreeTopicMessage
 		if err := proto.Unmarshal(msg.Value, &kafkaMsg); err != nil {
 			u.logger.Errorf("[subtreeMessageHandler] failed to unmarshal kafka message: %v", err)

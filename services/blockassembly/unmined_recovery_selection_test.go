@@ -320,9 +320,8 @@ func TestUnminedRecoveryTransientSelectionRetainsPublishedQueue(t *testing.T) {
 			require.False(t, b.subtreeProcessor.RecoveryPending(), "selection has not started destructive reconstruction")
 			fault.creating, fault.err = false, nil
 			require.NoError(t, b.subtreeProcessor.RecoverUnmined(t.Context(), header, nil, b.prepareUnminedRecovery))
-			require.Zero(t, b.subtreeProcessor.QueueLength())
-			after := recoveryCandidateHashes(t, b)
-			require.ElementsMatch(t, append([]chainhash.Hash{*subtree.CoinbasePlaceholderHash}, chain...), after, "retry must publish every accepted transaction exactly once")
+			require.Equal(t, int64(2), b.subtreeProcessor.QueueLength(), "repair leaves queued handoffs for normal dequeue")
+			require.Equal(t, before, recoveryCandidateHashes(t, b), "repair preserves announced template while queue is delayed")
 		})
 	}
 }
