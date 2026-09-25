@@ -388,7 +388,9 @@ func readBlockFromReaderWithLimits(block *Block, buf io.Reader, maxDeclaredBytes
 		return nil, errors.NewBlockInvalidError("error reading size in bytes", err)
 	}
 	if enforceDeclaredSize && block.SizeInBytes > maxDeclaredBytes {
-		return nil, errors.NewThresholdExceededError("block declared size %d exceeds limit %d", block.SizeInBytes, maxDeclaredBytes)
+		// This limit is the caller's block acceptance policy. Keep it separate
+		// from allocation/transport bounds so honest peers are not blamed for it.
+		return nil, errors.NewBlockPolicyDeclinedError("block declared size %d exceeds limit %d", block.SizeInBytes, maxDeclaredBytes)
 	}
 
 	// read the length of the subtree list

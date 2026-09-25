@@ -271,7 +271,9 @@ func TestPeerBlockFetches_StreamAndBoundResponses(t *testing.T) {
 
 		_, err = suite.Server.fetchSingleBlock(suite.Ctx, block.Hash(), "peer", "http://peer")
 		require.Error(t, err)
-		require.True(t, errors.Is(err, errors.ErrExternal), "declared policy rejection is peer-classified: %v", err)
+		require.ErrorIs(t, err, errors.ErrBlockPolicyDeclined)
+		require.NotErrorIs(t, err, errors.ErrExternal)
+		require.NotErrorIs(t, err, errors.ErrBlockInvalid)
 	})
 
 	t.Run("batch ignores extra blocks without draining hostile body", func(t *testing.T) {
@@ -603,6 +605,9 @@ func TestDecodeBoundedBlock_RejectsDeterministicallyInvalidCoinbaseBeforeBufferi
 
 	require.ErrorContains(t, err, "declared size 2048 exceeds limit 1024",
 		"declared policy must reject before scanning the hostile coinbase")
+	require.ErrorIs(t, err, errors.ErrBlockPolicyDeclined)
+	require.NotErrorIs(t, err, errors.ErrExternal)
+	require.NotErrorIs(t, err, errors.ErrBlockInvalid)
 
 	hostile = hostileCoinbaseBlock(t, 0, uint64(bt.MaxArenaAlloc)+1)
 	_, err = decodeBoundedBlockTest(bytes.NewReader(hostile), blockResponseLimits{maxTransportBytes: 8 << 30})

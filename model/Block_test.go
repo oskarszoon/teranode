@@ -1315,6 +1315,26 @@ func TestBlock_Bytes(t *testing.T) {
 	})
 }
 
+func TestNewBlockFromReaderWithDeclaredSizeLimit_PolicyDeclineBeforePayload(t *testing.T) {
+	header, err := hex.DecodeString(block1Header)
+	require.NoError(t, err)
+	var encoded bytes.Buffer
+	_, err = encoded.Write(header)
+	require.NoError(t, err)
+	require.NoError(t, wire.WriteVarInt(&encoded, 0, 1))
+	require.NoError(t, wire.WriteVarInt(&encoded, 0, 2048))
+	const unreadPayload = "subtrees and coinbase must remain unread"
+	_, err = encoded.WriteString(unreadPayload)
+	require.NoError(t, err)
+	reader := bytes.NewReader(encoded.Bytes())
+
+	_, err = NewBlockFromReaderWithDeclaredSizeLimit(reader, 1024, 1024)
+	require.ErrorIs(t, err, errors.ErrBlockPolicyDeclined)
+	require.NotErrorIs(t, err, errors.ErrBlockInvalid)
+	require.NotErrorIs(t, err, errors.ErrThresholdExceeded)
+	require.Equal(t, len(unreadPayload), reader.Len(), "policy rejection must precede payload reads and allocations")
+}
+
 func TestReadTransactionAllocationSafe_Parity(t *testing.T) {
 	standard := make([]byte, 0, 60)
 	standard = append(standard, 1, 0, 0, 0, 1)

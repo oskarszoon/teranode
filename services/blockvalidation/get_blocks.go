@@ -4,6 +4,7 @@ package blockvalidation
 import (
 	"bufio"
 	"context"
+	stderrors "errors" //nolint:depguard // Inspect native transport causes without message-based classification.
 	"fmt"
 	"io"
 	"math"
@@ -1726,6 +1727,25 @@ func decodeBoundedBlock(r io.Reader, limited *io.LimitedReader, limits blockResp
 	}
 	block, err := model.NewBlockFromReaderWithDeclaredSizeLimit(blockReader, declaredLimit, coinbaseBudget)
 	if err != nil {
+		if errors.Is(err, errors.ErrBlockPolicyDeclined) {
+			return nil, err
+		}
+		// HTTP body readers sanitize transport failures before the model wraps them
+		// in BlockInvalid. Preserve their native classification without that wrapper:
+		// an interrupted transfer is not evidence of an invalid block. Inspect codes
+		// structurally; IsNetworkError also matches untrusted message substrings.
+		for cause := err; cause != nil; cause = stderrors.Unwrap(cause) {
+			if native, ok := cause.(*errors.Error); ok {
+				switch native.Code() {
+				case errors.ERR_NETWORK_ERROR:
+					return nil, errors.NewNetworkError("peer block response transport failure")
+				case errors.ERR_NETWORK_TIMEOUT:
+					return nil, errors.NewNetworkTimeoutError("peer block response timed out")
+				case errors.ERR_NETWORK_CONNECTION_REFUSED:
+					return nil, errors.NewNetworkConnectionRefusedError("peer block response connection refused")
+				}
+			}
+		}
 		if errors.Is(err, errors.ErrThresholdExceeded) {
 			// Receive policy is ours, not a consensus verdict. Scanning can reject
 			// an advertised length before exhausting the reader, so checking N or
@@ -1758,7 +1778,7 @@ func decodeBoundedBlock(r io.Reader, limited *io.LimitedReader, limits blockResp
 		return nil, errors.NewBlockInvalidError("peer block response decoded to nil block")
 	}
 	if limits.enforceDeclared && block.SizeInBytes > limits.maxDeclaredBytes {
-		return nil, errors.NewExternalError("peer block declared size %d exceeds excessiveblocksize %d", block.SizeInBytes, limits.maxDeclaredBytes)
+		return nil, errors.NewBlockPolicyDeclinedError("peer block declared size %d exceeds excessiveblocksize %d", block.SizeInBytes, limits.maxDeclaredBytes)
 	}
 
 	return block, nil
