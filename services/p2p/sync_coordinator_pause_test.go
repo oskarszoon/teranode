@@ -112,6 +112,21 @@ func TestSyncCoordinator_PausePreservesPeerAndStallAgeOnResume(t *testing.T) {
 	}
 }
 
+func TestSyncCoordinator_IdleBreaksCompletionEdge(t *testing.T) {
+	sc, _, store := newPauseTestSyncCoordinator(t)
+	sc.currentSyncPeer = "current"
+	sc.lastObservedFSMState = blockchain.FSMStateCATCHINGBLOCKS
+	sc.lastObservedFSMStateSet = true
+	sc.pendingCompletionPeer = "current"
+	require.NoError(t, store.SetFSMState(context.Background(), "IDLE"))
+	sc.checkFSMState()
+	require.Equal(t, blockchain.FSMStateIDLE, sc.lastObservedFSMState)
+	require.Empty(t, sc.pendingCompletionPeer)
+	require.NoError(t, store.SetFSMState(context.Background(), "RUNNING"))
+	sc.checkFSMState()
+	require.Empty(t, sc.pendingCompletionPeer, "operator resume is not a completed catchup")
+}
+
 func TestSyncCoordinator_UnknownFSMTemporarilySuspendsEvaluation(t *testing.T) {
 	for _, scenario := range []string{"nil state", "unknown state", "read error", "RPC timeout", "missing client"} {
 		t.Run(scenario, func(t *testing.T) {

@@ -184,8 +184,8 @@ type Server struct {
 	// Kafka messages for distributed coordination
 	kafkaConsumerClient kafka.KafkaConsumerGroupI
 
-	// processBlockNotify caches subtree processing state to prevent duplicate
-	// processing of the same subtree from multiple miners
+	// processBlockNotify is a legacy advisory marker. catchupQueued owns
+	// duplicate admission; this cache does not authorize or reject work.
 	processBlockNotify *ttlcache.Cache[chainhash.Hash, bool]
 
 	// catchupAlternatives tracks alternative peer sources for blocks in
@@ -453,17 +453,14 @@ func New(
 		// net for any entries not removed by explicit success/error cleanup.
 		processBlockNotify: ttlcache.New[chainhash.Hash, bool](
 			ttlcache.WithTTL[chainhash.Hash, bool](10*time.Minute),
-			// Do not extend the window on reads, for the same reason as
-			// blockCatchupAttempts below: the enqueue gate reads this entry on every
-			// duplicate announcement, so touch-on-hit would let a stream of duplicates
-			// hold the suppression open past the safety-net TTL.
+			// Queue cleanup reads this advisory entry; keep its safety-net TTL fixed.
 			ttlcache.WithDisableTouchOnHit[chainhash.Hash, bool](),
 		),
 		catchupAlternatives: ttlcache.New[chainhash.Hash, []processBlockCatchup](
 			ttlcache.WithTTL[chainhash.Hash, []processBlockCatchup](10*time.Minute),
 			// Read on every duplicate announcement for a hash in catchup;
 			// touch-on-hit would let that stream hold the retained blocks past
-			// the TTL. Same reasoning as processBlockNotify above.
+			// the TTL.
 			ttlcache.WithDisableTouchOnHit[chainhash.Hash, []processBlockCatchup](),
 		),
 		blockCatchupAttempts: ttlcache.New[chainhash.Hash, int](
@@ -715,9 +712,19 @@ func (u *Server) GetCatchupStatus(ctx context.Context, _ *blockvalidation_api.Em
 func isUnvalidatablePeerError(err error) bool {
 	// A corrupt block body (bitcoin-sv/teranode#4692) is explicitly NOT unvalidatable: the received
 	// body is not bound to the header, so we must not give up on alternative sources —
-	// re-download from another peer instead. It already fails the ErrBlockInvalid check
-	// below (dedicated ERR_BLOCK_CORRUPT sentinel, no match), but guard explicitly so the
-	// don't-give-up intent survives future edits to this predicate.
+	// re-download from another peer instead.
+	//
+	// That deliberately includes the unbound invalid-transaction verdict (isUnboundTxInvalidVerdict,
+	// bitcoin-sv/teranode#4844). Its subtree list came from the primary and was never reconciled to
+	// the header's merkle root, so a primary that named its own subtrees produces exactly this error,
+	// and another peer's copy is how the honest body is recovered. Stopping here would hide it: peers
+	// absorbed into catchupAlternatives do not announce again. For a block whose real body is invalid,
+	// each alternative re-validates and fails, and the cycle counts once toward
+	// CatchupMaxAttemptsPerBlock, so the repeats stop at cooldown.
+	//
+	// A plain corrupt verdict would also fail the ErrBlockInvalid check below (dedicated
+	// ERR_BLOCK_CORRUPT sentinel, no match). This one would not, because it wraps ErrTxInvalid, so this
+	// guard is load-bearing for it.
 	if errors.IsBlockCorrupt(err) {
 		return false
 	}
@@ -1638,8 +1645,8 @@ func deriveBlockHeight(claimed, parentHeight uint32) (uint32, error) {
 // for this block (bitcoin-sv/teranode#4692). Optimistic mining is permitted on those paths ONLY
 // when BOTH the global OptimisticMining flag AND the dedicated OptimisticMiningPeerBlocks opt-in
 // are set, so the global opt-out always wins and the new peer-blocks flag can never bypass it.
-// Written explicitly at the gate rather than relying on the downstream useOptimisticMining seed
-// (belt-and-suspenders). Revalidation of an already-stored block (RevalidateBlock) is never
+// The downstream useOptimisticMining seed in ValidateBlockWithOptions applies the same conjunction
+// on every validation path; it is repeated here at the gate (belt-and-suspenders). Revalidation of an already-stored block (RevalidateBlock) is never
 // optimistic and does not use this gate.
 //
 // Blocks arriving over the legacy sync route (baseURL == "legacy") are unconditionally
@@ -2301,10 +2308,10 @@ func (u *Server) processCatchupChItem(ctx context.Context, c processBlockCatchup
 		// See excessiveBlockSizeDeclined for the field it reads and why. The progress exemption of
 		// the sibling branches is preserved by recordPolicyDeclineAttemptUnlessProgress.
 		//
-		// The processing marker is cleared so the hash can be re-entered, but catchupAlternatives is
+		// Ownership is released so the hash can be re-entered, but catchupAlternatives is
 		// deliberately LEFT INTACT. It is the only record of the other peers that announced this
-		// hash: addBlockToPriorityQueue absorbs an announcement for a hash already in
-		// processBlockNotify into that list instead of enqueueing it, and those peers do not announce
+		// hash: enqueueCatchup absorbs an announcement for a hash already in
+		// catchupQueued into that list instead of enqueueing it, and those peers do not announce
 		// again. Since the verdict is about this peer's declared size, their copies are exactly the
 		// recovery route — deleting them would discard it and leave nothing pending for the hash.
 		//
@@ -2320,11 +2327,17 @@ func (u *Server) processCatchupChItem(ctx context.Context, c processBlockCatchup
 		if errors.Is(err, errors.ErrBlockPolicyDeclined) {
 			declines := u.recordPolicyDeclineAttemptUnlessProgress(c.block.Hash(), c.peerID)
 			u.logger.Warnf("[catchup] Local policy declined a block during catchup toward block %s from peer %s (decline %d/%d for this peer); ending this catchup cycle without charging any peer: %v", c.block.Hash().String(), c.peerID, declines, u.settings.BlockValidation.MaxCorruptAttemptsPerBlock, err)
-			u.processBlockNotify.Delete(*c.block.Hash())
+			u.finishPolicyDeclinedTarget(c)
 
 			return
 		}
 
+		// Release the old generation before any RPC that can synchronously
+		// reannounce this hash. Its deferred release then cannot touch the retry.
+		unvalidatable := isUnvalidatablePeerError(err)
+		if unvalidatable {
+			u.finishCatchupTarget(c)
+		}
 		// Report catchup failure to P2P service.
 		u.reportCatchupFailureForError(ctx, c.peerID, err)
 
@@ -2339,7 +2352,7 @@ func (u *Server) processCatchupChItem(ctx context.Context, c processBlockCatchup
 		// Block is expected to be added to the block store as invalid somewhere else
 		// Note: ErrBlockIncomplete intentionally falls through to retry with alternative peers,
 		// since incomplete blocks (e.g. from seeded peers) may be available from other peers
-		if isUnvalidatablePeerError(err) {
+		if unvalidatable {
 			u.logger.Warnf("[catchup] Block %s is invalid, not trying alternative sources", c.block.Hash().String())
 
 			// Mark peer as malicious only for a genuinely invalid (consensus-failing)
@@ -2347,8 +2360,6 @@ func (u *Server) processCatchupChItem(ctx context.Context, c processBlockCatchup
 			// retry, same as ErrBlockIncomplete. See issue #1031.
 			u.reportCatchupMalicious(ctx, c.peerID, "invalid_block")
 
-			// Clean up the processing notification for this block
-			u.processBlockNotify.Delete(*c.block.Hash())
 			return
 		}
 

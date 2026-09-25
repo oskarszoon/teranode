@@ -405,6 +405,72 @@ func (c *catchupAdmissionAuthority) AdmitCatchupWork(ctx context.Context) error 
 	return nil
 }
 
+type forkMinedAdmissionClient struct {
+	blockchain.ClientI
+	authority *blockchain.Blockchain
+	clears    int
+	notifies  int
+}
+
+type reannounceOnFailureClient struct {
+	blockchain.ClientI
+	reannounce func()
+}
+
+func (c *reannounceOnFailureClient) ReportPeerFailure(context.Context, *chainhash.Hash, string, string, string) error {
+	c.reannounce()
+	return nil
+}
+
+func TestCatchupAdmission_InvalidBranchReannouncementGetsNewOwner(t *testing.T) {
+	server, authority := newCatchupAdmissionAuthority(t, blockchain.FSMStateRUNNING.String())
+	server.catchupCh = make(chan processBlockCatchup, 2)
+	server.p2pClient = &subtreeAttributionP2PClient{}
+	block := testhelpers.CreateTestBlockChain(t, 2)[1]
+	hash := *block.Hash()
+	server.blockchainClient = &reannounceOnFailureClient{ClientI: authority, reannounce: func() {
+		require.True(t, server.enqueueCatchup(processBlockCatchup{block: block, peerID: "retry", baseURL: "http://retry"}))
+	}}
+	server.catchupFunc = func(context.Context, *model.Block, string, string) error {
+		return errors.NewBlockInvalidError("invalid body")
+	}
+	require.True(t, server.enqueueCatchup(processBlockCatchup{block: block, peerID: "initial", baseURL: "http://initial"}))
+	server.processCatchupChItem(context.Background(), <-server.catchupCh)
+	require.Equal(t, "retry", server.catchupQueued[hash].peerID)
+	require.Equal(t, "retry", (<-server.catchupCh).peerID)
+}
+
+func (c *forkMinedAdmissionClient) ClearBlockMinedSet(ctx context.Context, _ *chainhash.Hash) error {
+	c.clears++
+	if c.clears == 1 {
+		_, err := c.authority.Idle(ctx, &emptypb.Empty{})
+		return err
+	}
+	return nil
+}
+
+func (c *forkMinedAdmissionClient) SendNotification(_ context.Context, n *blockchain_api.Notification) error {
+	if n.Type == model.NotificationType_BlockMinedUnset {
+		c.notifies++
+	}
+	return nil
+}
+
+func TestCatchupAdmission_ForkMinedClearNotifyBoundary(t *testing.T) {
+	server, authority := newCatchupAdmissionAuthority(t, blockchain.FSMStateCATCHINGBLOCKS.String())
+	client := &forkMinedAdmissionClient{ClientI: authority, authority: authority.server}
+	server.blockchainClient = client
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	headers := testhelpers.CreateTestHeaders(t, 2)
+	clearErrors, notifyErrors, err := server.clearForkMinedSets(ctx, headers)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Zero(t, clearErrors)
+	require.Zero(t, notifyErrors)
+	require.Equal(t, 1, client.clears, "successor header must wait after STOP")
+	require.Equal(t, 1, client.notifies, "already admitted clear/notify pair must finish")
+}
+
 func TestCatchupAdmission_ReadinessRecoversWithoutOperatorResume(t *testing.T) {
 	server, authority := newCatchupAdmissionAuthority(t, blockchain.FSMStateRUNNING.String())
 	authority.server.SetSubscriptionManagerReadyForTesting(false)

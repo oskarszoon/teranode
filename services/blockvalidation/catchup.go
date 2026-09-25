@@ -299,25 +299,9 @@ func (u *Server) catchup(ctx context.Context, blockUpTo *model.Block, peerID, ba
 			u.logger.Errorf("[catchup][%s] Failed to get fork block headers: %v",
 				catchupCtx.blockUpTo.Hash().String(), err)
 		} else {
-			var clearErrors, notifyErrors int
-			for _, header := range headers {
-				// Clearing mined state and notifying its repair form one admitted unit.
-				if err := u.waitForCatchupAdmission(ctx); err != nil {
-					return err
-				}
-				if err := u.blockchainClient.ClearBlockMinedSet(ctx, header.Hash()); err != nil {
-					clearErrors++
-				} else {
-					// Send BlockMinedUnset notification to trigger immediate transaction status update
-					// This ensures BlockValidation processes the block immediately instead of waiting
-					// for the periodic job (which runs every 1 minute). Same pattern as InvalidateBlock RPC.
-					if err := u.blockchainClient.SendNotification(ctx, &blockchain_api.Notification{
-						Type: model.NotificationType_BlockMinedUnset,
-						Hash: header.Hash().CloneBytes(),
-					}); err != nil {
-						notifyErrors++
-					}
-				}
+			clearErrors, notifyErrors, err := u.clearForkMinedSets(ctx, headers)
+			if err != nil {
+				return err
 			}
 			if clearErrors > 0 || notifyErrors > 0 {
 				u.logger.Errorf("[catchup][%s] Fork block cleanup: %d/%d clear failures, %d notification failures",
@@ -474,6 +458,16 @@ func (u *Server) releaseCatchupLock(ctx *CatchupContext, err *error) {
 
 		// TODO: all of these should be using error types, and not checking the strings (!)
 		switch {
+		case isCatchupAdmissionFailure(*err):
+			// A failed authoritative admission is our own service/upgrade state.
+			// Generic ServiceError also wraps real peer fetch failures, so this
+			// provenance check must precede the broad classifications below.
+			errorType = "local_catchup_authority"
+			if errors.Is(*err, errors.ErrStateError) {
+				// Keep the existing operator-IDLE dashboard classification.
+				errorType = "local_fsm_refusal"
+			}
+			isPeerError = false
 		case errors.Is(*err, errors.ErrStorageError):
 			// A failed read or write of our own store — a torn, stale or mis-keyed
 			// external transaction blob (issue 1439), a full disk — is this node's
@@ -556,6 +550,13 @@ func (u *Server) releaseCatchupLock(ctx *CatchupContext, err *error) {
 			// remain attributable through the failedPeers drain below.
 			errorType = "local_fsm_refusal"
 			isPeerError = false
+		case isUnboundTxInvalidVerdict(*err):
+			// An invalid transaction in an unbound subtree list (bitcoin-sv/teranode#4844): corrupt
+			// on the direct peer path, but on catch-up a consensus rejection, scored exactly like
+			// the validation_failure case below. Must precede the corrupt case, which would
+			// otherwise classify it corrupt_block_body and suppress the malicious report.
+			errorType = "validation_failure"
+			reportMalicious = true
 		case errors.IsBlockCorrupt(*err):
 			// Corrupt block body (bitcoin-sv/teranode#4692): classify for the dashboard but do NOT flag
 			// the peer malicious and do NOT open a generic peer-error window here. The serving
@@ -1751,6 +1752,20 @@ func (u *Server) validateBlocksOnChannel(validateBlocksChan chan blockForValidat
 					if errors.Is(err, errors.ErrBlockIncomplete) {
 						catchupCtx.incompleteBlockHash = block.Hash().String()
 						u.logger.Warnf("[catchup:validateBlocksOnChannel][%s] block %s from peer %s is incomplete, aborting catchup", blockUpTo.Hash().String(), block.Hash().String(), peerID)
+					} else if isUnboundTxInvalidVerdict(err) {
+						// An invalid transaction in the primary's subtree list (bitcoin-sv/teranode#4844).
+						// Corrupt on the direct path, but a consensus rejection here, so it is tested
+						// ahead of the corrupt branch below. No corruptBlockHash and no blob deletion:
+						// each blob was verified against its name at fetch time, so a retry reads the
+						// right bytes, and an honest different subtree list uses different keys.
+						// This abort does not end the cycle: processCatchupChItem still walks the
+						// alternative peers for this verdict, because the list is unbound. If the primary
+						// named its own subtrees, another peer serves a different, valid list. If the fault
+						// is in the miner's real body, every alternative fails the same way, bounded by
+						// CatchupMaxAttemptsPerBlock. The primary is responsible under the attribution
+						// rule on the options above.
+						u.logger.Warnf("[catchup:validateBlocksOnChannel][%s] block %s from peer %s carries an invalid transaction, rejected as a consensus failure", blockUpTo.Hash().String(), block.Hash().String(), peerID)
+						u.reportCatchupMalicious(gCtx, peerID, "invalid_block_validation")
 					} else if errors.IsBlockCorrupt(err) {
 						// Corrupt block body (bitcoin-sv/teranode#4692): the serving peer was already struck via
 						// AddBanScore inside ValidateBlockWithOptions and the block was NOT stored
@@ -1777,8 +1792,14 @@ func (u *Server) validateBlocksOnChannel(validateBlocksChan chan blockForValidat
 							u.logger.Errorf("[catchup:validateBlocksOnChannel][%s] block %s: failed to remove corrupt .subtree files: %v", blockUpTo.Hash().String(), block.Hash().String(), delErr)
 						}
 					} else if shouldReportConsensusMalicious(err) {
-						// ValidateBlockWithOptions already stored the block as invalid if it's a consensus violation
-						u.logger.Warnf("[catchup:validateBlocksOnChannel][%s] block %s violates consensus rules (already stored as invalid by ValidateBlockWithOptions)", blockUpTo.Hash().String(), block.Hash().String())
+						// The block violated a consensus rule and was rejected. Whether
+						// ValidateBlockWithOptions ALSO persisted a record depends on whether the
+						// verdict was bound to the header: the header-only verdicts (proof-of-work
+						// limit, declared target, checkpoint conflict, expected difficulty bits,
+						// contextual header rules) deliberately persist nothing, because they are
+						// final and the header behind them is cheap to fabricate
+						// (bitcoin-sv/teranode#4844). Do not assume a stored invalid row exists here.
+						u.logger.Warnf("[catchup:validateBlocksOnChannel][%s] block %s violates consensus rules, rejected (a record is persisted only for a header-bound verdict)", blockUpTo.Hash().String(), block.Hash().String())
 						u.reportCatchupMalicious(gCtx, peerID, "invalid_block_validation")
 					}
 
@@ -2376,4 +2397,26 @@ func newHashFromStr(hexStr string) *chainhash.Hash {
 	}
 
 	return hash
+}
+
+// clearForkMinedSets treats each clear/notification pair as one admitted unit.
+// A STOP after the clear may not suppress its matching notification; the next
+// header must obtain fresh admission.
+func (u *Server) clearForkMinedSets(ctx context.Context, headers []*model.BlockHeader) (clearErrors, notifyErrors int, err error) {
+	for _, header := range headers {
+		if err = u.waitForCatchupAdmission(ctx); err != nil {
+			return
+		}
+		if clearErr := u.blockchainClient.ClearBlockMinedSet(ctx, header.Hash()); clearErr != nil {
+			clearErrors++
+			continue
+		}
+		if notifyErr := u.blockchainClient.SendNotification(ctx, &blockchain_api.Notification{
+			Type: model.NotificationType_BlockMinedUnset,
+			Hash: header.Hash().CloneBytes(),
+		}); notifyErr != nil {
+			notifyErrors++
+		}
+	}
+	return
 }

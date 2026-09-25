@@ -31,6 +31,9 @@ not prove that already admitted work has drained; rewind still requires service
 shutdown. When catchup entry is refused, block validation clears its processing
 markers without penalizing the peer. Explicit resume permits a later block
 notification to retry; this does not guarantee immediate replay of queued work.
+STOP gates later catchup units only. Legacy netsync, direct `ProcessBlock` intake,
+background recovery, and work admitted before STOP may still write. IDLE is not
+a quiescence or rewind barrier.
 
 ## Prerequisites
 

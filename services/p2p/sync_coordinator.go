@@ -679,6 +679,7 @@ func (sc *SyncCoordinator) TriggerSync() error {
 // decisionMu to be held by the caller.
 func (sc *SyncCoordinator) triggerSyncLocked() error {
 	if sc.activeSyncStateLocked() == nil {
+		sc.logger.Debugf("[SyncCoordinator] Sync trigger deferred until FSM authority confirms an active state")
 		return nil
 	}
 
@@ -830,6 +831,7 @@ func (sc *SyncCoordinator) monitorFSM(ctx context.Context) {
 // forgiving existing lack of progress. Requires decisionMu.
 func (sc *SyncCoordinator) activeSyncStateLocked() *blockchain_api.FSMStateType {
 	if sc.blockchainClient == nil {
+		sc.logger.Debugf("[SyncCoordinator] Deferring sync decision: blockchain authority client unavailable")
 		return nil
 	}
 
@@ -843,10 +845,14 @@ func (sc *SyncCoordinator) activeSyncStateLocked() *blockchain_api.FSMStateType 
 	if state == blockchain.FSMStateIDLE {
 		if sc.syncPausedAt.IsZero() {
 			sc.syncPausedAt = time.Now()
+			sc.logger.Infof("[SyncCoordinator] Operator IDLE confirmed; pausing sync decisions")
 		}
+		sc.handleFSMTransition(&state)
 		return nil
 	}
 	if state != blockchain.FSMStateRUNNING && state != blockchain.FSMStateCATCHINGBLOCKS {
+		sc.handleFSMTransition(&state)
+		sc.logger.Debugf("[SyncCoordinator] Deferring sync decision in FSM state %s", state.String())
 		return nil
 	}
 

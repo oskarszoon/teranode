@@ -1,6 +1,8 @@
 package blockvalidation
 
 import (
+	"time"
+
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	"github.com/jellydator/ttlcache/v3"
 )
@@ -45,8 +47,16 @@ func (u *Server) enqueueCatchup(item processBlockCatchup) bool {
 	}
 	item.owner = &catchupQueueOwner{hash: hash}
 	u.catchupQueued[hash] = item
+	priorMarker := u.processBlockNotify.Get(hash)
+	var priorMarkerTTL time.Duration
+	if priorMarker != nil {
+		priorMarkerTTL = remainingCacheTTL(priorMarker.ExpiresAt())
+	}
 	u.processBlockNotify.Set(hash, true, ttlcache.NoTTL)
-	if alternatives := u.catchupAlternatives.Get(hash); alternatives != nil {
+	alternatives := u.catchupAlternatives.Get(hash)
+	var priorAlternativesTTL time.Duration
+	if alternatives != nil {
+		priorAlternativesTTL = remainingCacheTTL(alternatives.ExpiresAt())
 		u.catchupAlternatives.Set(hash, alternatives.Value(), ttlcache.NoTTL)
 	}
 	select {
@@ -54,10 +64,23 @@ func (u *Server) enqueueCatchup(item processBlockCatchup) bool {
 		return true
 	default:
 		delete(u.catchupQueued, hash)
-		u.processBlockNotify.Delete(hash)
-		u.catchupAlternatives.Delete(hash)
+		if priorMarker == nil {
+			u.processBlockNotify.Delete(hash)
+		} else {
+			u.processBlockNotify.Set(hash, priorMarker.Value(), priorMarkerTTL)
+		}
+		if alternatives != nil {
+			u.catchupAlternatives.Set(hash, alternatives.Value(), priorAlternativesTTL)
+		}
 		return false
 	}
+}
+
+func remainingCacheTTL(expiry time.Time) time.Duration {
+	if expiry.IsZero() {
+		return ttlcache.NoTTL
+	}
+	return time.Until(expiry)
 }
 
 // releaseCatchupOwnership runs on every consumer exit, including cancellation
@@ -110,6 +133,16 @@ func (u *Server) stopCatchupQueue() {
 // before publishing a failure that may synchronously cause a new announcement.
 // An older worker's deferred release must never expire that newer retry.
 func (u *Server) finishCatchupTarget(item processBlockCatchup) {
+	u.finishCatchupTargetWithAlternatives(item, false)
+}
+
+// Policy declines belong to a serving peer, so another announcement may use
+// alternatives retained from the rejected generation.
+func (u *Server) finishPolicyDeclinedTarget(item processBlockCatchup) {
+	u.finishCatchupTargetWithAlternatives(item, true)
+}
+
+func (u *Server) finishCatchupTargetWithAlternatives(item processBlockCatchup, preserveAlternatives bool) {
 	u.catchupQueueMu.Lock()
 	defer u.catchupQueueMu.Unlock()
 	hash := *item.block.Hash()
@@ -118,5 +151,11 @@ func (u *Server) finishCatchupTarget(item processBlockCatchup) {
 	}
 	delete(u.catchupQueued, hash)
 	u.processBlockNotify.Delete(hash)
-	u.catchupAlternatives.Delete(hash)
+	if preserveAlternatives {
+		if alternatives := u.catchupAlternatives.Get(hash); alternatives != nil {
+			u.catchupAlternatives.Set(hash, alternatives.Value(), ttlcache.DefaultTTL)
+		}
+	} else {
+		u.catchupAlternatives.Delete(hash)
+	}
 }

@@ -135,8 +135,11 @@ uses `ReadFSMState` without changing the operating state. Busy, unready or
 persistence-uncertain authority returns unavailable; it does not fabricate IDLE.
 A unit admitted before STOP may finish, including asynchronous writes. Later
 units wait while IDLE is confirmed, retaining pending items and progress markers.
-Transient admission failures retry at most five times; permanent errors return
-immediately. These local failures are not evidence of peer misbehavior.
+Transient admission failures retry with backoff for up to two minutes of active
+recovery time; confirmed IDLE freezes that budget until explicit resume.
+Permanent errors return immediately. An older blockchain service without the
+admission RPC is treated as temporarily unavailable during rolling upgrade.
+These local failures are not evidence of peer misbehavior.
 
 Synthetic client-cache IDLE from heartbeat/subscription failure cannot authorize
 or cancel work. Peer selection also reads authority directly: a confirmed pause
@@ -146,7 +149,9 @@ After restart, catchup is reconstructed from durable chain progress rather than
 replaying an exact in-memory queue.
 
 IDLE does not stop every service or establish live-store quiescence. Background
-recovery and already admitted work may continue. Rewind requires verified
+recovery and already admitted work may continue. This admission boundary covers
+catchup units; legacy netsync and direct `ProcessBlock` intake can still run.
+Pause does not rewind their writes. Rewind requires verified
 shutdown of Teranode services. A maintenance barrier acknowledging every
 service's quiescence is a separate feature.
 

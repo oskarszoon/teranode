@@ -349,6 +349,8 @@ returns before the subtree store is touched, so it cannot confirm that last one.
 `teranode-cli setfsmstate --fsmstate idle` pauses directly from `RUNNING` or
 `CATCHINGBLOCKS`. Success records durable pause intent; already admitted work
 may still finish. Verify that Teranode services are stopped before rewind.
+STOP gates later catchup units; legacy netsync, direct `ProcessBlock` intake,
+and background recovery can continue. IDLE does not establish store quiescence.
 Resume catchup explicitly with `teranode-cli setfsmstate --fsmstate catchingblocks`.
 
 A step-by-step operator runbook is not published yet. Until it is, do not run
