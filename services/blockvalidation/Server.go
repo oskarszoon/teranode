@@ -1104,7 +1104,7 @@ func (u *Server) processBlockFoundChannel(ctx context.Context, blockFound proces
 		// a slow peer pin the worker indefinitely. Same budget as the
 		// priority-queue catchup fetch in addBlockToPriorityQueue.
 		fetchCtx, fetchCancel := u.withCatchupFetchTimeout(ctx)
-		block, err := u.fetchSingleBlock(fetchCtx, blockFound.hash, blockFound.peerID, blockFound.baseURL)
+		block, err := u.fetchAnnouncedBlock(fetchCtx, blockFound.hash, blockFound.peerID, blockFound.baseURL)
 		fetchCancel()
 		if err != nil {
 			if blockFound.errCh != nil {
@@ -1780,7 +1780,7 @@ func (u *Server) processBlockFound(ctx context.Context, hash *chainhash.Hash, pe
 		// with no deadline of its own. Use the configured block-response budget, including
 		// retry backoff, rather than the more generous subtree streaming timeout.
 		fetchCtx, fetchCancel := u.withCatchupFetchTimeout(ctx)
-		block, err = u.fetchSingleBlock(fetchCtx, hash, peerID, baseURL)
+		block, err = u.fetchAnnouncedBlock(fetchCtx, hash, peerID, baseURL)
 		fetchCancel()
 		if err != nil {
 			return err
@@ -2798,6 +2798,21 @@ func (u *Server) policyDeclineAttemptsExhausted(blockHash *chainhash.Hash, peerI
 	return item != nil && item.Value() >= maxAttempts
 }
 
+// fetchAnnouncedBlock preserves the per-peer policy cooldown when the transport
+// decoder declines a declared size before normal block processing can record it.
+// Every announcement fetch uses this gate, including queue classification.
+func (u *Server) fetchAnnouncedBlock(ctx context.Context, hash *chainhash.Hash, peerID, baseURL string) (*model.Block, error) {
+	if u.policyDeclineAttemptsExhausted(hash, peerID) {
+		return nil, errors.NewBlockPolicyDeclinedError("[fetchAnnouncedBlock][%s] local policy decline cap reached for peer %s; re-fetch suppressed until cooldown expires", hash.String(), peerID)
+	}
+
+	block, err := u.fetchSingleBlock(ctx, hash, peerID, baseURL)
+	if errors.Is(err, errors.ErrBlockPolicyDeclined) {
+		u.recordPolicyDeclineAttempt(hash, peerID)
+	}
+	return block, err
+}
+
 // addBlockToPriorityQueue adds a block to the priority queue with appropriate classification
 func (u *Server) addBlockToPriorityQueue(ctx context.Context, blockFound processBlockFound) {
 	u.logger.Debugf("[addBlockToPriorityQueue] Started for block %s from %s", blockFound.hash.String(), blockFound.baseURL)
@@ -2826,15 +2841,15 @@ func (u *Server) addBlockToPriorityQueue(ctx context.Context, blockFound process
 	defer fetchCancel()
 
 	// Fetch the block to classify it
-	block, err := u.fetchSingleBlock(fetchCtx, blockFound.hash, blockFound.peerID, blockFound.baseURL)
+	block, err := u.fetchAnnouncedBlock(fetchCtx, blockFound.hash, blockFound.peerID, blockFound.baseURL)
 	if err != nil {
 		u.logger.Errorf("[addBlockToPriorityQueue] Failed to fetch block %s: %v", blockFound.hash.String(), err)
 
 		// Report peer failure to P2P service for reputation tracking
 		// This ensures peers with misconfigured asset servers (e.g., 401 errors) have their reputation degraded.
-		// Skip reporting for local errors (e.g. our own fetch-context timeout or per-peer rate-wait cancellation)
-		// so a local stall is not blamed on the peer.
-		if blockFound.peerID != "" && !errors.IsLocalError(err) {
+		// Local resource errors and our block-size policy say nothing about the
+		// serving peer. Neither should change reputation or its dashboard error.
+		if blockFound.peerID != "" && !errors.IsLocalError(err) && !errors.Is(err, errors.ErrBlockPolicyDeclined) {
 			u.reportCatchupFailure(ctx, blockFound.peerID)
 			u.reportCatchupError(ctx, blockFound.peerID, err.Error())
 		}

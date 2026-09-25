@@ -1525,6 +1525,7 @@ func (u *Server) fetchSubtreeFromPeer(ctx context.Context, subtreeHash *chainhas
 
 	// Bound the whole fetch (all retry attempts + streaming read) by one wall clock so a stalling
 	// peer can't hold it for maxAttempts x http_streaming_timeout.
+	parentCtx := ctx
 	ctx, cancel := u.withCatchupSubtreeFetchTimeout(ctx)
 	defer cancel()
 
@@ -1548,6 +1549,11 @@ func (u *Server) fetchSubtreeFromPeer(ctx context.Context, subtreeHash *chainhas
 	subtreeBytes, err := util.DoHTTPRequestBoundedWithRetry(ctx, url, maxSubtreeBytes,
 		func(c context.Context) error { return u.awaitPeerFetchSlot(c, baseURL) })
 	if err != nil {
+		// A caller deadline (for example RevalidateBlock's RPC budget) also ends
+		// the fetch, but must not charge the peer for exhausting our local budget.
+		if parentErr := parentCtx.Err(); parentErr != nil {
+			return nil, errors.NewContextCanceledError("[catchup:fetchSubtreeFromPeer] caller context ended for %s", subtreeHash.String(), parentErr)
+		}
 		return nil, errors.NewServiceError("[catchup:fetchSubtreeFromPeer] failed to fetch subtree from %s", util.RedactPeerURL(url), err)
 	}
 

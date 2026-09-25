@@ -596,6 +596,10 @@ func readBodyWithCtx(ctx context.Context, url string, r io.Reader, maxBytes int6
 // longer than maxBytes the body was over the cap and we return ErrExternal without retaining
 // the bytes for the caller.
 func DoHTTPRequestBounded(ctx context.Context, url string, maxBytes int64, requestBody ...[]byte) ([]byte, error) {
+	if maxBytes < 0 {
+		return nil, errors.NewConfigurationError("bounded HTTP response byte limit must be non-negative")
+	}
+
 	bodyReaderCloser, cancelFn, err := doHTTPRequest(ctx, url, requestBody...)
 	defer cancelFn()
 
@@ -1286,6 +1290,10 @@ func doHTTPRequestBodyReaderWithRetry(ctx context.Context, url string, cfg retry
 // catchup subtree fetches against peer-controlled asset endpoints.
 // beforeAttempt (nil = no-op) runs before every attempt, e.g. a per-peer rate-limit wait.
 func DoHTTPRequestBoundedWithRetry(ctx context.Context, url string, maxBytes int64, beforeAttempt func(context.Context) error, requestBody ...[]byte) ([]byte, error) {
+	if maxBytes < 0 {
+		return nil, errors.NewConfigurationError("bounded HTTP response byte limit must be non-negative")
+	}
+
 	return doHTTPRequestBoundedWithRetry(ctx, url, maxBytes, defaultRetryConfig, beforeAttempt, requestBody...)
 }
 
