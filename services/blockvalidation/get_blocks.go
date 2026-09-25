@@ -1940,6 +1940,11 @@ func (u *Server) fetchSingleBlock(ctx context.Context, hash *chainhash.Hash, pee
 		}
 		return nil, errors.NewProcessingError("[catchup:fetchSingleBlock][%s] failed to create block from bytes", hash.String(), err)
 	}
+	// /block returns exactly one serialized block: there is no count parameter
+	// or legacy batch-size negotiation to explain additional records. Keep its
+	// strict framing contract. The /blocks oversend exception above is scoped
+	// to batch interoperability; it does not make arbitrary proxy padding valid
+	// on the single-object endpoint.
 	if _, err = blockReader.Peek(1); err == nil {
 		return nil, errors.NewExternalError("[catchup:fetchSingleBlock][%s] peer returned trailing block data", hash.String())
 	} else if !errors.Is(err, io.EOF) {
