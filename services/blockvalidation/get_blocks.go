@@ -1131,6 +1131,11 @@ func (u *Server) fetchAndStoreSubtreeData(ctx context.Context, shutdownCtx conte
 	subtreeDataReader, err := u.fetchSubtreeDataFromPeer(ctx, subtreeHash, peerID, baseURL,
 		func(c context.Context) error { return u.awaitPeerFetchSlot(c, baseURL) }, bypassCache)
 	if err != nil {
+		// The caller (including RevalidateBlock's RPC) can have an earlier
+		// deadline than the download. That expiry is local, not a peer stall.
+		if parentErr := shutdownCtx.Err(); parentErr != nil {
+			return errors.NewContextCanceledError("[catchup:fetchAndStoreSubtreeData] caller context ended for %s", subtreeHash.String(), parentErr)
+		}
 		if c := classifyDownloadErr(ctx, subtreeHash, err); c != nil {
 			return c
 		}
@@ -1151,6 +1156,9 @@ func (u *Server) fetchAndStoreSubtreeData(ctx context.Context, shutdownCtx conte
 	// compared to the transactions in the subtree
 	subtreeData, err := subtreepkg.NewSubtreeDataFromReader(subtree, subtreeDataBufferedReader)
 	if err != nil {
+		if parentErr := shutdownCtx.Err(); parentErr != nil {
+			return errors.NewContextCanceledError("[catchup:fetchAndStoreSubtreeData] caller context ended for %s", subtreeHash.String(), parentErr)
+		}
 		// Parser errors may quote peer-controlled text. Only the actual download
 		// context establishes cancellation here; a quoted sentinel is not local failure.
 		if c := classifyDownloadErr(ctx, subtreeHash, nil); c != nil {
