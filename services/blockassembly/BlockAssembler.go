@@ -202,10 +202,6 @@ type BlockAssembler struct {
 	// unminedTransactionsLoading indicates if unmined transactions are currently being loaded
 	unminedTransactionsLoading atomic.Bool
 
-	// A failed memory rebuild must be repaired before mining resumes. If the
-	// chain advances meanwhile, keep this gate closed through reconciliation.
-	recoveryMiningBlocked atomic.Bool
-
 	// unminedDropHashes accumulates hashes that should be dropped from the
 	// input queue at the end of loadUnminedTransactions. Populated by
 	// markAsConflicting via the cascade returned from MarkConflictingRecursively.
@@ -935,8 +931,6 @@ func (b *BlockAssembler) reset(ctx context.Context, validateInputs ...bool) erro
 	prometheusBlockAssemblyCurrentBlockHeight.Set(float64(height))
 
 	b.logger.Warnf("[BlockAssembler][Reset] resetting block assembler DONE")
-	b.recoveryMiningBlocked.Store(false)
-
 	return nil
 }
 
@@ -1105,7 +1099,6 @@ func (b *BlockAssembler) processNewBlockAnnouncement(ctx context.Context) {
 
 	switch {
 	case bestBlockAccordingToBlockchain.Hash().IsEqual(bestBlockAccordingToBlockAssembly.Hash()):
-		b.recoveryMiningBlocked.Store(false)
 		ctxLogger.Infof("[BlockAssembler][%s] best block header is the same as the current best block header: %s", bestBlockchainBlockHeader.Hash(), bestBlockAccordingToBlockAssembly.Hash())
 		return
 
@@ -1164,8 +1157,6 @@ func (b *BlockAssembler) processNewBlockAnnouncement(ctx context.Context) {
 	}
 
 	b.setBestBlockHeader(bestBlockchainBlockHeader, bestBlockchainBlockHeaderMeta.Height)
-	b.recoveryMiningBlocked.Store(false)
-
 	// Block assembly advanced to the chain tip we observed this round: it is no longer
 	// behind, so clear the lag gauge (issue #980, Bug B).
 	prometheusBlockAssemblyTipLagBlocks.Set(0)
@@ -1899,7 +1890,7 @@ func (b *BlockAssembler) executeResetRequest(ctx context.Context, fullReset bool
 //   - *subtreeprocessor.MiningSnapshotLease: Release after all subtree readers finish
 //   - error: Any error encountered during retrieval
 func (b *BlockAssembler) GetMiningCandidate(ctx context.Context) (*model.MiningCandidate, []*subtree.Subtree, *subtreeprocessor.MiningSnapshotLease, error) {
-	if b.recoveryMiningBlocked.Load() || b.subtreeProcessor.RecoveryPending() {
+	if b.subtreeProcessor.RecoveryPending() {
 		return nil, nil, nil, errors.NewProcessingError(errMiningRecoveryPending)
 	}
 	ctx, _, deferFn := tracing.Tracer("blockassembly").Start(ctx, "GetMiningCandidate",
@@ -1922,7 +1913,7 @@ func (b *BlockAssembler) GetMiningCandidate(ctx context.Context) (*model.MiningC
 		}
 
 		candidate, trees, candidateErr := b.generateEmptyBlockCandidate(ctx, bestBlockHeader, bestBlockMeta.Height)
-		if b.recoveryMiningBlocked.Load() || b.subtreeProcessor.RecoveryPending() {
+		if b.subtreeProcessor.RecoveryPending() {
 			return nil, nil, nil, errors.NewProcessingError(errMiningRecoveryPending)
 		}
 		return candidate, trees, nil, candidateErr
@@ -1964,20 +1955,19 @@ func (b *BlockAssembler) GetMiningCandidate(ctx context.Context) (*model.MiningC
 			data = incompleteData
 			subtrees = incompleteData.Subtrees
 		} else {
-			if b.recoveryMiningBlocked.Load() || b.subtreeProcessor.RecoveryPending() {
+			if b.subtreeProcessor.RecoveryPending() {
 				return nil, nil, nil, errors.NewProcessingError(errMiningRecoveryPending)
 			}
 			candidate, trees, candidateErr := b.generateEmptyBlockCandidate(ctx, baBestBlockHeader, baBestBlockHeight)
-			if b.recoveryMiningBlocked.Load() || b.subtreeProcessor.RecoveryPending() {
+			if b.subtreeProcessor.RecoveryPending() {
 				return nil, nil, nil, errors.NewProcessingError(errMiningRecoveryPending)
 			}
 			return candidate, trees, nil, candidateErr
 		}
 	}
 
-	// Snapshot acquisition can wait behind recovery on the dispatcher. A newly
-	// published snapshot must remain gated until BA reconciles its chain anchor.
-	if b.recoveryMiningBlocked.Load() || b.subtreeProcessor.RecoveryPending() {
+	// Keep the processor's incomplete-recovery guard after snapshot acquisition.
+	if b.subtreeProcessor.RecoveryPending() {
 		return nil, nil, nil, errors.NewProcessingError(errMiningRecoveryPending)
 	}
 
@@ -2083,9 +2073,8 @@ func (b *BlockAssembler) GetMiningCandidate(ctx context.Context) (*model.MiningC
 
 	b.logger.Debugf("[GetMiningCandidate] Returning mining candidate: height=%d, fees=%d, subsidy=%d, txCount=%d, subtreeCount=%d", candidate.Height, totalFees, blockSubsidy, txCount, subtreeCountUint32)
 
-	// Chain/time reads above may also span a recovery pass. Reject before
-	// transferring ownership so the deferred cleanup releases any mmap lease.
-	if b.recoveryMiningBlocked.Load() || b.subtreeProcessor.RecoveryPending() {
+	// Recheck incomplete-recovery state before transferring the mmap lease.
+	if b.subtreeProcessor.RecoveryPending() {
 		return nil, nil, nil, errors.NewProcessingError(errMiningRecoveryPending)
 	}
 	transferred = true

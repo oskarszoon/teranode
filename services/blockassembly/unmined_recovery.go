@@ -27,13 +27,13 @@ func (b *BlockAssembler) unminedRecoveryInterval() time.Duration {
 func (b *BlockAssembler) nextUnminedRecoveryDelay(recovered bool) time.Duration {
 	interval := b.unminedRecoveryInterval()
 	if interval == 0 {
-		// Preserve the safety gate if an older in-process path left a repair pending.
-		if b.subtreeProcessor.RecoveryPending() || b.recoveryMiningBlocked.Load() {
+		// Keep retrying if the processor reports an incomplete repair.
+		if b.subtreeProcessor.RecoveryPending() {
 			return unminedRecoveryRetryDelay
 		}
 		return 0
 	}
-	if (!recovered || b.recoveryMiningBlocked.Load()) && interval > unminedRecoveryRetryDelay {
+	if !recovered && interval > unminedRecoveryRetryDelay {
 		return unminedRecoveryRetryDelay
 	}
 	return interval
@@ -45,7 +45,7 @@ func (b *BlockAssembler) recoverUnminedTransactions(ctx context.Context) (bool, 
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
-	if b.unminedRecoveryInterval() == 0 && !b.subtreeProcessor.RecoveryPending() && !b.recoveryMiningBlocked.Load() {
+	if b.unminedRecoveryInterval() == 0 && !b.subtreeProcessor.RecoveryPending() {
 		return false, nil
 	}
 	// Bound index scan, selection and queue admission. No live template is
@@ -101,7 +101,6 @@ func (b *BlockAssembler) recoverUnminedTransactions(ctx context.Context) (bool, 
 	if err != nil {
 		return false, err
 	}
-	wasBlocked := b.recoveryMiningBlocked.Load()
 	err = b.subtreeProcessor.RecoverUnmined(ctx, header, hashes,
 		func(ctx context.Context, candidates []chainhash.Hash, accepted func(chainhash.Hash) bool) ([]*utxo.UnminedTransaction, error) {
 			// Recheck authority and tip before reading metadata. The processor
@@ -149,9 +148,6 @@ func (b *BlockAssembler) recoverUnminedTransactions(ctx context.Context) (bool, 
 			return selected, nil
 		})
 	if err != nil {
-		if !wasBlocked && !b.subtreeProcessor.RecoveryPending() {
-			b.recoveryMiningBlocked.Store(false)
-		}
 		return false, err
 	}
 	// The chain may advance while the queue drains. Trigger normal reconciliation
@@ -159,9 +155,7 @@ func (b *BlockAssembler) recoverUnminedTransactions(ctx context.Context) (bool, 
 	checkCtx, stopCheck := context.WithTimeout(ctx, 5*time.Second)
 	latest, _, checkErr := b.blockchainClient.GetBestBlockHeader(checkCtx)
 	stopCheck()
-	if checkErr == nil && latest != nil && latest.Hash().IsEqual(header.Hash()) {
-		b.recoveryMiningBlocked.Store(false)
-	} else {
+	if checkErr != nil || latest == nil || !latest.Hash().IsEqual(header.Hash()) {
 		b.triggerReconcile()
 	}
 	b.logger.Infof("[BlockAssembler] Unmined transaction recovery completed in %s", time.Since(started))
