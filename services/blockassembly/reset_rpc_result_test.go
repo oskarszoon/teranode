@@ -2,11 +2,13 @@ package blockassembly
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	terrors "github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/services/blockassembly/blockassembly_api"
+	"github.com/bsv-blockchain/teranode/services/blockassembly/subtreeprocessor"
 	"github.com/bsv-blockchain/teranode/services/blockchain"
 	"github.com/bsv-blockchain/teranode/stores/utxo"
 	"github.com/bsv-blockchain/teranode/ulogger"
@@ -27,13 +29,19 @@ func resetRPCServer(assembler *BlockAssembler) *BlockAssembly {
 	return &BlockAssembly{blockAssembler: assembler, logger: ulogger.TestLogger{}, stats: gocore.NewStat("reset-rpc-result")}
 }
 
-func TestResetRPCsReturnRecoveryPendingError(t *testing.T) {
+type failingResetWaitProcessor struct {
+	subtreeprocessor.Interface
+	calls atomic.Int32
+}
+
+func (p *failingResetWaitProcessor) WaitForPendingBlocks(context.Context) error {
+	return terrors.NewProcessingError("reset wait failure %d", p.calls.Add(1))
+}
+
+func TestResetRPCsReturnOperationError(t *testing.T) {
 	assembler, _ := newUnminedRecoveryTestAssembler(t, blockchain.FSMStateRUNNING)
-	storeSuppressedRecoveryTransaction(t, assembler)
-	assembler.subtreeProcessor.SetCurrentItemsPerFile(1)
-	_, err := assembler.recoverUnminedTransactions(t.Context())
-	require.Error(t, err)
-	require.True(t, assembler.subtreeProcessor.RecoveryPending())
+	failing := &failingResetWaitProcessor{Interface: assembler.subtreeProcessor}
+	assembler.subtreeProcessor = failing
 	ctx, cancel := context.WithCancel(t.Context())
 	t.Cleanup(func() { cancel(); assembler.wg.Wait() })
 	require.NoError(t, assembler.startChannelListeners(ctx))
@@ -42,12 +50,12 @@ func TestResetRPCsReturnRecoveryPendingError(t *testing.T) {
 			callCtx, cancelCall := context.WithTimeout(t.Context(), 5*time.Second)
 			defer cancelCall()
 			response, err := rpc(callCtx, &blockassembly_api.EmptyMessage{})
-			require.ErrorContains(t, err, "read-only repair before reset")
+			require.ErrorContains(t, err, "[Reset] error waiting for pending blocks")
 			require.Nil(t, response)
 			require.Equal(t, terrors.NewProcessingError("expected").Code(), terrors.UnwrapGRPC(status.Convert(err).Err()).Code())
-			require.True(t, assembler.subtreeProcessor.RecoveryPending())
 		})
 	}
+	require.EqualValues(t, 3, failing.calls.Load())
 }
 
 func TestResetRPCsReturnCallerCancellation(t *testing.T) {
@@ -97,12 +105,25 @@ func TestResetRPCFullQueueCancellation(t *testing.T) {
 	require.Len(t, assembler.resetCh, 2)
 }
 
+func TestResetListenerRejectsMalformedQueuedRequest(t *testing.T) {
+	assembler, _ := newUnminedRecoveryTestAssembler(t, blockchain.FSMStateRUNNING)
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(func() { cancel(); assembler.wg.Wait() })
+	require.NoError(t, assembler.startChannelListeners(ctx))
+	reply := make(chan error, 1)
+	assembler.resetCh <- resetRequest{ErrCh: reply}
+	select {
+	case err := <-reply:
+		require.ErrorContains(t, err, "no operation")
+	case <-time.After(time.Second):
+		t.Fatal("malformed reset request stopped listener without a result")
+	}
+}
+
 func TestResetRPCQueuedOptionsReceiveTheirOwnErrors(t *testing.T) {
 	assembler, _ := newUnminedRecoveryTestAssembler(t, blockchain.FSMStateRUNNING)
-	storeSuppressedRecoveryTransaction(t, assembler)
-	assembler.subtreeProcessor.SetCurrentItemsPerFile(1)
-	_, err := assembler.recoverUnminedTransactions(t.Context())
-	require.Error(t, err)
+	failing := &failingResetWaitProcessor{Interface: assembler.subtreeProcessor}
+	assembler.subtreeProcessor = failing
 	assembler.resetCh = make(chan resetRequest, 3)
 	results := make(chan error, 3)
 	for _, rpc := range resetRPCs(resetRPCServer(assembler)) {
@@ -118,11 +139,12 @@ func TestResetRPCQueuedOptionsReceiveTheirOwnErrors(t *testing.T) {
 	for range 3 {
 		select {
 		case err := <-results:
-			require.ErrorContains(t, err, "read-only repair before reset", "no queued reset option may be acknowledged without execution")
+			require.ErrorContains(t, err, "[Reset] error waiting for pending blocks", "no queued reset option may be acknowledged without execution")
 		case <-time.After(time.Second):
 			t.Fatal("queued reset did not receive a result")
 		}
 	}
+	require.EqualValues(t, 3, failing.calls.Load())
 }
 
 func TestResetRPCListenerShutdownReleasesQueuedCaller(t *testing.T) {

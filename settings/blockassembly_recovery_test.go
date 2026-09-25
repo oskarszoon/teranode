@@ -29,6 +29,10 @@ func TestUnminedRecoveryIntervalLoadsConfiguration(t *testing.T) {
 	}
 }
 
+func TestUnminedRecoveryDisabledByDefault(t *testing.T) {
+	require.Zero(t, NewSettings("assembly_recovery_default_off_test").BlockAssembly.UnminedRecoveryInterval)
+}
+
 func TestUnminedRecoveryTimeoutLoadsConfiguration(t *testing.T) {
 	const testContext = "assembly_recovery_timeout_loader_test"
 	config := gocore.Config(testContext)

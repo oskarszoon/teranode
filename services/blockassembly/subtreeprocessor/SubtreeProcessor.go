@@ -245,6 +245,8 @@ type SubtreeProcessor struct {
 	resetCh chan *resetBlocks
 
 	recoverUnminedCh chan unminedRecoveryRequest
+	// recoveryEpoch invalidates a read-only selection across same-tip resets.
+	recoveryEpoch atomic.Uint64
 	// recoveryPending suppresses mining/dequeue after an incomplete rebuild.
 	recoveryPending atomic.Bool
 	// recoveryPendingSince retains the first pending timestamp across retries.
@@ -1146,6 +1148,21 @@ func (stp *SubtreeProcessor) Start(ctx context.Context) {
 					stp.lastDequeueMillis.Store(stp.clock.Now().UnixMilli())
 
 					stp.setCurrentRunningState(StateDequeue)
+					// A size-one first subtree contains only the coinbase placeholder
+					// and is full before the first queued transaction arrives. Rotate
+					// it before dequeue or speculative currentTxMap admission, so a
+					// failed rotation leaves every queued row untouched.
+					if stp.queue.length() > 0 {
+						full := stp.currentSubtree.Load()
+						if full != nil && full.Size() > 0 && len(full.Nodes) >= full.Size() {
+							if err := stp.processCompleteSubtree(false); err != nil {
+								stp.logger.Errorf("processCompleteSubtree before dequeue failed: %s", err)
+								stp.setCurrentRunningState(StateRunning)
+								time.Sleep(stp.settings.BlockAssembly.IdleSleepDuration)
+								continue
+							}
+						}
+					}
 
 					// Phase 1: Dequeue multiple batches
 					dequeueBatches = dequeueBatches[:0] // Reset slice without reallocating
@@ -1207,15 +1224,17 @@ func (stp *SubtreeProcessor) Start(ctx context.Context) {
 						addedCount++
 					}
 
-					// Phase 2: Filter batches in parallel goroutines
-					// Each goroutine marks rejected nodes by zeroing their Hash.
+					// Phase 2: Filter batches in parallel goroutines. Keep the
+					// published nodes immutable: recovery may retain a queue cursor
+					// while this consumer advances and filters the same batches.
 					// The maps (removeMap, currentTxMap) are thread-safe.
-					var zeroHash chainhash.Hash
+					rejected := make([][]bool, len(dequeueBatches))
 					var filterWg sync.WaitGroup
 
-					for _, batch := range dequeueBatches {
+					for batchIndex, batch := range dequeueBatches {
+						rejected[batchIndex] = make([]bool, len(batch.nodes))
 						filterWg.Add(1)
-						go func(b *TxBatch) {
+						go func(b *TxBatch, mask []bool) {
 							defer filterWg.Done()
 
 							for i := range b.nodes {
@@ -1226,29 +1245,29 @@ func (stp *SubtreeProcessor) Start(ctx context.Context) {
 								// Fast reject path first (most common in practice)
 								if mapLength > 0 && removeMap.Exists(hash) {
 									_ = removeMap.Delete(hash)
-									b.nodes[i].Hash = zeroHash // Mark as rejected
+									mask[i] = true
+									stp.recoveryEpoch.Add(1)
 									continue
 								}
 
 								// Check for duplicates and insert into txMap
 								if _, wasSet := currentTxMap.SetIfNotExists(hash, inpoints); !wasSet {
-									b.nodes[i].Hash = zeroHash // Mark as duplicate
+									mask[i] = true
 									continue
 								}
-								// Node is valid, keep its Hash intact
+								// Node is valid; its published hash stays intact.
 							}
-						}(batch)
+						}(batch, rejected[batchIndex])
 					}
 
 					filterWg.Wait()
 
 					// Phase 3: Bulk insert valid nodes into subtrees (single-threaded)
-					// Only nodes with non-zero Hash passed the filters
+					// Only nodes passing the filter are inserted.
 					nrAddedInBatch := 0
-					for _, batch := range dequeueBatches {
-						for _, node := range batch.nodes {
-							// Skip rejected/duplicate nodes (marked with zero hash)
-							if node.Hash == zeroHash {
+					for batchIndex, batch := range dequeueBatches {
+						for nodeIndex, node := range batch.nodes {
+							if rejected[batchIndex][nodeIndex] {
 								continue
 							}
 
@@ -1474,6 +1493,9 @@ func (stp *SubtreeProcessor) reset(blockHeader *model.BlockHeader, moveBackBlock
 	defer deferFn()
 
 	ctx := context.Background()
+	// Even a same-tip reset with an empty queue can rewrite UTXO markers and
+	// replace the accepted map. Invalidate in-flight recovery before either.
+	stp.recoveryEpoch.Add(1)
 
 	// Mark all currently-in-assembly transactions as NOT on longest chain before clearing state.
 	//
@@ -1750,6 +1772,7 @@ func (stp *SubtreeProcessor) reset(blockHeader *model.BlockHeader, moveBackBlock
 		if _, found := stp.queue.dequeueBatchUntil(validUntilMillis); !found {
 			break
 		}
+		stp.recoveryEpoch.Add(1)
 	}
 
 	return nil
@@ -2792,6 +2815,8 @@ func (stp *SubtreeProcessor) AddBatchIfRoom(nodes []subtreepkg.Node, txInpoints 
 // AddDirectly adds a transaction node directly to the subtree processor without going through the queue.
 // It is used for transactions that are already known to be valid and should be added immediately.
 // This is useful for transactions that are part of the current block being processed.
+// Call only before Start or from a reset/reorg callback on the processor dispatcher;
+// it mutates the live subtree without a separate lock.
 //
 // Parameters:
 //   - node: Transaction node to add
@@ -2817,6 +2842,8 @@ func (stp *SubtreeProcessor) addDirectly(ctx context.Context, node *subtreepkg.N
 // AddNodesDirectly adds a batch of unmined transactions directly to the processor without going through the queue.
 // It performs parallel filtering/insertion into currentTxMap and sequential insertion into subtrees.
 // This bypasses the queue and is useful for bulk loading transactions at startup.
+// Call only before Start or from a reset/reorg callback on the processor dispatcher;
+// it mutates the live subtree without a separate lock.
 //
 // Parameters:
 //   - txs: Unmined transactions to add
@@ -2941,6 +2968,17 @@ func (stp *SubtreeProcessor) Remove(ctx context.Context, hash chainhash.Hash) er
 	return nil
 }
 
+// Duplicate keeps snapshot isolation, but go-subtree's Duplicate allocates
+// Nodes with cap=len. For the live partial subtree that makes Size report a
+// false smaller limit and can complete a non-power-of-two tree after removal.
+func duplicatePartialSubtree(original *subtreepkg.Subtree) *subtreepkg.Subtree {
+	duplicate := original.Duplicate()
+	nodes := make([]subtreepkg.Node, len(duplicate.Nodes), original.Size())
+	copy(nodes, duplicate.Nodes)
+	duplicate.Nodes = nodes
+	return duplicate
+}
+
 func (stp *SubtreeProcessor) removeTxFromSubtrees(ctx context.Context, hash chainhash.Hash) error {
 	_, _, deferFn := tracing.Tracer("subtreeprocessor").Start(ctx, "removeTxFromSubtrees",
 		tracing.WithParentStat(stp.stats),
@@ -2995,7 +3033,7 @@ func (stp *SubtreeProcessor) removeTxFromSubtrees(ctx context.Context, hash chai
 			// chained-subtree branch below) so any precomputed mining-data snapshot holding
 			// the original stays safe for concurrent reads. Further processing is not needed,
 			// as the subtrees in chainedSubtrees are older than the current subtree.
-			currentSubtree := stp.currentSubtree.Load().Duplicate()
+			currentSubtree := duplicatePartialSubtree(stp.currentSubtree.Load())
 
 			if err := currentSubtree.RemoveNodeAtIndex(foundIndex); err != nil {
 				return errors.NewProcessingError("[SubtreeProcessor][removeTxFromSubtrees][%s] error removing node from current subtree", hash.String(), err)
@@ -3083,7 +3121,7 @@ func (stp *SubtreeProcessor) removeTxsFromSubtrees(ctx context.Context, hashes [
 				// index is rebuilt fresh on the next lookup: RemoveNodeAtIndex leaves the index
 				// map stale for nodes after the removed one, which would otherwise corrupt the
 				// index used to remove a subsequent hash from the same subtree.
-				currentSubtree := stp.currentSubtree.Load().Duplicate()
+				currentSubtree := duplicatePartialSubtree(stp.currentSubtree.Load())
 
 				if err := currentSubtree.RemoveNodeAtIndex(foundIndex); err != nil {
 					return errors.NewProcessingError("[SubtreeProcessor][removeTxsFromSubtrees][%s] error removing node from current subtree", hash.String(), err)
@@ -4913,6 +4951,7 @@ func (stp *SubtreeProcessor) closeRetiredDiskTxMaps() {
 }
 
 func (stp *SubtreeProcessor) resetSubtreeState(createProperlySizedSubtrees bool) (err error) {
+	stp.recoveryEpoch.Add(1)
 	// Track whether the pool swap has already been performed in this call. If a
 	// later step fails (notably stp.newSubtree below) we must roll the swap back
 	// here, atomically, because moveForwardBlock's own rollback defer is not yet
@@ -5580,14 +5619,17 @@ func (stp *SubtreeProcessor) dequeueDuringBlockMovement(transactionMap *SplitSwi
 				txInpoints := batch.txInpoints[i]
 
 				if transactionMap != nil && transactionMap.Exists(node.Hash) {
+					stp.recoveryEpoch.Add(1)
 					continue
 				}
 				if losingTxHashesMap != nil && losingTxHashesMap.Exists(node.Hash) {
+					stp.recoveryEpoch.Add(1)
 					continue
 				}
 
 				if len(conflictingHashes) > 0 {
 					if _, ok := conflictingHashes[node.Hash]; ok {
+						stp.recoveryEpoch.Add(1)
 						continue
 					}
 					if txInpoints != nil {
@@ -5600,12 +5642,15 @@ func (stp *SubtreeProcessor) dequeueDuringBlockMovement(transactionMap *SplitSwi
 						}
 						if matched {
 							conflictingHashes[node.Hash] = struct{}{}
+							stp.recoveryEpoch.Add(1)
 							continue
 						}
 					}
 				}
 
-				_ = stp.addNode(node, txInpoints, skipNotification)
+				if err := stp.addNode(node, txInpoints, skipNotification); err != nil {
+					stp.recoveryEpoch.Add(1)
+				}
 			}
 
 			itemsProcessed += int64(len(batch.nodes))

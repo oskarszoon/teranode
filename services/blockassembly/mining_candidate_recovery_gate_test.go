@@ -53,11 +53,23 @@ func TestMiningCandidateRejectsSnapshotAcquiredAcrossRecovery(t *testing.T) {
 				s.BlockAssembly.InitialMerkleItemsPerSubtree = 8
 				if complete {
 					s.BlockAssembly.InitialMerkleItemsPerSubtree = 2
+					s.BlockAssembly.StoreTxInpointsForSubtreeMeta = false
 				}
 				s.BlockAssembly.SubtreeMmapDir = t.TempDir()
 			})
 			hashes := storeRecoverySelectionChain(t, b, 1)
 			processor := b.subtreeProcessor
+			if complete {
+				require.True(t, b.AddTxBatchIfRoom([]subtree.Node{{Hash: hashes[0], Fee: 1, SizeInBytes: 100}}, []*subtree.TxInpoints{{}}))
+				require.Eventually(t, func() bool {
+					data := processor.GetPrecomputedMiningData()
+					if data == nil {
+						return false
+					}
+					defer data.Lease.Release()
+					return len(data.Subtrees) == 1 && data.Subtrees[0].IsMmapBacked()
+				}, time.Second, time.Millisecond, "fixture must complete a real mmap subtree before snapshot acquisition")
+			}
 			entered, release := make(chan struct{}), make(chan struct{})
 			barrier := &recoveryCandidateSnapshotBarrier{Interface: processor}
 			wait := func() { close(entered); <-release }

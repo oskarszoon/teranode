@@ -40,6 +40,7 @@ func newUnminedRecoveryTestAssembler(t *testing.T, state blockchain.FSMStateType
 	tSettings.BlockAssembly.OnRestartValidateParentChain = false
 	tSettings.BlockAssembly.UnminedTxDiskSortEnabled = false
 	tSettings.BlockAssembly.DoubleSpendWindow = 0
+	tSettings.BlockAssembly.UnminedRecoveryInterval = time.Hour
 	tSettings.BlockChain.HTTPListenAddress = "127.0.0.1:0"
 	tSettings.BlockChain.PeerRegistryStore = nil
 	tSettings.Kafka.BlocksFinalConfig = &url.URL{Scheme: "memory", Host: "recovery-test"}
@@ -156,6 +157,12 @@ func recoveryCandidateContains(ctx context.Context, assembler *BlockAssembler, t
 	return false
 }
 
+func requireRecoveryCandidateEventually(t *testing.T, assembler *BlockAssembler, txID chainhash.Hash) {
+	t.Helper()
+	require.Eventually(t, func() bool { return recoveryCandidateContains(t.Context(), assembler, txID) },
+		5*time.Second, 10*time.Millisecond)
+}
+
 func TestRecoverUnminedTransactionsWithoutNewBlock(t *testing.T) {
 	assembler, _ := newUnminedRecoveryTestAssembler(t, blockchain.FSMStateRUNNING)
 	txID := storeSuppressedRecoveryTransaction(t, assembler)
@@ -204,7 +211,7 @@ func TestRecoverUnminedTransactionsRetriesUnavailableAuthority(t *testing.T) {
 	recovered, err = assembler.recoverUnminedTransactions(t.Context())
 	require.NoError(t, err)
 	require.True(t, recovered)
-	require.Contains(t, recoveryCandidateHashes(t, assembler), txID)
+	requireRecoveryCandidateEventually(t, assembler, txID)
 }
 
 func TestRecoverUnminedTransactionsDefersTipMismatch(t *testing.T) {
@@ -233,46 +240,15 @@ func TestRecoverUnminedTransactionsCancelled(t *testing.T) {
 	require.NotContains(t, recoveryCandidateHashes(t, assembler), txID)
 }
 
-func TestUnminedRecoveryRepairsFailureBeforeReconcilingNewTip(t *testing.T) {
+func TestUnminedRecoveryDoesNotLatchMiningOnRepair(t *testing.T) {
 	assembler, _ := newUnminedRecoveryTestAssembler(t, blockchain.FSMStateRUNNING)
 	txID := storeSuppressedRecoveryTransaction(t, assembler)
-	header, height := assembler.CurrentBlock()
-	processor := assembler.subtreeProcessor
-	processor.SetCurrentItemsPerFile(1) // Coinbase fills the tree; the first transaction fails after clearing.
+	assembler.subtreeProcessor.SetCurrentItemsPerFile(1)
 	recovered, err := assembler.recoverUnminedTransactions(t.Context())
-	require.Error(t, err)
-	require.False(t, recovered)
-	require.True(t, processor.RecoveryPending())
-	_, _, lease, err := assembler.GetMiningCandidate(t.Context())
-	lease.Release()
-	require.Error(t, err, "partially rebuilt assembly must not issue mining work")
-
-	next := &model.BlockHeader{
-		Version: header.Version, HashPrevBlock: header.Hash(), HashMerkleRoot: &chainhash.Hash{},
-		Timestamp: header.Timestamp + 1, Bits: header.Bits, Nonce: 932,
-	}
-	require.NoError(t, assembler.blockchainClient.AddBlock(t.Context(), &model.Block{
-		Header: next, CoinbaseTx: coinbaseTxForHeader(t, next), TransactionCount: 1, Subtrees: []*chainhash.Hash{},
-	}, "", options.WithMinedSet(true)))
-	assembler.processNewBlockAnnouncement(t.Context())
-	current, _ := assembler.CurrentBlock()
-	require.Equal(t, header.Hash(), current.Hash(), "chain movement must wait for a complete assembly")
-	require.Error(t, assembler.reset(t.Context()), "legacy reset must not bypass read-only repair")
-
-	processor.SetCurrentItemsPerFile(32)
-	recovered, err = assembler.recoverUnminedTransactions(t.Context())
 	require.NoError(t, err)
-	require.True(t, recovered, "repair at the anchored old tip must work after the chain advances")
-	require.False(t, processor.RecoveryPending())
-	_, _, lease, err = assembler.GetMiningCandidate(t.Context())
-	lease.Release()
-	require.Error(t, err, "repaired old-tip work stays blocked until chain reconciliation")
-	require.Equal(t, time.Minute, assembler.nextUnminedRecoveryDelay(recovered), "an outstanding mining gate must retain short retry cadence")
-	assembler.processNewBlockAnnouncement(t.Context())
-	current, currentHeight := assembler.CurrentBlock()
-	require.Equal(t, next.Hash(), current.Hash())
-	require.Equal(t, height+1, currentHeight)
-	require.Contains(t, recoveryCandidateHashes(t, assembler), txID)
+	require.True(t, recovered)
+	require.False(t, assembler.subtreeProcessor.RecoveryPending())
+	requireRecoveryCandidateEventually(t, assembler, txID)
 }
 
 func TestUnminedRecoveryTimerWorksWithoutNewBlock(t *testing.T) {
@@ -350,6 +326,7 @@ func TestUnminedRecoveryTimerWaitsAfterSlowFailure(t *testing.T) {
 	assembler, _ := newUnminedRecoveryTestAssembler(t, blockchain.FSMStateRUNNING, func(s *settings.Settings) {
 		s.BlockAssembly.UnminedRecoveryInterval = interval
 	})
+	assembler.heartbeatInterval = 10 * time.Millisecond
 	faultStore := &recoveryDelayedIteratorStore{
 		Store: assembler.utxoStore, firstStarted: make(chan struct{}),
 		releaseFirst: make(chan struct{}), secondStarted: make(chan time.Time, 1),
@@ -367,6 +344,8 @@ func TestUnminedRecoveryTimerWaitsAfterSlowFailure(t *testing.T) {
 	// A fixed-rate ticker would retain an expired tick while this pass is
 	// blocked and immediately start another expensive reload on completion.
 	time.Sleep(3 * interval)
+	require.Less(t, assembler.heartbeat.Age(), 200*time.Millisecond,
+		"listener must keep servicing its heartbeat while the recovery index read is blocked")
 	released := time.Now()
 	release()
 	select {
@@ -412,24 +391,16 @@ func TestUnminedRecoveryDisabledDoesNotScan(t *testing.T) {
 	require.NotContains(t, recoveryCandidateHashes(t, assembler), txID)
 }
 
-func TestUnminedRecoveryDisabledKeepsPendingRepair(t *testing.T) {
-	assembler, _ := newUnminedRecoveryTestAssembler(t, blockchain.FSMStateRUNNING)
-	txID := storeSuppressedRecoveryTransaction(t, assembler)
-	processor := assembler.subtreeProcessor
-	processor.SetCurrentItemsPerFile(1)
+func TestUnminedRecoveryZeroIntervalDoesNotScan(t *testing.T) {
+	assembler, _ := newUnminedRecoveryTestAssembler(t, blockchain.FSMStateRUNNING,
+		func(s *settings.Settings) { s.BlockAssembly.UnminedRecoveryInterval = 0 })
+	iterator := &recoveryIteratorFailureStore{Store: assembler.utxoStore}
+	assembler.utxoStore = iterator
 	recovered, err := assembler.recoverUnminedTransactions(t.Context())
-	require.Error(t, err)
-	require.False(t, recovered)
-	require.True(t, processor.RecoveryPending())
-	assembler.settings.BlockAssembly.UnminedRecoveryInterval = -time.Second
-	require.Equal(t, time.Minute, assembler.nextUnminedRecoveryDelay(false), "disabling new scans must retain already-started repair responsibility")
-	processor.SetCurrentItemsPerFile(32)
-	recovered, err = assembler.recoverUnminedTransactions(t.Context())
 	require.NoError(t, err)
-	require.True(t, recovered)
-	require.False(t, processor.RecoveryPending())
-	require.Contains(t, recoveryCandidateHashes(t, assembler), txID)
-	require.Zero(t, assembler.nextUnminedRecoveryDelay(true))
+	require.False(t, recovered)
+	require.Zero(t, iterator.attempts.Load())
+	require.Zero(t, assembler.nextUnminedRecoveryDelay(false))
 }
 
 // Add the exact Skip sentinel emitted by both stores ahead of a real SQLite scan.
@@ -462,7 +433,7 @@ func TestUnminedRecoverySkipsNilNodeSentinel(t *testing.T) {
 	recovered, err := assembler.recoverUnminedTransactions(t.Context())
 	require.NoError(t, err)
 	require.True(t, recovered)
-	require.Contains(t, recoveryCandidateHashes(t, assembler), txID)
+	requireRecoveryCandidateEventually(t, assembler, txID)
 }
 
 // All metadata still comes from SQLite; observe mining while selection is reading it.
@@ -482,7 +453,7 @@ func TestUnminedRecoveryKeepsMiningDuringSelection(t *testing.T) {
 	recovered, err := assembler.recoverUnminedTransactions(t.Context())
 	require.NoError(t, err)
 	require.True(t, recovered)
-	require.Contains(t, recoveryCandidateHashes(t, assembler), hashes[0])
+	requireRecoveryCandidateEventually(t, assembler, hashes[0])
 	observations := make(chan error, 10)
 	assembler.utxoStore = &recoveryObservedMetadataStore{Store: assembler.utxoStore, beforeRead: func(ctx context.Context) {
 		_, _, lease, candidateErr := assembler.GetMiningCandidate(ctx)
@@ -533,5 +504,5 @@ func TestUnminedRecoveryBoundsMetadataSelection(t *testing.T) {
 	recovered, err = assembler.recoverUnminedTransactions(t.Context())
 	require.NoError(t, err)
 	require.True(t, recovered)
-	require.Contains(t, recoveryCandidateHashes(t, assembler), txID)
+	requireRecoveryCandidateEventually(t, assembler, txID)
 }

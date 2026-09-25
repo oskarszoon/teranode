@@ -137,7 +137,6 @@ func TestReadFSMState_DoesNotWaitForBlockedNotification(t *testing.T) {
 		_, err := b.Idle(context.Background(), &emptypb.Empty{})
 		finished <- err
 	}()
-	t.Cleanup(func() { <-b.notifications; require.NoError(t, <-finished) })
 	require.Eventually(t, func() bool {
 		return b.finiteStateMachine.Current() == "IDLE"
 	}, time.Second, time.Millisecond)
@@ -146,6 +145,50 @@ func TestReadFSMState_DoesNotWaitForBlockedNotification(t *testing.T) {
 	defer cancel()
 	_, err := client.ReadFSMState(ctx)
 	require.Equal(t, codes.Unavailable, status.Code(err), "unpublished transition must not block or certify a state")
+	require.ErrorContains(t, <-finished, "notification publication is pending")
+	_, err = client.ReadFSMState(context.Background())
+	require.Equal(t, codes.Unavailable, status.Code(err))
+	require.Eventually(t, func() bool {
+		select {
+		case notification := <-b.notifications:
+			return notification.Metadata.Metadata["destination"] == "IDLE"
+		default:
+			return false
+		}
+	}, time.Second, time.Millisecond)
+	require.Eventually(t, func() bool {
+		state, readErr := client.ReadFSMState(context.Background())
+		return readErr == nil && state == FSMStateIDLE
+	}, time.Second, time.Millisecond)
+}
+
+func TestFSMNotificationFullChannelRetainsDurableStopAndOrdering(t *testing.T) {
+	b, store := newFSMPersistenceTestBlockchain(t, FSMStateRUNNING)
+	b.subscriptionManagerReady.Store(true)
+	b.notifications = make(chan *blockchain_api.Notification, 1)
+	b.notifications <- &blockchain_api.Notification{Type: 0}
+
+	_, err := b.Idle(context.Background(), &emptypb.Empty{})
+	require.ErrorContains(t, err, "notification publication is pending")
+	persisted, err := store.GetFSMState(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, FSMStateIDLE.String(), persisted)
+	require.Equal(t, FSMStateIDLE.String(), b.finiteStateMachine.Current())
+	_, err = b.ReadFSMState(context.Background(), &emptypb.Empty{})
+	require.Equal(t, codes.Unavailable, status.Code(err))
+	_, err = b.SendFSMEvent(context.Background(), &blockchain_api.SendFSMEventRequest{Event: blockchain_api.FSMEventType_RUN})
+	require.ErrorContains(t, err, "notification publication is pending")
+
+	<-b.notifications
+	require.Eventually(t, func() bool {
+		return len(b.notifications) == 1
+	}, time.Second, time.Millisecond)
+	notification := <-b.notifications
+	require.Equal(t, FSMStateIDLE.String(), notification.Metadata.Metadata["destination"])
+	require.Eventually(t, func() bool {
+		state, readErr := b.ReadFSMState(context.Background(), &emptypb.Empty{})
+		return readErr == nil && state.State == FSMStateIDLE
+	}, time.Second, time.Millisecond)
 }
 
 func TestReadFSMState_CancellationAndDeadline(t *testing.T) {

@@ -199,6 +199,14 @@ func TestCompletedRecoveryKeepsQueuedSubtreeStorageAlive(t *testing.T) {
 	stp.mmapDir = t.TempDir()
 	stp.SetCurrentItemsPerFile(2)
 	stp.SetCurrentBlockHeader(prevBlockHeader)
+	// The fixture already constructed an empty subtree at its old capacity.
+	// Give ordinary dequeue a two-leaf tree so one queued repair transaction
+	// completes it after RecoverUnmined returns.
+	initial, err := stp.newSubtree(2)
+	require.NoError(t, err)
+	require.NoError(t, initial.AddCoinbaseNode())
+	old := stp.currentSubtree.Swap(initial)
+	old.Close()
 	stp.Start(t.Context())
 	t.Cleanup(func() { stp.Stop(context.Background()) })
 	node := &subtreepkg.Node{Hash: chainhash.HashH([]byte("storage after recovery returns")), Fee: 1, SizeInBytes: 100}
@@ -207,8 +215,13 @@ func TestCompletedRecoveryKeepsQueuedSubtreeStorageAlive(t *testing.T) {
 			return []*utxostore.UnminedTransaction{{Node: node, TxInpoints: &subtreepkg.TxInpoints{}}}, nil
 		}))
 	// Deliberately start storage after RecoverUnmined has returned and cancelled
-	// its per-call context. Accepted announcements belong to processor lifetime.
-	queued := <-stp.newSubtreeChan
+	// its per-call context. Dequeue/storage belong to processor lifetime.
+	var queued NewSubtreeRequest
+	select {
+	case queued = <-stp.newSubtreeChan:
+	case <-time.After(5 * time.Second):
+		t.Fatal("queued repair did not complete a subtree")
+	}
 	require.True(t, queued.stopLeaseRelease(), "successful recovery must not cancel a queued subtree's storage lifetime")
 	owned, retained := queued.TakeStorageOwnership()
 	require.True(t, retained)

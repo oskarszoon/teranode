@@ -15,7 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestMiningCandidateSurvivesSameTipMmapReset(t *testing.T) {
+func TestMiningCandidateSurvivesSameTipMmapRepair(t *testing.T) {
 	common := testutil.NewCommonTestSetup(t)
 	common.Settings.BlockAssembly.SubtreeMmapDir = t.TempDir()
 	common.Settings.BlockAssembly.InitialMerkleItemsPerSubtree = 2
@@ -63,11 +63,7 @@ func TestMiningCandidateSurvivesSameTipMmapReset(t *testing.T) {
 	before, err := server.GetCandidateBlock(ctx, &blockassembly_api.GetCandidateBlockRequest{Id: candidate.Id})
 	require.NoError(t, err)
 	header, _ := server.blockAssembler.CurrentBlock()
-	err = server.blockAssembler.subtreeProcessor.RecoverUnmined(ctx, header, nil, func(_ context.Context, hashes []chainhash.Hash, accepted func(chainhash.Hash) bool) ([]*utxo.UnminedTransaction, error) {
-		require.Contains(t, hashes, txID)
-		require.True(t, accepted(txID))
-		return []*utxo.UnminedTransaction{{Node: &subtreepkg.Node{Hash: txID, Fee: 17, SizeInBytes: uint64(tx.Size())}, TxInpoints: &subtreepkg.TxInpoints{}}}, nil
-	})
+	err = server.blockAssembler.subtreeProcessor.RecoverUnmined(ctx, header, nil, server.blockAssembler.prepareUnminedRecovery)
 	require.NoError(t, err)
 	after, err := server.GetCandidateBlock(ctx, &blockassembly_api.GetCandidateBlockRequest{Id: candidate.Id})
 	require.NoError(t, err)

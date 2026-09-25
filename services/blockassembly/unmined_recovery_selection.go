@@ -32,8 +32,8 @@ type recoverySelectionFrame struct {
 }
 
 // prepareUnminedRecovery selects a parent-first snapshot without changing UTXO
-// state. The processor dispatcher must own the assembly/queue snapshot while
-// this runs. accepted identifies successful assembly handoffs, including locked
+// state. Selection runs off the processor dispatcher. accepted identifies
+// successful assembly handoffs, including locked
 // transactions whose validator has not yet acknowledged its two-phase commit.
 // An unqueued locked record may still be unwound after a rejected handoff and
 // must not be admitted or unlocked by online recovery.
@@ -61,8 +61,8 @@ func (b *BlockAssembler) prepareUnminedRecovery(ctx context.Context, hashes []ch
 	if err != nil {
 		return nil, err
 	}
-	// Success authorizes replacing the template and discarding the captured
-	// queue prefix. Unknown eligibility must never relinquish responsibility
+	// Success authorizes queueing only the missing entries. Unknown eligibility
+	// must never relinquish responsibility
 	// for an already accepted transaction, including a descendant of a missing
 	// or incomplete ancestor. Retain the old state and retry fresh metadata.
 	for _, hash := range hashes {

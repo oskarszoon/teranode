@@ -273,7 +273,7 @@ func NewSettings(alternativeContext ...string) *Settings {
 		},
 		BlockAssembly: BlockAssemblySettings{
 			UnminedRecoveryTimeout:               getDuration("blockassembly_unminedRecoveryTimeout", 5*time.Minute, alternativeContext...),
-			UnminedRecoveryInterval:              getDuration("blockassembly_unminedRecoveryInterval", DefaultUnminedRecoveryInterval, alternativeContext...),
+			UnminedRecoveryInterval:              getDuration("blockassembly_unminedRecoveryInterval", 0, alternativeContext...),
 			LivenessStallTimeout:                 getDuration("blockassembly_livenessStallTimeout", 0, alternativeContext...),
 			Disabled:                             getBool("blockassembly_disabled", false, alternativeContext...),
 			GenerateTipWaitTimeout:               getDuration("blockassembly_generateTipWaitTimeout", DefaultGenerateTipWaitTimeout, alternativeContext...),

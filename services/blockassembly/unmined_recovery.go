@@ -7,7 +7,6 @@ import (
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/services/blockchain"
-	"github.com/bsv-blockchain/teranode/settings"
 	"github.com/bsv-blockchain/teranode/stores/utxo"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -16,13 +15,11 @@ import (
 const unminedRecoveryRetryDelay = time.Minute
 
 func (b *BlockAssembler) unminedRecoveryInterval() time.Duration {
-	if interval := b.settings.BlockAssembly.UnminedRecoveryInterval; interval != 0 {
-		if interval < 0 {
-			return 0
-		}
-		return interval
+	interval := b.settings.BlockAssembly.UnminedRecoveryInterval
+	if interval <= 0 {
+		return 0
 	}
-	return settings.DefaultUnminedRecoveryInterval
+	return interval
 }
 
 // Retry deferred or failed recovery without spinning or waiting another full
@@ -30,7 +27,7 @@ func (b *BlockAssembler) unminedRecoveryInterval() time.Duration {
 func (b *BlockAssembler) nextUnminedRecoveryDelay(recovered bool) time.Duration {
 	interval := b.unminedRecoveryInterval()
 	if interval == 0 {
-		// Disabling new passes must never abandon an incomplete replacement.
+		// Preserve the safety gate if an older in-process path left a repair pending.
 		if b.subtreeProcessor.RecoveryPending() || b.recoveryMiningBlocked.Load() {
 			return unminedRecoveryRetryDelay
 		}
@@ -42,8 +39,8 @@ func (b *BlockAssembler) nextUnminedRecoveryDelay(recovered bool) time.Duration 
 	return interval
 }
 
-// recoverUnminedTransactions repairs missing template entries at the current tip.
-// The channel listener owns serialization with block notifications and resets.
+// recoverUnminedTransactions queues eligible missing entries at the current tip.
+// It runs off the channel listener; the processor rechecks its anchor on admission.
 func (b *BlockAssembler) recoverUnminedTransactions(ctx context.Context) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
@@ -51,9 +48,8 @@ func (b *BlockAssembler) recoverUnminedTransactions(ctx context.Context) (bool, 
 	if b.unminedRecoveryInterval() == 0 && !b.subtreeProcessor.RecoveryPending() && !b.recoveryMiningBlocked.Load() {
 		return false, nil
 	}
-	// Bound the serialized pass, including the dispatcher's storage wait and
-	// reconstruction. Cancellation before mutation preserves the old template;
-	// cancellation during reconstruction retains the read-only repair latch.
+	// Bound index scan, selection and queue admission. No live template is
+	// replaced, so cancellation leaves already admitted batches with the queue.
 	timeout := b.settings.BlockAssembly.UnminedRecoveryTimeout
 	if timeout <= 0 {
 		timeout = 5 * time.Minute
@@ -108,9 +104,8 @@ func (b *BlockAssembler) recoverUnminedTransactions(ctx context.Context) (bool, 
 	wasBlocked := b.recoveryMiningBlocked.Load()
 	err = b.subtreeProcessor.RecoverUnmined(ctx, header, hashes,
 		func(ctx context.Context, candidates []chainhash.Hash, accepted func(chainhash.Hash) bool) ([]*utxo.UnminedTransaction, error) {
-			// The index scan may be long. Recheck authority and tip before the
-			// dispatcher prepares any memory replacement. This remains admission
-			// of one recovery pass, not a lease or a global STOP/drain barrier.
+			// Recheck authority and tip before reading metadata. The processor
+			// independently checks its anchor again before each queue batch.
 			checkCtx, stopCheck := context.WithTimeout(ctx, 5*time.Second)
 			defer stopCheck()
 			state, err := b.blockchainClient.ReadFSMState(checkCtx)
@@ -132,10 +127,25 @@ func (b *BlockAssembler) recoverUnminedTransactions(ctx context.Context) (bool, 
 			if err != nil {
 				return nil, err
 			}
-			// Preserve usable mining work throughout read-only selection. The
-			// processor owns the mutation gate; this additional gate spans its
-			// publication until the assembly anchor has been rechecked below.
-			b.recoveryMiningBlocked.Store(true)
+			// Selection runs outside the dispatcher and can outlive an FSM
+			// transition. Admit only while authority still permits assembly.
+			finalCtx, stopFinal := context.WithTimeout(ctx, 5*time.Second)
+			defer stopFinal()
+			state, err = b.blockchainClient.ReadFSMState(finalCtx)
+			if err != nil {
+				return nil, err
+			}
+			if state != blockchain.FSMStateRUNNING {
+				return nil, errors.NewProcessingError("unmined recovery deferred because the FSM is no longer RUNNING")
+			}
+			latest, _, err = b.blockchainClient.GetBestBlockHeader(finalCtx)
+			if err != nil {
+				return nil, err
+			}
+			if latest == nil || !latest.Hash().IsEqual(header.Hash()) {
+				b.triggerReconcile()
+				return nil, errors.NewProcessingError("unmined recovery deferred because the chain tip changed")
+			}
 			return selected, nil
 		})
 	if err != nil {
@@ -144,9 +154,8 @@ func (b *BlockAssembler) recoverUnminedTransactions(ctx context.Context) (bool, 
 		}
 		return false, err
 	}
-	// Repair at the original anchor is necessary even when a block arrived
-	// after a failed rebuild. Only a complete template may enter normal chain
-	// movement; no mining work may escape from the repaired old tip meanwhile.
+	// The chain may advance while the queue drains. Trigger normal reconciliation
+	// if this pass no longer describes the current chain tip.
 	checkCtx, stopCheck := context.WithTimeout(ctx, 5*time.Second)
 	latest, _, checkErr := b.blockchainClient.GetBestBlockHeader(checkCtx)
 	stopCheck()
@@ -159,8 +168,8 @@ func (b *BlockAssembler) recoverUnminedTransactions(ctx context.Context) (bool, 
 	return true, nil
 }
 
-// The index only discovers candidates. Eligibility is checked again from fresh
-// metadata on the dispatcher, together with queued and already assembled work.
+// The index only discovers candidates. Eligibility is checked from fresh
+// metadata off the dispatcher, with queued and assembled admission proof.
 // In particular, startup's unlock/cleanup behavior is never used live.
 func (b *BlockAssembler) scanUnminedRecoveryHashes(ctx context.Context) (hashes []chainhash.Hash, resultErr error) {
 	var iterator utxo.UnminedTxIterator
@@ -211,7 +220,7 @@ func (b *BlockAssembler) scanUnminedRecoveryHashes(ctx context.Context) (hashes 
 }
 
 // An older blockchain service is an expected rollout condition. Preserve warnings
-// for readiness, storage and rebuild failures that require operator attention.
+// for readiness, storage and selection failures that require attention.
 func (b *BlockAssembler) logUnminedRecoveryError(err error) {
 	if status.Code(err) == codes.Unimplemented {
 		b.logger.Infof("[BlockAssembler] Unmined recovery requires a blockchain service upgrade: %v", err)

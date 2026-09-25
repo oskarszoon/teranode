@@ -483,12 +483,12 @@ func (u *Server) CheckBlockSubtrees(ctx context.Context, request *subtreevalidat
 	// straddle an FSM transition and give the two pipelines divergent
 	// WithAddTXToBlockAssembly settings for the same block. Only known RUNNING
 	// state permits admission; catchup writes may still finish after entering IDLE.
-	currentState, err := u.blockchainClient.GetFSMCurrentState(ctx)
+	currentState, err := u.blockchainClient.ReadFSMState(ctx)
 	if err != nil {
 		return nil, errors.WrapGRPC(errors.NewProcessingError("[CheckBlockSubtrees] Failed to get FSM current state", err))
 	}
 
-	addTXToBlockAssembly := u.allowAssemblyForObservedFSM(currentState, "check_block_subtrees")
+	addTXToBlockAssembly := u.allowAssemblyForObservedFSM(&currentState, "check_block_subtrees")
 
 	// BATCHED SUBTREE LOADING: Get blockIds once before batching
 	blockHeaderIDs, err := u.blockchainClient.GetBlockHeaderIDs(ctx, block.Header.HashPrevBlock, uint64(u.settings.GetUtxoStoreBlockHeightRetention()*2))

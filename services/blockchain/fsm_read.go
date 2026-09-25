@@ -14,8 +14,8 @@ import (
 const fsmReadTimeout = 5 * time.Second
 
 // ReadFSMState returns a ready, persistence-confirmed snapshot without mutating
-// the FSM. It must not wait behind a persistence write or notification delivery:
-// both can hold fsmMu longer than a caller's deadline.
+// the FSM. It must not wait behind a persistence write. Notification enqueue
+// is bounded; while publication remains pending the read reports unavailable.
 func (b *Blockchain) ReadFSMState(ctx context.Context, _ *emptypb.Empty) (*blockchain_api.GetFSMStateResponse, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, status.FromContextError(err).Err()
@@ -30,8 +30,8 @@ func (b *Blockchain) ReadFSMState(ctx context.Context, _ *emptypb.Empty) (*block
 	if err := ctx.Err(); err != nil {
 		return nil, status.FromContextError(err).Err()
 	}
-	if b.finiteStateMachine == nil || !b.subscriptionManagerReady.Load() || b.fsmPersistenceUncertain {
-		return nil, status.Error(codes.Unavailable, "FSM authority is not ready or persistence is uncertain")
+	if b.finiteStateMachine == nil || !b.subscriptionManagerReady.Load() || b.fsmPersistenceUncertain || b.fsmNotificationPending != nil {
+		return nil, status.Error(codes.Unavailable, "FSM authority is not ready, persistence is uncertain, or state notification publication is pending")
 	}
 	state, ok := blockchain_api.FSMStateType_value[b.finiteStateMachine.Current()]
 	if !ok {

@@ -467,6 +467,11 @@ func (b *BlockAssembler) startChannelListeners(ctx context.Context) (err error) 
 		// another expensive scan immediately upon completion.
 		var recoveryTimer *time.Timer
 		var recoveryTick <-chan time.Time
+		type recoveryResult struct {
+			recovered bool
+			err       error
+		}
+		recoveryDone := make(chan recoveryResult, 1)
 		if delay := b.nextUnminedRecoveryDelay(true); delay > 0 {
 			recoveryTimer = time.NewTimer(delay)
 			recoveryTick = recoveryTimer.C
@@ -514,19 +519,44 @@ func (b *BlockAssembler) startChannelListeners(ctx context.Context) (err error) 
 				return
 
 			case <-recoveryTick:
-				recovered, recoveryErr := b.recoverUnminedTransactions(ctx)
-				if recoveryErr != nil && ctx.Err() == nil {
-					b.logUnminedRecoveryError(recoveryErr)
+				// Selection and metadata reads run outside the listener. The
+				// processor rechecks its chain anchor before queue admission.
+				recoveryTick = nil
+				b.wg.Add(1)
+				go func() {
+					defer b.wg.Done()
+					recovered, err := b.recoverUnminedTransactions(ctx)
+					select {
+					case recoveryDone <- recoveryResult{recovered: recovered, err: err}:
+					case <-ctx.Done():
+					}
+				}()
+
+			case result := <-recoveryDone:
+				if result.err != nil && ctx.Err() == nil {
+					b.logUnminedRecoveryError(result.err)
 				}
-				if delay := b.nextUnminedRecoveryDelay(recovered); delay > 0 {
+				if delay := b.nextUnminedRecoveryDelay(result.recovered); delay > 0 {
 					recoveryTimer.Reset(delay)
-				} else {
-					recoveryTick = nil
+					recoveryTick = recoveryTimer.C
 				}
 			case <-heartbeatTicker.C:
 				// Idle tick: proves the loop is alive without requiring work.
 
-			case resetReq := <-b.resetCh:
+			case resetReq, ok := <-b.resetCh:
+				if !ok {
+					b.logger.Errorf("[BlockAssembler] reset request channel closed unexpectedly")
+					b.heartbeat.Disable()
+					return
+				}
+				if resetReq.run == nil {
+					err := errors.NewProcessingError("[BlockAssembler] reset request has no operation")
+					b.logger.Errorf("%v", err)
+					if resetReq.ErrCh != nil {
+						resetReq.ErrCh <- err
+					}
+					continue
+				}
 				b.setCurrentRunningState(StateResetting)
 				err := resetReq.run(ctx)
 				if err != nil {
