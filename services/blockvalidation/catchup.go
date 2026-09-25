@@ -2407,14 +2407,14 @@ func (u *Server) clearForkMinedSets(ctx context.Context, headers []*model.BlockH
 		if err = u.waitForCatchupAdmission(ctx); err != nil {
 			return
 		}
-		if clearErr := u.blockchainClient.ClearBlockMinedSet(ctx, header.Hash()); clearErr != nil {
+		if u.blockchainClient.ClearBlockMinedSet(ctx, header.Hash()) != nil {
 			clearErrors++
 			continue
 		}
-		if notifyErr := u.blockchainClient.SendNotification(ctx, &blockchain_api.Notification{
+		if u.blockchainClient.SendNotification(ctx, &blockchain_api.Notification{
 			Type: model.NotificationType_BlockMinedUnset,
 			Hash: header.Hash().CloneBytes(),
-		}); notifyErr != nil {
+		}) != nil {
 			notifyErrors++
 		}
 	}
