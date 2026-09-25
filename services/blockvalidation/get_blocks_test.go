@@ -136,6 +136,102 @@ func TestDecodeBoundedBlock_TruncationIsExternalNotInvalid(t *testing.T) {
 		"truncation must NOT carry ErrBlockInvalid — catchup.go would report the honest peer malicious: %v", decodeErr)
 }
 
+func TestBatchFetchAndDistribute_RespectsAggregateBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		batchSize        int
+		aggregateRatio   int64
+		belowMessageCap  bool
+		wantRequestSizes []int
+	}{
+		{name: "split batch", batchSize: 5, aggregateRatio: 2, wantRequestSizes: []int{2, 2, 1}},
+		{name: "equal caps", batchSize: 5, aggregateRatio: 1, wantRequestSizes: []int{1, 1, 1, 1, 1}},
+		{name: "aggregate below message cap", batchSize: 5, belowMessageCap: true, wantRequestSizes: []int{1, 1, 1, 1, 1}},
+		{name: "configured smaller batch", batchSize: 1, aggregateRatio: 2, wantRequestSizes: []int{1, 1, 1, 1, 1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := &Server{settings: test.CreateBaseTestSettings(t), logger: ulogger.TestLogger{}}
+			blocks := testhelpers.CreateTestBlockChain(t, 6)
+			headers := make([]*model.BlockHeader, 0, 5)
+			payloads := make([][]byte, len(blocks))
+			indices := make(map[string]int)
+			var largestMessage int64
+			for i := 1; i < len(blocks); i++ {
+				payload, err := blocks[i].Bytes()
+				require.NoError(t, err)
+				payloads[i] = payload
+				largestMessage = max(largestMessage, int64(len(payload)))
+				headers = append(headers, blocks[i].Header)
+				indices[blocks[i].Hash().String()] = i
+			}
+			messageCap := largestMessage + 16
+			aggregateCap := tc.aggregateRatio * messageCap
+			if tc.belowMessageCap {
+				aggregateCap = largestMessage
+			}
+			server.settings.BlockValidation.MaxIncomingBlockBytes = aggregateCap
+			server.settings.BlockValidation.MaxIncomingBlockMessageBytes = messageCap
+			server.settings.BlockValidation.PerPeerFetchRate = 0
+			httpmock.ActivateNonDefault(util.HTTPClient())
+			defer httpmock.DeactivateAndReset()
+			var requestSizes []int
+			httpmock.RegisterNoResponder(func(req *http.Request) (*http.Response, error) {
+				n, err := strconv.Atoi(req.URL.Query().Get("n"))
+				require.NoError(t, err)
+				require.Positive(t, n)
+				index, ok := indices[strings.TrimPrefix(req.URL.Path, "/blocks/")]
+				require.True(t, ok)
+				require.GreaterOrEqual(t, index, n)
+				requestSizes = append(requestSizes, n)
+				var response []byte
+				for i := index; i > index-n; i-- {
+					response = append(response, payloads[i]...)
+				}
+				return httpmock.NewBytesResponse(http.StatusOK, response), nil
+			})
+			queue := make(chan workItem, len(headers))
+			const startingHeight = uint32(800000)
+			err := server.batchFetchAndDistribute(context.Background(), headers, queue, "peer", "http://peer", blocks[5], tc.batchSize, startingHeight)
+			require.NoError(t, err)
+			require.Equal(t, tc.wantRequestSizes, requestSizes)
+			require.Len(t, queue, len(headers))
+			for i, header := range headers {
+				item := <-queue
+				require.Equal(t, i, item.index)
+				require.Equal(t, header.Hash(), item.block.Hash())
+				require.Equal(t, startingHeight+uint32(i), item.block.Height)
+			}
+			require.Equal(t, aggregateCap, server.settings.BlockValidation.MaxIncomingBlockBytes)
+			require.Equal(t, messageCap, server.settings.BlockValidation.MaxIncomingBlockMessageBytes)
+		})
+	}
+}
+
+func TestBatchFetchAndDistribute_InvalidReceiveLimits(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		aggregate int64
+		message   int64
+	}{
+		{name: "zero aggregate", message: 1024},
+		{name: "negative aggregate", aggregate: -1, message: 1024},
+		{name: "zero message", aggregate: 1024},
+		{name: "negative message", aggregate: 1024, message: -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := &Server{settings: test.CreateBaseTestSettings(t), logger: ulogger.TestLogger{}}
+			blocks := testhelpers.CreateTestBlockChain(t, 2)
+			server.settings.BlockValidation.MaxIncomingBlockBytes = tc.aggregate
+			server.settings.BlockValidation.MaxIncomingBlockMessageBytes = tc.message
+			queue := make(chan workItem, 1)
+			err := server.batchFetchAndDistribute(context.Background(), []*model.BlockHeader{blocks[1].Header}, queue, "peer", "http://peer", blocks[1], 1, 1)
+			require.Error(t, err)
+			require.True(t, errors.Is(err, errors.ErrConfiguration), "%v", err)
+			require.Empty(t, queue)
+		})
+	}
+}
+
 func TestPeerBlockFetches_StreamAndBoundResponses(t *testing.T) {
 	t.Run("single rejects trailing oversized body without reading it all", func(t *testing.T) {
 		suite := NewCatchupTestSuite(t)
@@ -1074,6 +1170,10 @@ func TestFetchBlocksConcurrently_PerformanceCharacteristics(t *testing.T) {
 	t.Run("Memory_Usage_Pattern", func(t *testing.T) {
 		suite := NewCatchupTestSuite(t)
 		defer suite.Cleanup()
+
+		// These ~180-byte fixtures exercise 100-block batching and worker ordering.
+		// A 1 MiB message cap keeps that batch within the aggregate receive allowance.
+		suite.Server.settings.BlockValidation.MaxIncomingBlockMessageBytes = 1 << 20
 
 		numBlocks := 100
 		blocks := testhelpers.CreateTestBlockChain(t, numBlocks+1)
@@ -2017,6 +2117,10 @@ func TestFetchBlocksConcurrently_OptimizedBehavior(t *testing.T) {
 		suite := NewCatchupTestSuite(t)
 		defer suite.Cleanup()
 
+		// These ~180-byte fixtures exercise 100-block batching and worker ordering.
+		// A 1 MiB message cap keeps that batch within the aggregate receive allowance.
+		suite.Server.settings.BlockValidation.MaxIncomingBlockMessageBytes = 1 << 20
+
 		// Create test blockchain with 100 blocks
 		blocks := testhelpers.CreateTestBlockChain(t, 101) // +1 for genesis
 
@@ -2054,7 +2158,7 @@ func TestFetchBlocksConcurrently_OptimizedBehavior(t *testing.T) {
 		}
 
 		err := suite.Server.fetchBlocksConcurrently(ctx, catchupCtx, validateBlocksChan, size)
-		assert.NoError(t, err)
+		require.NoError(t, err)
 
 		// Wait for completion
 		// err = errorGroup.Wait()
@@ -2089,6 +2193,10 @@ func TestFetchBlocksConcurrently_OptimizedBehavior(t *testing.T) {
 	t.Run("Multiple_Large_Batches_250_Blocks", func(t *testing.T) {
 		suite := NewCatchupTestSuite(t)
 		defer suite.Cleanup()
+
+		// These ~180-byte fixtures exercise 100-block batching and worker ordering.
+		// A 1 MiB message cap keeps that batch within the aggregate receive allowance.
+		suite.Server.settings.BlockValidation.MaxIncomingBlockMessageBytes = 1 << 20
 
 		// Create test blockchain with 250 blocks
 		blocks := testhelpers.CreateTestBlockChain(t, 251) // +1 for genesis
@@ -2138,7 +2246,7 @@ func TestFetchBlocksConcurrently_OptimizedBehavior(t *testing.T) {
 		}
 
 		err := suite.Server.fetchBlocksConcurrently(ctx, catchupCtx, validateBlocksChan, size)
-		assert.NoError(t, err)
+		require.NoError(t, err)
 
 		// Wait for completion
 		// err = errorGroup.Wait()
@@ -2314,6 +2422,10 @@ func TestFetchBlocksConcurrently_WorkerPoolArchitecture(t *testing.T) {
 		suite := NewCatchupTestSuite(t)
 		defer suite.Cleanup()
 
+		// These ~180-byte fixtures exercise 100-block batching and worker ordering.
+		// A 1 MiB message cap keeps that batch within the aggregate receive allowance.
+		suite.Server.settings.BlockValidation.MaxIncomingBlockMessageBytes = 1 << 20
+
 		// Create test blockchain with 100 blocks
 		blocks := testhelpers.CreateTestBlockChain(t, 101) // +1 for genesis
 
@@ -2351,7 +2463,7 @@ func TestFetchBlocksConcurrently_WorkerPoolArchitecture(t *testing.T) {
 		}
 
 		err := suite.Server.fetchBlocksConcurrently(ctx, catchupCtx, validateBlocksChan, size)
-		assert.NoError(t, err)
+		require.NoError(t, err)
 
 		// Wait for completion
 		// err = errorGroup.Wait()

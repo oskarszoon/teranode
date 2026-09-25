@@ -280,6 +280,19 @@ func (u *Server) batchFetchAndDistribute(ctx context.Context, blockHeaders []*mo
 	)
 	defer deferFn()
 
+	limits, err := resolveBlockResponseLimits(u.settings.BlockValidation.MaxIncomingBlockBytes, u.settings.Policy.ExcessiveBlockSize)
+	if err != nil {
+		return err
+	}
+	messageLimit := u.settings.BlockValidation.MaxIncomingBlockMessageBytes
+	if messageLimit <= 0 {
+		return errors.NewConfigurationError("blockvalidation_max_incoming_block_message_bytes must be positive")
+	}
+	// Every individually acceptable message must fit in the requested batch's
+	// aggregate allowance. Otherwise honest peers all fail the same fixed batch.
+	// When the aggregate cap is smaller, request one and let the decoder enforce it.
+	batchSize = int(min(int64(batchSize), max(int64(1), limits.maxTransportBytes/messageLimit)))
+
 	u.logger.Debugf("[catchup:batchFetchAndDistribute][%s] fetching %d blocks in batches of %d", blockUpTo.Hash().String(), len(blockHeaders), batchSize)
 
 	currentIndex := 0

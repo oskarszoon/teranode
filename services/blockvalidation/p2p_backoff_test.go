@@ -485,21 +485,30 @@ func TestFetchSingleBlock_PreExpiredLimiterDeadlineStaysLocal(t *testing.T) {
 	require.Zero(t, requests.Load())
 }
 
-// TestSelectBestPeersForCatchup_PrunedFallback proves the catchup primary selection
-// deprioritises pruned peers but falls back to them when no non-pruned peer is
-// available, so an all-pruned peer set still gets an attempt instead of stranding.
+// TestSelectBestPeersForCatchup_PrunedFallback keeps pruned peers available after
+// full/unknown peers, preserving the registry's order within each storage tier.
 func TestSelectBestPeersForCatchup_PrunedFallback(t *testing.T) {
-	t.Run("prefers non-pruned", func(t *testing.T) {
+	t.Run("non-pruned first with both tiers preserving order", func(t *testing.T) {
 		suite := NewCatchupTestSuite(t)
 		defer suite.Cleanup()
+		noURL := mkTestPeer("pruned-no-url", "pruned", 100)
+		noURL.DataHubURL = ""
 		suite.Server.p2pClient = &catchupPeersP2PMock{peers: []*p2p.PeerInfo{
-			mkTestPeer("full-1", "full", 100),
 			mkTestPeer("pruned-1", "pruned", 100),
+			mkTestPeer("full-1", "full", 100),
+			mkTestPeer("pruned-2", "pruned", 100),
+			mkTestPeer("unknown-1", "", 100),
+			mkTestPeer("full-2", "full", 100),
+			mkTestPeer("pruned-behind", "pruned", 99),
+			noURL,
 		}}
 		peers, err := suite.Server.selectBestPeersForCatchup(context.Background(), 100)
 		require.NoError(t, err)
-		require.Len(t, peers, 1)
-		require.Equal(t, "full", peers[0].Storage)
+		urls := make([]string, 0, len(peers))
+		for _, candidate := range peers {
+			urls = append(urls, candidate.DataHubURL)
+		}
+		require.Equal(t, []string{"http://full-1", "http://unknown-1", "http://full-2", "http://pruned-1", "http://pruned-2"}, urls)
 	})
 
 	t.Run("falls back to pruned when no other", func(t *testing.T) {
@@ -507,12 +516,33 @@ func TestSelectBestPeersForCatchup_PrunedFallback(t *testing.T) {
 		defer suite.Cleanup()
 		suite.Server.p2pClient = &catchupPeersP2PMock{peers: []*p2p.PeerInfo{
 			mkTestPeer("pruned-1", "pruned", 100),
+			mkTestPeer("pruned-2", "pruned", 100),
 		}}
 		peers, err := suite.Server.selectBestPeersForCatchup(context.Background(), 100)
 		require.NoError(t, err)
-		require.Len(t, peers, 1, "must fall back to the pruned peer rather than strand")
-		require.Equal(t, "pruned", peers[0].Storage)
+		require.Len(t, peers, 2, "must retain the pruned peers rather than strand")
+		require.Equal(t, "http://pruned-1", peers[0].DataHubURL)
+		require.Equal(t, "http://pruned-2", peers[1].DataHubURL)
 	})
+}
+
+func TestTryAlternativePeersForCatchup_PrunedFallbackAfterExcludedOrigin(t *testing.T) {
+	suite := NewCatchupTestSuite(t)
+	defer suite.Cleanup()
+	full := mkTestPeer("full-origin", "full", 100)
+	pruned := mkTestPeer("pruned-fallback", "pruned", 100)
+	suite.Server.p2pClient = &catchupPeersP2PMock{peers: []*p2p.PeerInfo{full, pruned}}
+	block := testhelpers.CreateTestBlockChain(t, 1)[0]
+	block.Height = 100
+	// Complete the real catchup's local-existence fast path once an alternative
+	// is selected; this isolates selection from header/block download validation.
+	suite.Server.blockValidation.blockExistsCache.Set(*block.Hash(), true)
+	suite.Server.processBlockNotify.Set(*block.Hash(), true, 0)
+
+	require.True(t, suite.Server.tryAlternativePeersForCatchup(suite.Ctx, block, full.ID.String()),
+		"the sole full origin must not hide the remaining pruned fallback when excluded")
+	require.Equal(t, int64(1), suite.Server.catchupAttempts.Load(), "the remaining pruned peer must be attempted")
+	require.Nil(t, suite.Server.processBlockNotify.Get(*block.Hash()), "successful fallback clears the processing marker")
 }
 
 // TestReleaseCatchupLock_LocalErrorNotBlamedOnPeer proves the catchup reputation gate

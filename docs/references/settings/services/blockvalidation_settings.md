@@ -66,7 +66,7 @@
 | MaxParallelForks | int | 4 | blockvalidation_max_parallel_forks | Maximum parallel fork processing |
 | MaxTrackedForks | int | 1000 | blockvalidation_max_tracked_forks | Maximum total forks tracked |
 | NearForkThreshold | int | 0 | blockvalidation_near_fork_threshold | Near fork detection (0=coinbase maturity/2) |
-| FetchLargeBatchSize | int | 100 | blockvalidation_fetch_large_batch_size | Block fetch batch size |
+| FetchLargeBatchSize | int | 100 | blockvalidation_fetch_large_batch_size | Maximum blocks per request; reduced to fit aggregate/per-message receive budgets (64 with default budgets) |
 | FetchNumWorkers | int | 16 | blockvalidation_fetch_num_workers | Catchup workers running the per-block subtree-data prewarm |
 | FetchBufferSize | int | 50 | blockvalidation_fetch_buffer_size | Block fetch channel buffer |
 | SubtreeFetchConcurrency | int | 32 | blockvalidation_subtree_fetch_concurrency | Concurrent subtree fetches per block |

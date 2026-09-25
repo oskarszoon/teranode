@@ -20,15 +20,15 @@ type PeerForCatchup struct {
 	CatchupFailures        int64
 }
 
-// selectBestPeersForCatchup queries the P2P service for peers suitable for catchup,
-// sorted by reputation score (highest first).
+// selectBestPeersForCatchup queries the P2P service for whole-catchup alternatives.
+// Full/unknown peers precede pruned peers, preserving registry order within each tier.
 //
 // Parameters:
 //   - ctx: Context for the gRPC call
 //   - targetHeight: The height we're trying to catch up to (for filtering peers)
 //
 // Returns:
-//   - []PeerForCatchup: List of peers sorted by reputation (best first)
+//   - []PeerForCatchup: Eligible peers in fallback order
 //   - error: If the query fails
 func (u *Server) selectBestPeersForCatchup(ctx context.Context, targetHeight uint32) ([]PeerForCatchup, error) {
 	// If P2P client is not available, return empty list
@@ -51,7 +51,7 @@ func (u *Server) selectBestPeersForCatchup(ctx context.Context, targetHeight uin
 
 	// Convert PeerInfo to our internal type
 	peers := make([]PeerForCatchup, 0, len(peerInfos))
-	var prunedFallback []PeerForCatchup // pruned peers held back, used only if no others qualify
+	var prunedFallback []PeerForCatchup
 	for _, p := range peerInfos {
 		// Filter out peers that don't have the target height yet
 		// (we only want peers that are at or above our target)
@@ -78,10 +78,9 @@ func (u *Server) selectBestPeersForCatchup(ctx context.Context, targetHeight uin
 			CatchupFailures:        p.CatchupFailures,
 		}
 
-		// Deprioritise pruned peers as catchup primaries: they 404 on archival subtree
-		// data during IBD, wasting a fetch attempt per block before failover. They are
-		// held back as a fallback rather than hard-excluded, so an all-pruned peer set
-		// still gets an attempt (and a diagnosable 404) instead of stranding the node.
+		// Pruned peers may lack archival data, but can still serve recent blocks.
+		// Retain them after full/unknown peers so caller exclusions or failed
+		// non-pruned attempts cannot hide a usable fallback.
 		if isPrunedPeer(p.Storage) {
 			prunedFallback = append(prunedFallback, candidate)
 			continue
@@ -90,11 +89,11 @@ func (u *Server) selectBestPeersForCatchup(ctx context.Context, targetHeight uin
 		peers = append(peers, candidate)
 	}
 
-	// Fall back to pruned peers only when no full/unknown peer qualifies.
+	// Keep every eligible pruned peer available after the preferred candidates.
 	if len(peers) == 0 && len(prunedFallback) > 0 {
 		u.logger.Warnf("[peer_selection] No non-pruned peers for catchup; falling back to %d pruned peer(s)", len(prunedFallback))
-		peers = prunedFallback
 	}
+	peers = append(peers, prunedFallback...)
 
 	u.logger.Infof("[peer_selection] Selected %d peers for catchup (from %d total)", len(peers), len(peerInfos))
 	for i, p := range peers {

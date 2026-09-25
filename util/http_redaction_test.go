@@ -7,10 +7,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/bsv-blockchain/teranode/errors"
+	"github.com/jarcoal/httpmock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -161,4 +163,48 @@ func TestSanitizeHTTPTransportError_NestedURL(t *testing.T) {
 	require.ErrorIs(t, got, errors.ErrNetworkError)
 	require.NotContains(t, got.Error(), "private-token")
 	require.Nil(t, stderrors.Unwrap(got), "unsafe raw transport causes must not survive sanitization")
+}
+
+func TestRedactPeerURLKeepsIPv6ZoneEscaped(t *testing.T) {
+	previous := SSRFProtectionEnabled()
+	SetSSRFProtection(true)
+	t.Cleanup(func() { SetSSRFProtection(previous) })
+	for _, sentinel := range []string{"context canceled", "context deadline exceeded"} {
+		t.Run(sentinel, func(t *testing.T) {
+			raw := (&url.URL{Scheme: "http", Host: "[2001:db8::1%" + sentinel + "]:8080", Path: "/private-path", RawQuery: "token=private-token"}).String()
+			require.NoError(t, ValidatePeerBaseURL((&url.URL{Scheme: "http", Host: "[2001:db8::1%" + sentinel + "]:8080"}).String()))
+			require.NoError(t, ValidateURL(raw))
+			redacted := RedactPeerURL(raw)
+			require.NotContains(t, redacted, sentinel)
+			require.NotContains(t, redacted, "private-")
+			require.Equal(t, redacted, RedactPeerURL(redacted), "repeated wrapping must retain escaping")
+			parsed, err := url.Parse(redacted)
+			require.NoError(t, err)
+			require.Equal(t, "[2001:db8::1%"+sentinel+"]:8080", parsed.Host)
+			transportErr := sanitizeHTTPTransportError(io.ErrUnexpectedEOF, raw)
+			require.ErrorIs(t, transportErr, errors.ErrNetworkError)
+			require.False(t, errors.IsLocalError(transportErr), "encoded host text must not become local cancellation: %v", transportErr)
+			responseErr := buildHTTPError(&http.Response{StatusCode: http.StatusTooManyRequests, Body: io.NopCloser(strings.NewReader(""))}, raw)
+			require.False(t, errors.IsContextError(responseErr), "status errors must preserve escaped host text: %v", responseErr)
+		})
+	}
+}
+
+func TestHTTPTransportErrorsKeepIPv6ZoneEscaped(t *testing.T) {
+	httpmock.ActivateNonDefault(HTTPClient())
+	defer httpmock.DeactivateAndReset()
+	httpmock.RegisterNoResponder(httpmock.NewErrorResponder(io.ErrUnexpectedEOF))
+	for _, caller := range peerHTTPErrorCallers {
+		t.Run(caller.name, func(t *testing.T) {
+			for _, zone := range []string{"context%20canceled", "context%20deadline%20exceeded"} {
+				endpoint, err := JoinPeerURL("http://[2001:db8::1%25"+zone+"]/api/v1", "block", "abc")
+				require.NoError(t, err)
+				ctx := context.Background()
+				err = caller.request(ctx, endpoint)
+				require.ErrorIs(t, err, errors.ErrNetworkError)
+				require.False(t, errors.IsLocalError(err), "live caller must retain peer attribution: %v", err)
+				require.NoError(t, ctx.Err())
+			}
+		})
+	}
 }

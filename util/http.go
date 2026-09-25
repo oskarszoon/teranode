@@ -920,7 +920,9 @@ func RedactPeerURL(raw string) string {
 	if err != nil || u.Host == "" {
 		return "[redacted url]"
 	}
-	return u.Scheme + "://" + u.Host
+	// Host is decoded by url.Parse, including spaces in IPv6 zone identifiers.
+	// Serialize again so those bytes cannot enter legacy message classifiers.
+	return (&url.URL{Scheme: u.Scheme, Host: u.Host}).String()
 }
 
 // maxHTTPErrorBodyDrainBytes bounds how much of the REMAINDER of an error body is
