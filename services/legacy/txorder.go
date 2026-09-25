@@ -5,9 +5,11 @@ import (
 )
 
 // parentsFirst returns the indexes 0..len(hashes)-1 reordered so that every
-// tx comes after any of its parents that are also in hashes. SV Node only
-// accepts a child once it has the parent, so invs must reach a peer in this
-// order. Txs with no dependency between them keep their relative order.
+// tx comes after any of its parents that are also in hashes. SV Node parks a
+// child that arrives before its parent in its orphan pool, which is bounded
+// and expires entries, so the child can be lost before the parent turns up.
+// Sending the parent first avoids relying on that pool. Txs with no
+// dependency between them keep their relative order.
 //
 // parents(i) returns the parent tx hashes of hashes[i]; parents outside the
 // set are ignored. Duplicate hashes keep only their first position as a

@@ -3,6 +3,7 @@ package legacy
 import (
 	"context"
 	"net/url"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	utxosql "github.com/bsv-blockchain/teranode/stores/utxo/sql"
 	"github.com/bsv-blockchain/teranode/ulogger"
 	"github.com/bsv-blockchain/teranode/util/test"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -103,8 +105,9 @@ func TestRebroadcastQueue_RetryKeepsInsertionOrder(t *testing.T) {
 }
 
 // TestRebroadcastQueue_RetrySortsParentsFirst covers the parent-first
-// requirement from issue 1826: SV Node only accepts a child once it has the
-// parent, and txmeta Kafka reads can queue a child before its parent.
+// requirement from issue 1826: sending the parent first avoids relying on the
+// peer's bounded orphan pool, and txmeta Kafka reads can queue a child before
+// its parent.
 func TestRebroadcastQueue_RetrySortsParentsFirst(t *testing.T) {
 	q := newRebroadcastQueue(10)
 
@@ -204,25 +207,38 @@ func TestPruneRebroadcastQueue(t *testing.T) {
 		require.True(t, q.add(iv, nil))
 	}
 
-	result, err := pruneRebroadcastQueue(ctx, store, q)
+	lookup, err := lookupRebroadcasts(ctx, store, q.ivs())
 	require.NoError(t, err)
+	require.Equal(t, 6, q.len(), "the lookup must not touch the queue")
+
+	// An entry re-added while the lookup ran moves to the back and still gets its result.
+	q.remove(unminedB)
+	require.True(t, q.add(unminedB, nil))
+
+	result := q.applyLookup(lookup)
 	require.Equal(t, rebroadcastPruneResult{mined: 1, conflicting: 1, notFound: 1}, result)
 
 	entries := q.entries()
 	require.Len(t, entries, 3)
 	require.Equal(t, unminedA, entries[0].iv)
-	require.Equal(t, unminedB, entries[1].iv)
-	require.Equal(t, withParent, entries[2].iv)
+	require.Equal(t, withParent, entries[1].iv)
+	require.Equal(t, unminedB, entries[2].iv)
 
 	require.Empty(t, entries[0].parents)
-	require.Equal(t, []chainhash.Hash{*parentTx.TxIDChainHash()}, entries[2].parents,
-		"prune must record the parents retry orders by")
+	require.Equal(t, []chainhash.Hash{*parentTx.TxIDChainHash()}, entries[1].parents,
+		"the lookup must record the parents retry orders by")
 
 	t.Run("nil store keeps every entry", func(t *testing.T) {
-		result, err := pruneRebroadcastQueue(ctx, nil, q)
+		lookup, err := lookupRebroadcasts(ctx, nil, q.ivs())
 		require.NoError(t, err)
-		require.Zero(t, result)
+		require.Zero(t, q.applyLookup(lookup))
 		require.Equal(t, 3, q.len())
+	})
+
+	t.Run("an entry removed during the lookup is not touched", func(t *testing.T) {
+		gone := newRebroadcastQueue(10)
+		require.Zero(t, gone.applyLookup(lookup))
+		require.Zero(t, gone.len())
 	})
 }
 
@@ -287,4 +303,78 @@ func TestRebroadcastHandler_RetriesOncePerBlock(t *testing.T) {
 
 	s.BlockConnected()
 	expectRetry("no retry after a later block")
+}
+
+// TestRebroadcastHandler_TakesAddsDuringSlowLookup covers the stall review
+// found: the UTXO lookup before a retry used to run on the handler
+// goroutine, and on Aerospike it can outlast its context. Meanwhile nothing
+// drained modifyRebroadcastInv, so adds were dropped right after each block.
+func TestRebroadcastHandler_TakesAddsDuringSlowLookup(t *testing.T) {
+	store := &utxo.MockUtxostore{}
+	lookupStarted := make(chan struct{})
+	releaseLookup := make(chan struct{})
+
+	var startOnce, releaseOnce sync.Once
+
+	release := func() { releaseOnce.Do(func() { close(releaseLookup) }) }
+
+	store.On("BatchDecorate", mock.Anything, mock.Anything, mock.Anything).Run(func(mock.Arguments) {
+		startOnce.Do(func() { close(lookupStarted) })
+		<-releaseLookup
+	}).Return(nil)
+
+	s := &server{
+		ctx:    context.Background(),
+		logger: ulogger.TestLogger{},
+		// One slot: an add is only accepted once the handler took the last.
+		modifyRebroadcastInv: make(chan interface{}, 1),
+		rebroadcastTip:       make(chan struct{}, 1),
+		rebroadcastTipDelay:  10 * time.Millisecond,
+		relayInv:             make(chan relayMsg, 64),
+		quit:                 make(chan struct{}),
+		utxoStore:            store,
+	}
+
+	s.wg.Add(1)
+
+	go s.rebroadcastHandler()
+
+	t.Cleanup(func() {
+		release()
+		close(s.quit)
+		s.wg.Wait()
+	})
+
+	first := testTxInv(1)
+	s.AddRebroadcastInventory(&first, "first")
+	s.BlockConnected()
+
+	select {
+	case <-lookupStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("lookup did not start")
+	}
+
+	const adds = 20
+
+	for i := 0; i < adds; i++ {
+		iv := testTxInv(byte(0x10 + i))
+		s.AddRebroadcastInventory(&iv, i)
+
+		require.Eventually(t, func() bool { return len(s.modifyRebroadcastInv) == 0 }, time.Second, time.Millisecond,
+			"handler stopped taking adds while the lookup ran (add %d)", i)
+	}
+
+	require.Zero(t, s.droppedRebroadcastAdds.Load())
+
+	release()
+
+	// The retry covers the entry the lookup saw and the ones added meanwhile.
+	for i := 0; i < adds+1; i++ {
+		select {
+		case <-s.relayInv:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("retry relayed only %d of %d entries", i, adds+1)
+		}
+	}
 }

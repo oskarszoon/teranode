@@ -372,7 +372,9 @@ keeps a bounded retry queue.
 - The remaining entries are re-offered to every connected peer with parents
   before their children. Queue order alone is not enough: txs are read from
   the txmeta Kafka topic across partitions, so a child can be queued before
-  its parent, and SV Node only accepts a child once it has the parent. Retries
+  its parent. SV Node parks a child that arrives first in its orphan pool,
+  which is bounded and expires entries, so sending the parent first avoids
+  relying on that pool. Retries
   bypass each peer's known-inventory filter, so a peer that already saw the
   first announce is offered the tx again.
 - Each entry has a budget of `maxRebroadcastTips` (6) retries, about an

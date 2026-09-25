@@ -34,8 +34,9 @@ const (
 	// share the one retry.
 	rebroadcastTipDelay = 30 * time.Second
 
-	// rebroadcastPruneTimeout bounds the UTXO store lookup that drops mined
-	// entries before each retry.
+	// rebroadcastPruneTimeout is the context deadline for the UTXO store
+	// lookup that drops mined entries before each retry. Not every store
+	// honours it, which is why the lookup runs off the handler goroutine.
 	rebroadcastPruneTimeout = 30 * time.Second
 
 	// modifyRebroadcastInvBuffer is the channel buffer between
@@ -61,7 +62,7 @@ type rebroadcastEntry struct {
 // order. Insertion order is the order txs were read from the txmeta Kafka
 // topic, which is spread over partitions and so is not validation order: a
 // child can be queued before its parent. retry therefore sorts each batch
-// parents-first using the parent hashes pruneRebroadcastQueue records. Not
+// parents-first using the parent hashes applyLookup records. Not
 // safe for concurrent use; owned by rebroadcastHandler.
 type rebroadcastQueue struct {
 	capacity int
@@ -158,19 +159,44 @@ func (q *rebroadcastQueue) retry(maxTips int, relay func([]relayMsg)) (relayed, 
 	return len(batch), agedOut
 }
 
-// rebroadcastPruneResult counts the entries pruneRebroadcastQueue removed,
-// by reason.
+// rebroadcastStatus is what the UTXO store lookup found for a pending tx.
+type rebroadcastStatus int
+
+const (
+	// rebroadcastKeep: still unmined, or the lookup failed for this tx.
+	rebroadcastKeep rebroadcastStatus = iota
+	rebroadcastMined
+	rebroadcastConflicting
+	rebroadcastNotFound
+)
+
+// rebroadcastLookup is the UTXO store lookup result for one pending tx.
+// parents is only set, and parentsKnown only true, for a tx that stays.
+type rebroadcastLookup struct {
+	iv           wire.InvVect
+	status       rebroadcastStatus
+	parents      []chainhash.Hash
+	parentsKnown bool
+}
+
+// rebroadcastPruneResult counts the entries applyLookup removed, by reason.
 type rebroadcastPruneResult struct {
 	mined       int
 	conflicting int
 	notFound    int
 }
 
-// pruneRebroadcastQueue drops entries that no longer need retrying: txs that
-// have been mined, txs marked conflicting, and txs no longer in the UTXO
-// store (which a peer could not fetch from us anyway). A lookup error keeps
-// the entry: a failed prune costs one wasted retry, not a lost tx. Entries
-// that stay record their parent tx hashes, which retry orders by.
+// lookupRebroadcasts looks the given pending txs up in the UTXO store, to
+// find the ones that no longer need retrying: txs that have been mined, txs
+// marked conflicting, and txs no longer in the store (which a peer could not
+// fetch from us anyway). For txs that stay it reads their parent tx hashes,
+// which retry orders by. A lookup error for one tx keeps it: a failed lookup
+// costs one wasted retry, not a lost tx.
+//
+// It touches no queue state, so rebroadcastHandler runs it on its own
+// goroutine: on Aerospike it can take far longer than ctx allows, since the
+// batch read ignores ctx and TxInpoints of external txs are read one blob at
+// a time, and the handler must keep taking adds meanwhile.
 //
 // Looking the pending txs up is cheaper than walking the new block's
 // subtrees: the queue holds at most maxRebroadcastInventory entries, while a
@@ -179,45 +205,86 @@ type rebroadcastPruneResult struct {
 //
 // A tx whose only block was later orphaned by a reorg is dropped too early.
 // Reorgs are rare enough that this is accepted.
-func pruneRebroadcastQueue(ctx context.Context, store utxo.Store, q *rebroadcastQueue) (rebroadcastPruneResult, error) {
-	var result rebroadcastPruneResult
-
-	if store == nil || q.len() == 0 {
-		return result, nil
+func lookupRebroadcasts(ctx context.Context, store utxo.Store, ivs []wire.InvVect) ([]rebroadcastLookup, error) {
+	if store == nil || len(ivs) == 0 {
+		return nil, nil
 	}
 
-	entries := q.entries()
 	lookupFields := []fields.FieldName{fields.BlockIDs, fields.Conflicting, fields.TxInpoints}
 
-	items := make([]*utxo.UnresolvedMetaData, len(entries))
-	for i, entry := range entries {
-		items[i] = &utxo.UnresolvedMetaData{Hash: entry.iv.Hash, Idx: i, Fields: lookupFields}
+	items := make([]*utxo.UnresolvedMetaData, len(ivs))
+	for i, iv := range ivs {
+		items[i] = &utxo.UnresolvedMetaData{Hash: iv.Hash, Idx: i, Fields: lookupFields}
 	}
 
 	if err := store.BatchDecorate(ctx, items, lookupFields...); err != nil {
-		return result, err
+		return nil, err
 	}
 
+	results := make([]rebroadcastLookup, len(items))
+
 	for i, item := range items {
+		results[i].iv = ivs[i]
+
 		switch {
 		case item.Err != nil:
 			if errors.Is(item.Err, errors.ErrTxNotFound) {
-				q.remove(entries[i].iv)
-				result.notFound++
+				results[i].status = rebroadcastNotFound
 			}
 		case item.Data == nil:
 		case len(item.Data.BlockIDs) > 0:
-			q.remove(entries[i].iv)
-			result.mined++
+			results[i].status = rebroadcastMined
 		case item.Data.Conflicting:
-			q.remove(entries[i].iv)
-			result.conflicting++
+			results[i].status = rebroadcastConflicting
 		default:
-			entries[i].parents = item.Data.TxInpoints.ParentTxHashes
+			results[i].parents = item.Data.TxInpoints.ParentTxHashes
+			results[i].parentsKnown = true
 		}
 	}
 
-	return result, nil
+	return results, nil
+}
+
+// applyLookup applies lookupRebroadcasts results to the queue: it removes
+// entries that no longer need retrying and records the parents of the rest.
+// Entries removed since the lookup started are skipped.
+func (q *rebroadcastQueue) applyLookup(results []rebroadcastLookup) rebroadcastPruneResult {
+	var pruned rebroadcastPruneResult
+
+	for _, res := range results {
+		el, ok := q.index[res.iv]
+		if !ok {
+			continue
+		}
+
+		switch res.status {
+		case rebroadcastMined:
+			q.remove(res.iv)
+			pruned.mined++
+		case rebroadcastConflicting:
+			q.remove(res.iv)
+			pruned.conflicting++
+		case rebroadcastNotFound:
+			q.remove(res.iv)
+			pruned.notFound++
+		default:
+			if res.parentsKnown {
+				el.Value.(*rebroadcastEntry).parents = res.parents
+			}
+		}
+	}
+
+	return pruned
+}
+
+// ivs returns the pending invs in queue order.
+func (q *rebroadcastQueue) ivs() []wire.InvVect {
+	out := make([]wire.InvVect, 0, len(q.index))
+	for el := q.order.Front(); el != nil; el = el.Next() {
+		out = append(out, el.Value.(*rebroadcastEntry).iv)
+	}
+
+	return out
 }
 
 // AddRebroadcastInventory adds 'iv' to the list of inventories to be
@@ -298,22 +365,45 @@ func (s *server) relayRebroadcastBatch(batch []relayMsg) {
 	}()
 }
 
-// retryRebroadcasts runs one retry of the pending queue: it prunes entries
-// that no longer need retrying, then re-offers the rest to every connected
-// peer, parents first. Skipped entirely, without spending any budget, while
-// the node is not relaying txs.
-func (s *server) retryRebroadcasts(q *rebroadcastQueue) {
+// rebroadcastLookupDone carries a lookupRebroadcasts result back to
+// rebroadcastHandler.
+type rebroadcastLookupDone struct {
+	results []rebroadcastLookup
+	err     error
+}
+
+// startRebroadcastRetry starts one retry of the pending queue: it looks the
+// pending txs up on a separate goroutine and reports on done, which
+// finishRebroadcastRetry then handles. Returns false, spending no budget,
+// while the node is not relaying txs. done must have room for one result.
+func (s *server) startRebroadcastRetry(q *rebroadcastQueue, done chan<- rebroadcastLookupDone) bool {
 	if !s.canRelayTx() {
-		return
+		return false
 	}
 
-	ctx, cancel := context.WithTimeout(s.ctx, rebroadcastPruneTimeout)
-	pruned, err := pruneRebroadcastQueue(ctx, s.utxoStore, q)
-	cancel()
+	ivs := q.ivs()
 
-	if err != nil {
-		s.logger.Warnf("[rebroadcast] failed to prune mined txs from the rebroadcast queue, retrying all %d entries: %v", q.len(), err)
+	go func() {
+		ctx, cancel := context.WithTimeout(s.ctx, rebroadcastPruneTimeout)
+		defer cancel()
+
+		results, err := lookupRebroadcasts(ctx, s.utxoStore, ivs)
+		done <- rebroadcastLookupDone{results: results, err: err}
+	}()
+
+	return true
+}
+
+// finishRebroadcastRetry applies a lookup result to the queue, then re-offers
+// the remaining entries to every connected peer, parents first. Entries added
+// while the lookup ran are retried too, in queue order, since their parents
+// are not known yet.
+func (s *server) finishRebroadcastRetry(q *rebroadcastQueue, lookup rebroadcastLookupDone) {
+	if lookup.err != nil {
+		s.logger.Warnf("[rebroadcast] failed to prune mined txs from the rebroadcast queue, retrying all %d entries: %v", q.len(), lookup.err)
 	}
+
+	pruned := q.applyLookup(lookup.results)
 
 	prometheusLegacyRebroadcastRemoved.WithLabelValues("mined").Add(float64(pruned.mined))
 	prometheusLegacyRebroadcastRemoved.WithLabelValues("conflicting").Add(float64(pruned.conflicting))
@@ -339,15 +429,21 @@ func (s *server) retryRebroadcasts(q *rebroadcastQueue) {
 // recent-rejects filter when its tip changes: a retry before the next block
 // is likely rejected again. Mined txs are pruned before each retry and every
 // entry ages out after maxRebroadcastTips blocks, so the queue stays bounded.
+// The UTXO lookup behind the prune runs on its own goroutine, so adds keep
+// being taken while it runs.
 func (s *server) rebroadcastHandler() {
 	queue := newRebroadcastQueue(maxRebroadcastInventory)
 
-	// Stopped until the first block arrives. retryPending tracks whether it
-	// is armed, so blocks arriving during the delay share one retry.
+	// Stopped until the first block arrives. retryPending is true from the
+	// first block until its retry has gone out, so blocks arriving during
+	// the delay or the lookup share one retry.
 	retryTimer := time.NewTimer(time.Hour)
 	retryTimer.Stop()
 
 	retryPending := false
+
+	// At most one lookup runs at a time, so one slot never blocks the sender.
+	lookupDone := make(chan rebroadcastLookupDone, 1)
 
 out:
 	for {
@@ -376,9 +472,14 @@ out:
 			}
 
 		case <-retryTimer.C:
-			retryPending = false
+			if !s.startRebroadcastRetry(queue, lookupDone) {
+				retryPending = false
+			}
 
-			s.retryRebroadcasts(queue)
+		case lookup := <-lookupDone:
+			s.finishRebroadcastRetry(queue, lookup)
+
+			retryPending = false
 
 		case <-s.quit:
 			break out
