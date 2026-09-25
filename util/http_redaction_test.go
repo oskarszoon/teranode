@@ -2,6 +2,7 @@ package util
 
 import (
 	"context"
+	stderrors "errors" //nolint:depguard // Structural unwrapping must bypass teranode message-based error classification.
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -23,6 +24,14 @@ func TestHTTPRequestErrorsRedactPeerURLs(t *testing.T) {
 		}},
 		{"bounded retry", func(ctx context.Context, rawURL string) ([]byte, error) {
 			return DoHTTPRequestBoundedWithRetry(ctx, rawURL, 1024, nil)
+		}},
+		{"reader retry", func(ctx context.Context, rawURL string) ([]byte, error) {
+			reader, err := DoHTTPRequestBodyReaderWithRetryFunc(ctx, rawURL, nil)
+			if err != nil {
+				return nil, err
+			}
+			defer reader.Close()
+			return io.ReadAll(reader)
 		}},
 	}
 	for _, caller := range callers {
@@ -143,11 +152,13 @@ var malformedPeerURLs = []string{
 	"http://context canceled/private-token",
 }
 
-func TestUnwrapHTTPURLError_NestedURL(t *testing.T) {
+func TestSanitizeHTTPTransportError_NestedURL(t *testing.T) {
 	cause := io.ErrUnexpectedEOF
 	err := &url.Error{Op: "Get", URL: "http://outer/private-token", Err: &url.Error{
 		Op: "Get", URL: "http://inner/private-token", Err: cause,
 	}}
-	got := unwrapHTTPURLError(err)
-	require.Same(t, cause, got, "nested URL wrappers must not leave a raw peer URL in the error")
+	got := sanitizeHTTPTransportError(err, "http://outer/private-token")
+	require.ErrorIs(t, got, errors.ErrNetworkError)
+	require.NotContains(t, got.Error(), "private-token")
+	require.Nil(t, stderrors.Unwrap(got), "unsafe raw transport causes must not survive sanitization")
 }

@@ -87,7 +87,8 @@ func TestDoHTTPRequestWithTimeout(t *testing.T) {
 
 	_, err := DoHTTPRequest(ctx, server.URL)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "context deadline exceeded")
+	require.ErrorIs(t, err, errors.ErrNetworkTimeout)
+	require.False(t, errors.IsLocalError(err))
 }
 
 func TestDoHTTPRequestDefaultTimeoutInMilliseconds(t *testing.T) {
@@ -268,7 +269,7 @@ func TestDoHTTPRequestInvalidURL(t *testing.T) {
 
 	require.Error(t, err)
 	// Non-http URL passes SSRF validation but fails at HTTP client level
-	require.Contains(t, err.Error(), "failed to do http request")
+	require.ErrorIs(t, err, errors.ErrNetworkError)
 }
 
 func TestDoHTTPRequestConnectionError(t *testing.T) {
@@ -277,7 +278,7 @@ func TestDoHTTPRequestConnectionError(t *testing.T) {
 	_, err := DoHTTPRequest(ctx, "http://localhost:99999")
 
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "failed to do http request")
+	require.ErrorIs(t, err, errors.ErrNetworkError)
 }
 
 func TestDoHTTPRequestBodyReaderGET(t *testing.T) {
@@ -339,7 +340,7 @@ func TestDoHTTPRequestBodyReaderError(t *testing.T) {
 	require.Nil(t, reader)
 	require.Error(t, err)
 	// Non-http URL passes SSRF validation but fails at HTTP client level
-	require.Contains(t, err.Error(), "failed to do http request")
+	require.ErrorIs(t, err, errors.ErrNetworkError)
 }
 
 func TestDoHTTPRequestBodyReaderServerError(t *testing.T) {
@@ -792,7 +793,7 @@ func TestDoHTTPRequest_ReadBodyError(t *testing.T) {
 
 	// This might pass or fail depending on timing, but exercises the read error path
 	if err != nil {
-		require.Contains(t, err.Error(), "failed to read body")
+		require.ErrorIs(t, err, errors.ErrNetworkError)
 	}
 }
 
@@ -1009,8 +1010,13 @@ func TestDefaultSSRFDialPolicy(t *testing.T) {
 		})
 	}
 
-	// RFC1918 / ULA ranges are intentionally allowed: teranode peers, k8s pods and
-	// private miner interconnects all live on private networks.
+	// RFC1918 / ULA ranges are allowed when p2p_allow_private_ips is set: teranode peers,
+	// k8s pods and private miner interconnects can all live on private networks. Refusal
+	// with the setting off is covered by TestDefaultSSRFDialPolicy_PrivateNetworksFollowSetting.
+	origAllowPrivate := SSRFAllowPrivateNetworks()
+	SetSSRFAllowPrivateNetworks(true)
+	defer SetSSRFAllowPrivateNetworks(origAllowPrivate)
+
 	allowed := []string{
 		"8.8.8.8",
 		"1.1.1.1",
@@ -1123,9 +1129,13 @@ func TestNewSSRFSafeDialContext_CustomPolicy(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "private address")
 
-	// The package default policy allows private ranges, so it dials instead. Bound the
+	// With private networks allowed the package default policy dials instead. Bound the
 	// attempt: a dropped (rather than refused) RFC1918 packet would otherwise sit here for
 	// the dialer's full 30s.
+	origAllowPrivate := SSRFAllowPrivateNetworks()
+	SetSSRFAllowPrivateNetworks(true)
+	defer SetSSRFAllowPrivateNetworks(origAllowPrivate)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
@@ -1357,8 +1367,8 @@ func TestDoHTTPRequestBodyReaderWithRetry_ExhaustsAttemptsOnPersistent503(t *tes
 	body, err := doHTTPRequestBodyReaderWithRetry(context.Background(), server.URL, testRetryConfig, nil)
 	require.Error(t, err)
 	require.Nil(t, body)
-	require.True(t, errors.Is(err, errors.ErrServiceUnavailable),
-		"final error must be ErrServiceUnavailable so callers can branch on it; got %T: %v", err, err)
+	require.ErrorIs(t, err, errors.ErrNetworkError)
+	require.False(t, errors.IsTransientLocalError(err))
 	require.Equal(t, int32(testRetryConfig.maxAttempts), atomic.LoadInt32(&attempts),
 		"should have exactly maxAttempts attempts")
 }
@@ -1487,8 +1497,8 @@ func TestDoHTTPRequestBodyReaderWithRetry_ExhaustsAttemptsOnPersistent429(t *tes
 	body, err := doHTTPRequestBodyReaderWithRetry(context.Background(), server.URL, testRetryConfig, nil)
 	require.Error(t, err)
 	require.Nil(t, body)
-	require.True(t, errors.Is(err, errors.ErrServiceUnavailable),
-		"persistent 429 must surface as ErrServiceUnavailable (retryable class); got %T: %v", err, err)
+	require.ErrorIs(t, err, errors.ErrNetworkError)
+	require.False(t, errors.IsTransientLocalError(err))
 	require.Equal(t, int32(testRetryConfig.maxAttempts), atomic.LoadInt32(&attempts))
 }
 
@@ -1724,6 +1734,7 @@ func TestRetryHTTP_DeadlineAfterPeerFaultIsPeerError(t *testing.T) {
 		"deadline after a peer fault must be a peer fault (non-local); got %T: %v", err, err)
 	require.True(t, errors.IsNetworkError(err),
 		"should classify as a network timeout (peer fault) by code; got %T: %v", err, err)
+	require.False(t, errors.IsTransientLocalError(err), "deadline after peer failure must not carry a local service cause")
 }
 
 // TestRetryHTTP_CancelStaysLocal proves the complementary case: an explicit cancel
@@ -1834,7 +1845,8 @@ func TestRetryHTTP_CumulativeBackoffBudget(t *testing.T) {
 	_, err := retryHTTP(context.Background(), cfg, attempt)
 	elapsed := time.Since(start)
 	require.Error(t, err)
-	require.True(t, errors.Is(err, errors.ErrServiceUnavailable))
+	require.ErrorIs(t, err, errors.ErrNetworkError)
+	require.False(t, errors.IsTransientLocalError(err))
 	// Two ~40ms waits fit the 60ms budget for only the first; the loop abandons well before the
 	// 6-attempt cap would allow ~200ms of sleeping.
 	require.Less(t, elapsed, 150*time.Millisecond, "cumulative backoff must be bounded by maxBackoffTotal")

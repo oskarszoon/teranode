@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	subtreepkg "github.com/bsv-blockchain/go-subtree"
@@ -58,24 +59,27 @@ func TestCatchupHeaders_PeerURLCannotForgeLocalError(t *testing.T) {
 }
 
 func TestCatchupPeerSnapshot_RetriesTransientLookupFailure(t *testing.T) {
-	calls := 0
-	snapshot := &catchupPeerSnapshot{
-		load: func() ([]*p2p.PeerInfo, bool, error) {
-			calls++
-			if calls == 1 {
-				return nil, false, errors.NewServiceError("registry restarting")
-			}
-			return []*p2p.PeerInfo{mkTestPeer("archival", "full", 100)}, false, nil
-		},
-	}
-	_, _, err := snapshot.get()
-	require.Error(t, err)
-	for range 3 {
-		peers, _, err := snapshot.get()
-		require.NoError(t, err)
-		require.Len(t, peers, 1)
-	}
-	require.Equal(t, 2, calls, "cache successful discovery, never a transient RPC error")
+	synctest.Test(t, func(t *testing.T) {
+		calls := 0
+		snapshot := &catchupPeerSnapshot{
+			load: func() ([]*p2p.PeerInfo, bool, error) {
+				calls++
+				if calls == 1 {
+					return nil, false, errors.NewServiceError("registry restarting")
+				}
+				return []*p2p.PeerInfo{mkTestPeer("archival", "full", 100)}, false, nil
+			},
+		}
+		_, _, err := snapshot.get()
+		require.Error(t, err)
+		time.Sleep(time.Second)
+		for range 3 {
+			peers, _, err := snapshot.get()
+			require.NoError(t, err)
+			require.Len(t, peers, 1)
+		}
+		require.Equal(t, 2, calls, "cache successful discovery, retry transient RPC errors after the short failure window")
+	})
 }
 
 func TestDecodeBoundedBlock_BufferedCoinbaseUsesBlockBudget(t *testing.T) {
@@ -110,7 +114,7 @@ type timeoutSubtreeStore struct {
 	writeContext context.Context
 }
 
-func (s *timeoutSubtreeStore) Set(ctx context.Context, _ []byte, _ fileformat.FileType, _ []byte, _ ...options.FileOption) error {
+func (s *timeoutSubtreeStore) SetFromReader(ctx context.Context, _ []byte, _ fileformat.FileType, _ io.ReadCloser, _ ...options.FileOption) error {
 	s.writeContext = ctx
 	return context.DeadlineExceeded
 }
@@ -126,7 +130,7 @@ func TestCatchupSubtreeData_StoreTimeoutIsLocal(t *testing.T) {
 	httpmock.ActivateNonDefault(util.HTTPClient())
 	defer httpmock.DeactivateAndReset()
 	httpmock.RegisterResponder("GET", fmt.Sprintf("http://peer/subtree_data/%s", hash), httpmock.NewBytesResponder(200, nil))
-	err = server.fetchAndStoreSubtreeData(context.Background(), context.Background(), block, hash, subtree, "peer", "http://peer", false)
+	err = server.fetchAndStoreSubtreeData(context.Background(), context.Background(), block, hash, subtree, "peer", "http://peer", false, nil)
 	require.Error(t, err)
 	require.True(t, errors.Is(err, errors.ErrStorageError), "local store deadline must remain a storage failure: %v", err)
 	require.True(t, errors.IsLocalError(err))
@@ -161,7 +165,7 @@ func TestCatchupSubtree_PacingSaturationFailsOverWithoutPeerPenalty(t *testing.T
 			httpmock.RegisterResponder("GET", fmt.Sprintf("%s/subtree/%s", primary.DataHubURL, hash), httpmock.NewStringResponder(http.StatusNotFound, "missing"))
 			httpmock.RegisterResponder("GET", fmt.Sprintf("%s/subtree/%s", good.DataHubURL, hash), httpmock.NewBytesResponder(http.StatusOK, subtreepkg.CoinbasePlaceholderHashValue[:]))
 			block := testhelpers.CreateTestBlockChain(t, 1)[0]
-			got, err := server.fetchAndStoreSubtreeAndSubtreeData(context.Background(), context.Background(), block, hash, primary.ID.String(), primary.DataHubURL, snapshot)
+			got, err := server.fetchAndStoreSubtreeAndSubtreeData(context.Background(), context.Background(), block, hash, primary.ID.String(), primary.DataHubURL, snapshot, nil)
 			require.NoError(t, err)
 			require.Equal(t, good.ID.String(), got)
 			require.NotContains(t, server.activeCatchupCtx.failedPeers, saturated.ID.String(), "no request was sent to the saturated peer")
@@ -197,7 +201,7 @@ func TestCatchupSubtreeDistribution_RequiresRequestedHeight(t *testing.T) {
 	behindURL := fmt.Sprintf("%s/subtree/%s", behind.DataHubURL, hash)
 	httpmock.RegisterResponder("GET", behindURL, httpmock.NewStringResponder(http.StatusNotFound, "not synced yet"))
 	httpmock.RegisterResponder("GET", fmt.Sprintf("%s/subtree/%s", primary.DataHubURL, hash), httpmock.NewBytesResponder(http.StatusOK, subtreepkg.CoinbasePlaceholderHashValue[:]))
-	_, err = server.fetchSubtreeDataForBlock(context.Background(), block, primary.ID.String(), primary.DataHubURL)
+	_, _, err = server.fetchSubtreeDataForBlock(context.Background(), block, primary.ID.String(), primary.DataHubURL)
 	require.NoError(t, err)
 	require.Zero(t, httpmock.GetCallCountInfo()["GET "+behindURL], "never assign a subtree to a peer below its block height")
 }
@@ -252,7 +256,7 @@ func TestCatchupSubtreeData_StreamingReadSharesFetchDeadline(t *testing.T) {
 		body = &stallingBlockResponseBody{ctx: req.Context(), started: make(chan struct{})}
 		return blockHTTPResponse(body), nil
 	})
-	err = server.fetchAndStoreSubtreeData(context.Background(), context.Background(), block, hash, subtree, "peer", "http://peer", false)
+	err = server.fetchAndStoreSubtreeData(context.Background(), context.Background(), block, hash, subtree, "peer", "http://peer", false, nil)
 	require.ErrorIs(t, err, errors.ErrNetworkTimeout)
 	require.False(t, errors.IsLocalError(err))
 	require.NotNil(t, body)

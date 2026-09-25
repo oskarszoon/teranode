@@ -231,7 +231,7 @@ func TestCatchup_ConnectionDropMidTransfer(t *testing.T) {
 			// Let the configured retry finish. An expired caller deadline is a
 			// local cancellation and must not count as a connection failure.
 			_, _, err := server.catchupGetBlockHeaders(ctx, targetBlock, peerID, "http://bad-peer")
-			require.ErrorContains(t, err, "connection reset by peer")
+			require.ErrorIs(t, err, errors.ErrNetworkError)
 			require.False(t, errors.IsLocalError(err))
 			require.NoError(t, ctx.Err())
 			_, failures, _, _ := breaker.GetStats()

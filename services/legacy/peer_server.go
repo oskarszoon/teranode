@@ -190,6 +190,12 @@ type broadcastInventoryDel *wire.InvVect
 type relayMsg struct {
 	invVect *wire.InvVect
 	data    interface{}
+
+	// requeue re-announces a tx inv to peers that are already known to
+	// have it. Set only by the rebroadcast path: the first announce puts
+	// the inv in each peer's known inventory, so without it a rebroadcast
+	// never reaches a peer that stayed connected.
+	requeue bool
 }
 
 // updatePeerHeightsMsg is a message sent from the blockmanager to the server
@@ -1267,6 +1273,14 @@ func (sp *serverPeer) OnBlock(_ *peer.Peer, msg *wire.MsgBlock, buf []byte, payl
 			if err != nil {
 				sp.server.logger.Errorf("block processing failed: %v", err)
 
+				// Corrupt block body (bitcoin-sv/teranode#4692): strike THIS serving peer — the legacy
+				// layer is where the peer identity actually lives. A namespaced form of it is now
+				// threaded through the netsync ProcessBlock path too, but blockvalidation's own
+				// isLegacyPeerID gate intentionally excludes it from that package's own
+				// strike/malicious-check, so attribution stays exclusively here. Extracted to a
+				// method so the attribution is unit-testable without driving the whole read loop.
+				sp.strikeIfCorruptBlockBody(err)
+
 				if shouldDisconnectOnBlockErr(err) {
 					// Evict the whole association so the sync peer actually rotates; see
 					// disconnectMisbehaving (a bare sp disconnect misses the primary).
@@ -1385,6 +1399,39 @@ func preAdmitTimedOut(preAdmitCtx context.Context) bool {
 	return errors.Is(preAdmitCtx.Err(), context.DeadlineExceeded)
 }
 
+// banScoreCorruptBlockBody is the transient ban-score increment applied to a legacy
+// peer that served a corrupt block body (bitcoin-sv/teranode#4692). Deliberately modest (well
+// below the warn/ban thresholds for a single event) so an honest relay's one-off
+// transport corruption decays away, while a peer repeatedly serving corrupt bodies
+// accumulates toward a ban. The value is a NOMINAL alignment with the "corrupt_block_body"
+// ReasonPoints entry in services/blockchain/peer_registry.go (both are 10), NOT equivalent
+// escalation: the legacy transient score halves every ~60s while the registry sheds a flat
+// 1/min, so the two decay differently and a same-hash attacker tops out at different points.
+// The two are intentionally not unified across the package boundary; a follow-up tracks
+// deduplicating them.
+const banScoreCorruptBlockBody = 10
+
+// strikeIfCorruptBlockBody applies the corrupt-body ban-score strike to THIS serving
+// peer when err (or anything it wraps, across the ProcessBlock gRPC boundary) is a
+// corrupt block body (bitcoin-sv/teranode#4692), and reports whether err was corrupt. Attribution
+// is inherent: sp is the peer whose blockProcessed result produced err, so the penalty
+// always lands on a real serving peer, independently of the "legacy:"-namespaced peerID
+// also threaded through the netsync ProcessBlock path — blockvalidation's own
+// isLegacyPeerID gate keeps that value out of its strike/malicious-check, so this remains
+// the only place a legacy corrupt body is attributed ENFORCEABLY (see that gate's doc in
+// services/blockvalidation/peer_metrics_helpers.go for why). A single strike stays below the ban
+// threshold (addBanScore only disconnects past it), so an honest one-off transport corruption
+// does not rotate the sync peer.
+func (sp *serverPeer) strikeIfCorruptBlockBody(err error) bool {
+	if !errors.IsBlockCorrupt(err) {
+		return false
+	}
+
+	sp.addBanScore(0, banScoreCorruptBlockBody, "corrupt block body")
+
+	return true
+}
+
 // shouldDisconnectOnBlockErr reports whether a block-processing error should
 // rotate the sync peer. Block validation failures disconnect the peer; transient
 // LOCAL conditions must not, since they would only cause unnecessary sync-peer
@@ -1397,6 +1444,27 @@ func preAdmitTimedOut(preAdmitCtx context.Context) bool {
 // cannot drift apart.
 func shouldDisconnectOnBlockErr(err error) bool {
 	if err == nil {
+		return false
+	}
+
+	// A corrupt block body (bitcoin-sv/teranode#4692) is not a clear peer fault — a body can be
+	// corrupted in transit by an honest relay — and is not a verdict on the hash. Do NOT
+	// disconnect (which would churn an otherwise-healthy sync peer); the block is simply
+	// dropped and re-requested. Kept in lock-step with the netsync reject/suppress skip in
+	// handleBlockMsg.
+	if errors.IsBlockCorrupt(err) {
+		return false
+	}
+
+	// A local policy decline (excessiveblocksize) is OUR configuration, not the peer's conduct
+	// (bitcoin-sv/teranode#4692). Disconnecting here would label the peer "misbehaving" and rotate
+	// the sync peer for a decision no peer can influence: every peer serves the same block, so the
+	// replacement is declined identically and the only effect is churning through the fleet. It is
+	// not transient-local either — the decline clears only when the operator raises the knob — so
+	// IsTransientLocalError below does not cover it and it needs its own exemption. This is the same
+	// invariant the catch-up terminal branch and the blockvalidation strike gates enforce: a policy
+	// decline charges no peer and signals no rotation.
+	if errors.Is(err, errors.ErrBlockPolicyDeclined) {
 		return false
 	}
 
@@ -1549,6 +1617,13 @@ func (sp *serverPeer) awaitBlockResult(done chan error, weight int64, blockHash 
 
 	if err != nil {
 		sp.server.logger.Errorf("block processing failed: %v", err)
+
+		// Corrupt block body (bitcoin-sv/teranode#4692): strike THIS serving peer on the async
+		// prefetch-ingestion completion path too — this is the DEFAULT path off regtest
+		// (UseBlockPrefetchIngestion = budget > 0 && net != RegTestNet), so without this a
+		// corrupt body would be dropped with no serving-peer score. Same modest, non-
+		// disconnecting strike as the synchronous OnBlock path.
+		sp.strikeIfCorruptBlockBody(err)
 
 		if shouldDisconnectOnBlockErr(err) {
 			// Evict the whole association so the sync peer actually rotates; see
@@ -2246,25 +2321,6 @@ func (s *server) pushTxMsg(sp *serverPeer, hash *chainhash.Hash, doneChan chan<-
 	return nil
 }
 
-func (s *server) getTxFromStore(hash *chainhash.Hash) (*bsvutil.Tx, int64, error) {
-	txMeta, err := s.utxoStore.Get(s.ctx, hash, fields.Tx)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	fee, err := util.GetFees(txMeta.Tx)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	tx, err := bsvutil.NewTxFromBytes(txMeta.Tx.Bytes())
-	if err != nil {
-		return nil, 0, err
-	}
-
-	return tx, int64(fee), nil // nolint:gosec
-}
-
 // pushBlockMsg sends a block message for the provided block hash to the
 // connected peer.  An error is returned if the block hash is not known.
 func (s *server) pushBlockMsg(sp *serverPeer, hash *chainhash.Hash, doneChan chan<- struct{},
@@ -2275,7 +2331,9 @@ func (s *server) pushBlockMsg(sp *serverPeer, hash *chainhash.Hash, doneChan cha
 	// 1. Writing the entire block to disk (slow, causes context deadline exceeded)
 	// 2. Reading it back from disk (additional I/O overhead)
 	url := fmt.Sprintf("%s/block_legacy/%s?wire=1", s.assetHTTPAddress, hash.String())
-	reader, err := util.DoHTTPRequestBodyReader(s.ctx, url)
+	// asset_httpAddress is this node's own asset service, from settings, and is routinely
+	// localhost or a private container address. The peer-URL client refuses both.
+	reader, err := util.DoLocalServiceHTTPRequestBodyReader(s.ctx, url)
 	if err != nil {
 		sp.server.logger.Errorf("Unable to fetch requested block %v: %v", hash, err)
 
@@ -2743,6 +2801,7 @@ func (s *server) handleRelayInvMsg(state *peerState, msg relayMsg) {
 
 type serverPeerQueueInventory interface {
 	QueueInventory(*wire.InvVect)
+	RequeueInventory(*wire.InvVect)
 }
 
 func (s *server) handleRelayTxMsg(sp serverPeerQueueInventory, msg relayMsg, feeFilter int64) {
@@ -2775,6 +2834,13 @@ func (s *server) handleRelayTxMsg(sp serverPeerQueueInventory, msg relayMsg, fee
 		if feePerKB < feeFilter {
 			return
 		}
+	}
+
+	// A rebroadcast must reach peers that already saw the first announce
+	// and then rejected or dropped the tx.
+	if msg.requeue {
+		sp.RequeueInventory(msg.invVect)
+		return
 	}
 
 	// Queue the inventory to be relayed with the next batch.
@@ -3417,6 +3483,19 @@ func (s *server) canRelayTx() bool {
 // Note: not gated by `listen_mode`. See AnnounceNewTransactions for the
 // rationale.
 func (s *server) RelayInventory(invVect *wire.InvVect, data interface{}) {
+	s.relayInventory(relayMsg{invVect: invVect, data: data})
+}
+
+// rebroadcastInventory relays a tx inv from the rebroadcast queue to all
+// connected peers, including those already known to have it. See
+// relayMsg.requeue.
+func (s *server) rebroadcastInventory(invVect *wire.InvVect, data interface{}) {
+	s.relayInventory(relayMsg{invVect: invVect, data: data, requeue: true})
+}
+
+func (s *server) relayInventory(msg relayMsg) {
+	invVect := msg.invVect
+
 	// Suppress tx invs while the node is not in RUNNING state. Block invs
 	// are still relayed (block sync is gated separately in netsync.manager).
 	if invVect != nil && invVect.Type == wire.InvTypeTx && !s.canRelayTx() {
@@ -3424,9 +3503,9 @@ func (s *server) RelayInventory(invVect *wire.InvVect, data interface{}) {
 	}
 
 	// dont' block on inv relay, losing invs on restart is fine.
-	go func(invVect *wire.InvVect, data interface{}) {
-		s.relayInv <- relayMsg{invVect: invVect, data: data}
-	}(invVect, data)
+	go func(msg relayMsg) {
+		s.relayInv <- msg
+	}(msg)
 }
 
 // BroadcastMessage sends msg to all peers currently connected to the server
@@ -3603,8 +3682,9 @@ func (s *server) RebroadcastDropCounts() (adds, capHits uint64) {
 // rebroadcastHandler keeps track of inventories announced via
 // AnnounceNewTransactions that have not yet made it into a block. It
 // periodically re-emits them so a tx that hit a transient miss on first
-// announce (peer not yet handshaken, brief disconnect) still reaches the
-// network.
+// announce (peer not yet handshaken, brief disconnect, or a temporary reject
+// by the peer) still reaches the network. Re-emits bypass each peer's known
+// inventory, so peers that stayed connected are offered the tx again.
 //
 // Bounded because no TransactionConfirmed hook calls RemoveRebroadcastInventory
 // in this codebase — entries are aged out by attempt count, and new adds are
@@ -3637,7 +3717,7 @@ out:
 			}
 
 		case <-timer.C:
-			processRebroadcastTick(pendingInvs, maxRebroadcastAttempts, s.RelayInventory)
+			processRebroadcastTick(pendingInvs, maxRebroadcastAttempts, s.rebroadcastInventory)
 
 			// Process at a random time up to 30mins (in seconds)
 			// in the future.
@@ -3884,8 +3964,6 @@ func newServer(ctx context.Context, logger ulogger.Logger, tSettings *settings.S
 	if err != nil {
 		return nil, err
 	}
-	// c.Upnp = true // TODO set from settings
-
 	cfg = c
 
 	// This is normally only done from file in bsvd, but we need to do it here, also happens inside loadConfig
@@ -3899,7 +3977,7 @@ func newServer(ctx context.Context, logger ulogger.Logger, tSettings *settings.S
 	}
 
 	// overwrite any config options from settings, if applicable
-	setConfigValuesFromSettings(logger, config.GetAll(), cfg)
+	setConfigValuesFromSettings(logger, config, cfg)
 
 	// If Port was set via settings, update activeNetParams
 	if cfg.Port != "" {

@@ -3,6 +3,8 @@ package util
 import (
 	"bytes"
 	"context"
+	stderrors "errors" //nolint:depguard // Structural unwrapping must bypass teranode message-based error classification.
+	"fmt"
 	"io"
 	"math/rand/v2"
 	"net"
@@ -10,7 +12,9 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/bsv-blockchain/teranode/errors"
@@ -92,6 +96,15 @@ func NewSSRFSafeDialContext(policy SSRFDialPolicy) func(ctx context.Context, net
 			return nil, errors.NewServiceError("SSRF dial check: no usable addresses resolved for host %q", host)
 		}
 
+		// The policy judges this one answer. The guard compares it with earlier answers for
+		// the same hostname, which is what stops a peer's DNS flipping a name from a public
+		// address to a private one between two requests (issue 4843).
+		if net.ParseIP(host) == nil {
+			if reason := ssrfRebind.check(host, validated, time.Now()); reason != "" {
+				return nil, errors.NewInvalidArgumentError("SSRF dial check: %s", reason)
+			}
+		}
+
 		// Dial the validated IPs directly (no re-resolution), trying each to preserve
 		// multi-A-record failover. Dialing by IP loses net.Dialer's dual-stack fast
 		// fallback, so each attempt gets a slice of the remaining budget: without that, a
@@ -158,18 +171,20 @@ func dialAttemptContext(ctx context.Context, remainingCandidates int) (context.C
 // shared client, returning the reason an address is unsafe or "" when it is safe. Services
 // fetching peer-supplied URLs should reuse it so every such path enforces the same rules.
 //
-// It blocks only:
-//   - link-local (169.254.0.0/16, fe80::/10) — the real SSRF target, since the cloud
-//     metadata endpoint 169.254.169.254 lives here;
-//   - loopback (127.0.0.0/8, ::1) — a peer should never make us dial our own localhost
-//     admin/RPC services, and no legitimate peer advertises a loopback fetch source;
+// It always blocks:
+//   - link-local (169.254.0.0/16, fe80::/10), since the cloud metadata endpoint
+//     169.254.169.254 lives here;
+//   - loopback (127.0.0.0/8, ::1), since a peer should never make us dial our own
+//     localhost admin/RPC services, and no legitimate peer advertises a loopback source;
 //   - unspecified (0.0.0.0, ::).
 //
-// RFC1918 ranges (10/8, 172.16/12, 192.168/16) and IPv6 ULA (fc00::/7) are intentionally
-// NOT blocked: teranode peers, k8s pods, and privately-routed miner interconnects all
-// communicate over private networks in real deployments. Blocking them here would reject
-// legitimate peer traffic and contradicts isBlockedIP, which allows the same ranges for
-// the static ValidateURL check.
+// Private-network ranges (RFC1918, IPv6 ULA fc00::/7 and shared address space
+// 100.64.0.0/10) are blocked unless SetSSRFAllowPrivateNetworks(true), which the daemon
+// sets from p2p_allow_private_ips. That matches the static check on announced DataHub
+// URLs, so a hostname resolving to a private address is treated like a private IP literal.
+// Before issue 4843 private ranges were always allowed here, and a peer-controlled hostname
+// could steer a request carrying a chosen body into an internal service such as a Kafka
+// admin API.
 func DefaultSSRFDialPolicy(ip net.IP) string {
 	switch {
 	case ip.IsLoopback():
@@ -179,7 +194,140 @@ func DefaultSSRFDialPolicy(ip net.IP) string {
 	case ip.IsUnspecified():
 		return "unspecified address"
 	default:
+		return privateNetworkDialPolicy(ip)
+	}
+}
+
+// privateNetworkDialPolicy is the part of DefaultSSRFDialPolicy that follows
+// SetSSRFAllowPrivateNetworks.
+func privateNetworkDialPolicy(ip net.IP) string {
+	if !ssrfAllowPrivateNetworks.Load() && ssrfIsPrivateNetwork(ip) {
+		return "private-network address (set p2p_allow_private_ips to allow)"
+	}
+
+	return ""
+}
+
+// ssrfAllowPrivateNetworks holds whether peer-supplied URLs may resolve to private-network
+// addresses. The zero value refuses them, so a process that never configures it fails closed.
+var ssrfAllowPrivateNetworks atomic.Bool
+
+// SetSSRFAllowPrivateNetworks sets whether connections for peer-supplied URLs may go to
+// private-network addresses (RFC1918, fc00::/7, 100.64.0.0/10). The daemon calls it at
+// startup with p2p_allow_private_ips.
+func SetSSRFAllowPrivateNetworks(allowed bool) {
+	ssrfAllowPrivateNetworks.Store(allowed)
+}
+
+// SSRFAllowPrivateNetworks reports the value last set by SetSSRFAllowPrivateNetworks.
+func SSRFAllowPrivateNetworks() bool {
+	return ssrfAllowPrivateNetworks.Load()
+}
+
+// sharedAddressSpace is RFC 6598's 100.64.0.0/10. Carrier NAT and some Kubernetes pod
+// networks (EKS custom networking among them) use it for internal addresses, which
+// net.IP.IsPrivate does not cover.
+var sharedAddressSpace = &net.IPNet{IP: net.IPv4(100, 64, 0, 0).To4(), Mask: net.CIDRMask(10, 32)}
+
+func isPrivateNetworkIP(ip net.IP) bool {
+	return ip.IsPrivate() || sharedAddressSpace.Contains(ip)
+}
+
+// ssrfIsPrivateNetwork classifies an address as private-network. It is a package var so
+// tests can have a loopback address stand in for a private one.
+var ssrfIsPrivateNetwork = isPrivateNetworkIP
+
+const (
+	// ssrfRebindWindow is how long a hostname that resolved to a public address is barred
+	// from resolving to a private-network one. The attack needs the two answers seconds
+	// apart; a legitimate move from public to private hosting is rare and can wait.
+	ssrfRebindWindow = 10 * time.Minute
+
+	// ssrfRebindMaxHosts bounds the guard's memory.
+	ssrfRebindMaxHosts = 10_000
+)
+
+// ssrfRebind is the process-wide rebinding guard consulted by every SSRF-safe dialer.
+var ssrfRebind = newRebindGuard(ssrfRebindWindow, ssrfRebindMaxHosts)
+
+// rebindGuard catches a hostname whose DNS answer moves from public to private-network
+// between connections. Each dial resolves and validates on its own, and when private
+// networks are allowed a peer's DNS could answer with its public server for a GET and an
+// internal service for the POST that follows (issue 4843). Pinning per fetch would not
+// help: subtree validation can reuse a stored subtree and send the POST with no GET first.
+//
+// It deliberately does not pin a hostname to exact addresses, since legitimate peers move
+// between public addresses (failover, CDNs). It also cannot catch a hostname whose first
+// answer is already private; only refusing private networks does that.
+type rebindGuard struct {
+	mu          sync.Mutex
+	window      time.Duration
+	maxHosts    int
+	publicUntil map[string]time.Time
+}
+
+func newRebindGuard(window time.Duration, maxHosts int) *rebindGuard {
+	return &rebindGuard{
+		window:      window,
+		maxHosts:    maxHosts,
+		publicUntil: make(map[string]time.Time),
+	}
+}
+
+// check records host's validated answer and returns why it must be refused, or "".
+func (g *rebindGuard) check(host string, ips []net.IP, now time.Time) string {
+	var public, private bool
+
+	for _, ip := range ips {
+		if ssrfIsPrivateNetwork(ip) {
+			private = true
+		} else {
+			public = true
+		}
+	}
+
+	// A mixed answer lets the dialer's per-address failover reach the private address
+	// once the public one refuses the connection.
+	if public && private {
+		return fmt.Sprintf("host %q resolved to both public and private-network addresses", host)
+	}
+
+	key := strings.ToLower(strings.TrimRight(host, "."))
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if private {
+		if until, ok := g.publicUntil[key]; ok && now.Before(until) {
+			return fmt.Sprintf("host %q resolved to a public address within the last %s and now to private-network address %s", host, g.window, ips[0])
+		}
+
 		return ""
+	}
+
+	if _, ok := g.publicUntil[key]; !ok && len(g.publicUntil) >= g.maxHosts {
+		g.evictLocked(now)
+	}
+
+	g.publicUntil[key] = now.Add(g.window)
+
+	return ""
+}
+
+// evictLocked frees room for one entry: expired entries go first, then an arbitrary one.
+func (g *rebindGuard) evictLocked(now time.Time) {
+	for host, until := range g.publicUntil {
+		if !now.Before(until) {
+			delete(g.publicUntil, host)
+		}
+	}
+
+	for host := range g.publicUntil {
+		if len(g.publicUntil) < g.maxHosts {
+			return
+		}
+
+		delete(g.publicUntil, host)
 	}
 }
 
@@ -207,6 +355,18 @@ func ssrfCheckRedirect(policy SSRFDialPolicy) func(req *http.Request, via []*htt
 			return nil
 		}
 
+		if len(via) > 0 && via[0] != nil {
+			// A POST body was built from peer-supplied data. Go does not replay it on a 307
+			// or 308, but a 301, 302 or 303 turns it into a GET to wherever the peer points.
+			if via[0].Method == http.MethodPost {
+				return errors.NewInvalidArgumentError("SSRF redirect check: refusing to follow a redirect of a POST")
+			}
+
+			if via[0].URL != nil && !sameOriginOrUpgrade(via[0].URL, req.URL) {
+				return errors.NewInvalidArgumentError("SSRF redirect check: redirect leaves the origin of the requested URL")
+			}
+		}
+
 		scheme := strings.ToLower(req.URL.Scheme)
 		if scheme != "http" && scheme != "https" {
 			return errors.NewInvalidArgumentError("SSRF redirect check: invalid scheme %q", scheme)
@@ -226,6 +386,41 @@ func ssrfCheckRedirect(policy SSRFDialPolicy) func(req *http.Request, via []*htt
 
 		return nil
 	}
+}
+
+// sameOriginOrUpgrade reports whether a redirect from one URL to another keeps the same
+// origin (scheme, host and port), allowing only an http to https upgrade on the same host
+// between the default ports. Teranode's asset service never redirects, so a cross-origin hop
+// can only be a peer steering the request somewhere else.
+func sameOriginOrUpgrade(from, to *url.URL) bool {
+	canonicalHost := func(u *url.URL) string {
+		return strings.ToLower(strings.TrimRight(u.Hostname(), "."))
+	}
+
+	effectivePort := func(u *url.URL, scheme string) string {
+		if p := u.Port(); p != "" {
+			return p
+		}
+
+		if scheme == "https" {
+			return "443"
+		}
+
+		return "80"
+	}
+
+	if canonicalHost(from) != canonicalHost(to) {
+		return false
+	}
+
+	fromScheme, toScheme := strings.ToLower(from.Scheme), strings.ToLower(to.Scheme)
+	fromPort, toPort := effectivePort(from, fromScheme), effectivePort(to, toScheme)
+
+	if fromScheme == toScheme {
+		return fromPort == toPort
+	}
+
+	return fromScheme == "http" && toScheme == "https" && fromPort == "80" && toPort == "443"
 }
 
 // NewSSRFSafeHTTPClient returns an HTTP client for fetching peer-supplied URLs. Every
@@ -281,6 +476,45 @@ var (
 	}
 )
 
+// localServiceHTTPClient reaches this node's own services at operator-configured
+// addresses, which are routinely loopback (the default asset_httpAddress is localhost) or a
+// private container address. It has no SSRF dial guard, so it must never be given a
+// peer-supplied URL.
+var localServiceHTTPClient = &http.Client{
+	Transport: func() *http.Transport {
+		t := http.DefaultTransport.(*http.Transport).Clone()
+		t.MaxIdleConns = 100
+		t.MaxIdleConnsPerHost = 100
+		return t
+	}(),
+}
+
+// DoLocalServiceHTTPRequestBodyReader streams a GET from one of this node's own services,
+// such as the legacy service reading blocks from the local asset service. The URL must come
+// from this node's settings, never from a peer: unlike DoHTTPRequestBodyReader it does not
+// refuse loopback or private addresses. The default timeout matches DoHTTPRequestBodyReader.
+func DoLocalServiceHTTPRequestBodyReader(ctx context.Context, url string) (io.ReadCloser, error) {
+	cancelFn := func() {
+		// noop
+	}
+
+	if _, ok := ctx.Deadline(); !ok {
+		ctx, cancelFn = context.WithTimeout(ctx, time.Duration(httpStreamingTimeout)*time.Millisecond)
+	}
+
+	bodyReaderCloser, cancelFn, err := executeHTTPRequestWithClient(ctx, cancelFn, localServiceHTTPClient, url)
+	if err != nil {
+		cancelFn()
+		return nil, err
+	}
+
+	return &readCloserWithCancel{
+		ReadCloser: bodyReaderCloser,
+		cancelFn:   cancelFn,
+		rawURL:     url,
+	}, nil
+}
+
 // HTTPClient returns the shared HTTP client for use with httpmock.ActivateNonDefault() in tests.
 func HTTPClient() *http.Client {
 	return httpClient
@@ -289,6 +523,11 @@ func HTTPClient() *http.Client {
 // DoHTTPRequest performs an HTTP GET or POST request and returns the response body as bytes.
 // Uses GET by default, switches to POST if requestBody is provided.
 // Automatically handles timeouts and validates response status codes.
+//
+// Deprecated: this reads the whole body with io.ReadAll and applies no cap, so a peer-controlled
+// response of unbounded size is read into memory in full (bitcoin-sv/teranode#4742). It has no
+// production callers left. Use DoHTTPRequestBounded for a caller-known size, or
+// DoHTTPRequestBodyReader to stream and bound the parse itself.
 func DoHTTPRequest(ctx context.Context, url string, requestBody ...[]byte) ([]byte, error) {
 	bodyReaderCloser, cancelFn, err := doHTTPRequest(ctx, url, requestBody...)
 	defer cancelFn()
@@ -310,7 +549,7 @@ func DoHTTPRequest(ctx context.Context, url string, requestBody ...[]byte) ([]by
 // can't block past the request deadline), with ONE shared cancel-vs-deadline
 // classification so every caller agrees: a context deadline (peer too slow) → a non-local
 // network timeout (the peer is at fault); a cancel (e.g. shutdown) → a local context error
-// (we are at fault, don't blame the peer). Any other read error → a generic service error.
+// (we are at fault, don't blame the peer). Other read errors are sanitized network errors.
 // maxBytes < 0 means unbounded; otherwise the body is capped and ErrExternal is returned if
 // the peer streams more than the cap.
 func readBodyWithCtx(ctx context.Context, url string, r io.Reader, maxBytes int64) ([]byte, error) {
@@ -339,13 +578,7 @@ func readBodyWithCtx(ctx context.Context, url string, r io.Reader, maxBytes int6
 		return nil, errors.NewNetworkTimeoutError("http request [%s] timed out while reading body", url)
 	case <-done:
 		if readErr != nil {
-			if errors.Is(readErr, context.DeadlineExceeded) {
-				return nil, errors.NewNetworkTimeoutError("http request [%s] timed out while reading body", url)
-			}
-			if errors.Is(readErr, context.Canceled) {
-				return nil, errors.NewContextCanceledError("http request [%s] canceled while reading body", url, context.Canceled)
-			}
-			return nil, errors.NewServiceError("http request [%s] failed to read body", url, readErr)
+			return nil, sanitizeHTTPTransportError(readErr, url)
 		}
 		if maxBytes >= 0 && int64(len(b)) > maxBytes {
 			return nil, errors.NewExternalError("http request [%s] response body exceeds %d bytes", url, maxBytes)
@@ -382,7 +615,19 @@ func DoHTTPRequestBounded(ctx context.Context, url string, maxBytes int64, reque
 // readCloserWithCancel wraps an io.ReadCloser and calls a cancel function when closed.
 type readCloserWithCancel struct {
 	io.ReadCloser
-	cancelFn context.CancelFunc
+	cancelFn       context.CancelFunc
+	rawURL         string
+	sanitizeErrors bool
+}
+
+// Read sanitizes protocol errors that surface only after response headers, such
+// as malformed chunked trailers. EOF remains the reader completion sentinel.
+func (r *readCloserWithCancel) Read(p []byte) (int, error) {
+	n, err := r.ReadCloser.Read(p)
+	if r.sanitizeErrors && err != nil && err != io.EOF {
+		err = sanitizeHTTPTransportError(err, r.rawURL)
+	}
+	return n, err
 }
 
 func (r *readCloserWithCancel) Close() error {
@@ -404,8 +649,10 @@ func DoHTTPRequestBodyReader(ctx context.Context, url string, requestBody ...[]b
 	}
 
 	return &readCloserWithCancel{
-		ReadCloser: bodyReaderCloser,
-		cancelFn:   cancelFn,
+		ReadCloser:     bodyReaderCloser,
+		cancelFn:       cancelFn,
+		rawURL:         url,
+		sanitizeErrors: true,
 	}, nil
 }
 
@@ -532,35 +779,57 @@ func isBlockedIP(ip net.IP) bool {
 	return false
 }
 
-// unwrapHTTPURLError removes nested URL wrappers while retaining the transport
-// failure. URL parser failures need fixed messages instead: their causes can also
-// include peer-controlled URL text.
-func unwrapHTTPURLError(err error) error {
-	var urlErr *url.Error
-	for errors.As(err, &urlErr) {
-		err = urlErr.Err
+// sanitizeHTTPTransportError keeps only structural failure classifications.
+// net/http parser errors can quote peer-controlled header and redirect bytes;
+// retaining any raw cause lets legacy substring classifiers forge a local fault.
+func sanitizeHTTPTransportError(err error, rawURL string) error {
+	displayURL := RedactPeerURL(rawURL)
+	// Do not call the teranode Error.Is method for context classification: it
+	// also accepts message substrings. Genuine wrapped sentinels remain intact.
+	for cause := err; cause != nil; cause = stderrors.Unwrap(cause) {
+		// The body reader may already have sanitized this error. Preserve its
+		// code while constructing a fresh fixed message without wrapped text.
+		if typed, ok := cause.(*errors.Error); ok {
+			switch typed.Code() {
+			case errors.ERR_NETWORK_TIMEOUT:
+				return errors.NewNetworkTimeoutError("http request [%s] timed out", displayURL)
+			case errors.ERR_NETWORK_CONNECTION_REFUSED:
+				return errors.NewNetworkConnectionRefusedError("http request [%s] connection refused", displayURL)
+			}
+		}
+		switch cause {
+		case context.Canceled:
+			return errors.NewContextCanceledError("http request [%s] canceled", displayURL, context.Canceled)
+		case context.DeadlineExceeded:
+			return errors.NewNetworkTimeoutError("http request [%s] timed out", displayURL)
+		}
 	}
-	// net/http exposes malformed redirect targets only as an untyped error with
-	// this fixed prefix. It embeds both the Location header and the parse cause,
-	// so unwrapping alone would feed peer-controlled text into error classifiers.
-	if err != nil && strings.HasPrefix(err.Error(), "failed to parse Location header ") {
-		return errors.NewServiceError("HTTP redirect has an invalid URL")
+	var netErr net.Error
+	if stderrors.As(err, &netErr) && netErr.Timeout() {
+		return errors.NewNetworkTimeoutError("http request [%s] timed out", displayURL)
 	}
-	return err
+	if stderrors.Is(err, syscall.ECONNREFUSED) {
+		return errors.NewNetworkConnectionRefusedError("http request [%s] connection refused", displayURL)
+	}
+	return errors.NewNetworkError("http request [%s] transport failure", displayURL)
 }
 
 // newSignedRequest builds a validated, optionally-signed *http.Request for rawURL.
 // GET by default; POST with an octet-stream body when requestBody is provided.
 //
-// This is the single request-builder shared by both the one-shot (executeHTTPRequest)
-// and retrying (doRequestReaderWithRetryAfter) paths, so request signing, body
-// Content-Type, and URL validation can never diverge between them — a divergence
-// previously sent retrying catchup fetches unsigned and lost the peer rate-limit
-// exemption.
+// Both peer entry points validate URLs and share buildSignedRequest with the
+// local-service path, so retries retain request signing and the binary content type.
 func newSignedRequest(ctx context.Context, rawURL string, requestBody ...[]byte) (*http.Request, error) {
 	if err := ValidateURL(rawURL); err != nil {
 		return nil, err
 	}
+
+	return buildSignedRequest(ctx, rawURL, requestBody...)
+}
+
+// buildSignedRequest also supports local services, whose operator-configured URLs
+// are not subject to the peer URL policy.
+func buildSignedRequest(ctx context.Context, rawURL string, requestBody ...[]byte) (*http.Request, error) {
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
@@ -590,17 +859,30 @@ func newSignedRequest(ctx context.Context, rawURL string, requestBody ...[]byte)
 	return req, nil
 }
 
-// executeHTTPRequest performs the actual HTTP request with the given context.
+// executeHTTPRequest performs a request through the SSRF-guarded peer client.
 func executeHTTPRequest(ctx context.Context, cancelFn context.CancelFunc, rawURL string, requestBody ...[]byte) (io.ReadCloser, context.CancelFunc, error) {
-	req, err := newSignedRequest(ctx, rawURL, requestBody...)
+	if err := ValidateURL(rawURL); err != nil {
+		return nil, cancelFn, err
+	}
+	return executeHTTPRequestWithClient(ctx, cancelFn, httpClient, rawURL, requestBody...)
+}
+
+// executeHTTPRequestWithClient also serves operator-configured local URLs.
+func executeHTTPRequestWithClient(ctx context.Context, cancelFn context.CancelFunc, client *http.Client, rawURL string, requestBody ...[]byte) (io.ReadCloser, context.CancelFunc, error) {
+	req, err := buildSignedRequest(ctx, rawURL, requestBody...)
 	if err != nil {
 		return nil, cancelFn, err
 	}
 
 	var resp *http.Response
-	resp, err = httpClient.Do(req)
+	resp, err = client.Do(req)
 	if err != nil {
-		return nil, cancelFn, errors.NewServiceError("failed to do http request [%s]", RedactPeerURL(rawURL), unwrapHTTPURLError(err))
+		if client == localServiceHTTPClient {
+			// Operator-configured services belong to this node. Preserve their
+			// local classification instead of attributing failures to a peer.
+			return nil, cancelFn, errors.NewServiceError("failed to do local http request", err)
+		}
+		return nil, cancelFn, sanitizeHTTPTransportError(err, rawURL)
 	}
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
@@ -868,7 +1150,6 @@ func jitterDelay(d time.Duration) time.Duration {
 func retryHTTP[T any](ctx context.Context, cfg retryConfig, attempt func(context.Context) (T, time.Duration, error)) (T, error) {
 	var zero T
 	delay := cfg.initialDelay
-	var lastErr error
 	var sleptTotal time.Duration
 	attemptsMade := 0
 
@@ -878,10 +1159,12 @@ func retryHTTP[T any](ctx context.Context, cfg retryConfig, attempt func(context
 		if err == nil {
 			return res, nil
 		}
+		if localErr, ok := err.(*localHTTPAttemptError); ok {
+			return zero, localErr.error
+		}
 		if !errors.Is(err, errors.ErrServiceUnavailable) {
 			return zero, err
 		}
-		lastErr = err
 
 		if n == cfg.maxAttempts {
 			break
@@ -930,12 +1213,12 @@ func retryHTTP[T any](ctx context.Context, cfg retryConfig, attempt func(context
 			// returning a bare local context error — otherwise a peer that 429-spams us
 			// until our fetch budget runs out evades any reputation penalty. A cancel
 			// (e.g. shutdown), or a deadline with no prior peer fault, stays local.
-			if lastErr != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			if ctx.Err() == context.DeadlineExceeded {
 				// Peer too slow / rate-limiting ran out our budget. Use a network-timeout
 				// (classified as a peer fault by error CODE, not by a fragile message
-				// substring) so the reputation gates blame the peer. lastErr is carried as
-				// the wrapped error, so no trailing format verb (would render %!v(MISSING)).
-				return zero, errors.NewNetworkTimeoutError("http request aborted after %d attempt(s) (peer too slow or rate-limiting)", n, lastErr)
+				// substring) so the reputation gates blame the peer. Do not wrap the
+				// retryable service cause, which would also classify as a local fault.
+				return zero, errors.NewNetworkTimeoutError("http request aborted after %d attempt(s) (peer too slow or rate-limiting)", n)
 			}
 			return zero, ctx.Err()
 		case <-time.After(sleepFor):
@@ -947,8 +1230,14 @@ func retryHTTP[T any](ctx context.Context, cfg retryConfig, attempt func(context
 		}
 	}
 
-	return zero, errors.NewServiceUnavailableError("http request still failing after %d attempt(s)", attemptsMade, lastErr)
+	// Do not retain the ServiceUnavailable cause: local-error classifiers walk
+	// the whole chain, and would otherwise absolve the exhausted peer.
+	return zero, errors.NewNetworkError("http request still failing after %d attempt(s)", attemptsMade)
 }
+
+// localHTTPAttemptError keeps a local pacing failure out of the peer retry ladder.
+// retryHTTP returns the original error to preserve the caller's classification.
+type localHTTPAttemptError struct{ error }
 
 // DoHTTPRequestBodyReaderWithRetry behaves like DoHTTPRequestBodyReader but retries on
 // HTTP 503/429 with exponential backoff. Used for endpoints where the server signals
@@ -983,7 +1272,7 @@ func doHTTPRequestBodyReaderWithRetry(ctx context.Context, url string, cfg retry
 	return retryHTTP(ctx, cfg, func(c context.Context) (io.ReadCloser, time.Duration, error) {
 		if beforeAttempt != nil {
 			if err := beforeAttempt(c); err != nil {
-				return nil, 0, err
+				return nil, 0, &localHTTPAttemptError{err}
 			}
 		}
 		return doHTTPRequestForStreamingWithRetryAfter(c, url, requestBody...)
@@ -1002,7 +1291,7 @@ func doHTTPRequestBoundedWithRetry(ctx context.Context, url string, maxBytes int
 	return retryHTTP(ctx, cfg, func(c context.Context) ([]byte, time.Duration, error) {
 		if beforeAttempt != nil {
 			if err := beforeAttempt(c); err != nil {
-				return nil, 0, err
+				return nil, 0, &localHTTPAttemptError{err}
 			}
 		}
 		return readBodyWithRetryAfter(c, url, maxBytes, requestBody...)
@@ -1015,9 +1304,8 @@ func doHTTPRequestBoundedWithRetry(ctx context.Context, url string, maxBytes int
 // ErrExternal if the peer streams more than the cap (mirrors DoHTTPRequestBounded).
 //
 // The body read is guarded by ctx.Done() (mirroring DoHTTPRequest/DoHTTPRequestBounded):
-// a context timeout/cancel during the read returns NewNetworkTimeoutError — a non-local
-// error — so a peer stalling mid-stream is correctly attributed to the peer rather than
-// classified as a local error and silently absolved.
+// a deadline during the read returns NewNetworkTimeoutError so a peer stalling
+// mid-stream remains a peer fault; explicit cancellation stays local.
 func readBodyWithRetryAfter(ctx context.Context, url string, maxBytes int64, requestBody ...[]byte) ([]byte, time.Duration, error) {
 	// Use the standard request timeout (not the streaming timeout) to preserve the
 	// behavior of the non-retry DoHTTPRequest/DoHTTPRequestBounded these helpers replace.
@@ -1066,20 +1354,7 @@ func doRequestReaderWithRetryAfter(ctx context.Context, timeout time.Duration, r
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		cancelFn()
-		// Classify context-derived failures the same way as the body-read path: a
-		// deadline before the response (connect/TLS/header stall) means the peer was
-		// too slow — a peer fault, surfaced as a non-local network timeout so the
-		// reputation gate blames the peer and catchup keeps failing over. A cancel
-		// (e.g. node shutdown) is local. Other Do errors stay generic ServiceErrors.
-		if errors.Is(err, context.DeadlineExceeded) {
-			return nil, 0, errors.NewNetworkTimeoutError("http request [%s] timed out before response", displayURL)
-		}
-		if errors.Is(err, context.Canceled) {
-			return nil, 0, errors.NewContextCanceledError("http request [%s] canceled before response", displayURL, context.Canceled)
-		}
-		// *url.Error renders as `Get "<full rawURL>": <cause>`, embedding the peer path/query.
-		// Unwrap to the cause and attach only the redacted display URL ourselves.
-		return nil, 0, errors.NewServiceError("http request [%s] failed", displayURL, unwrapHTTPURLError(err))
+		return nil, 0, sanitizeHTTPTransportError(err, rawURL)
 	}
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
@@ -1103,5 +1378,5 @@ func doRequestReaderWithRetryAfter(ctx context.Context, timeout time.Duration, r
 		return nil, 0, errors.NewServiceError("http request [%s] returned HTML - assume bad URL", displayURL)
 	}
 
-	return &readCloserWithCancel{ReadCloser: resp.Body, cancelFn: cancelFn}, 0, nil
+	return &readCloserWithCancel{ReadCloser: resp.Body, cancelFn: cancelFn, rawURL: rawURL, sanitizeErrors: true}, 0, nil
 }

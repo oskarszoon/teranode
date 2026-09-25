@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
@@ -155,22 +156,25 @@ func TestCatchupPeerSnapshot_IsLazyAndLoadsOnce(t *testing.T) {
 }
 
 func TestCatchupPeerSnapshot_RetriesErrorsAndReportsOnce(t *testing.T) {
-	var loads atomic.Int32
-	var reports atomic.Int32
-	snapshot := &catchupPeerSnapshot{
-		load: func() ([]*p2p.PeerInfo, bool, error) {
-			loads.Add(1)
-			return nil, false, errors.NewServiceError("registry unavailable")
-		},
-		onError: func(error) { reports.Add(1) },
-	}
+	synctest.Test(t, func(t *testing.T) {
+		var loads atomic.Int32
+		var reports atomic.Int32
+		snapshot := &catchupPeerSnapshot{
+			load: func() ([]*p2p.PeerInfo, bool, error) {
+				loads.Add(1)
+				return nil, false, errors.NewServiceError("registry unavailable")
+			},
+			onError: func(error) { reports.Add(1) },
+		}
 
-	for range 3 {
-		_, _, err := snapshot.get()
-		require.Error(t, err)
-	}
-	require.Equal(t, int32(3), loads.Load())
-	require.Equal(t, int32(1), reports.Load())
+		for range 3 {
+			_, _, err := snapshot.get()
+			require.Error(t, err)
+			time.Sleep(time.Second)
+		}
+		require.Equal(t, int32(3), loads.Load())
+		require.Equal(t, int32(1), reports.Load())
+	})
 }
 
 func TestSelectAlternativePeers_CapsAndSkipsTargets(t *testing.T) {
@@ -264,7 +268,7 @@ func TestFetchSubtreeDataForBlock_PeerLookupMode(t *testing.T) {
 		suite.Server.settings.BlockValidation.CatchupParallelFetchEnabled = false
 		block := seedLocalSubtreeForPeerLookupTest(t, suite.Server, suite.Ctx)
 
-		_, err := suite.Server.fetchSubtreeDataForBlock(suite.Ctx, block, "primary", "http://primary")
+		_, _, err := suite.Server.fetchSubtreeDataForBlock(suite.Ctx, block, "primary", "http://primary")
 		require.NoError(t, err)
 		require.Zero(t, client.calls.Load())
 	})
@@ -277,7 +281,7 @@ func TestFetchSubtreeDataForBlock_PeerLookupMode(t *testing.T) {
 		suite.Server.settings.BlockValidation.CatchupParallelFetchEnabled = true
 		block := seedLocalSubtreeForPeerLookupTest(t, suite.Server, suite.Ctx)
 
-		_, err := suite.Server.fetchSubtreeDataForBlock(suite.Ctx, block, "primary", "http://primary")
+		_, _, err := suite.Server.fetchSubtreeDataForBlock(suite.Ctx, block, "primary", "http://primary")
 		require.NoError(t, err)
 		require.Equal(t, int32(1), client.calls.Load())
 	})
@@ -295,7 +299,7 @@ func TestFetchSubtreeDataForBlock_LocalFailureHasNoPeerAttribution(t *testing.T)
 	block := testhelpers.CreateTestBlockChain(t, 1)[0]
 	block.Subtrees = []*chainhash.Hash{&hash}
 
-	_, err := suite.Server.fetchSubtreeDataForBlock(suite.Ctx, block, "peer", "http://peer")
+	_, _, err := suite.Server.fetchSubtreeDataForBlock(suite.Ctx, block, "peer", "http://peer")
 	require.Error(t, err)
 	require.True(t, errors.IsLocalError(err))
 	var carrier interface{ FailedPeerIDs() []string }
@@ -326,6 +330,7 @@ func TestFetchAndStoreSubtree_CorruptLocalCacheDoesNotBlamePeer(t *testing.T) {
 		&subtreeHash,
 		"peer",
 		"http://peer",
+		nil,
 		nil,
 	)
 	require.Error(t, err)
@@ -641,7 +646,7 @@ func TestFetchAndStoreSubtree_PrunedPeerServesFailover(t *testing.T) {
 		httpmock.NewBytesResponder(http.StatusOK, subtreepkg.CoinbasePlaceholderHashValue[:]))
 
 	servingPeerID, err := suite.Server.fetchAndStoreSubtreeAndSubtreeData(
-		suite.Ctx, suite.Ctx, block, subtreeHash, primary.ID.String(), primary.DataHubURL, snapshot)
+		suite.Ctx, suite.Ctx, block, subtreeHash, primary.ID.String(), primary.DataHubURL, snapshot, nil)
 	require.NoError(t, err)
 	require.Equal(t, altPruned.ID.String(), servingPeerID, "pruned peer recovered the subtree archival peers could not serve")
 }
@@ -750,7 +755,7 @@ func TestFetchAndStoreSubtreeData_StorageExistsErrorHalts(t *testing.T) {
 
 	block := testhelpers.CreateTestBlockChain(t, 1)[0]
 	sh := &chainhash.Hash{0x02}
-	err := suite.Server.fetchAndStoreSubtreeData(suite.Ctx, suite.Ctx, block, sh, nil, "peer", "http://peer", false)
+	err := suite.Server.fetchAndStoreSubtreeData(suite.Ctx, suite.Ctx, block, sh, nil, "peer", "http://peer", false, nil)
 	require.Error(t, err)
 	require.True(t, errors.Is(err, errors.ErrStorageError), "a storage existence-read failure must classify as ErrStorageError; got %T: %v", err, err)
 	require.True(t, errors.IsLocalError(err), "and therefore local (no peer blame)")
@@ -788,3 +793,5 @@ func TestDistributeSubtreesAcrossPeers_AllPrunedKeepsPrimary(t *testing.T) {
 		require.Equal(t, "http://pruned-primary", p.BaseURL, "all-pruned segment must fall back to the primary, not panic")
 	}
 }
+
+func (m *catchupPeersP2PMock) AddBanScore(context.Context, string, string) error { return nil }

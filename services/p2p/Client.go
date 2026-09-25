@@ -878,6 +878,9 @@ func convertFromAPIPeerInfo(apiPeer interface{}) (*PeerInfo, error) {
 			CatchupAttempts:        p.CatchupAttempts,
 			CatchupSuccesses:       p.CatchupSuccesses,
 			CatchupFailures:        p.CatchupFailures,
+			BlocksReceived:         p.BlocksReceived,
+			SubtreesReceived:       p.SubtreesReceived,
+			TransactionsReceived:   p.TransactionsReceived,
 		}, nil
 
 	default:

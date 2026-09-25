@@ -104,6 +104,7 @@ func TestCatchupHeaders_FailureAttribution(t *testing.T) {
 			require.Equal(t, tc.wantFailures, recorder.failures, "breaker and reputation must agree")
 			if tc.wantFailures == 0 {
 				require.True(t, errors.IsLocalError(err), "local cancellation must survive the returned error: %v", err)
+				require.False(t, catchupFailureAlreadyReported(err), "unreported local errors must not carry the peer-report marker")
 			} else {
 				require.False(t, errors.IsLocalError(err))
 				require.True(t, catchupFailureAlreadyReported(err))

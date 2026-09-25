@@ -435,9 +435,15 @@ func catchupAltPeers(ctx context.Context, logger ulogger.Logger, p2pClient P2PCl
 	return alts, primaryPruned, nil
 }
 
+// Failed discovery is shared briefly across subtree workers, then retried so a
+// transient local P2P outage cannot disable failover for the rest of the block.
+const catchupPeerSnapshotFailureTTL = time.Second
+
 type catchupPeerSnapshot struct {
 	mu            sync.Mutex
 	loaded        bool
+	lastErr       error
+	retryAfter    time.Time
 	errorOnce     sync.Once
 	load          func() ([]*p2p.PeerInfo, bool, error)
 	onError       func(error)
@@ -471,11 +477,16 @@ func (s *catchupPeerSnapshot) get() ([]*p2p.PeerInfo, bool, error) {
 	if s.loaded {
 		return s.peers, s.primaryPruned, nil
 	}
+	if s.lastErr != nil && time.Now().Before(s.retryAfter) {
+		return nil, false, s.lastErr
+	}
 
 	peers, primaryPruned, err := s.load()
 	if err != nil {
-		// A local RPC outage must not disable failover for the whole block.
-		// Serialize discovery and report the outage once, but let a later caller retry.
+		// Start the window after the RPC completes: a slow failed lookup must
+		// not leave every queued worker immediately eligible to repeat it.
+		s.lastErr = err
+		s.retryAfter = time.Now().Add(catchupPeerSnapshotFailureTTL)
 		s.errorOnce.Do(func() {
 			if s.onError != nil {
 				s.onError(err)
@@ -483,6 +494,7 @@ func (s *catchupPeerSnapshot) get() ([]*p2p.PeerInfo, bool, error) {
 		})
 		return nil, false, err
 	}
+	s.lastErr = nil
 	s.peers, s.primaryPruned, s.loaded = peers, primaryPruned, true
 	return s.peers, s.primaryPruned, nil
 }
