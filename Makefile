@@ -512,15 +512,18 @@ lint: lint-tracing-info
 # per-subtree or per-request paths belong on tracing.WithDebugLogMessage instead.
 # This gate stops that count creeping back up unnoticed; if you add a site
 # deliberately, raise TRACING_INFO_MAX in the same commit and say why.
-TRACING_INFO_MAX := 62
+# Only production code counts: test files are excluded so that deleting a test
+# cannot silently free a slot for a new production INFO site.
+TRACING_INFO_MAX := 61
 
 .PHONY: lint-tracing-info
 lint-tracing-info:
-	@count=$$(git grep -c "tracing\.WithLogMessage(" -- '*.go' | awk -F: '{s+=$$NF} END {print s+0}'); \
+	@count=$$(git grep -c "tracing\.WithLogMessage(" -- '*.go' ':!*_test.go' ':!test/**' | awk -F: '{s+=$$NF} END {print s+0}'); \
 	if [ "$$count" -lt 1 ]; then \
 		echo "lint-tracing-info: counted $$count sites, which cannot be right."; \
-		echo "The count command failed (not a git checkout, or git grep unavailable)."; \
-		echo "Failing rather than passing silently."; \
+		echo "Either the count command failed (not a git checkout, or git grep"; \
+		echo "unavailable) or tracing.WithLogMessage was renamed and this gate needs"; \
+		echo "updating. Failing rather than passing silently."; \
 		exit 1; \
 	fi; \
 	if [ "$$count" -gt "$(TRACING_INFO_MAX)" ]; then \
