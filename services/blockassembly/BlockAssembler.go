@@ -3285,7 +3285,7 @@ func (b *BlockAssembler) loadUnminedTransactions(ctx context.Context, validateIn
 
 					if !b.settings.BlockAssembly.StoreTxInpointsForSubtreeMeta {
 						// clear the TxInpoints to save memory if we are not using subtree meta
-						unminedTransaction.TxInpoints = &subtree.TxInpoints{}
+						clearUnminedTxInpoints(unminedTransaction)
 					}
 
 					localResult.unminedTxs = append(localResult.unminedTxs, unminedTransaction)
@@ -3498,6 +3498,18 @@ func (b *BlockAssembler) loadUnminedTransactions(ctx context.Context, validateIn
 	}
 
 	return nil
+}
+
+// clearUnminedTxInpoints empties a reloaded transaction's inpoints in place.
+// Every store iterator allocates inpoints per transaction, so resetting the
+// existing value is safe and avoids retaining a second object per transaction.
+func clearUnminedTxInpoints(tx *utxo.UnminedTransaction) {
+	if tx.TxInpoints == nil {
+		tx.TxInpoints = &subtree.TxInpoints{}
+		return
+	}
+
+	*tx.TxInpoints = subtree.TxInpoints{}
 }
 
 // sortEntry is a lightweight in-memory structure for sorting.
