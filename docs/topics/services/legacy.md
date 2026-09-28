@@ -363,12 +363,15 @@ keeps a bounded retry queue.
   `peer_server.AnnounceNewTransactions` for the rationale.)
 - Retries follow blocks, not a timer. SV Node clears its recent-rejects
   filter when its tip changes, so a retry before the next block is likely
-  rejected again. Each valid block on the `blocks_final` Kafka topic
-  schedules one retry `rebroadcastTipDelay` (30 seconds) later; blocks
-  arriving during that delay share the retry.
+  rejected again. A retry goes out `rebroadcastTipDelay` (30 seconds)
+  after the latest valid block on the `blocks_final` Kafka topic: a block
+  arriving during the delay restarts it, and one arriving while the
+  pre-retry UTXO lookup runs schedules another retry once it is done.
 - Before each retry, the queue is checked against the UTXO store. Txs that
   are mined, marked conflicting, or no longer stored are removed, and the
-  parent tx hashes of the rest are read.
+  parent tx hashes of the rest are read in a second lookup, so a failed
+  parents read never hides that a tx is mined. The lookup runs off the
+  queue's handler goroutine, so adds keep being taken while it runs.
 - The remaining entries are re-offered to every connected peer with parents
   before their children. Queue order alone is not enough: txs are read from
   the txmeta Kafka topic across partitions, so a child can be queued before
@@ -379,9 +382,12 @@ keeps a bounded retry queue.
   first announce is offered the tx again.
 - Each entry has a budget of `maxRebroadcastTips` (6) retries, about an
   hour on mainnet. After that it is aged out.
-- The queue is capped at `maxRebroadcastInventory` (4096) entries. New
-  adds beyond the cap are dropped: older entries keep their retry budget
-  rather than being evicted by fresher adds that haven't yet failed.
+- The queue is capped at `maxRebroadcastInventory` (4096) entries. Every
+  announced tx waits in the queue until the next block's prune, so above
+  about 7 tx/s fresh txs alone fill it between blocks. At the cap, a new
+  add evicts the oldest entry that has not been retried yet; entries that
+  survived a block unmined, the likely stuck ones, keep their place. A new
+  add is only dropped when every entry has already been retried.
 - The channel between callers and the handler is bounded at
   `modifyRebroadcastInvBuffer` (1024). Non-blocking sends keep the relay
   hot path uncontended; if the handler is backlogged past the buffer,
@@ -393,9 +399,9 @@ The queue is exported as Prometheus metrics:
 |---|---|
 | `teranode_legacy_rebroadcast_pending` | Txs currently queued |
 | `teranode_legacy_rebroadcast_add_dropped_total` | Adds dropped because the handler's channel was full |
-| `teranode_legacy_rebroadcast_cap_hits_total` | Adds dropped because the queue was at its cap |
+| `teranode_legacy_rebroadcast_cap_hits_total` | Adds dropped because the queue was full of already-retried entries |
 | `teranode_legacy_rebroadcast_retries_total` | Tx invs re-offered to peers |
-| `teranode_legacy_rebroadcast_removed_total{reason}` | Entries removed, by `mined`, `conflicting`, `not_found` or `aged_out` |
+| `teranode_legacy_rebroadcast_removed_total{reason}` | Entries removed, by `mined`, `conflicting`, `not_found`, `aged_out` or `evicted` (a never-retried entry displaced at the cap) |
 
 Dropped adds still got their immediate INV dispatch; only the retry safety
 net is lost for them. Sustained drops mean the queue cannot keep up with the

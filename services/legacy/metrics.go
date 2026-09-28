@@ -66,7 +66,7 @@ var (
 		Namespace: "teranode",
 		Subsystem: "legacy",
 		Name:      "rebroadcast_cap_hits_total",
-		Help:      "Txs not added to the legacy rebroadcast queue because it was full",
+		Help:      "Txs not added to the legacy rebroadcast queue because it was full of already-retried entries",
 	})
 	prometheusLegacyRebroadcastRetries = prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: "teranode",

@@ -470,7 +470,8 @@ type server struct {
 	droppedRebroadcastAdds atomic.Uint64
 
 	// droppedRebroadcastCapHits counts rebroadcastHandler add attempts that
-	// failed because the queue was at maxRebroadcastInventory. A non-zero
+	// failed because the queue was at maxRebroadcastInventory with every
+	// entry already retried, so no fresh entry could be evicted. A non-zero
 	// value indicates the retry queue is saturated and new adds are losing
 	// their retry safety net (their immediate RelayInventory still ran).
 	droppedRebroadcastCapHits atomic.Uint64

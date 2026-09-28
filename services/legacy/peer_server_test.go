@@ -409,7 +409,7 @@ func TestRebroadcastTickReachesPeerThatAlreadySawInv(t *testing.T) {
 	expectNoInv("plain relay re-sent a known inv")
 
 	queue := newRebroadcastQueue(maxRebroadcastInventory)
-	require.True(t, queue.add(*iv, data))
+	mustAdd(t, queue, *iv, data)
 
 	for retry := 1; retry <= 2; retry++ {
 		relayed, _ := queue.retry(maxRebroadcastTips, s.relayRebroadcastBatch)

@@ -3,6 +3,7 @@ package legacy
 import (
 	"context"
 	"net/url"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -11,7 +12,10 @@ import (
 	"github.com/bsv-blockchain/go-bt/v2/bscript"
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	"github.com/bsv-blockchain/go-wire"
+	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/stores/utxo"
+	"github.com/bsv-blockchain/teranode/stores/utxo/fields"
+	"github.com/bsv-blockchain/teranode/stores/utxo/meta"
 	utxosql "github.com/bsv-blockchain/teranode/stores/utxo/sql"
 	"github.com/bsv-blockchain/teranode/ulogger"
 	"github.com/bsv-blockchain/teranode/util/test"
@@ -21,6 +25,15 @@ import (
 
 func testTxInv(b byte) wire.InvVect {
 	return wire.InvVect{Type: wire.InvTypeTx, Hash: chainhash.Hash{b}}
+}
+
+// mustAdd adds iv to q and fails unless it was added without evicting.
+func mustAdd(t *testing.T, q *rebroadcastQueue, iv wire.InvVect, data interface{}) {
+	t.Helper()
+
+	added, evicted := q.add(iv, data)
+	require.True(t, added, "add of %v must be accepted", iv.Hash)
+	require.False(t, evicted, "add of %v must not evict", iv.Hash)
 }
 
 // retryBatch runs one retry and returns the batch handed to relay.
@@ -36,13 +49,13 @@ func retryBatch(q *rebroadcastQueue, maxTips int) (batch []relayMsg, agedOut int
 func TestRebroadcastQueue_ReaddKeepsPositionAndBudget(t *testing.T) {
 	q := newRebroadcastQueue(10)
 
-	require.True(t, q.add(testTxInv(1), "first"))
-	require.True(t, q.add(testTxInv(2), "other"))
+	mustAdd(t, q, testTxInv(1), "first")
+	mustAdd(t, q, testTxInv(2), "other")
 
 	_, _ = retryBatch(q, 10)
 	_, _ = retryBatch(q, 10)
 
-	require.True(t, q.add(testTxInv(1), "second"), "re-add of an existing iv must be accepted")
+	mustAdd(t, q, testTxInv(1), "second")
 	require.Equal(t, 2, q.len())
 
 	entries := q.entries()
@@ -51,26 +64,78 @@ func TestRebroadcastQueue_ReaddKeepsPositionAndBudget(t *testing.T) {
 	require.Equal(t, "second", entries[0].data, "re-add must refresh the data payload")
 }
 
-// TestRebroadcastQueue_DropsAtCap covers the bounded-memory contract: once the
-// queue holds `capacity` entries, new adds are rejected, while updates of
-// existing entries still succeed.
-func TestRebroadcastQueue_DropsAtCap(t *testing.T) {
+// TestRebroadcastQueue_EvictsFreshEntriesAtCap covers the cap policy from
+// review: fresh txs alone fill the queue between blocks at modest tx rates,
+// so at the cap a new add evicts the oldest entry not retried yet. Entries
+// that have been retried, the likely stuck ones, keep their place, and a new
+// add is only dropped when every entry has been retried.
+func TestRebroadcastQueue_EvictsFreshEntriesAtCap(t *testing.T) {
 	const capacity = 4
 
 	q := newRebroadcastQueue(capacity)
 
-	for i := 0; i < capacity; i++ {
-		require.True(t, q.add(testTxInv(byte(i+1)), i), "add %d below cap must be accepted", i)
-	}
+	// Two entries survive a retry, two fresh ones follow.
+	mustAdd(t, q, testTxInv(1), nil)
+	mustAdd(t, q, testTxInv(2), nil)
+	_, _ = retryBatch(q, 10)
+	mustAdd(t, q, testTxInv(3), nil)
+	mustAdd(t, q, testTxInv(4), nil)
 
-	require.False(t, q.add(testTxInv(0xff), "overflow"), "add beyond cap must be rejected")
-	require.Equal(t, capacity, q.len(), "rejected add must not mutate the queue")
+	added, evicted := q.add(testTxInv(5), nil)
+	require.True(t, added)
+	require.True(t, evicted, "a full queue with fresh entries must evict one")
+	require.Equal(t, []wire.InvVect{testTxInv(1), testTxInv(2), testTxInv(4), testTxInv(5)}, q.ivs(),
+		"the oldest fresh entry must go, retried entries must stay")
 
-	require.True(t, q.add(testTxInv(1), "updated"), "update of existing entry must succeed at cap")
+	added, evicted = q.add(testTxInv(6), nil)
+	require.True(t, added)
+	require.True(t, evicted)
+	require.Equal(t, []wire.InvVect{testTxInv(1), testTxInv(2), testTxInv(5), testTxInv(6)}, q.ivs())
+
+	// An update of an existing entry never evicts.
+	added, evicted = q.add(testTxInv(1), "updated")
+	require.True(t, added)
+	require.False(t, evicted)
 	require.Equal(t, "updated", q.entries()[0].data)
 
+	// Once every entry has been retried, a new add is dropped.
+	_, _ = retryBatch(q, 10)
+
+	added, evicted = q.add(testTxInv(7), nil)
+	require.False(t, added, "a full queue of retried entries must drop the new add")
+	require.False(t, evicted)
+	require.Equal(t, capacity, q.len())
+
 	q.remove(testTxInv(2))
-	require.True(t, q.add(testTxInv(0xff), "fits"), "add must succeed once an entry is removed")
+	mustAdd(t, q, testTxInv(7), nil)
+}
+
+// TestRebroadcastQueue_FreshTailSurvivesRemovals checks the fresh-tail
+// pointer when the first fresh entry is removed or pruned.
+func TestRebroadcastQueue_FreshTailSurvivesRemovals(t *testing.T) {
+	q := newRebroadcastQueue(3)
+
+	mustAdd(t, q, testTxInv(1), nil)
+	_, _ = retryBatch(q, 10)
+	mustAdd(t, q, testTxInv(2), nil)
+	mustAdd(t, q, testTxInv(3), nil)
+
+	// Removing the first fresh entry moves the tail start to the next one.
+	q.remove(testTxInv(2))
+	mustAdd(t, q, testTxInv(4), nil)
+
+	added, evicted := q.add(testTxInv(5), nil)
+	require.True(t, added)
+	require.True(t, evicted)
+	require.Equal(t, []wire.InvVect{testTxInv(1), testTxInv(4), testTxInv(5)}, q.ivs())
+
+	// Removing every fresh entry leaves nothing to evict.
+	q.remove(testTxInv(4))
+	q.remove(testTxInv(5))
+	require.Nil(t, q.firstFresh)
+
+	mustAdd(t, q, testTxInv(6), nil)
+	require.Equal(t, testTxInv(6), q.firstFresh.Value.(*rebroadcastEntry).iv)
 }
 
 // TestRebroadcastQueue_RetryKeepsInsertionOrder checks that entries with no
@@ -85,7 +150,7 @@ func TestRebroadcastQueue_RetryKeepsInsertionOrder(t *testing.T) {
 	want := make([]wire.InvVect, 0, n)
 	for i := 0; i < n; i++ {
 		iv := wire.InvVect{Type: wire.InvTypeTx, Hash: chainhash.Hash{byte(n - i), byte(i * 7)}}
-		require.True(t, q.add(iv, i))
+		mustAdd(t, q, iv, i)
 
 		want = append(want, iv)
 	}
@@ -115,7 +180,7 @@ func TestRebroadcastQueue_RetrySortsParentsFirst(t *testing.T) {
 
 	// Queued in the worst order a partitioned read could give.
 	for _, iv := range []wire.InvVect{grandchild, unrelated, child, root} {
-		require.True(t, q.add(iv, nil))
+		mustAdd(t, q, iv, nil)
 	}
 
 	parents := map[wire.InvVect][]chainhash.Hash{
@@ -142,7 +207,7 @@ func TestRebroadcastQueue_AgesOutAfterMaxTips(t *testing.T) {
 	const maxTips = 3
 
 	q := newRebroadcastQueue(10)
-	require.True(t, q.add(testTxInv(1), "data"))
+	mustAdd(t, q, testTxInv(1), "data")
 
 	for i := 1; i < maxTips; i++ {
 		batch, agedOut := retryBatch(q, maxTips)
@@ -204,7 +269,7 @@ func TestPruneRebroadcastQueue(t *testing.T) {
 
 	q := newRebroadcastQueue(10)
 	for _, iv := range []wire.InvVect{unminedA, mined, conflicting, notFound, unminedB, withParent} {
-		require.True(t, q.add(iv, nil))
+		mustAdd(t, q, iv, nil)
 	}
 
 	lookup, err := lookupRebroadcasts(ctx, store, q.ivs())
@@ -213,7 +278,7 @@ func TestPruneRebroadcastQueue(t *testing.T) {
 
 	// An entry re-added while the lookup ran moves to the back and still gets its result.
 	q.remove(unminedB)
-	require.True(t, q.add(unminedB, nil))
+	mustAdd(t, q, unminedB, nil)
 
 	result := q.applyLookup(lookup)
 	require.Equal(t, rebroadcastPruneResult{mined: 1, conflicting: 1, notFound: 1}, result)
@@ -376,5 +441,175 @@ func TestRebroadcastHandler_TakesAddsDuringSlowLookup(t *testing.T) {
 		case <-time.After(2 * time.Second):
 			t.Fatalf("retry relayed only %d of %d entries", i, adds+1)
 		}
+	}
+}
+
+// TestLookupRebroadcasts_ParentsReadFailureKeepsMinedCheck covers review:
+// reading TxInpoints can need a blob read for a large external tx, and a
+// failure there used to fail the whole item and hide that the tx was mined.
+func TestLookupRebroadcasts_ParentsReadFailureKeepsMinedCheck(t *testing.T) {
+	mined, unmined := testTxInv(1), testTxInv(2)
+
+	store := &utxo.MockUtxostore{}
+	store.On("BatchDecorate", mock.Anything, mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+		items := args.Get(1).([]*utxo.UnresolvedMetaData)
+		requested := args.Get(2).([]fields.FieldName)
+
+		for _, item := range items {
+			if slices.Contains(requested, fields.TxInpoints) {
+				item.Err = errors.NewStorageError("external tx blob read failed")
+				continue
+			}
+
+			item.Data = &meta.Data{}
+			if item.Hash == mined.Hash {
+				item.Data.BlockIDs = []uint32{7}
+			}
+		}
+	}).Return(nil)
+
+	results, err := lookupRebroadcasts(context.Background(), store, []wire.InvVect{mined, unmined})
+	require.NoError(t, err)
+	require.Len(t, results, 2)
+
+	require.Equal(t, rebroadcastMined, results[0].status, "a failed parents read must not hide a mined tx")
+	require.Equal(t, rebroadcastKeep, results[1].status)
+	require.False(t, results[1].parentsKnown, "a failed parents read leaves the parents unknown")
+
+	// The parents read only asks for the tx that stays.
+	store.AssertNumberOfCalls(t, "BatchDecorate", 2)
+
+	parentsCall := store.Calls[1].Arguments.Get(1).([]*utxo.UnresolvedMetaData)
+	require.Len(t, parentsCall, 1)
+	require.Equal(t, unmined.Hash, parentsCall[0].Hash)
+}
+
+// newBlockingLookupServer returns a server whose UTXO lookups block until
+// release is called, and a channel that receives each lookup as it starts.
+func newBlockingLookupServer(t *testing.T) (s *server, lookups <-chan struct{}, release func()) {
+	t.Helper()
+
+	started := make(chan struct{}, 16)
+	releaseCh := make(chan struct{})
+
+	var releaseOnce sync.Once
+
+	release = func() { releaseOnce.Do(func() { close(releaseCh) }) }
+
+	store := &utxo.MockUtxostore{}
+	store.On("BatchDecorate", mock.Anything, mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+		// Only the first read of each lookup blocks and is reported.
+		if !slices.Contains(args.Get(2).([]fields.FieldName), fields.TxInpoints) {
+			started <- struct{}{}
+			<-releaseCh
+		}
+	}).Return(nil)
+
+	s = &server{
+		ctx:                  context.Background(),
+		logger:               ulogger.TestLogger{},
+		modifyRebroadcastInv: make(chan interface{}, modifyRebroadcastInvBuffer),
+		rebroadcastTip:       make(chan struct{}, 1),
+		rebroadcastTipDelay:  10 * time.Millisecond,
+		relayInv:             make(chan relayMsg, 64),
+		quit:                 make(chan struct{}),
+		utxoStore:            store,
+	}
+
+	return s, started, release
+}
+
+// TestRebroadcastHandler_BlockDuringLookupSchedulesAnotherRetry covers review:
+// a block that arrived while a lookup ran used to be swallowed, so the retry
+// could reach peers before they had processed that block, and the next try
+// waited for the following block.
+func TestRebroadcastHandler_BlockDuringLookupSchedulesAnotherRetry(t *testing.T) {
+	s, lookups, release := newBlockingLookupServer(t)
+
+	s.wg.Add(1)
+
+	go s.rebroadcastHandler()
+
+	t.Cleanup(func() {
+		release()
+		close(s.quit)
+		s.wg.Wait()
+	})
+
+	iv := testTxInv(1)
+	s.AddRebroadcastInventory(&iv, nil)
+	s.BlockConnected()
+
+	select {
+	case <-lookups:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first lookup did not start")
+	}
+
+	// A block arrives while the lookup runs.
+	s.BlockConnected()
+	release()
+
+	select {
+	case <-s.relayInv:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first retry not relayed")
+	}
+
+	select {
+	case <-lookups:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the block that arrived during the lookup did not schedule another retry")
+	}
+
+	select {
+	case <-s.relayInv:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second retry not relayed")
+	}
+}
+
+// TestRebroadcastHandler_ShutdownWaitsForLookup covers review: the lookup
+// goroutine was not waited for, so it could still run against a store being
+// closed after the handler returned.
+func TestRebroadcastHandler_ShutdownWaitsForLookup(t *testing.T) {
+	s, lookups, release := newBlockingLookupServer(t)
+	t.Cleanup(release)
+
+	s.wg.Add(1)
+
+	go s.rebroadcastHandler()
+
+	iv := testTxInv(1)
+	s.AddRebroadcastInventory(&iv, nil)
+	s.BlockConnected()
+
+	select {
+	case <-lookups:
+	case <-time.After(2 * time.Second):
+		t.Fatal("lookup did not start")
+	}
+
+	close(s.quit)
+
+	stopped := make(chan struct{})
+
+	go func() {
+		s.wg.Wait()
+		close(stopped)
+	}()
+
+	select {
+	case <-stopped:
+		t.Fatal("handler returned while its lookup was still running")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	release()
+
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler did not return after its lookup finished")
 	}
 }

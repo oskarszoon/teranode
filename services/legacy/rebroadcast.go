@@ -15,11 +15,12 @@ import (
 
 const (
 	// maxRebroadcastInventory caps how many tx invs the rebroadcastHandler
-	// holds at once. Beyond this, new adds are dropped: the existing
-	// (older, already-retried) entries keep their retry budget instead of
-	// being evicted by fresher adds that haven't yet failed. Mined txs are
-	// pruned on every new block, so the cap only binds when that many txs
-	// are genuinely stuck.
+	// holds at once. Every announced tx waits in the queue until the next
+	// block's prune, so above about 7 tx/s fresh txs alone fill it between
+	// blocks. At the cap, a new add evicts the oldest entry that has not
+	// been retried yet: entries that survived a block unmined are the likely
+	// stuck ones and keep their place. Only when every entry has been
+	// retried is the new add dropped.
 	maxRebroadcastInventory = 4096
 
 	// maxRebroadcastTips is the per-entry retry budget, counted in new
@@ -64,10 +65,15 @@ type rebroadcastEntry struct {
 // child can be queued before its parent. retry therefore sorts each batch
 // parents-first using the parent hashes applyLookup records. Not
 // safe for concurrent use; owned by rebroadcastHandler.
+//
+// A retry counts against every entry at once, so the entries not retried
+// yet are always the ones added since the last retry: a contiguous tail of
+// order, starting at firstFresh (nil when there are none).
 type rebroadcastQueue struct {
-	capacity int
-	order    *list.List
-	index    map[wire.InvVect]*list.Element
+	capacity   int
+	order      *list.List
+	index      map[wire.InvVect]*list.Element
+	firstFresh *list.Element
 }
 
 func newRebroadcastQueue(capacity int) *rebroadcastQueue {
@@ -83,26 +89,43 @@ func newRebroadcastQueue(capacity int) *rebroadcastQueue {
 // this, a duplicate add (e.g. a Kafka replay) would reset the retry budget
 // of a tx that should have aged out.
 //
-// Returns false (and does not mutate the queue) when iv is new and the queue
-// is at capacity. The caller is responsible for any cap-hit telemetry.
-func (q *rebroadcastQueue) add(iv wire.InvVect, data interface{}) bool {
+// At capacity, a new iv evicts the oldest entry not retried yet (evicted is
+// true). If every entry has been retried, the new iv is dropped (added is
+// false) and the queue is unchanged. The caller is responsible for the
+// telemetry.
+func (q *rebroadcastQueue) add(iv wire.InvVect, data interface{}) (added, evicted bool) {
 	if el, ok := q.index[iv]; ok {
 		el.Value.(*rebroadcastEntry).data = data
-		return true
+		return true, false
 	}
 
 	if len(q.index) >= q.capacity {
-		return false
+		if q.firstFresh == nil {
+			return false, false
+		}
+
+		q.remove(q.firstFresh.Value.(*rebroadcastEntry).iv)
+
+		evicted = true
 	}
 
-	q.index[iv] = q.order.PushBack(&rebroadcastEntry{iv: iv, data: data})
+	el := q.order.PushBack(&rebroadcastEntry{iv: iv, data: data})
+	q.index[iv] = el
 
-	return true
+	if q.firstFresh == nil {
+		q.firstFresh = el
+	}
+
+	return true, evicted
 }
 
 // remove drops iv from the queue if present.
 func (q *rebroadcastQueue) remove(iv wire.InvVect) {
 	if el, ok := q.index[iv]; ok {
+		if el == q.firstFresh {
+			q.firstFresh = el.Next()
+		}
+
 		q.order.Remove(el)
 		delete(q.index, iv)
 	}
@@ -154,6 +177,9 @@ func (q *rebroadcastQueue) retry(maxTips int, relay func([]relayMsg)) (relayed, 
 		}
 	}
 
+	// Every remaining entry has now been retried.
+	q.firstFresh = nil
+
 	relay(batch)
 
 	return len(batch), agedOut
@@ -189,9 +215,14 @@ type rebroadcastPruneResult struct {
 // lookupRebroadcasts looks the given pending txs up in the UTXO store, to
 // find the ones that no longer need retrying: txs that have been mined, txs
 // marked conflicting, and txs no longer in the store (which a peer could not
-// fetch from us anyway). For txs that stay it reads their parent tx hashes,
-// which retry orders by. A lookup error for one tx keeps it: a failed lookup
-// costs one wasted retry, not a lost tx.
+// fetch from us anyway). For txs that stay it then reads their parent tx
+// hashes, which retry orders by. A lookup error for one tx keeps it: a failed
+// lookup costs one wasted retry, not a lost tx.
+//
+// The two reads are separate because reading TxInpoints can need a blob read
+// for a large external tx. If that read fails the whole item fails, which in
+// a single read would hide that the tx is mined and keep it queued for every
+// retry. A failed parents read only leaves the tx's parents unknown.
 //
 // It touches no queue state, so rebroadcastHandler runs it on its own
 // goroutine: on Aerospike it can take far longer than ctx allows, since the
@@ -210,18 +241,20 @@ func lookupRebroadcasts(ctx context.Context, store utxo.Store, ivs []wire.InvVec
 		return nil, nil
 	}
 
-	lookupFields := []fields.FieldName{fields.BlockIDs, fields.Conflicting, fields.TxInpoints}
+	statusFields := []fields.FieldName{fields.BlockIDs, fields.Conflicting}
 
 	items := make([]*utxo.UnresolvedMetaData, len(ivs))
 	for i, iv := range ivs {
-		items[i] = &utxo.UnresolvedMetaData{Hash: iv.Hash, Idx: i, Fields: lookupFields}
+		items[i] = &utxo.UnresolvedMetaData{Hash: iv.Hash, Idx: i, Fields: statusFields}
 	}
 
-	if err := store.BatchDecorate(ctx, items, lookupFields...); err != nil {
+	if err := store.BatchDecorate(ctx, items, statusFields...); err != nil {
 		return nil, err
 	}
 
 	results := make([]rebroadcastLookup, len(items))
+
+	var kept []int
 
 	for i, item := range items {
 		results[i].iv = ivs[i]
@@ -237,6 +270,29 @@ func lookupRebroadcasts(ctx context.Context, store utxo.Store, ivs []wire.InvVec
 		case item.Data.Conflicting:
 			results[i].status = rebroadcastConflicting
 		default:
+			kept = append(kept, i)
+		}
+	}
+
+	if len(kept) == 0 {
+		return results, nil
+	}
+
+	parentFields := []fields.FieldName{fields.TxInpoints}
+
+	parentItems := make([]*utxo.UnresolvedMetaData, len(kept))
+	for j, i := range kept {
+		parentItems[j] = &utxo.UnresolvedMetaData{Hash: ivs[i].Hash, Idx: j, Fields: parentFields}
+	}
+
+	// A failed parents read is not an error for the caller: those txs are
+	// still retried, just in queue order.
+	if err := store.BatchDecorate(ctx, parentItems, parentFields...); err != nil {
+		return results, nil
+	}
+
+	for j, i := range kept {
+		if item := parentItems[j]; item.Err == nil && item.Data != nil {
 			results[i].parents = item.Data.TxInpoints.ParentTxHashes
 			results[i].parentsKnown = true
 		}
@@ -431,19 +487,30 @@ func (s *server) finishRebroadcastRetry(q *rebroadcastQueue, lookup rebroadcastL
 // entry ages out after maxRebroadcastTips blocks, so the queue stays bounded.
 // The UTXO lookup behind the prune runs on its own goroutine, so adds keep
 // being taken while it runs.
+//
+// Each retry goes out rebroadcastTipDelay after the latest block: a block
+// arriving during the delay restarts it, and one arriving during the lookup
+// schedules another retry once the lookup is done.
 func (s *server) rebroadcastHandler() {
 	queue := newRebroadcastQueue(maxRebroadcastInventory)
 
-	// Stopped until the first block arrives. retryPending is true from the
-	// first block until its retry has gone out, so blocks arriving during
-	// the delay or the lookup share one retry.
+	// Stopped until the first block arrives.
 	retryTimer := time.NewTimer(time.Hour)
 	retryTimer.Stop()
 
-	retryPending := false
+	var (
+		timerArmed      bool
+		lookupInFlight  bool
+		tipDuringLookup bool
+	)
 
 	// At most one lookup runs at a time, so one slot never blocks the sender.
 	lookupDone := make(chan rebroadcastLookupDone, 1)
+
+	armTimer := func() {
+		retryTimer.Reset(s.rebroadcastTipDelay)
+		timerArmed = true
+	}
 
 out:
 	for {
@@ -454,9 +521,14 @@ out:
 			// of existing entries refresh the data payload but keep
 			// their position and budget, see rebroadcastQueue.add.
 			case broadcastInventoryAdd:
-				if !queue.add(*msg.invVect, msg.data) {
+				added, evicted := queue.add(*msg.invVect, msg.data)
+				if !added {
 					s.droppedRebroadcastCapHits.Add(1)
 					prometheusLegacyRebroadcastCapHits.Inc()
+				}
+
+				if evicted {
+					prometheusLegacyRebroadcastRemoved.WithLabelValues("evicted").Inc()
 				}
 
 			// When an InvVect has been added to a block, we can
@@ -466,20 +538,26 @@ out:
 			}
 
 		case <-s.rebroadcastTip:
-			if !retryPending {
-				retryTimer.Reset(s.rebroadcastTipDelay)
-				retryPending = true
+			if lookupInFlight {
+				tipDuringLookup = true
+			} else {
+				armTimer()
 			}
 
 		case <-retryTimer.C:
-			if !s.startRebroadcastRetry(queue, lookupDone) {
-				retryPending = false
-			}
+			timerArmed = false
+			lookupInFlight = s.startRebroadcastRetry(queue, lookupDone)
 
 		case lookup := <-lookupDone:
+			lookupInFlight = false
+
 			s.finishRebroadcastRetry(queue, lookup)
 
-			retryPending = false
+			if tipDuringLookup {
+				tipDuringLookup = false
+
+				armTimer()
+			}
 
 		case <-s.quit:
 			break out
@@ -488,7 +566,19 @@ out:
 		prometheusLegacyRebroadcastPending.Set(float64(queue.len()))
 	}
 
-	retryTimer.Stop()
+	if timerArmed {
+		retryTimer.Stop()
+	}
+
+	// Wait for an in-flight lookup, so it does not run against a store that
+	// is being closed. Bounded, since not every store honours its context.
+	if lookupInFlight {
+		select {
+		case <-lookupDone:
+		case <-time.After(rebroadcastPruneTimeout):
+			s.logger.Warnf("[rebroadcast] UTXO lookup still running at shutdown after %s, not waiting for it", rebroadcastPruneTimeout)
+		}
+	}
 
 	// Drain channels before exiting so nothing is left waiting around
 	// to send.
