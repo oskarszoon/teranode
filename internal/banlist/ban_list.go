@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"strings"
 	"sync"
 	"time"
 
@@ -132,9 +131,10 @@ func (b *BanList) reloadFromDatabase() error {
 			continue
 		}
 
-		_, subnet, err := net.ParseCIDR(subnetStr)
+		// Reconstruct from the raw key to repair legacy host networks without rewriting rows.
+		subnet, err := parseAddress(key)
 		if err != nil {
-			b.logger.Errorf("error parsing subnet %s: %v", subnetStr, err)
+			b.logger.Errorf("error parsing ban key %s: %v", key, err)
 			continue
 		}
 
@@ -213,13 +213,16 @@ func (b *BanList) IsBanned(ipStr string) bool {
 		ipStr = host
 	}
 
-	// Direct lookup
+	// One decision time for the whole lookup, including the cleanup recheck.
+	now := time.Now()
+
+	// Direct lookup; an expired exact entry falls through so it cannot mask an
+	// active covering ban.
 	b.mu.RLock()
-	if info, exists := b.bannedPeers[ipStr]; exists {
-		isBanned := info.ExpirationTime.After(time.Now())
+	if info, exists := b.bannedPeers[ipStr]; exists && info.ExpirationTime.After(now) {
 		b.mu.RUnlock()
 
-		return isBanned
+		return true
 	}
 	b.mu.RUnlock()
 
@@ -229,7 +232,7 @@ func (b *BanList) IsBanned(ipStr string) bool {
 		return false
 	}
 
-	// Check subnets
+	// Check every active network, whatever the spelling of its raw key.
 	b.mu.RLock()
 	var (
 		expiredKeys []string
@@ -237,12 +240,8 @@ func (b *BanList) IsBanned(ipStr string) bool {
 	)
 
 	for key, info := range b.bannedPeers {
-		if !info.ExpirationTime.After(time.Now()) {
+		if !info.ExpirationTime.After(now) {
 			expiredKeys = append(expiredKeys, key)
-			continue
-		}
-
-		if !strings.Contains(key, "/") {
 			continue
 		}
 
@@ -253,11 +252,12 @@ func (b *BanList) IsBanned(ipStr string) bool {
 	}
 	b.mu.RUnlock()
 
-	// Clean up expired entries
+	// Clean up expired entries, rechecking the current entry so a renewal made
+	// after the read above survives.
 	if len(expiredKeys) > 0 {
 		b.mu.Lock()
 		for _, key := range expiredKeys {
-			if info, exists := b.bannedPeers[key]; exists && !info.ExpirationTime.After(time.Now()) {
+			if info, exists := b.bannedPeers[key]; exists && !info.ExpirationTime.After(now) {
 				delete(b.bannedPeers, key)
 			}
 		}
@@ -415,9 +415,10 @@ func (b *BanList) loadFromDatabase(ctx context.Context) error {
 				continue
 			}
 
-			_, subnet, err := net.ParseCIDR(subnetStr)
+			// Reconstruct from the raw key to repair legacy host networks without rewriting rows.
+			subnet, err := parseAddress(key)
 			if err != nil {
-				b.logger.Errorf("error parsing subnet %s: %v", subnetStr, err)
+				b.logger.Errorf("error parsing ban key %s: %v", key, err)
 				continue
 			}
 
