@@ -4,6 +4,10 @@
 // 	protoc        v7.35.1
 // source: services/p2p/p2p_api/p2p_api.proto
 
+// Version: v1 (implicit). No version suffix; the unsuffixed name IS v1. A
+// breaking change adds the next suffixed version (v2) alongside it -- see
+// docs/references/protoVersioning.md.
+
 package p2p_api
 
 import (
@@ -2311,6 +2315,7 @@ type IsPeerUnhealthyResponse struct {
 	IsUnhealthy     bool                   `protobuf:"varint,1,opt,name=is_unhealthy,json=isUnhealthy,proto3" json:"is_unhealthy,omitempty"`
 	Reason          string                 `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`                                            // Optional reason why peer is considered unhealthy
 	ReputationScore float32                `protobuf:"fixed32,3,opt,name=reputation_score,json=reputationScore,proto3" json:"reputation_score,omitempty"` // Current reputation score
+	Unknown         bool                   `protobuf:"varint,4,opt,name=unknown,proto3" json:"unknown,omitempty"`                                         // True if the peer is absent from the registry (no information, not a verdict)
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -2366,6 +2371,13 @@ func (x *IsPeerUnhealthyResponse) GetReputationScore() float32 {
 	return 0
 }
 
+func (x *IsPeerUnhealthyResponse) GetUnknown() bool {
+	if x != nil {
+		return x.Unknown
+	}
+	return false
+}
+
 // Comprehensive peer information with all registry metadata
 type PeerRegistryInfo struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
@@ -2399,8 +2411,15 @@ type PeerRegistryInfo struct {
 	CatchupAttempts  int64 `protobuf:"varint,27,opt,name=catchup_attempts,json=catchupAttempts,proto3" json:"catchup_attempts,omitempty"`
 	CatchupSuccesses int64 `protobuf:"varint,28,opt,name=catchup_successes,json=catchupSuccesses,proto3" json:"catchup_successes,omitempty"`
 	CatchupFailures  int64 `protobuf:"varint,29,opt,name=catchup_failures,json=catchupFailures,proto3" json:"catchup_failures,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// Interaction type breakdown, incremented by RecordBlockReceived,
+	// RecordSubtreeReceived and RecordTransactionReceived on the blockchain peer
+	// registry. blocks_received drives the asset service's miner-tier
+	// rate-limit exemption, so it must survive the gRPC hop.
+	BlocksReceived       int64 `protobuf:"varint,30,opt,name=blocks_received,json=blocksReceived,proto3" json:"blocks_received,omitempty"`
+	SubtreesReceived     int64 `protobuf:"varint,31,opt,name=subtrees_received,json=subtreesReceived,proto3" json:"subtrees_received,omitempty"`
+	TransactionsReceived int64 `protobuf:"varint,32,opt,name=transactions_received,json=transactionsReceived,proto3" json:"transactions_received,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *PeerRegistryInfo) Reset() {
@@ -2618,6 +2637,27 @@ func (x *PeerRegistryInfo) GetCatchupSuccesses() int64 {
 func (x *PeerRegistryInfo) GetCatchupFailures() int64 {
 	if x != nil {
 		return x.CatchupFailures
+	}
+	return 0
+}
+
+func (x *PeerRegistryInfo) GetBlocksReceived() int64 {
+	if x != nil {
+		return x.BlocksReceived
+	}
+	return 0
+}
+
+func (x *PeerRegistryInfo) GetSubtreesReceived() int64 {
+	if x != nil {
+		return x.SubtreesReceived
+	}
+	return 0
+}
+
+func (x *PeerRegistryInfo) GetTransactionsReceived() int64 {
+	if x != nil {
+		return x.TransactionsReceived
 	}
 	return 0
 }
@@ -3016,11 +3056,12 @@ const file_services_p2p_p2p_api_p2p_api_proto_rawDesc = "" +
 	"\fis_malicious\x18\x01 \x01(\bR\visMalicious\x12\x16\n" +
 	"\x06reason\x18\x02 \x01(\tR\x06reason\"1\n" +
 	"\x16IsPeerUnhealthyRequest\x12\x17\n" +
-	"\apeer_id\x18\x01 \x01(\tR\x06peerId\"\x7f\n" +
+	"\apeer_id\x18\x01 \x01(\tR\x06peerId\"\x99\x01\n" +
 	"\x17IsPeerUnhealthyResponse\x12!\n" +
 	"\fis_unhealthy\x18\x01 \x01(\bR\visUnhealthy\x12\x16\n" +
 	"\x06reason\x18\x02 \x01(\tR\x06reason\x12)\n" +
-	"\x10reputation_score\x18\x03 \x01(\x02R\x0freputationScore\"\xe7\b\n" +
+	"\x10reputation_score\x18\x03 \x01(\x02R\x0freputationScore\x12\x18\n" +
+	"\aunknown\x18\x04 \x01(\bR\aunknown\"\xf2\t\n" +
 	"\x10PeerRegistryInfo\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x16\n" +
 	"\x06height\x18\x02 \x01(\rR\x06height\x12\x1d\n" +
@@ -3052,7 +3093,10 @@ const file_services_p2p_p2p_api_p2p_api_proto_rawDesc = "" +
 	"\x17last_catchup_error_time\x18\x1a \x01(\x03R\x14lastCatchupErrorTime\x12)\n" +
 	"\x10catchup_attempts\x18\x1b \x01(\x03R\x0fcatchupAttempts\x12+\n" +
 	"\x11catchup_successes\x18\x1c \x01(\x03R\x10catchupSuccesses\x12)\n" +
-	"\x10catchup_failures\x18\x1d \x01(\x03R\x0fcatchupFailures\"J\n" +
+	"\x10catchup_failures\x18\x1d \x01(\x03R\x0fcatchupFailures\x12'\n" +
+	"\x0fblocks_received\x18\x1e \x01(\x03R\x0eblocksReceived\x12+\n" +
+	"\x11subtrees_received\x18\x1f \x01(\x03R\x10subtreesReceived\x123\n" +
+	"\x15transactions_received\x18  \x01(\x03R\x14transactionsReceived\"J\n" +
 	"\x17GetPeerRegistryResponse\x12/\n" +
 	"\x05peers\x18\x01 \x03(\v2\x19.p2p_api.PeerRegistryInfoR\x05peers\"b\n" +
 	"\x1cRecordBytesDownloadedRequest\x12\x17\n" +

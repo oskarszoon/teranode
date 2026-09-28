@@ -17,16 +17,17 @@
 | ProcessTxMetaUsingCacheBatchSize | int | 1024 | blockvalidation_processTxMetaUsingCache_BatchSize | Cache processing batch size |
 | ProcessTxMetaUsingCacheConcurrency | int | 32 | blockvalidation_processTxMetaUsingCache_Concurrency | Cache processing concurrency |
 | ProcessTxMetaUsingCacheMissingTxThreshold | int | 1 | blockvalidation_processTxMetaUsingCache_MissingTxThreshold | Cache miss threshold |
-| ProcessTxMetaUsingStoreBatchSize | int | max(4, CPU/2) | blockvalidation_processTxMetaUsingStore_BatchSize | Store processing batch size |
-| ProcessTxMetaUsingStoreConcurrency | int | 32 | blockvalidation_processTxMetaUsingStore_Concurrency | Store processing concurrency |
+| ProcessTxMetaUsingStoreBatchSize | int | 1024 | blockvalidation_processTxMetaUsingStore_BatchSize | Store processing batch size |
+| ProcessTxMetaUsingStoreConcurrency | int | max(4, CPU/2) | blockvalidation_processTxMetaUsingStore_Concurrency | Store processing concurrency |
 | ProcessTxMetaUsingStoreMissingTxThreshold | int | 1 | blockvalidation_processTxMetaUsingStore_MissingTxThreshold | Store miss threshold |
+| ProcessTxMetaUsingStoreRetries | int | 3 | blockvalidation_processTxMetaUsingStore_Retries | Retries for a transient store failure; negative values clamp to 0 |
 | SkipCheckParentMined | bool | false | blockvalidation_skipCheckParentMined | Parent block mining validation |
 | SubtreeFoundChConcurrency | int | 1 | blockvalidation_subtreeFoundChConcurrency | Subtree processing concurrency |
 | SubtreeValidationAbandonThreshold | int | 1 | blockvalidation_subtree_validation_abandon_threshold | Subtree validation abandonment |
 | ValidateBlockSubtreesConcurrency | int | max(4, CPU/2) | blockvalidation_validateBlockSubtreesConcurrency | Block subtree validation concurrency |
 | ValidationMaxRetries | int | 3 | blockvalidation_validation_max_retries | Validation retry attempts |
 | ValidationRetrySleep | time.Duration | 5s | blockvalidation_validation_retry_sleep | Validation retry delay |
-| OptimisticMining | bool | true | blockvalidation_optimistic_mining | Optimistic mining behavior (global; the peer-served path also requires OptimisticMiningPeerBlocks, and catch-up is never optimistic) |
+| OptimisticMining | bool | true | blockvalidation_optimistic_mining | Optimistic mining behavior (global; every validation path also requires OptimisticMiningPeerBlocks, and catch-up is never optimistic) |
 | OptimisticMiningPeerBlocks | bool | false | blockvalidation_optimistic_mining_peer_blocks | Opt in to optimistic mining on the peer-served path (accepts the invalidate-route tradeoff) |
 | MaxCorruptAttemptsPerBlock | int | 3 | blockvalidation_max_corrupt_attempts_per_block | Ban-score-independent per-(block hash, serving peerID) cap on corrupt re-downloads; also sizes the separate local-policy decline cap (0 disables, re-opening the DoS) |
 | CorruptAttemptCooldown | time.Duration | 10m | blockvalidation_corrupt_attempt_cooldown | Fixed cooldown window after which a capped (hash, peerID) is admitted again, for both caps |
@@ -61,9 +62,10 @@
 | MaxTrackedForks | int | 1000 | blockvalidation_max_tracked_forks | Maximum total forks tracked |
 | NearForkThreshold | int | 0 | blockvalidation_near_fork_threshold | Near fork detection (0=coinbase maturity/2) |
 | FetchLargeBatchSize | int | 100 | blockvalidation_fetch_large_batch_size | Block fetch batch size |
-| FetchNumWorkers | int | 1 | blockvalidation_fetch_num_workers | Block fetch worker goroutines |
+| FetchNumWorkers | int | 16 | blockvalidation_fetch_num_workers | Catchup workers running the per-block subtree-data prewarm |
 | FetchBufferSize | int | 50 | blockvalidation_fetch_buffer_size | Block fetch channel buffer |
-| SubtreeFetchConcurrency | int | 8 | blockvalidation_subtree_fetch_concurrency | Concurrent subtree fetches per block |
+| SubtreeFetchConcurrency | int | 32 | blockvalidation_subtree_fetch_concurrency | Concurrent subtree fetches per block |
+| CatchupPrefetchBudgetBytes | int64 | 268435456 | blockvalidation_catchup_prefetch_budget_bytes | Declared block bytes admitted concurrently into the catchup subtree-data prewarm (0 disables the budget and the subtree-concurrency rule it drives) |
 | SubtreeBatchSize | int | 16 | blockvalidation_subtree_batch_size | Subtrees processed per batch in quick validation |
 | SubtreeBatchPrefetchDepth | int | 2 | blockvalidation_subtree_batch_prefetch_depth | Batches to prefetch ahead in pipeline (0=sequential) |
 | GetBlockTransactionsConcurrency | int | 64 | blockvalidation_get_block_transactions_concurrency | Block transaction fetch concurrency |
@@ -92,10 +94,12 @@
 - `OptimisticMining = true`: enables background validation for performance on paths that opt in
 - Block validation proceeds while subtree validation runs in the background
 - Can be overridden per-validation via the `DisableOptimisticMining` option
-- **On the peer-served validation path optimistic mining is OFF unless BOTH
+- **On every validation path optimistic mining is OFF unless BOTH
   `blockvalidation_optimistic_mining` AND `blockvalidation_optimistic_mining_peer_blocks` are set**
-  (default `(true, false)` = off). The global flag being false always wins, so the peer-blocks flag
-  can never bypass it (bitcoin-sv/teranode#4692). Revalidation of an already-stored block is always
+  (default `(true, false)` = off). The requirement is applied where each validation chooses its
+  mode, not only at the peer entry gate, so an internal caller cannot turn optimistic on the global
+  flag alone (bitcoin-sv/teranode#4844). The global flag being false always wins, so the peer-blocks
+  flag can never bypass it (bitcoin-sv/teranode#4692). Revalidation of an already-stored block is always
   non-optimistic regardless of these flags.
 - **The catch-up path is always non-optimistic**, whatever these two flags are set to. It validates
   against a cached header run holding only the block's in-batch predecessors, which cannot carry the
@@ -106,6 +110,11 @@
   invalidated/poisoned rather than re-downloaded) until the `block.Valid` integrity-floor split lands
   and removes that path. With the default (peer-blocks off) a corrupt body is never added and is
   re-downloaded, not poisoned.
+- **Known exposure under the opt-in:** a received body that carries subtrees is still added before
+  it is bound to its header, and when it is invalidated its coinbase is persisted with the invalid
+  record (bitcoin-sv/teranode#4844). A body carrying no subtrees is bound by the coinbase-only rule
+  and rejected before the add. Keep `blockvalidation_optimistic_mining_peer_blocks` off until the
+  `block.Valid` split lands.
 
 ### Corrupt-body re-download cap
 
@@ -197,6 +206,21 @@ blockvalidation_catchupConcurrency=8
 blockvalidation_fetch_num_workers=32
 blockvalidation_subtree_batch_size=32
 ```
+
+Raising `blockvalidation_fetch_num_workers` raises catchup memory: each worker runs one
+block's subtree-data prewarm, parsing every transaction of every subtree of that block into
+memory. Size `blockvalidation_catchup_prefetch_budget_bytes` against measured headroom on
+the target deployment — it caps the declared block bytes admitted concurrently across those
+workers, which is not the same thing as a process-memory ceiling.
+
+A block whose declared size exceeds that budget, or which declares no size at all, parses its
+subtrees one at a time instead of `blockvalidation_subtree_fetch_concurrency` at a time. Setting
+the budget to `0` disables the budget and that rule together; it does not restore the
+pre-budget behaviour exactly, because subtree data is streamed into the blob store either way.
+The counters `teranode_blockvalidation_catchup_prefetch_budget_parked_total`,
+`teranode_blockvalidation_catchup_prefetch_oversized_blocks_total` and
+`teranode_blockvalidation_catchup_prefetch_undeclared_size_blocks_total` report how often each
+of those regimes is entered.
 
 ### Catchup Mode Configuration
 

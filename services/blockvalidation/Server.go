@@ -51,6 +51,7 @@ import (
 	"github.com/ordishs/gocore"
 	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/sync/semaphore"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -248,6 +249,16 @@ type Server struct {
 	// adaptiveFetch controls whether subtreeData is pre-fetched during catchup
 	// or skipped because the tx distributor is keeping the UTXO store up to date.
 	adaptiveFetch *adaptivefetch.State
+
+	// catchupPrefetchBudget caps, by declared serialized block bytes, the blocks admitted
+	// concurrently into the catch-up subtree-data prewarm. nil means disabled
+	// (blockvalidation_catchup_prefetch_budget_bytes = 0, or a Server built directly by a
+	// test). Only the catch-up pipeline takes a reservation: RevalidateBlock's single-block
+	// prewarm does not, so an operator-triggered revalidation can never park behind catch-up.
+	// It DOES share the oversized-block subtree-concurrency rule — see
+	// boundSubtreeConcurrencyByBudget, which explains why that is deliberate.
+	catchupPrefetchBudget      *semaphore.Weighted
+	catchupPrefetchBudgetBytes int64
 
 	// fetchSubtreeDataForBlockFn is the function used by blockWorker to fetch
 	// subtree data for a block. Production code always uses the real method;
@@ -488,6 +499,16 @@ func New(
 	bVal.fetchSubtreeDataForBlockFn = bVal.fetchSubtreeDataForBlock
 	bVal.catchupFunc = bVal.catchup
 
+	// 0 disables rather than falling back to a default: an explicit operator opt-out that
+	// turns off the byte budget AND the oversized-block subtree-concurrency rule
+	// (bsv-blockchain/teranode#1139). It does NOT restore the pre-change behaviour exactly —
+	// the streamed store write in fetchAndStoreSubtreeData is unconditional and applies either
+	// way. It keeps every test that builds a bare &Server{...} working unchanged.
+	if budget := tSettings.BlockValidation.CatchupPrefetchBudgetBytes; budget > 0 {
+		bVal.catchupPrefetchBudgetBytes = budget
+		bVal.catchupPrefetchBudget = semaphore.NewWeighted(budget)
+	}
+
 	return bVal
 }
 
@@ -690,9 +711,19 @@ func (u *Server) GetCatchupStatus(ctx context.Context, _ *blockvalidation_api.Em
 func isUnvalidatablePeerError(err error) bool {
 	// A corrupt block body (bitcoin-sv/teranode#4692) is explicitly NOT unvalidatable: the received
 	// body is not bound to the header, so we must not give up on alternative sources —
-	// re-download from another peer instead. It already fails the ErrBlockInvalid check
-	// below (dedicated ERR_BLOCK_CORRUPT sentinel, no match), but guard explicitly so the
-	// don't-give-up intent survives future edits to this predicate.
+	// re-download from another peer instead.
+	//
+	// That deliberately includes the unbound invalid-transaction verdict (isUnboundTxInvalidVerdict,
+	// bitcoin-sv/teranode#4844). Its subtree list came from the primary and was never reconciled to
+	// the header's merkle root, so a primary that named its own subtrees produces exactly this error,
+	// and another peer's copy is how the honest body is recovered. Stopping here would hide it: peers
+	// absorbed into catchupAlternatives do not announce again. For a block whose real body is invalid,
+	// each alternative re-validates and fails, and the cycle counts once toward
+	// CatchupMaxAttemptsPerBlock, so the repeats stop at cooldown.
+	//
+	// A plain corrupt verdict would also fail the ErrBlockInvalid check below (dedicated
+	// ERR_BLOCK_CORRUPT sentinel, no match). This one would not, because it wraps ErrTxInvalid, so this
+	// guard is load-bearing for it.
 	if errors.IsBlockCorrupt(err) {
 		return false
 	}
@@ -1043,7 +1074,7 @@ func (u *Server) processBlockFoundChannel(ctx context.Context, blockFound proces
 		// state an announcement flood creates — so an unbounded fetch would let
 		// a slow peer pin the worker indefinitely. Same budget as the
 		// priority-queue catchup fetch in addBlockToPriorityQueue.
-		fetchCtx, fetchCancel := context.WithTimeout(ctx, 30*time.Second)
+		fetchCtx, fetchCancel := context.WithTimeout(ctx, peerBlockFetchTimeout)
 		block, err := u.fetchSingleBlock(fetchCtx, blockFound.hash, blockFound.peerID, blockFound.baseURL)
 		fetchCancel()
 		if err != nil {
@@ -1614,8 +1645,8 @@ func deriveBlockHeight(claimed, parentHeight uint32) (uint32, error) {
 // for this block (bitcoin-sv/teranode#4692). Optimistic mining is permitted on those paths ONLY
 // when BOTH the global OptimisticMining flag AND the dedicated OptimisticMiningPeerBlocks opt-in
 // are set, so the global opt-out always wins and the new peer-blocks flag can never bypass it.
-// Written explicitly at the gate rather than relying on the downstream useOptimisticMining seed
-// (belt-and-suspenders). Revalidation of an already-stored block (RevalidateBlock) is never
+// The downstream useOptimisticMining seed in ValidateBlockWithOptions applies the same conjunction
+// on every validation path; it is repeated here at the gate (belt-and-suspenders). Revalidation of an already-stored block (RevalidateBlock) is never
 // optimistic and does not use this gate.
 //
 // Blocks arriving over the legacy sync route (baseURL == "legacy") are unconditionally
@@ -1716,7 +1747,14 @@ func (u *Server) processBlockFound(ctx context.Context, hash *chainhash.Hash, pe
 	if len(useBlock) > 0 {
 		block = useBlock[0]
 	} else {
-		block, err = u.fetchSingleBlock(ctx, hash, peerID, baseURL)
+		// Bound the fetch: this ctx is the block-processing worker's service-lifetime context
+		// with no deadline of its own, and fetchSingleBlock's DoHTTPRequestBodyReader would
+		// otherwise fall back to http_streaming_timeout (600 s in settings.conf,
+		// bitcoin-sv/teranode#4742) - a 20x wider window for a hostile peer than the 30 s budget
+		// every sibling fetchSingleBlock call site sets explicitly.
+		fetchCtx, fetchCancel := context.WithTimeout(ctx, peerBlockFetchTimeout)
+		block, err = u.fetchSingleBlock(fetchCtx, hash, peerID, baseURL)
+		fetchCancel()
 		if err != nil {
 			return err
 		}
@@ -2133,8 +2171,11 @@ func (u *Server) processCatchupChItem(ctx context.Context, c processBlockCatchup
 	}
 
 	// Check if peer is bad or malicious before attempting catchup
-	if u.isPeerBad(c.peerID) || u.isPeerMalicious(ctx, c.peerID) {
-		u.logger.Warnf("[catchup][%s] peer %s (%s) is marked as bad or malicious, trying alternative peers", c.block.Hash().String(), c.peerID, c.baseURL)
+	if bad, badReason := u.isPeerBad(c.peerID); bad || u.isPeerMalicious(ctx, c.peerID) {
+		malicious := !bad
+		reason := classifyPeerRefusalReason(badReason, malicious)
+		prometheusCatchupPeerHealthGate.WithLabelValues(reason).Inc()
+		u.logger.Warnf("[catchup][%s] peer %s (%s) refused as catchup source (%s), trying alternative peers", c.block.Hash().String(), c.peerID, c.baseURL, reason)
 
 		// Try alternative peers from P2P service instead of just skipping
 		if !u.tryAlternativePeersForCatchup(ctx, c.block, c.peerID) {
@@ -2759,7 +2800,7 @@ func (u *Server) addBlockToPriorityQueue(ctx context.Context, blockFound process
 
 	// Create isolated context with timeout for transient fetch operation
 	// This ensures fetch failures don't affect other operations using parent context
-	fetchCtx, fetchCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	fetchCtx, fetchCancel := context.WithTimeout(context.Background(), peerBlockFetchTimeout)
 	defer fetchCancel()
 
 	// Fetch the block to classify it

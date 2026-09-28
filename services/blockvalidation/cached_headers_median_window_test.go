@@ -46,6 +46,7 @@ func TestValidateBlock_CachedHeadersShortWindowIsRefused(t *testing.T) {
 	tSettings := test.CreateBaseTestSettings(t)
 	// The flip: optimistic mining ON is what routes CachedHeaders into CheckHeaderContextual.
 	tSettings.BlockValidation.OptimisticMining = true
+	tSettings.BlockValidation.OptimisticMiningPeerBlocks = true
 
 	coinbaseTx, err := bt.NewTxFromString(model.CoinbaseHex)
 	require.NoError(t, err)
@@ -135,7 +136,10 @@ func TestValidateBlock_CachedHeadersShortWindowIsRefused(t *testing.T) {
 	bv := NewBlockValidation(ctx, ulogger.TestLogger{}, tSettings, mockBlockchain, subtreeStore, txStore, utxoStore, nil, subtreeValidationClient)
 
 	// Prime the subtree store so subtree validation passes and the run reaches the header check.
-	subtreeBytes, err := subtree.SerializeNodes()
+	// Serialize(), not SerializeNodes(): the cached-subtree ancestry check reads this blob
+	// back with DeserializeSubtreeConflictingFromReader, which needs the conflicting-nodes
+	// trailer that only the full serialisation carries. Production writes Serialize() here.
+	subtreeBytes, err := subtree.Serialize()
 	require.NoError(t, err)
 	require.NoError(t, subtreeStore.Set(ctx, subtree.RootHash()[:], fileformat.FileTypeSubtree, subtreeBytes))
 
@@ -207,6 +211,7 @@ func runHeaderContextRetryReachesAddBlock(t *testing.T, disableOptimisticMining 
 
 	tSettings := test.CreateBaseTestSettings(t)
 	tSettings.BlockValidation.OptimisticMining = true
+	tSettings.BlockValidation.OptimisticMiningPeerBlocks = true
 
 	coinbaseTx, err := bt.NewTxFromString(model.CoinbaseHex)
 	require.NoError(t, err)

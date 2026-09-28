@@ -32,7 +32,6 @@ import (
 	"github.com/bsv-blockchain/teranode/stores/utxo/meta"
 	"github.com/bsv-blockchain/teranode/ulogger"
 	"github.com/bsv-blockchain/teranode/util"
-	"github.com/ordishs/gocore"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -201,8 +200,8 @@ func NewTxMetaCache(
 
 	initPrometheusMetrics()
 
-	// base size (MB) from config
-	maxMB, _ := gocore.Config().GetInt("txMetaCacheMaxMB", 256)
+	// base size (MB) from the tagged setting
+	maxMB := tSettings.SubtreeValidation.TxMetaCacheMaxMB
 	// override if caller passed one
 	if len(maxMBOverride) > 0 && maxMBOverride[0] > 0 {
 		maxMB = maxMBOverride[0]
@@ -218,7 +217,7 @@ func NewTxMetaCache(
 
 		cache = pc
 	} else {
-		c, err := New(maxMB*1024*1024, bucketType)
+		c, err := New(maxMB*1024*1024, bucketType, tSettings.SubtreeValidation.TxMetaCacheTrimRatio)
 		if err != nil {
 			return nil, errors.NewProcessingError("error creating cache", err)
 		}
@@ -519,6 +518,22 @@ func putMetaBytesBuf(bp *[]byte) {
 	}
 
 	metaBytesBufPool.Put(bp)
+}
+
+// UnderlyingStore returns the store this cache wraps, so a caller that knows its
+// reads cannot benefit from caching can go straight to the origin.
+//
+// The block-validation path is the case this exists for: it reads a whole
+// block's transactions exactly once, and setMined evicts them immediately
+// afterwards, so routing it through the cache only serializes and inserts
+// entries that are never read back — and evicts the ingest path's hot working
+// set to make room. Measured on the scaling cluster while revalidating a single
+// block: 0 cache hits against ~755k insertions/s.
+//
+// Callers must not use this to bypass the cache for writes or for reads that
+// could be served from it; it is a read-through escape hatch only.
+func (t *TxMetaCache) UnderlyingStore() utxo.Store {
+	return t.utxoStore
 }
 
 // BatchDecorate retrieves metadata for multiple transactions in a single batch operation.
