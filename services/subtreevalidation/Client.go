@@ -15,6 +15,8 @@ import (
 	"github.com/bsv-blockchain/teranode/ulogger"
 	"github.com/bsv-blockchain/teranode/util"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // Client provides a gRPC client interface for the subtree validation service.
@@ -169,6 +171,11 @@ func (s *Client) CheckBlockSubtrees(ctx context.Context, block *model.Block, pee
 		BaseUrl: baseURL,
 		PeerId:  peerID,
 	}); err != nil {
+		// An exhausted transport outage has no native error details to decode.
+		// Keep its local-service provenance for catch-up peer attribution.
+		if st, ok := status.FromError(err); ok && st.Code() == codes.Unavailable && len(st.Details()) == 0 {
+			return errors.NewServiceError("subtree validation bulk RPC unavailable", err)
+		}
 		return errors.UnwrapGRPC(err)
 	}
 

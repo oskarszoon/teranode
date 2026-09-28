@@ -184,6 +184,8 @@ teranode_pruner_errors_total{operation="expire_preservations"} 0
 teranode_pruner_errors_total{operation="dah_pruner"} 2
 ```
 
+Dashboards and alerts querying `operation="parent_preservation"` should use `operation="preserve_parents"`; the old label no longer receives samples. For skipped operations, keep `reason="fsm_error"` (state read failed) separate from `reason="fsm_not_running"` (known non-running or unknown state).
+
 ### Store-Level Metrics
 
 Located in `/stores/utxo/aerospike/pruner/`:

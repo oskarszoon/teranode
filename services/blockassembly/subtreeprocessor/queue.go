@@ -11,13 +11,6 @@ import (
 	"github.com/bsv-blockchain/teranode/ulogger"
 )
 
-// snapshotPublished visits a fixed queue prefix without removing it. Only the
-// processor goroutine may call it. Producers can append while selection runs.
-func (q *LockFreeQueue) snapshotPublished(ctx context.Context, visit func(chainhash.Hash)) (*TxBatch, error) {
-	head, boundary := q.publishedCursor()
-	return visitPublishedCursor(ctx, head, boundary, visit)
-}
-
 // publishedCursor must be called on the consumer goroutine. Linked batches
 // and their node slices are immutable, so a retained prefix can be visited
 // elsewhere after the consumer advances head.
@@ -50,17 +43,6 @@ func visitPublishedCursor(ctx context.Context, head, boundary *TxBatch, visit fu
 		cursor = next
 	}
 	return boundary, nil
-}
-
-// discardThrough commits a previously captured prefix. snapshotPublished already
-// observed every link, so no producer wait or timestamp comparison is needed.
-func (q *LockFreeQueue) discardThrough(boundary *TxBatch) {
-	if boundary == nil {
-		return
-	}
-	for q.head != boundary {
-		_, _ = q.dequeueBatch(0)
-	}
 }
 
 // normalizeMaxQueueItems validates and normalizes the configured ingest-queue

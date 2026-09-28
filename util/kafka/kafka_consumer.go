@@ -465,6 +465,10 @@ func WithWaitForFetchHandlers(handlerCancel context.CancelFunc) ConsumerOption {
 	}
 }
 
+func isConsumerShutdownError(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, kgo.ErrClientClosed)
+}
+
 func (k *KafkaConsumerGroup) Start(ctx context.Context, consumerFn func(message *KafkaMessage) error, opts ...ConsumerOption) {
 	if k == nil {
 		return
@@ -600,7 +604,7 @@ func (k *KafkaConsumerGroup) Start(ctx context.Context, consumerFn func(message 
 
 				if errs := fetches.Errors(); len(errs) > 0 {
 					for _, err := range errs {
-						if errors.Is(err.Err, context.Canceled) || errors.Is(err.Err, kgo.ErrClientClosed) {
+						if isConsumerShutdownError(err.Err) {
 							k.Config.Logger.Debugf("Kafka consumer shutdown: %v", err.Err)
 							shutdownDrain()
 							return

@@ -25,6 +25,8 @@ import (
 	"github.com/bsv-blockchain/teranode/util"
 	"github.com/bsv-blockchain/teranode/util/tracing"
 	"golang.org/x/sync/errgroup"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // bufioReaderPool reduces GC pressure by reusing bufio.Reader instances.
@@ -485,6 +487,12 @@ func (u *Server) CheckBlockSubtrees(ctx context.Context, request *subtreevalidat
 	// state permits admission; catchup writes may still finish after entering IDLE.
 	currentState, err := u.blockchainClient.ReadFSMState(ctx)
 	if err != nil {
+		// A temporarily unavailable authority must remain retryable by the
+		// existing bulk-RPC interceptor. A native authority verdict retains its
+		// details and the usual processing-error path.
+		if st, ok := status.FromError(err); ok && st.Code() == codes.Unavailable && len(st.Details()) == 0 {
+			return nil, status.Errorf(codes.Unavailable, "[CheckBlockSubtrees] Failed to get FSM current state: %v", err)
+		}
 		return nil, errors.WrapGRPC(errors.NewProcessingError("[CheckBlockSubtrees] Failed to get FSM current state", err))
 	}
 
