@@ -2,6 +2,7 @@ package subtreevalidation
 
 import (
 	"context"
+	"net"
 	"net/url"
 	"testing"
 
@@ -9,12 +10,18 @@ import (
 	subtreepkg "github.com/bsv-blockchain/go-subtree"
 	"github.com/bsv-blockchain/teranode/model"
 	"github.com/bsv-blockchain/teranode/pkg/fileformat"
+	"github.com/bsv-blockchain/teranode/services/blockchain"
+	"github.com/bsv-blockchain/teranode/services/blockchain/blockchain_api"
 	"github.com/bsv-blockchain/teranode/services/subtreevalidation/subtreevalidation_api"
 	"github.com/bsv-blockchain/teranode/services/validator"
+	blockchainstore "github.com/bsv-blockchain/teranode/stores/blockchain"
 	"github.com/bsv-blockchain/teranode/ulogger"
 	"github.com/bsv-blockchain/teranode/util/kafka"
 	"github.com/bsv-blockchain/teranode/util/test"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/test/bufconn"
 )
 
 // TestUnconfirmedParentsOptionDoesNotLeakToPeerPaths pins the no-leak side of
@@ -72,8 +79,26 @@ func TestUnconfirmedParentsOptionDoesNotLeakToPeerPaths(t *testing.T) {
 		nilConsumer := &kafka.KafkaConsumerGroup{}
 		tSettings := test.CreateBaseTestSettings(t)
 		tSettings.SubtreeValidation.QuorumPath = t.TempDir()
+		storeURL, err := url.Parse("sqlitememory:///")
+		require.NoError(t, err)
+		chainStore, err := blockchainstore.NewStore(ulogger.TestLogger{}, storeURL, tSettings)
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, chainStore.Close(context.Background())) })
+		chainServer, err := blockchain.New(t.Context(), ulogger.TestLogger{}, tSettings, chainStore, nil, blockchain.FSMStateRUNNING.String())
+		require.NoError(t, err)
+		require.NoError(t, chainServer.Init(t.Context()))
+		chainServer.SetSubscriptionManagerReadyForTesting(true)
+		listener := bufconn.Listen(1024 * 1024)
+		grpcServer := grpc.NewServer()
+		blockchain_api.RegisterBlockchainAPIServer(grpcServer, chainServer)
+		go func() { _ = grpcServer.Serve(listener) }()
+		t.Cleanup(grpcServer.Stop)
+		conn, err := grpc.NewClient("passthrough:///block-path-authority", grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return listener.Dial() }))
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, conn.Close()) })
+		authoritativeClient := &sqliteGRPCAuthorityClient{ClientI: blockchainClient, rpc: blockchain_api.NewBlockchainAPIClient(conn)}
 
-		server, err := New(context.Background(), ulogger.TestLogger{}, tSettings, subtreeStore, txStore, utxoStore, recordingClient, blockchainClient, nilConsumer, nilConsumer, nil, nil)
+		server, err := New(context.Background(), ulogger.TestLogger{}, tSettings, subtreeStore, txStore, utxoStore, recordingClient, authoritativeClient, nilConsumer, nilConsumer, nil, nil)
 		require.NoError(t, err)
 
 		return server, recordingClient, childSubtree

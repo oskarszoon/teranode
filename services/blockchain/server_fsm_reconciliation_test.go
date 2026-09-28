@@ -39,16 +39,17 @@ func (r *reconciliationRPC) CatchUpBlocks(ctx context.Context, req *emptypb.Empt
 	return r.server.CatchUpBlocks(ctx, req)
 }
 
-func TestClient_ConvenienceCallsReconcileUncertainPersistence(t *testing.T) {
+func TestClient_ConvenienceCallsDoNotRewriteUncertainIntent(t *testing.T) {
 	for _, tt := range []struct {
-		name  string
-		state blockchain_api.FSMStateType
-		event blockchain_api.FSMEventType
-		call  func(*Client, context.Context) error
+		name       string
+		state      blockchain_api.FSMStateType
+		event      blockchain_api.FSMEventType
+		call       func(*Client, context.Context) error
+		resultCall func(*Client, context.Context) error
 	}{
-		{"idle after ambiguous run", FSMStateIDLE, blockchain_api.FSMEventType_RUN, (*Client).Idle},
-		{"run after ambiguous stop", FSMStateRUNNING, blockchain_api.FSMEventType_STOP, func(c *Client, ctx context.Context) error { return c.Run(ctx, "test") }},
-		{"catchup after ambiguous run", FSMStateCATCHINGBLOCKS, blockchain_api.FSMEventType_RUN, (*Client).CatchUpBlocks},
+		{"idle after ambiguous run", FSMStateIDLE, blockchain_api.FSMEventType_RUN, (*Client).Idle, func(c *Client, ctx context.Context) error { return c.Run(ctx, "test") }},
+		{"run after ambiguous stop", FSMStateRUNNING, blockchain_api.FSMEventType_STOP, func(c *Client, ctx context.Context) error { return c.Run(ctx, "test") }, (*Client).Idle},
+		{"catchup after ambiguous run", FSMStateCATCHINGBLOCKS, blockchain_api.FSMEventType_RUN, (*Client).CatchUpBlocks, func(c *Client, ctx context.Context) error { return c.Run(ctx, "test") }},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -71,18 +72,26 @@ func TestClient_ConvenienceCallsReconcileUncertainPersistence(t *testing.T) {
 			persisted, err = store.GetFSMState(ctx)
 			require.NoError(t, err)
 			require.NotEqual(t, tt.state.String(), persisted)
+			require.Equal(t, tt.state.String(), b.finiteStateMachine.Current(), "a different event must not clear the pending intent")
+			require.Empty(t, b.notifications, "a rejected event must not publish a notification")
 
+			_, err = b.SendFSMEvent(ctx, &blockchain_api.SendFSMEventRequest{Event: tt.event})
+			require.Error(t, err, "the exact event cannot succeed without an acknowledged write")
+			require.Equal(t, tt.state.String(), b.finiteStateMachine.Current())
 			store.writeErr = nil
-			require.NoError(t, tt.call(client, ctx))
+			_, err = b.SendFSMEvent(ctx, &blockchain_api.SendFSMEventRequest{Event: tt.event})
+			require.NoError(t, err, "only the exact original intent can reconcile ambiguous persistence")
 			persisted, err = store.GetFSMState(ctx)
 			require.NoError(t, err)
-			require.Equal(t, tt.state.String(), persisted)
-			require.Empty(t, b.notifications, "reconciliation is not a new transition")
+			require.NotEqual(t, tt.state.String(), persisted)
+			require.Equal(t, persisted, b.finiteStateMachine.Current())
+			require.Len(t, b.notifications, 1, "the acknowledged transition publishes exactly once")
 
 			writes := 0
-			store.beforeWrite = func(context.Context) { writes++ }
-			require.NoError(t, tt.call(client, ctx))
-			require.Zero(t, writes, "an acknowledged clean no-op needs no additional write")
+			store.setBeforeWrite(func(context.Context) { writes++ })
+			require.NoError(t, tt.resultCall(client, ctx), "an acknowledged same-target call is a clean no-op")
+			require.Zero(t, writes, "a clean no-op needs no additional write")
+			require.Len(t, b.notifications, 1, "a clean no-op must not publish again")
 		})
 	}
 }

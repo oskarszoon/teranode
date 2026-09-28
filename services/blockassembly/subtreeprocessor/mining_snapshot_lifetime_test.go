@@ -206,7 +206,7 @@ func TestCompletedRecoveryKeepsQueuedSubtreeStorageAlive(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, initial.AddCoinbaseNode())
 	old := stp.currentSubtree.Swap(initial)
-	old.Close()
+	require.NoError(t, old.Close())
 	stp.Start(t.Context())
 	t.Cleanup(func() { stp.Stop(context.Background()) })
 	node := &subtreepkg.Node{Hash: chainhash.HashH([]byte("storage after recovery returns")), Fee: 1, SizeInBytes: 100}

@@ -754,7 +754,9 @@ func TestMoveForwardBlock_LeftInQueue(t *testing.T) {
 	require.NoError(t, err)
 
 	tSettings := test.CreateBaseTestSettings(t)
-	tSettings.BlockAssembly.DoubleSpendWindow = 2 * time.Second
+	// Keep this handoff queued even when race/coverage instrumentation or
+	// parallel packages make the block movement take longer than a few seconds.
+	tSettings.BlockAssembly.DoubleSpendWindow = time.Hour
 	tSettings.BlockAssembly.InitialMerkleItemsPerSubtree = 32
 
 	blockchainClient := &blockchain.Mock{}
@@ -786,9 +788,23 @@ func TestMoveForwardBlock_LeftInQueue(t *testing.T) {
 	err = subtreeProcessor.MoveForwardBlock(block)
 	require.NoError(t, err)
 
-	assert.Len(t, subtreeProcessor.chainedSubtrees, 0)
-	assert.Len(t, subtreeProcessor.currentSubtree.Load().Nodes, 1)
-	assert.Equal(t, *subtreepkg.CoinbasePlaceholderHash, subtreeProcessor.currentSubtree.Load().Nodes[0].Hash)
+	var chainedCount, currentLength int
+	var firstHash chainhash.Hash
+	var queuedCount int64
+	require.NoError(t, subtreeProcessor.runRecoveryOnDispatcher(t.Context(), func() error {
+		chainedCount = len(subtreeProcessor.chainedSubtrees)
+		current := subtreeProcessor.currentSubtree.Load()
+		currentLength = len(current.Nodes)
+		if currentLength > 0 {
+			firstHash = current.Nodes[0].Hash
+		}
+		queuedCount = subtreeProcessor.queue.length()
+		return nil
+	}))
+	require.Zero(t, chainedCount)
+	require.Equal(t, 1, currentLength)
+	require.Equal(t, *subtreepkg.CoinbasePlaceholderHash, firstHash)
+	require.Equal(t, int64(1), queuedCount, "the transaction remains the queue's responsibility")
 }
 
 func TestIncompleteSubtreeMoveForwardBlock(t *testing.T) {
