@@ -111,6 +111,7 @@ func (s *Server) waitForBlockMinedStatus(ctx context.Context, blockHash *chainha
 // isFSMReadyForPruning checks the optional FSM admission guard. This is an
 // observation, not a lock: transitions after admission do not cancel the cycle.
 func (s *Server) isFSMReadyForPruning(ctx context.Context, blockHash string, height uint32) bool {
+	// The blockchain client is optional only when this FSM guard is disabled.
 	if !s.settings.Pruner.SkipDuringCatchup {
 		return true
 	}

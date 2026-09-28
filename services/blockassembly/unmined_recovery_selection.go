@@ -22,8 +22,9 @@ const (
 )
 
 type recoverySelectionEntry struct {
-	tx    *utxo.UnminedTransaction
-	state recoveryEligibility
+	tx       *utxo.UnminedTransaction
+	state    recoveryEligibility
+	accepted bool
 }
 
 type recoverySelectionFrame struct {
@@ -37,7 +38,7 @@ type recoverySelectionFrame struct {
 // transactions whose validator has not yet acknowledged its two-phase commit.
 // An unqueued locked record may still be unwound after a rejected handoff and
 // must not be admitted or unlocked by online recovery.
-func (b *BlockAssembler) prepareUnminedRecovery(ctx context.Context, hashes []chainhash.Hash, accepted func(chainhash.Hash) bool) ([]*utxo.UnminedTransaction, error) {
+func (b *BlockAssembler) prepareUnminedRecovery(ctx context.Context, hashes []chainhash.Hash, accepted func([]chainhash.Hash) (map[chainhash.Hash]bool, error)) ([]*utxo.UnminedTransaction, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -66,7 +67,7 @@ func (b *BlockAssembler) prepareUnminedRecovery(ctx context.Context, hashes []ch
 	// for an already accepted transaction, including a descendant of a missing
 	// or incomplete ancestor. Retain the old state and retry fresh metadata.
 	for _, hash := range hashes {
-		if cache[hash].state == recoveryDeferred && accepted != nil && accepted(hash) {
+		if cache[hash].state == recoveryDeferred && cache[hash].accepted {
 			return nil, errors.NewProcessingError("unmined recovery deferred: accepted transaction %s has incomplete metadata or ancestry", hash.String())
 		}
 	}
@@ -75,7 +76,7 @@ func (b *BlockAssembler) prepareUnminedRecovery(ctx context.Context, hashes []ch
 
 // readRecoveryGraph hydrates candidates and ancestor frontiers with bounded
 // metadata batches, caching each transaction once for this selection.
-func (b *BlockAssembler) readRecoveryGraph(ctx context.Context, hashes []chainhash.Hash, chainIDs map[uint32]struct{}, accepted func(chainhash.Hash) bool) (map[chainhash.Hash]*recoverySelectionEntry, error) {
+func (b *BlockAssembler) readRecoveryGraph(ctx context.Context, hashes []chainhash.Hash, chainIDs map[uint32]struct{}, accepted func([]chainhash.Hash) (map[chainhash.Hash]bool, error)) (map[chainhash.Hash]*recoverySelectionEntry, error) {
 	cache := make(map[chainhash.Hash]*recoverySelectionEntry, len(hashes))
 	frontier := make([]chainhash.Hash, 0, len(hashes))
 	schedule := func(hash chainhash.Hash) {
@@ -114,9 +115,21 @@ func (b *BlockAssembler) readRecoveryGraph(ctx context.Context, hashes []chainha
 			if err != nil {
 				return nil, errors.NewProcessingError("unmined recovery failed to read transaction metadata", err)
 			}
+			membership := make(map[chainhash.Hash]bool)
+			if accepted != nil {
+				batchHashes := make([]chainhash.Hash, 0, len(batch))
+				for _, item := range batch {
+					batchHashes = append(batchHashes, item.Hash)
+				}
+				membership, err = accepted(batchHashes)
+				if err != nil {
+					return nil, err
+				}
+			}
 			for _, item := range batch {
 				entry := cache[item.Hash]
-				if err := classifyRecoveryMetadata(item, entry, chainIDs, accepted); err != nil {
+				entry.accepted = membership[item.Hash]
+				if err := classifyRecoveryMetadata(item, entry, chainIDs); err != nil {
 					return nil, err
 				}
 				if entry.state == recoveryUnvisited {
@@ -134,7 +147,7 @@ func (b *BlockAssembler) readRecoveryGraph(ctx context.Context, hashes []chainha
 // classifyRecoveryMetadata separates permanent exclusions from read failures.
 // Chain membership permits mined parents without replaying them; only accepted
 // handoffs permit a still-locked unmined record.
-func classifyRecoveryMetadata(item *utxo.UnresolvedMetaData, entry *recoverySelectionEntry, chainIDs map[uint32]struct{}, accepted func(chainhash.Hash) bool) error {
+func classifyRecoveryMetadata(item *utxo.UnresolvedMetaData, entry *recoverySelectionEntry, chainIDs map[uint32]struct{}) error {
 	if item.Err != nil {
 		if errors.Is(item.Err, errors.ErrTxNotFound) {
 			// Absence is not evidence of membership in the anchored chain.
@@ -160,7 +173,7 @@ func classifyRecoveryMetadata(item *utxo.UnresolvedMetaData, entry *recoverySele
 			return nil
 		}
 	}
-	wasAccepted := accepted != nil && accepted(item.Hash)
+	wasAccepted := entry.accepted
 	if data.IsCoinbase {
 		return nil
 	}

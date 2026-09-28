@@ -8,7 +8,6 @@ package subtreeprocessor
 
 import (
 	"context"
-	"sync/atomic"
 	"time"
 
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
@@ -37,7 +36,6 @@ var _ Interface = (*MockSubtreeProcessor)(nil)
 //   - Validating transaction processing workflows
 type MockSubtreeProcessor struct {
 	mock.Mock
-	RecoveryPendingState atomic.Bool
 }
 
 func (m *MockSubtreeProcessor) GetCurrentTxMap() TxInpointsMap {
@@ -74,12 +72,8 @@ func (m *MockSubtreeProcessor) Reset(blockHeader *model.BlockHeader, moveBackBlo
 	return args.Get(0).(ResetResponse)
 }
 
-func (m *MockSubtreeProcessor) RecoverUnmined(ctx context.Context, header *model.BlockHeader, scanHashes []chainhash.Hash, prepare func(context.Context, []chainhash.Hash, func(chainhash.Hash) bool) ([]*utxostore.UnminedTransaction, error)) error {
+func (m *MockSubtreeProcessor) RecoverUnmined(ctx context.Context, header *model.BlockHeader, scanHashes []chainhash.Hash, prepare func(context.Context, []chainhash.Hash, func([]chainhash.Hash) (map[chainhash.Hash]bool, error)) ([]*utxostore.UnminedTransaction, error)) error {
 	return m.Called(ctx, header, scanHashes, prepare).Error(0)
-}
-
-func (m *MockSubtreeProcessor) RecoveryPending() bool {
-	return m.RecoveryPendingState.Load()
 }
 
 func (m *MockSubtreeProcessor) GetCurrentBlockHeader() *model.BlockHeader {

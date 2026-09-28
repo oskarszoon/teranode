@@ -74,8 +74,8 @@ func TestPrepareUnminedRecoveryLockedRequiresAcceptedHandoff(t *testing.T) {
 	selected, err := b.prepareUnminedRecovery(t.Context(), []chainhash.Hash{chain[1]}, nil)
 	require.NoError(t, err)
 	require.Empty(t, selected, "unqueued in-flight parent and its descendants are deferred")
-	selected, err = b.prepareUnminedRecovery(t.Context(), []chainhash.Hash{chain[1], chain[0]}, func(hash chainhash.Hash) bool {
-		return hash == chain[0]
+	selected, err = b.prepareUnminedRecovery(t.Context(), []chainhash.Hash{chain[1], chain[0]}, func(hashes []chainhash.Hash) (map[chainhash.Hash]bool, error) {
+		return map[chainhash.Hash]bool{chain[0]: true}, nil
 	})
 	require.NoError(t, err)
 	require.Equal(t, chain, selectionHashes(selected))
@@ -148,6 +148,24 @@ func TestPrepareUnminedRecoveryBatchesFreshMetadataOnce(t *testing.T) {
 	}
 }
 
+func TestPrepareUnminedRecoveryBatchesMembershipAcrossAncestorFrontiers(t *testing.T) {
+	b, _ := newUnminedRecoveryTestAssembler(t, blockchain.FSMStateRUNNING)
+	b.settings.BlockAssembly.ParentValidationBatchSize = 2
+	chain := storeRecoverySelectionChain(t, b, 4)
+	var calls [][]chainhash.Hash
+	selected, err := b.prepareUnminedRecovery(t.Context(), chain[2:],
+		func(hashes []chainhash.Hash) (map[chainhash.Hash]bool, error) {
+			calls = append(calls, append([]chainhash.Hash(nil), hashes...))
+			return make(map[chainhash.Hash]bool), nil
+		})
+	require.NoError(t, err)
+	require.Equal(t, chain, selectionHashes(selected))
+	require.Len(t, calls, 4, "one membership query per hydrated frontier, including discovered ancestors")
+	require.Equal(t, chain[2:], calls[0])
+	require.Equal(t, []chainhash.Hash{chain[1]}, calls[1])
+	require.Equal(t, []chainhash.Hash{chain[0]}, calls[2])
+}
+
 func TestPrepareUnminedRecoveryExcludesMinedBeyondThousandHeaders(t *testing.T) {
 	b, _ := newUnminedRecoveryTestAssembler(t, blockchain.FSMStateRUNNING)
 	chain := storeRecoverySelectionChain(t, b, 2)
@@ -201,7 +219,13 @@ func TestPrepareUnminedRecoveryCreatingAndReadFailure(t *testing.T) {
 	chain := storeRecoverySelectionChain(t, b, 2)
 	fault := &recoverySelectionReadFault{Store: b.utxoStore, hash: chain[0], creating: true}
 	b.utxoStore = fault
-	selected, err := b.prepareUnminedRecovery(t.Context(), []chainhash.Hash{chain[1]}, func(chainhash.Hash) bool { return true })
+	selected, err := b.prepareUnminedRecovery(t.Context(), []chainhash.Hash{chain[1]}, func(hashes []chainhash.Hash) (map[chainhash.Hash]bool, error) {
+		result := make(map[chainhash.Hash]bool, len(hashes))
+		for _, hash := range hashes {
+			result[hash] = true
+		}
+		return result, nil
+	})
 	require.Error(t, err)
 	require.Nil(t, selected, "accepted handoff with incomplete creation must preserve the previous assembly and queue")
 	fault.creating = false
@@ -263,7 +287,9 @@ func TestPrepareUnminedRecoveryPreservesAcceptedTransientTransactions(t *testing
 			if tc.acceptedChild {
 				owned = chain[2]
 			}
-			accepted := func(hash chainhash.Hash) bool { return hash == owned }
+			accepted := func(hashes []chainhash.Hash) (map[chainhash.Hash]bool, error) {
+				return map[chainhash.Hash]bool{owned: true}, nil
+			}
 			selected, err := b.prepareUnminedRecovery(t.Context(), []chainhash.Hash{owned}, accepted)
 			require.Error(t, err, "must not authorize discarding an accepted transaction with unknown eligibility")
 			require.Nil(t, selected)
@@ -317,7 +343,6 @@ func TestUnminedRecoveryTransientSelectionRetainsPublishedQueue(t *testing.T) {
 			require.Error(t, err)
 			require.Equal(t, int64(2), b.subtreeProcessor.QueueLength(), "published handoffs remain owned after incomplete metadata")
 			require.Equal(t, before, recoveryCandidateHashes(t, b), "read-only failure preserves the previous template")
-			require.False(t, b.subtreeProcessor.RecoveryPending(), "selection has not started destructive reconstruction")
 			fault.creating, fault.err = false, nil
 			require.NoError(t, b.subtreeProcessor.RecoverUnmined(t.Context(), header, nil, b.prepareUnminedRecovery))
 			require.Equal(t, int64(2), b.subtreeProcessor.QueueLength(), "repair leaves queued handoffs for normal dequeue")

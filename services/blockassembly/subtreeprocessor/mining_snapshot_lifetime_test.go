@@ -211,7 +211,7 @@ func TestCompletedRecoveryKeepsQueuedSubtreeStorageAlive(t *testing.T) {
 	t.Cleanup(func() { stp.Stop(context.Background()) })
 	node := &subtreepkg.Node{Hash: chainhash.HashH([]byte("storage after recovery returns")), Fee: 1, SizeInBytes: 100}
 	require.NoError(t, stp.RecoverUnmined(t.Context(), prevBlockHeader, nil,
-		func(context.Context, []chainhash.Hash, func(chainhash.Hash) bool) ([]*utxostore.UnminedTransaction, error) {
+		func(context.Context, []chainhash.Hash, func([]chainhash.Hash) (map[chainhash.Hash]bool, error)) ([]*utxostore.UnminedTransaction, error) {
 			return []*utxostore.UnminedTransaction{{Node: node, TxInpoints: &subtreepkg.TxInpoints{}}}, nil
 		}))
 	// Deliberately start storage after RecoverUnmined has returned and cancelled

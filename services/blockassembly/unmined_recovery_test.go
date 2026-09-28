@@ -247,7 +247,6 @@ func TestUnminedRecoveryDoesNotLatchMiningOnRepair(t *testing.T) {
 	recovered, err := assembler.recoverUnminedTransactions(t.Context())
 	require.NoError(t, err)
 	require.True(t, recovered)
-	require.False(t, assembler.subtreeProcessor.RecoveryPending())
 	requireRecoveryCandidateEventually(t, assembler, txID)
 }
 
@@ -497,7 +496,6 @@ func TestUnminedRecoveryBoundsMetadataSelection(t *testing.T) {
 	}
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	require.False(t, recovered)
-	require.False(t, assembler.subtreeProcessor.RecoveryPending(), "selection expiry must leave the published template intact")
 	require.NotContains(t, recoveryCandidateHashes(t, assembler), txID)
 	assembler.utxoStore = original
 	recovered, err = assembler.recoverUnminedTransactions(t.Context())

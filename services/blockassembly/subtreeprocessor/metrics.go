@@ -3,8 +3,6 @@ package subtreeprocessor
 
 import (
 	"sync"
-	"sync/atomic"
-	"time"
 
 	"github.com/bsv-blockchain/teranode/util"
 	"github.com/prometheus/client_golang/prometheus"
@@ -46,12 +44,7 @@ var (
 	prometheusSubtreeProcessorOversizeBatchAdmitted prometheus.Counter
 )
 
-var (
-	prometheusMetricsInitOnce sync.Once
-	// Like the other processor gauges, this represents the active processor in
-	// this process. Store only its timestamp, without retaining the processor.
-	prometheusRecoveryPendingSince atomic.Pointer[time.Time]
-)
+var prometheusMetricsInitOnce sync.Once
 
 // initPrometheusMetrics initializes all Prometheus metrics for the subtree processor.
 // This function is called once during package initialization to ensure that
@@ -68,18 +61,6 @@ func initPrometheusMetrics() {
 // The metrics cover various aspects of subtree processing including transaction
 // addition, block movements, and performance timing for critical operations.
 func _initPrometheusMetrics() {
-	promauto.NewGaugeFunc(prometheus.GaugeOpts{
-		Namespace: "teranode",
-		Subsystem: "subtreeprocessor",
-		Name:      "recovery_pending_seconds",
-		Help:      "Seconds spent in the current pending memory recovery, or zero when healthy",
-	}, func() float64 {
-		if since := prometheusRecoveryPendingSince.Load(); since != nil {
-			return max(0, time.Since(*since).Seconds())
-		}
-		return 0
-	})
-
 	prometheusSubtreeProcessorAddTx = promauto.NewCounter(
 		prometheus.CounterOpts{
 			Namespace: "teranode",

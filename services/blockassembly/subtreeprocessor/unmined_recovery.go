@@ -17,29 +17,13 @@ type unminedRecoveryRequest struct {
 
 // Cap repair-owned backlog even when ordinary ingest intentionally has no cap.
 const maxRecoveryQueuedItems int64 = 1 << 16
-
-// RecoveryPending remains a safety gate for an incomplete recovery created by
-// an older in-process path. Periodic repair never enters this state.
-func (stp *SubtreeProcessor) RecoveryPending() bool { return stp.recoveryPending.Load() }
-
-func (stp *SubtreeProcessor) publishRecoveredMiningData() {
-	stp.miningSnapshots.mu.Lock()
-	defer stp.miningSnapshots.mu.Unlock()
-	stp.updatePrecomputedMiningDataLocked()
-	stp.recoveryPending.Store(false)
-	stp.clearRecoveryPendingMetric()
-	stp.recoveryPendingSince.Store(nil)
-}
-
-func (stp *SubtreeProcessor) clearRecoveryPendingMetric() {
-	prometheusRecoveryPendingSince.CompareAndSwap(stp.recoveryPendingSince.Load(), nil)
-}
+const maxRecoveryMembershipItems = 128
 
 // RecoverUnmined captures an admission snapshot on the dispatcher, performs
 // storage-heavy selection on its caller, then admits missing rows in bounded
 // queue batches. The ordinary dequeue path stores and announces new subtrees.
 func (stp *SubtreeProcessor) RecoverUnmined(ctx context.Context, header *model.BlockHeader, scanHashes []chainhash.Hash,
-	prepare func(context.Context, []chainhash.Hash, func(chainhash.Hash) bool) ([]*utxostore.UnminedTransaction, error)) error {
+	prepare func(context.Context, []chainhash.Hash, func([]chainhash.Hash) (map[chainhash.Hash]bool, error)) ([]*utxostore.UnminedTransaction, error)) error {
 	if prepare == nil {
 		return errors.NewProcessingError("[SubtreeProcessor] unmined recovery requires a selection callback")
 	}
@@ -132,7 +116,7 @@ func (snapshot *unminedRecoverySnapshot) queueHashes(ctx context.Context) (map[c
 }
 
 func (stp *SubtreeProcessor) selectUnminedRecovery(ctx context.Context, snapshot *unminedRecoverySnapshot,
-	prepare func(context.Context, []chainhash.Hash, func(chainhash.Hash) bool) ([]*utxostore.UnminedTransaction, error), dispatched bool) ([]*utxostore.UnminedTransaction, error) {
+	prepare func(context.Context, []chainhash.Hash, func([]chainhash.Hash) (map[chainhash.Hash]bool, error)) ([]*utxostore.UnminedTransaction, error), dispatched bool) ([]*utxostore.UnminedTransaction, error) {
 	queued, err := snapshot.queueHashes(ctx)
 	if err != nil {
 		return nil, err
@@ -152,37 +136,59 @@ func (stp *SubtreeProcessor) selectUnminedRecovery(ctx context.Context, snapshot
 		}
 	}
 	acceptedCache := make(map[chainhash.Hash]bool)
-	var readErr error
-	accepted := func(hash chainhash.Hash) bool {
-		if _, exists := queued[hash]; exists {
-			return true
+	acceptedBatch := func(hashes []chainhash.Hash) (map[chainhash.Hash]bool, error) {
+		result := make(map[chainhash.Hash]bool, len(hashes))
+		missing := make([]chainhash.Hash, 0, len(hashes))
+		for _, hash := range hashes {
+			if _, exists := queued[hash]; exists {
+				result[hash] = true
+			} else if value, exists := acceptedCache[hash]; exists {
+				result[hash] = value
+			} else {
+				missing = append(missing, hash)
+			}
 		}
-		if value, exists := acceptedCache[hash]; exists {
-			return value
-		}
-		if readErr != nil {
-			return false
-		}
-		var exists bool
-		if dispatched {
-			readErr = stp.runRecoveryOnDispatcher(ctx, func() error {
+		// Keep each dispatcher turn short even when metadata hydration is
+		// configured for a much larger batch.
+		err := visitRecoveryMembershipChunks(ctx, missing, func(chunk []chainhash.Hash) error {
+			read := func() error {
 				if err := stp.checkRecoveryEpoch(ctx, snapshot.epoch); err != nil {
 					return err
 				}
-				exists = stp.currentTxMap.Exists(hash)
+				for _, hash := range chunk {
+					result[hash] = stp.currentTxMap.Exists(hash)
+				}
 				return nil
-			})
-		} else {
-			exists = stp.currentTxMap.Exists(hash)
+			}
+			if dispatched {
+				return stp.runRecoveryOnDispatcher(ctx, read)
+			}
+			return read()
+		})
+		if err != nil {
+			return nil, err
 		}
-		acceptedCache[hash] = exists
-		return exists
+		for _, hash := range missing {
+			acceptedCache[hash] = result[hash]
+		}
+		return result, nil
 	}
-	selected, err := prepare(ctx, hashes, accepted)
-	if readErr != nil {
-		return nil, readErr
-	}
+	selected, err := prepare(ctx, hashes, acceptedBatch)
 	return selected, err
+}
+
+// visitRecoveryMembershipChunks caps the work admitted to each dispatcher turn
+// independently of the store's metadata batch configuration.
+func visitRecoveryMembershipChunks(ctx context.Context, hashes []chainhash.Hash, visit func([]chainhash.Hash) error) error {
+	for start := 0; start < len(hashes); start += maxRecoveryMembershipItems {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := visit(hashes[start:min(start+maxRecoveryMembershipItems, len(hashes))]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (stp *SubtreeProcessor) checkRecoveryEpoch(ctx context.Context, epoch uint64) error {
@@ -202,9 +208,6 @@ func (stp *SubtreeProcessor) checkRecoveryAnchor(ctx context.Context, header *mo
 	current := stp.currentBlockHeader.Load()
 	if header == nil || current == nil || !header.Hash().IsEqual(current.Hash()) {
 		return errors.NewProcessingError("[SubtreeProcessor] unmined recovery aborted: block assembly tip changed")
-	}
-	if stp.recoveryPending.Load() {
-		return errors.NewProcessingError("[SubtreeProcessor] incomplete legacy unmined recovery requires restart")
 	}
 	return nil
 }
@@ -272,7 +275,7 @@ func (stp *SubtreeProcessor) commitUnminedRecovery(ctx context.Context, header *
 
 // Direct tests use the same capture/select/commit path without a running dispatcher.
 func (stp *SubtreeProcessor) recoverUnmined(ctx context.Context, header *model.BlockHeader, scanHashes []chainhash.Hash,
-	prepare func(context.Context, []chainhash.Hash, func(chainhash.Hash) bool) ([]*utxostore.UnminedTransaction, error)) error {
+	prepare func(context.Context, []chainhash.Hash, func([]chainhash.Hash) (map[chainhash.Hash]bool, error)) ([]*utxostore.UnminedTransaction, error)) error {
 	snapshot, err := stp.captureUnminedRecovery(ctx, header, scanHashes)
 	if err != nil {
 		return err

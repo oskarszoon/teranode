@@ -16,6 +16,33 @@ func recoveryRow(name string) *utxostore.UnminedTransaction {
 	return &utxostore.UnminedTransaction{Node: &subtreepkg.Node{Hash: chainhash.HashH([]byte(name)), Fee: 1, SizeInBytes: 100}, TxInpoints: &subtreepkg.TxInpoints{}}
 }
 
+func TestRecoveryMembershipDispatcherChunksAreBounded(t *testing.T) {
+	hashes := make([]chainhash.Hash, maxRecoveryMembershipItems*2+1)
+	var sizes []int
+	require.NoError(t, visitRecoveryMembershipChunks(t.Context(), hashes, func(chunk []chainhash.Hash) error {
+		sizes = append(sizes, len(chunk))
+		return nil
+	}))
+	require.Equal(t, []int{maxRecoveryMembershipItems, maxRecoveryMembershipItems, 1}, sizes)
+}
+
+func TestUnminedRecoveryMembershipQueryRejectsSameTipReset(t *testing.T) {
+	stp := newTestProcessorNoStart(t)
+	stp.SetCurrentBlockHeader(prevBlockHeader)
+	stp.Start(t.Context())
+	t.Cleanup(func() { stp.Stop(context.Background()) })
+	hash := recoveryRow("query-after-reset").Hash
+	err := stp.RecoverUnmined(t.Context(), prevBlockHeader, []chainhash.Hash{hash},
+		func(_ context.Context, _ []chainhash.Hash, accepted func([]chainhash.Hash) (map[chainhash.Hash]bool, error)) ([]*utxostore.UnminedTransaction, error) {
+			reset := stp.Reset(prevBlockHeader, nil, nil, false, nil)
+			require.NoError(t, reset.Err)
+			_, queryErr := accepted([]chainhash.Hash{hash})
+			return nil, queryErr
+		})
+	require.ErrorContains(t, err, "assembly state or queued responsibility changed")
+	require.Zero(t, stp.queue.length())
+}
+
 func TestUnminedRecoveryHealthyPassKeepsTemplate(t *testing.T) {
 	stp := newTestProcessorNoStart(t)
 	stp.SetCurrentBlockHeader(prevBlockHeader)
@@ -24,14 +51,15 @@ func TestUnminedRecoveryHealthyPassKeepsTemplate(t *testing.T) {
 	notifications := make(chan NewSubtreeRequest, 1)
 	stp.newSubtreeChan = notifications
 	before := stp.currentSubtree.Load()
-	require.NoError(t, stp.recoverUnmined(t.Context(), prevBlockHeader, []chainhash.Hash{assembled.Hash}, func(_ context.Context, _ []chainhash.Hash, accepted func(chainhash.Hash) bool) ([]*utxostore.UnminedTransaction, error) {
-		require.True(t, accepted(assembled.Hash))
+	require.NoError(t, stp.recoverUnmined(t.Context(), prevBlockHeader, []chainhash.Hash{assembled.Hash}, func(_ context.Context, _ []chainhash.Hash, accepted func([]chainhash.Hash) (map[chainhash.Hash]bool, error)) ([]*utxostore.UnminedTransaction, error) {
+		membership, err := accepted([]chainhash.Hash{assembled.Hash})
+		require.NoError(t, err)
+		require.True(t, membership[assembled.Hash])
 		return []*utxostore.UnminedTransaction{assembled}, nil
 	}))
 	require.Same(t, before, stp.currentSubtree.Load())
 	require.Zero(t, stp.queue.length())
 	require.Empty(t, notifications, "healthy pass must not write or announce another subtree")
-	require.False(t, stp.RecoveryPending())
 	require.Equal(t, []chainhash.Hash{*subtreepkg.CoinbasePlaceholderHash, assembled.Hash}, collectSubtreeHashes(stp))
 }
 
@@ -43,16 +71,19 @@ func TestUnminedRecoverySelectionFailurePreservesAssemblyAndQueue(t *testing.T) 
 	stp.queue.enqueueBatch([]subtreepkg.Node{*queued.Node}, []*subtreepkg.TxInpoints{queued.TxInpoints})
 	before := stp.currentSubtree.Load()
 	want := errors.NewProcessingError("read unavailable")
-	err := stp.recoverUnmined(t.Context(), prevBlockHeader, []chainhash.Hash{queued.Hash}, func(_ context.Context, hashes []chainhash.Hash, accepted func(chainhash.Hash) bool) ([]*utxostore.UnminedTransaction, error) {
+	err := stp.recoverUnmined(t.Context(), prevBlockHeader, []chainhash.Hash{queued.Hash}, func(_ context.Context, hashes []chainhash.Hash, accepted func([]chainhash.Hash) (map[chainhash.Hash]bool, error)) ([]*utxostore.UnminedTransaction, error) {
 		require.Equal(t, []chainhash.Hash{queued.Hash}, hashes)
-		require.True(t, accepted(old.Hash))
-		require.True(t, accepted(queued.Hash))
+		membership, err := accepted([]chainhash.Hash{old.Hash})
+		require.NoError(t, err)
+		require.True(t, membership[old.Hash])
+		membership, err = accepted([]chainhash.Hash{queued.Hash})
+		require.NoError(t, err)
+		require.True(t, membership[queued.Hash])
 		return nil, want
 	})
 	require.ErrorIs(t, err, want)
 	require.Same(t, before, stp.currentSubtree.Load())
 	require.Equal(t, int64(1), stp.queue.length())
-	require.False(t, stp.RecoveryPending())
 }
 
 func TestUnminedRecoveryEnqueuesMissingParentFirstAndAnnouncesCompletedSubtree(t *testing.T) {
@@ -68,7 +99,7 @@ func TestUnminedRecoveryEnqueuesMissingParentFirstAndAnnouncesCompletedSubtree(t
 	parent, child := recoveryRow("missing-parent"), recoveryRow("missing-child")
 	child.TxInpoints.ParentTxHashes = []chainhash.Hash{parent.Hash}
 	before := stp.currentSubtree.Load()
-	require.NoError(t, stp.recoverUnmined(t.Context(), prevBlockHeader, []chainhash.Hash{parent.Hash, child.Hash}, func(context.Context, []chainhash.Hash, func(chainhash.Hash) bool) ([]*utxostore.UnminedTransaction, error) {
+	require.NoError(t, stp.recoverUnmined(t.Context(), prevBlockHeader, []chainhash.Hash{parent.Hash, child.Hash}, func(context.Context, []chainhash.Hash, func([]chainhash.Hash) (map[chainhash.Hash]bool, error)) ([]*utxostore.UnminedTransaction, error) {
 		return []*utxostore.UnminedTransaction{parent, child}, nil
 	}))
 	require.Same(t, before, stp.currentSubtree.Load(), "selection must not replace announced roots")
@@ -91,7 +122,7 @@ func TestUnminedRecoveryKeepsArrivalsAfterSnapshotOnce(t *testing.T) {
 	stp.SetCurrentBlockHeader(prevBlockHeader)
 	parent, child := recoveryRow("late-parent"), recoveryRow("late-child")
 	child.TxInpoints.ParentTxHashes = []chainhash.Hash{parent.Hash}
-	require.NoError(t, stp.recoverUnmined(t.Context(), prevBlockHeader, []chainhash.Hash{parent.Hash}, func(_ context.Context, _ []chainhash.Hash, _ func(chainhash.Hash) bool) ([]*utxostore.UnminedTransaction, error) {
+	require.NoError(t, stp.recoverUnmined(t.Context(), prevBlockHeader, []chainhash.Hash{parent.Hash}, func(_ context.Context, _ []chainhash.Hash, _ func([]chainhash.Hash) (map[chainhash.Hash]bool, error)) ([]*utxostore.UnminedTransaction, error) {
 		stp.queue.enqueueBatch([]subtreepkg.Node{*parent.Node, *child.Node}, []*subtreepkg.TxInpoints{parent.TxInpoints, child.TxInpoints})
 		return []*utxostore.UnminedTransaction{parent}, nil
 	}))
@@ -107,20 +138,18 @@ func TestUnminedRecoveryQueueFullRetriesWithoutLatching(t *testing.T) {
 	stp.queue.maxItems = 1
 	first, second := recoveryRow("first"), recoveryRow("second")
 	selected := []*utxostore.UnminedTransaction{first, second}
-	err := stp.recoverUnmined(t.Context(), prevBlockHeader, nil, func(context.Context, []chainhash.Hash, func(chainhash.Hash) bool) ([]*utxostore.UnminedTransaction, error) {
+	err := stp.recoverUnmined(t.Context(), prevBlockHeader, nil, func(context.Context, []chainhash.Hash, func([]chainhash.Hash) (map[chainhash.Hash]bool, error)) ([]*utxostore.UnminedTransaction, error) {
 		return selected, nil
 	})
 	require.ErrorContains(t, err, "queue full")
-	require.False(t, stp.RecoveryPending())
 	require.Zero(t, stp.currentTxMap.Length())
 	require.Equal(t, int64(1), stp.queue.length())
 	stp.clock = fixedClock{t: time.Now().Add(time.Second)}
 	require.NoError(t, stp.dequeueDuringBlockMovement(nil, nil, nil, false))
-	require.NoError(t, stp.recoverUnmined(t.Context(), prevBlockHeader, nil, func(context.Context, []chainhash.Hash, func(chainhash.Hash) bool) ([]*utxostore.UnminedTransaction, error) {
+	require.NoError(t, stp.recoverUnmined(t.Context(), prevBlockHeader, nil, func(context.Context, []chainhash.Hash, func([]chainhash.Hash) (map[chainhash.Hash]bool, error)) ([]*utxostore.UnminedTransaction, error) {
 		return selected, nil
 	}))
 	require.Equal(t, int64(1), stp.queue.length())
-	require.False(t, stp.RecoveryPending())
 }
 
 func TestUnminedRecoveryHasCapWhenNormalQueueUnbounded(t *testing.T) {
@@ -130,12 +159,11 @@ func TestUnminedRecoveryHasCapWhenNormalQueueUnbounded(t *testing.T) {
 	stp.queue.queueLength.Store(maxRecoveryQueuedItems)
 	row := recoveryRow("bounded-repair")
 	err := stp.recoverUnmined(t.Context(), prevBlockHeader, nil,
-		func(context.Context, []chainhash.Hash, func(chainhash.Hash) bool) ([]*utxostore.UnminedTransaction, error) {
+		func(context.Context, []chainhash.Hash, func([]chainhash.Hash) (map[chainhash.Hash]bool, error)) ([]*utxostore.UnminedTransaction, error) {
 			return []*utxostore.UnminedTransaction{row}, nil
 		})
 	require.ErrorContains(t, err, "queue full")
 	require.Equal(t, maxRecoveryQueuedItems, stp.queue.length())
-	require.False(t, stp.RecoveryPending())
 }
 
 func TestUnminedRecoveryCursorRetainsDequeuedPrefix(t *testing.T) {
@@ -206,8 +234,10 @@ func TestUnminedRecoveryRejectsLostLockedAdmission(t *testing.T) {
 	row.Locked = true
 	stp.queue.enqueueBatch([]subtreepkg.Node{*row.Node}, []*subtreepkg.TxInpoints{row.TxInpoints})
 	err := stp.recoverUnmined(t.Context(), prevBlockHeader, []chainhash.Hash{row.Hash},
-		func(_ context.Context, _ []chainhash.Hash, accepted func(chainhash.Hash) bool) ([]*utxostore.UnminedTransaction, error) {
-			require.True(t, accepted(row.Hash))
+		func(_ context.Context, _ []chainhash.Hash, accepted func([]chainhash.Hash) (map[chainhash.Hash]bool, error)) ([]*utxostore.UnminedTransaction, error) {
+			membership, err := accepted([]chainhash.Hash{row.Hash})
+			require.NoError(t, err)
+			require.True(t, membership[row.Hash])
 			_, found := stp.queue.dequeueBatch(0) // validator unwinds before commit
 			require.True(t, found)
 			return []*utxostore.UnminedTransaction{row}, nil
@@ -222,7 +252,7 @@ func TestUnminedRecoveryRejectsChangedTipAndCancellation(t *testing.T) {
 	stp.SetCurrentBlockHeader(prevBlockHeader)
 	stp.Start(t.Context())
 	t.Cleanup(func() { stp.Stop(context.Background()) })
-	prepare := func(context.Context, []chainhash.Hash, func(chainhash.Hash) bool) ([]*utxostore.UnminedTransaction, error) {
+	prepare := func(context.Context, []chainhash.Hash, func([]chainhash.Hash) (map[chainhash.Hash]bool, error)) ([]*utxostore.UnminedTransaction, error) {
 		return nil, errors.NewProcessingError("selection must not run")
 	}
 	require.ErrorContains(t, stp.RecoverUnmined(t.Context(), blockHeader, nil, prepare), "tip changed")
@@ -240,7 +270,7 @@ func TestUnminedRecoverySelectionLeavesDispatcherResponsive(t *testing.T) {
 	result := make(chan error, 1)
 	go func() {
 		result <- stp.RecoverUnmined(t.Context(), prevBlockHeader, nil,
-			func(context.Context, []chainhash.Hash, func(chainhash.Hash) bool) ([]*utxostore.UnminedTransaction, error) {
+			func(context.Context, []chainhash.Hash, func([]chainhash.Hash) (map[chainhash.Hash]bool, error)) ([]*utxostore.UnminedTransaction, error) {
 				close(selectionStarted)
 				<-finishSelection
 				return nil, nil
@@ -266,7 +296,7 @@ func TestUnminedRecoverySameTipResetInvalidatesSelection(t *testing.T) {
 	t.Cleanup(func() { stp.Stop(context.Background()) })
 	row := recoveryRow("same-tip-stale")
 	err := stp.RecoverUnmined(t.Context(), prevBlockHeader, []chainhash.Hash{row.Hash},
-		func(context.Context, []chainhash.Hash, func(chainhash.Hash) bool) ([]*utxostore.UnminedTransaction, error) {
+		func(context.Context, []chainhash.Hash, func([]chainhash.Hash) (map[chainhash.Hash]bool, error)) ([]*utxostore.UnminedTransaction, error) {
 			response := stp.Reset(prevBlockHeader, nil, nil, false, nil)
 			require.NoError(t, response.Err)
 			return []*utxostore.UnminedTransaction{row}, nil
@@ -319,7 +349,7 @@ func TestUnminedRecoveryAfterPartialRemovalAndNormalDequeue(t *testing.T) {
 		return ready
 	}, time.Second, time.Millisecond, "normal dequeue must finish the original eight-leaf subtree")
 	require.NoError(t, stp.RecoverUnmined(t.Context(), prevBlockHeader, nil,
-		func(context.Context, []chainhash.Hash, func(chainhash.Hash) bool) ([]*utxostore.UnminedTransaction, error) {
+		func(context.Context, []chainhash.Hash, func([]chainhash.Hash) (map[chainhash.Hash]bool, error)) ([]*utxostore.UnminedTransaction, error) {
 			return rows, nil
 		}))
 	require.Zero(t, stp.queue.length(), "repair must recognize every assembled row")
@@ -355,7 +385,7 @@ func TestUnminedRecoveryWhenInitialSubtreeSizeIsOne(t *testing.T) {
 		return ready
 	}, time.Second, time.Millisecond, "a full coinbase-only subtree must rotate before queue admission")
 	require.NoError(t, stp.RecoverUnmined(t.Context(), prevBlockHeader, nil,
-		func(context.Context, []chainhash.Hash, func(chainhash.Hash) bool) ([]*utxostore.UnminedTransaction, error) {
+		func(context.Context, []chainhash.Hash, func([]chainhash.Hash) (map[chainhash.Hash]bool, error)) ([]*utxostore.UnminedTransaction, error) {
 			return []*utxostore.UnminedTransaction{row}, nil
 		}))
 	require.Zero(t, stp.queue.length(), "assembled transaction must not be requeued by repair")
@@ -414,7 +444,7 @@ func TestUnminedRecoveryPreservesOutstandingRemovalsAndDescendants(t *testing.T)
 	removed, child, good := recoveryRow("removed"), recoveryRow("removed-child"), recoveryRow("good")
 	child.TxInpoints.ParentTxHashes = []chainhash.Hash{removed.Hash}
 	require.NoError(t, stp.removeMap.Put(removed.Hash, 1))
-	require.NoError(t, stp.recoverUnmined(t.Context(), prevBlockHeader, nil, func(context.Context, []chainhash.Hash, func(chainhash.Hash) bool) ([]*utxostore.UnminedTransaction, error) {
+	require.NoError(t, stp.recoverUnmined(t.Context(), prevBlockHeader, nil, func(context.Context, []chainhash.Hash, func([]chainhash.Hash) (map[chainhash.Hash]bool, error)) ([]*utxostore.UnminedTransaction, error) {
 		return []*utxostore.UnminedTransaction{removed, child, good}, nil
 	}))
 	require.Equal(t, int64(1), stp.queue.length())

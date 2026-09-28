@@ -104,10 +104,9 @@ func TestMiningCandidateCanAcquireSnapshotAcrossRepair(t *testing.T) {
 			}
 			header, _ := b.CurrentBlock()
 			require.NoError(t, processor.RecoverUnmined(t.Context(), header, hashes,
-				func(ctx context.Context, candidates []chainhash.Hash, accepted func(chainhash.Hash) bool) ([]*utxo.UnminedTransaction, error) {
+				func(ctx context.Context, candidates []chainhash.Hash, accepted func([]chainhash.Hash) (map[chainhash.Hash]bool, error)) ([]*utxo.UnminedTransaction, error) {
 					return b.prepareUnminedRecovery(ctx, candidates, accepted)
 				}))
-			require.False(t, processor.RecoveryPending(), "nondestructive repair keeps mining available")
 			close(release)
 			released = true
 			var got result

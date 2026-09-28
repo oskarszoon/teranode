@@ -438,6 +438,13 @@ func TestSkipDuringCatchupWithNilBlockchainClientDoesNotPanic(t *testing.T) {
 	require.Zero(t, server.lastProcessedHeight.Load())
 }
 
+func TestSkipDuringCatchupDisabledAllowsNilBlockchainClient(t *testing.T) {
+	server := &Server{
+		settings: &settings.Settings{Pruner: settings.PrunerSettings{SkipDuringCatchup: false}},
+	}
+	require.True(t, server.isFSMReadyForPruning(t.Context(), "", 0))
+}
+
 // TestStart_FSMContextCancellation verifies graceful shutdown handling when
 // the context is cancelled during the FSM wait. The error must be returned
 // (not swallowed) and must be a context error so the service manager can

@@ -193,7 +193,6 @@ func TestResetRPCsReturnCompletedSuccess(t *testing.T) {
 			response, err := resetRPCs(resetRPCServer(assembler))[name](callCtx, &blockassembly_api.EmptyMessage{})
 			require.NoError(t, err)
 			require.NotNil(t, response)
-			require.False(t, assembler.subtreeProcessor.RecoveryPending())
 		})
 	}
 }

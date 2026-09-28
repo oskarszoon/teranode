@@ -54,7 +54,6 @@ const (
 	errGettingBestBlockHeaders  = "error getting best block headers"
 	errMarkingTxsMined          = "error marking transactions as mined on longest chain"
 	errGettingUnminedTxIterator = "error getting unmined tx iterator"
-	errMiningRecoveryPending    = "mining is waiting for unmined recovery and chain reconciliation"
 )
 
 // create state strings for the processor
@@ -631,9 +630,6 @@ func (b *BlockAssembler) triggerReconcile() {
 // Returns:
 //   - error: Any error encountered during reset
 func (b *BlockAssembler) reset(ctx context.Context, validateInputs ...bool) error {
-	if b.subtreeProcessor.RecoveryPending() {
-		return errors.NewProcessingError("unmined recovery requires read-only repair before reset")
-	}
 	bestBlockchainBlockHeader, meta, err := b.blockchainClient.GetBestBlockHeader(ctx)
 	if err != nil {
 		return errors.NewProcessingError("[Reset] error getting best block header", err)
@@ -1043,10 +1039,6 @@ func (b *BlockAssembler) waitForBlockMinedSet(ctx context.Context, blockHash *ch
 // Parameters:
 //   - ctx: Context for cancellation
 func (b *BlockAssembler) processNewBlockAnnouncement(ctx context.Context) {
-	if b.subtreeProcessor.RecoveryPending() {
-		b.logger.Warnf("[BlockAssembler] Deferring chain movement until unmined recovery completes")
-		return
-	}
 	_, _, deferFn := tracing.Tracer("blockassembly").Start(ctx, "processNewBlockAnnouncement",
 		tracing.WithParentStat(b.stats),
 		tracing.WithHistogram(prometheusBlockAssemblerUpdateBestBlock),
@@ -1867,10 +1859,6 @@ func newResetRequest(ctx context.Context, run func(context.Context) error) reset
 }
 
 func (b *BlockAssembler) executeResetRequest(ctx context.Context, fullReset bool, validateInputs bool) error {
-	// A full reset must not mutate the store while read-only repair is pending.
-	if b.subtreeProcessor.RecoveryPending() {
-		return errors.NewProcessingError("unmined recovery requires read-only repair before reset")
-	}
 	if fullReset {
 		if err := b.fixUnminedSinceInconsistencies(ctx); err != nil {
 			b.logger.Warnf("[BlockAssembler] error fixing unmined_since inconsistencies; continuing template reset: %v", err)
@@ -1890,9 +1878,6 @@ func (b *BlockAssembler) executeResetRequest(ctx context.Context, fullReset bool
 //   - *subtreeprocessor.MiningSnapshotLease: Release after all subtree readers finish
 //   - error: Any error encountered during retrieval
 func (b *BlockAssembler) GetMiningCandidate(ctx context.Context) (*model.MiningCandidate, []*subtree.Subtree, *subtreeprocessor.MiningSnapshotLease, error) {
-	if b.subtreeProcessor.RecoveryPending() {
-		return nil, nil, nil, errors.NewProcessingError(errMiningRecoveryPending)
-	}
 	ctx, _, deferFn := tracing.Tracer("blockassembly").Start(ctx, "GetMiningCandidate",
 		tracing.WithParentStat(b.stats),
 		tracing.WithHistogram(prometheusBlockAssemblyGetMiningCandidateDuration),
@@ -1913,9 +1898,6 @@ func (b *BlockAssembler) GetMiningCandidate(ctx context.Context) (*model.MiningC
 		}
 
 		candidate, trees, candidateErr := b.generateEmptyBlockCandidate(ctx, bestBlockHeader, bestBlockMeta.Height)
-		if b.subtreeProcessor.RecoveryPending() {
-			return nil, nil, nil, errors.NewProcessingError(errMiningRecoveryPending)
-		}
 		return candidate, trees, nil, candidateErr
 	}
 
@@ -1951,24 +1933,18 @@ func (b *BlockAssembler) GetMiningCandidate(ctx context.Context) (*model.MiningC
 		lease.Release()
 		lease = nil
 		incompleteData := b.subtreeProcessor.GetIncompleteSubtreeMiningData(ctx)
-		if incompleteData != nil && len(incompleteData.Subtrees) > 0 && incompleteData.PreviousHeader.Hash().IsEqual(baBestBlockHeader.Hash()) {
+		// The current producer returns heap data without a lease. Own any
+		// future mmap-backed snapshot before inspecting its header or subtrees.
+		if incompleteData != nil {
+			lease = incompleteData.Lease
+		}
+		if incompleteData != nil && incompleteData.PreviousHeader != nil && len(incompleteData.Subtrees) > 0 && incompleteData.PreviousHeader.Hash().IsEqual(baBestBlockHeader.Hash()) {
 			data = incompleteData
 			subtrees = incompleteData.Subtrees
 		} else {
-			if b.subtreeProcessor.RecoveryPending() {
-				return nil, nil, nil, errors.NewProcessingError(errMiningRecoveryPending)
-			}
 			candidate, trees, candidateErr := b.generateEmptyBlockCandidate(ctx, baBestBlockHeader, baBestBlockHeight)
-			if b.subtreeProcessor.RecoveryPending() {
-				return nil, nil, nil, errors.NewProcessingError(errMiningRecoveryPending)
-			}
 			return candidate, trees, nil, candidateErr
 		}
-	}
-
-	// Keep the processor's incomplete-recovery guard after snapshot acquisition.
-	if b.subtreeProcessor.RecoveryPending() {
-		return nil, nil, nil, errors.NewProcessingError(errMiningRecoveryPending)
 	}
 
 	// Apply max block size limit if configured
@@ -2073,10 +2049,6 @@ func (b *BlockAssembler) GetMiningCandidate(ctx context.Context) (*model.MiningC
 
 	b.logger.Debugf("[GetMiningCandidate] Returning mining candidate: height=%d, fees=%d, subsidy=%d, txCount=%d, subtreeCount=%d", candidate.Height, totalFees, blockSubsidy, txCount, subtreeCountUint32)
 
-	// Recheck incomplete-recovery state before transferring the mmap lease.
-	if b.subtreeProcessor.RecoveryPending() {
-		return nil, nil, nil, errors.NewProcessingError(errMiningRecoveryPending)
-	}
 	transferred = true
 	return candidate, subtrees, lease, nil
 }

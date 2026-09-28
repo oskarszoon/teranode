@@ -1142,7 +1142,7 @@ func (ba *BlockAssembly) Start(ctx context.Context, readyCh chan<- struct{}) (er
 func (ba *BlockAssembly) Stop(ctx context.Context) error {
 	ba.stopOnce.Do(func() {
 		ba.jobStore.Stop()
-		ba.jobStore.DeleteAll()
+		ba.deleteAllMiningJobs()
 
 		// Stop the subtree processor to stop the announcement ticker and cleanup resources
 		if ba.blockAssembler != nil && ba.blockAssembler.subtreeProcessor != nil {
@@ -1644,16 +1644,12 @@ func (ba *BlockAssembly) GetMiningCandidate(ctx context.Context, req *blockassem
 
 	id, _ := chainhash.NewHash(miningCandidate.Id)
 
-	ba.jobStoreMu.Lock()
-	// Delete first: ttlcache replacement does not invoke eviction callbacks.
-	ba.jobStore.Delete(*id)
-	ba.jobStore.Set(*id, &subtreeprocessor.Job{
+	ba.replaceMiningJob(*id, &subtreeprocessor.Job{
 		ID:              id,
 		Subtrees:        subtrees,
 		MiningCandidate: miningCandidate,
 		Lease:           cacheLease,
-	}, jobTTL) // create a new job with a TTL, will be cleaned up automatically
-	ba.jobStoreMu.Unlock()
+	})
 
 	if includeSubtreeHashes {
 		miningCandidate.SubtreeHashes = make([][]byte, len(subtrees))
@@ -1810,6 +1806,28 @@ func coinbaseHasP2SHOutput(tx *bt.Tx) bool {
 	}
 
 	return false
+}
+
+// Explicit mutations share the lock with job lookup plus Retain. The cache's
+// independent TTL eviction callback only releases its lease and never takes it.
+func (ba *BlockAssembly) deleteMiningJob(id chainhash.Hash) {
+	ba.jobStoreMu.Lock()
+	defer ba.jobStoreMu.Unlock()
+	ba.jobStore.Delete(id)
+}
+
+func (ba *BlockAssembly) deleteAllMiningJobs() {
+	ba.jobStoreMu.Lock()
+	defer ba.jobStoreMu.Unlock()
+	ba.jobStore.DeleteAll()
+}
+
+func (ba *BlockAssembly) replaceMiningJob(id chainhash.Hash, job *subtreeprocessor.Job) {
+	ba.jobStoreMu.Lock()
+	defer ba.jobStoreMu.Unlock()
+	// ttlcache replacement does not invoke eviction callbacks.
+	ba.jobStore.Delete(id)
+	ba.jobStore.Set(id, job, jobTTL)
 }
 
 // retainMiningJobForSubmission acquires the request's lease before eviction can
@@ -2054,7 +2072,7 @@ func (ba *BlockAssembly) submitMiningSolution(ctx context.Context, req *BlockSub
 			ba.logger.Warnf("[BlockAssembly][%s][%s] rejected mining solution, block breaks a consensus rule: %v", jobID, block.Hash().String(), err)
 
 			// remove the job, the same solution would be rejected again
-			ba.jobStore.Delete(*storeID)
+			ba.deleteMiningJob(*storeID)
 
 			return nil, errors.NewProcessingError("[BlockAssembly][%s][%s] invalid block", jobID, block.Hash().String(), err)
 		}
@@ -2066,7 +2084,7 @@ func (ba *BlockAssembly) submitMiningSolution(ctx context.Context, req *BlockSub
 		ba.blockAssembler.Reset(false)
 
 		// remove the job, we cannot use it anymore
-		ba.jobStore.Delete(*storeID)
+		ba.deleteMiningJob(*storeID)
 
 		return nil, errors.NewProcessingError("[BlockAssembly][%s][%s] invalid block", jobID, block.Hash().String(), err)
 	}
@@ -2123,7 +2141,7 @@ func (ba *BlockAssembly) submitMiningSolution(ctx context.Context, req *BlockSub
 
 	// remove jobs, we have already mined a block
 	// if we don't do this, all the subtrees will never be removed from memory
-	ba.jobStore.DeleteAll()
+	ba.deleteAllMiningJobs()
 
 	return &blockassembly_api.OKResponse{
 		Ok: true,

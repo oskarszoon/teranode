@@ -247,14 +247,6 @@ type SubtreeProcessor struct {
 	recoverUnminedCh chan unminedRecoveryRequest
 	// recoveryEpoch invalidates a read-only selection across same-tip resets.
 	recoveryEpoch atomic.Uint64
-	// recoveryPending suppresses mining/dequeue after an incomplete rebuild.
-	recoveryPending atomic.Bool
-	// recoveryPendingSince retains the first pending timestamp across retries.
-	recoveryPendingSince atomic.Pointer[time.Time]
-	// recoveryAccepted preserves prior admission evidence across rebuild retries.
-	// It is owned by the processor goroutine, like currentTxMap.
-	recoveryAccepted map[chainhash.Hash]struct{}
-
 	// reconcileCoinbasesCh handles requests to create canonical coinbase UTXOs
 	// for a set of gap blocks, without touching any other in-memory state
 	reconcileCoinbasesCh chan reconcileCoinbasesMsg
@@ -800,10 +792,6 @@ func (stp *SubtreeProcessor) Start(ctx context.Context) {
 					return
 
 				case getSubtreesChan := <-stp.getSubtreesChan:
-					if stp.recoveryPending.Load() {
-						getSubtreesChan <- nil
-						continue
-					}
 					stp.setCurrentRunningState(StateGetSubtrees)
 
 					logger.Debugf("[SubtreeProcessor] get current subtrees")
@@ -882,10 +870,6 @@ func (stp *SubtreeProcessor) Start(ctx context.Context) {
 					stp.setCurrentRunningState(StateRunning)
 
 				case responseChan := <-stp.getIncompleteSubtreeDataChan:
-					if stp.recoveryPending.Load() {
-						responseChan <- nil
-						continue
-					}
 					// On-demand snapshot of incomplete subtree for mining (only when requested)
 					currentSt := stp.currentSubtree.Load()
 					if stp.chainedSubtreeCount.Load() > 0 || currentSt == nil || currentSt.Length() <= 1 {
@@ -947,10 +931,6 @@ func (stp *SubtreeProcessor) Start(ctx context.Context) {
 					stp.setCurrentRunningState(StateRunning)
 
 				case reorgReq := <-stp.reorgBlockChan:
-					if stp.recoveryPending.Load() {
-						reorgReq.errChan <- errors.NewProcessingError("[SubtreeProcessor] incomplete unmined recovery requires read-only repair before reorg")
-						continue
-					}
 					reorgReq.errChan <- stp.runHandlerWithRecover("reorgBlocks", func() error {
 						stp.setCurrentRunningState(StateReorg)
 						logger.Infof("[SubtreeProcessor] reorgReq subtree processor: %d, %d", len(reorgReq.moveBackBlocks), len(reorgReq.moveForwardBlocks))
@@ -964,10 +944,6 @@ func (stp *SubtreeProcessor) Start(ctx context.Context) {
 					stp.setCurrentRunningState(StateRunning)
 
 				case moveForwardReq := <-stp.moveForwardBlockChan:
-					if stp.recoveryPending.Load() {
-						moveForwardReq.errChan <- errors.NewProcessingError("[SubtreeProcessor] incomplete unmined recovery requires read-only repair before block movement")
-						continue
-					}
 					moveForwardReq.errChan <- stp.runHandlerWithRecover("moveForwardBlock", func() error {
 						stp.setCurrentRunningState(StateMoveForwardBlock)
 
@@ -1034,10 +1010,6 @@ func (stp *SubtreeProcessor) Start(ctx context.Context) {
 					recovery.result <- err
 
 				case resetBlocksMsg := <-stp.resetCh:
-					if stp.recoveryPending.Load() {
-						resetBlocksMsg.responseCh <- ResetResponse{Err: errors.NewProcessingError("[SubtreeProcessor] incomplete unmined recovery requires read-only repair before reset")}
-						continue
-					}
 					resetErr := stp.runHandlerWithRecover("reset", func() error {
 						stp.setCurrentRunningState(StateResetBlocks)
 						return stp.reset(resetBlocksMsg.blockHeader, resetBlocksMsg.moveBackBlocks, resetBlocksMsg.moveForwardBlocks,
@@ -1098,9 +1070,6 @@ func (stp *SubtreeProcessor) Start(ctx context.Context) {
 					stp.setCurrentRunningState(StateRunning)
 
 				case <-stp.announcementTicker.C:
-					if stp.recoveryPending.Load() {
-						continue
-					}
 					// Periodically announce the current subtree if it has transactions.
 					// Skip if the subtree is nearly full: a complete subtree is imminent and
 					// a partial here would just duplicate the announcement that follows.
@@ -1142,13 +1111,6 @@ func (stp *SubtreeProcessor) Start(ctx context.Context) {
 					}
 
 				default:
-					if stp.recoveryPending.Load() {
-						select {
-						case <-processorCtx.Done():
-						case <-time.After(time.Millisecond):
-						}
-						continue
-					}
 					// Record that the consumer passed through this branch
 					// before doing any dequeue work, so a slow or wedged
 					// step further down still counts as "the consumer was
@@ -3411,9 +3373,6 @@ func (stp *SubtreeProcessor) GetCompletedSubtreesForMiningCandidate() []*subtree
 func (stp *SubtreeProcessor) GetPrecomputedMiningData() *PrecomputedMiningData {
 	stp.miningSnapshots.mu.Lock()
 	defer stp.miningSnapshots.mu.Unlock()
-	if stp.recoveryPending.Load() {
-		return nil
-	}
 	data := stp.precomputedMiningData.Load()
 	if data == nil {
 		return nil
@@ -3430,9 +3389,6 @@ func (stp *SubtreeProcessor) GetPrecomputedMiningData() *PrecomputedMiningData {
 // processing goroutine is busy (e.g., during a reorg). The caller's context
 // is also respected for earlier cancellation.
 func (stp *SubtreeProcessor) GetIncompleteSubtreeMiningData(ctx context.Context) *PrecomputedMiningData {
-	if stp.recoveryPending.Load() {
-		return nil
-	}
 	const timeout = 5 * time.Second
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -3457,9 +3413,6 @@ func (stp *SubtreeProcessor) GetIncompleteSubtreeMiningData(ctx context.Context)
 func (stp *SubtreeProcessor) updatePrecomputedMiningData() {
 	stp.miningSnapshots.mu.Lock()
 	defer stp.miningSnapshots.mu.Unlock()
-	if stp.recoveryPending.Load() {
-		return
-	}
 	stp.updatePrecomputedMiningDataLocked()
 }
 
@@ -6955,7 +6908,6 @@ func DeserializeHashesFromReaderIntoBuckets(
 //   - ctx: Context for the stop operation (currently unused, for future extensibility)
 func (stp *SubtreeProcessor) Stop(ctx context.Context) {
 	stp.stopOnce.Do(func() {
-		defer stp.clearRecoveryPendingMetric()
 		h := stp.cancelPtr.Swap(nil)
 		if h != nil && h.f != nil {
 			h.f()

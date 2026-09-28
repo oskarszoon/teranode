@@ -27,10 +27,6 @@ func (b *BlockAssembler) unminedRecoveryInterval() time.Duration {
 func (b *BlockAssembler) nextUnminedRecoveryDelay(recovered bool) time.Duration {
 	interval := b.unminedRecoveryInterval()
 	if interval == 0 {
-		// Keep retrying if the processor reports an incomplete repair.
-		if b.subtreeProcessor.RecoveryPending() {
-			return unminedRecoveryRetryDelay
-		}
 		return 0
 	}
 	if !recovered && interval > unminedRecoveryRetryDelay {
@@ -45,7 +41,7 @@ func (b *BlockAssembler) recoverUnminedTransactions(ctx context.Context) (bool, 
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
-	if b.unminedRecoveryInterval() == 0 && !b.subtreeProcessor.RecoveryPending() {
+	if b.unminedRecoveryInterval() == 0 {
 		return false, nil
 	}
 	// Bound index scan, selection and queue admission. No live template is
@@ -87,8 +83,7 @@ func (b *BlockAssembler) recoverUnminedTransactions(ctx context.Context) (bool, 
 	if header == nil || bestHeader == nil || bestMeta == nil {
 		return false, errors.NewProcessingError("unmined recovery requires a known chain tip")
 	}
-	repairPending := b.subtreeProcessor.RecoveryPending()
-	if !repairPending && (height != bestMeta.Height || !header.Hash().IsEqual(bestHeader.Hash())) {
+	if height != bestMeta.Height || !header.Hash().IsEqual(bestHeader.Hash()) {
 		// Let normal block/reorg processing catch up first. Recovery must not
 		// introduce additional tip-moving resets or bypass their conflict rules.
 		b.triggerReconcile()
@@ -102,7 +97,7 @@ func (b *BlockAssembler) recoverUnminedTransactions(ctx context.Context) (bool, 
 		return false, err
 	}
 	err = b.subtreeProcessor.RecoverUnmined(ctx, header, hashes,
-		func(ctx context.Context, candidates []chainhash.Hash, accepted func(chainhash.Hash) bool) ([]*utxo.UnminedTransaction, error) {
+		func(ctx context.Context, candidates []chainhash.Hash, accepted func([]chainhash.Hash) (map[chainhash.Hash]bool, error)) ([]*utxo.UnminedTransaction, error) {
 			// Recheck authority and tip before reading metadata. The processor
 			// independently checks its anchor again before each queue batch.
 			checkCtx, stopCheck := context.WithTimeout(ctx, 5*time.Second)
@@ -118,7 +113,7 @@ func (b *BlockAssembler) recoverUnminedTransactions(ctx context.Context) (bool, 
 			if err != nil {
 				return nil, err
 			}
-			if latest == nil || (!repairPending && !latest.Hash().IsEqual(header.Hash())) {
+			if latest == nil || !latest.Hash().IsEqual(header.Hash()) {
 				b.triggerReconcile()
 				return nil, errors.NewProcessingError("unmined recovery deferred because the chain tip changed")
 			}
