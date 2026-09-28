@@ -37,7 +37,7 @@ func TestMiningJobExplicitMutationAndRetainReleaseOwnership(t *testing.T) {
 	defer snapshot.Lease.Release()
 
 	server := &BlockAssembly{jobStore: ttlcache.New[chainhash.Hash, *subtreeprocessor.Job]()}
-	server.jobStore.OnEviction(func(_ context.Context, _ ttlcache.EvictionReason, item *ttlcache.Item[chainhash.Hash, *subtreeprocessor.Job]) {
+	unsubscribe := server.jobStore.OnEviction(func(_ context.Context, _ ttlcache.EvictionReason, item *ttlcache.Item[chainhash.Hash, *subtreeprocessor.Job]) {
 		item.Value().Lease.Release()
 	})
 	id := chainhash.HashH([]byte("concurrent-job"))
@@ -70,6 +70,9 @@ func TestMiningJobExplicitMutationAndRetainReleaseOwnership(t *testing.T) {
 	}()
 	wg.Wait()
 	server.deleteAllMiningJobs()
+	// ttlcache runs eviction callbacks asynchronously. Unsubscribing waits for
+	// all callbacks before checking that cache ownership has been released.
+	unsubscribe()
 	require.Len(t, leases, replacements)
 	for _, lease := range leases {
 		retained, ok := lease.Retain()
