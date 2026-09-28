@@ -22,6 +22,8 @@ import (
 	"github.com/bsv-blockchain/teranode/util/test"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // assemblyFSMClient only overrides FSM observations; all chain reads use SQLite.
@@ -130,8 +132,11 @@ func TestBlockSubtreeAssemblyRequiresRunning(t *testing.T) {
 						require.NoError(t, blockErr)
 						_, err = server.CheckBlockSubtrees(ctx, &subtreevalidation_api.CheckBlockSubtreesRequest{Block: blockBytes, BaseUrl: "http://peer.invalid"})
 					}
-					if tt.err != nil && path != "peer" {
+					if tt.err != nil {
 						require.Error(t, err)
+						if path == "peer" {
+							require.Equal(t, codes.Unavailable, status.Code(err))
+						}
 						require.Empty(t, recorder.recordedOptions(*child.TxIDChainHash()))
 						return
 					}

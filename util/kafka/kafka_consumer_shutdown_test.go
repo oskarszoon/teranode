@@ -26,6 +26,45 @@ func newLogErrorAndMoveOnWrapper(ctx context.Context, fn func(*KafkaMessage) err
 	return wrapConsumerFn(ctx, ulogger.TestLogger{}, "test-topic", fn, options)
 }
 
+func TestWaitForFetchHandlersCloseCancelsBlockedHandler(t *testing.T) {
+	const topic = "fetch-barrier-close-cancels-handler"
+	broker := inmemorykafka.GetSharedBroker()
+	broker.DropTopic(topic)
+	t.Cleanup(func() { broker.DropTopic(topic) })
+	kafkaURL, err := url.Parse("memory://localhost/" + topic)
+	require.NoError(t, err)
+	consumer, err := NewKafkaConsumerGroupFromURL(ulogger.TestLogger{}, kafkaURL, topic+"-group", true, nil)
+	require.NoError(t, err)
+	handlerCtx, handlerCancel := context.WithCancel(context.Background())
+	defer handlerCancel()
+	entered, exited := make(chan struct{}), make(chan struct{})
+	consumer.Start(context.Background(), func(*KafkaMessage) error {
+		close(entered)
+		<-handlerCtx.Done()
+		close(exited)
+		return handlerCtx.Err()
+	}, WithLogErrorAndMoveOn(), WithWaitForFetchHandlers(handlerCancel))
+	require.Eventually(t, func() bool { return broker.HasConsumer(topic) }, 2*time.Second, 5*time.Millisecond)
+	require.NoError(t, broker.Produce(context.Background(), topic, []byte("key"), []byte("value")))
+	require.Eventually(t, func() bool {
+		select {
+		case <-entered:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, 5*time.Millisecond)
+	require.NoError(t, consumer.Close())
+	require.Eventually(t, func() bool {
+		select {
+		case <-exited:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, 5*time.Millisecond)
+}
+
 // TestLogErrorAndMoveOn_ReturnsErrorAfterCancel pins the shutdown carve-out.
 //
 // Before it, a handler failure at shutdown was logged and swallowed: the wrapper

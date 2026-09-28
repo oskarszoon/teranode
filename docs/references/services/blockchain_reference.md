@@ -534,7 +534,7 @@ Waits for the FSM to transition from the IDLE state.
 func (b *Blockchain) SendFSMEvent(ctx context.Context, eventReq *blockchain_api.SendFSMEventRequest) (*blockchain_api.GetFSMStateResponse, error)
 ```
 
-Sends an explicit operator event to the finite state machine. Accepted transitions persist their destination before memory, notifications, or metrics change. Failed writes return an error; the database may nevertheless have committed, so retry the event or request a convenience target to reconcile before relying on restart state. No compensating rollback is attempted.
+Sends an explicit operator event to the finite state machine. Accepted transitions persist their destination before memory, notifications, or metrics change. Success confirms persisted FSM state, while subscriber notification delivery may follow later. Failed writes return an error; the database may nevertheless have committed, so only the exact original transition may be retried. A background worker retries that transition while the service runs. No compensating rollback is attempted.
 
 ### Run
 
@@ -544,7 +544,7 @@ func (b *Blockchain) Run(ctx context.Context, _ *emptypb.Empty) (*emptypb.Empty,
 
 Automatically promotes `CATCHINGBLOCKS` to `RUNNING`. It refuses automatic promotion from operator `IDLE`, including catchup retries after a lost response. Explicit operator `SendFSMEvent(RUN)` can leave IDLE when checkpoint-safe; explicit `CATCHUPBLOCKS` starts synchronization. A tip below the highest checkpoint or an unreadable tip refuses promotion.
 
-The Run, CatchUpBlocks, and Idle convenience RPCs check authoritative state under the transition lock. An already-current target normally succeeds without writing, but after an uncertain persistence result it succeeds only after an acknowledged write of that target. Clients contact the server even when their cached state already matches. Reconciliation emits no new transition notification.
+The Run, CatchUpBlocks, and Idle convenience RPCs check authoritative state under the transition lock. An already-current target succeeds without writing. After an uncertain persistence result, only the original event and destination may be retried; a different convenience call cannot overwrite an ambiguous operator STOP. An acknowledged replay emits the original transition notification once. Clients contact the server even when their cached state already matches. A delayed notification blocks different transitions until it is queued, but does not hide an acknowledged durable state from authoritative reads.
 
 Catchup completion makes at most three promotion attempts for transient failures, with cancellable one-second backoff. Exhaustion warns that RUNNING was not durably confirmed and asks the operator to inspect FSM state, mining readiness and store health. This does not retry permanent state rejections or override an operator STOP.
 

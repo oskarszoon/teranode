@@ -94,11 +94,16 @@ func TestReadFSMState_UncertainPersistenceRequiresReconciliation(t *testing.T) {
 	require.Empty(t, b.notifications)
 	store.writeErr = nil
 	_, err = b.Run(context.Background(), &emptypb.Empty{})
+	require.Error(t, err, "automatic RUN must not overwrite an ambiguous STOP")
+	persisted, err = store.GetFSMState(context.Background())
 	require.NoError(t, err)
+	require.Equal(t, FSMStateIDLE.String(), persisted)
+	_, err = b.Idle(context.Background(), &emptypb.Empty{})
+	require.NoError(t, err, "exact STOP retry may reconcile the ambiguous write")
 	state, err := client.ReadFSMState(context.Background())
 	require.NoError(t, err)
-	require.Equal(t, FSMStateRUNNING, state)
-	require.Empty(t, b.notifications, "read and same-state reconciliation must not notify")
+	require.Equal(t, FSMStateIDLE, state)
+	require.Len(t, b.notifications, 1)
 }
 
 func TestReadFSMState_DoesNotWaitForBlockedPersistence(t *testing.T) {
@@ -145,9 +150,9 @@ func TestReadFSMState_DoesNotWaitForBlockedNotification(t *testing.T) {
 	defer cancel()
 	_, err := client.ReadFSMState(ctx)
 	require.Equal(t, codes.Unavailable, status.Code(err), "unpublished transition must not block or certify a state")
-	require.ErrorContains(t, <-finished, "notification publication is pending")
+	require.NoError(t, <-finished)
 	_, err = client.ReadFSMState(context.Background())
-	require.Equal(t, codes.Unavailable, status.Code(err))
+	require.NoError(t, err)
 	require.Eventually(t, func() bool {
 		select {
 		case notification := <-b.notifications:
@@ -169,13 +174,16 @@ func TestFSMNotificationFullChannelRetainsDurableStopAndOrdering(t *testing.T) {
 	b.notifications <- &blockchain_api.Notification{Type: 0}
 
 	_, err := b.Idle(context.Background(), &emptypb.Empty{})
-	require.ErrorContains(t, err, "notification publication is pending")
+	require.NoError(t, err)
 	persisted, err := store.GetFSMState(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, FSMStateIDLE.String(), persisted)
 	require.Equal(t, FSMStateIDLE.String(), b.finiteStateMachine.Current())
-	_, err = b.ReadFSMState(context.Background(), &emptypb.Empty{})
-	require.Equal(t, codes.Unavailable, status.Code(err))
+	state, err := b.ReadFSMState(context.Background(), &emptypb.Empty{})
+	require.NoError(t, err)
+	require.Equal(t, FSMStateIDLE, state.State)
+	_, err = b.Idle(context.Background(), &emptypb.Empty{})
+	require.NoError(t, err, "same-target no-op must not await subscriber delivery")
 	_, err = b.SendFSMEvent(context.Background(), &blockchain_api.SendFSMEventRequest{Event: blockchain_api.FSMEventType_RUN})
 	require.ErrorContains(t, err, "notification publication is pending")
 
@@ -189,6 +197,15 @@ func TestFSMNotificationFullChannelRetainsDurableStopAndOrdering(t *testing.T) {
 		state, readErr := b.ReadFSMState(context.Background(), &emptypb.Empty{})
 		return readErr == nil && state.State == FSMStateIDLE
 	}, time.Second, time.Millisecond)
+	require.Eventually(t, func() bool {
+		b.fsmMu.RLock()
+		defer b.fsmMu.RUnlock()
+		return b.fsmNotificationPending == nil
+	}, time.Second, time.Millisecond)
+	_, err = b.SendFSMEvent(context.Background(), &blockchain_api.SendFSMEventRequest{Event: blockchain_api.FSMEventType_RUN})
+	require.NoError(t, err)
+	next := <-b.notifications
+	require.Equal(t, FSMStateRUNNING.String(), next.Metadata.Metadata["destination"], "later transition must follow the queued STOP")
 }
 
 func TestReadFSMState_CancellationAndDeadline(t *testing.T) {

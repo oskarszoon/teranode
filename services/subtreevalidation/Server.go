@@ -35,6 +35,8 @@ import (
 	"github.com/ordishs/gocore"
 	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -579,7 +581,9 @@ func (u *Server) Start(ctx context.Context, readyCh chan<- struct{}) error {
 	}()
 
 	// start kafka consumers
-	u.subtreeConsumerClient.Start(ctx, u.subtreeMessageHandler(ctx), kafka.WithLogErrorAndMoveOn())
+	subtreeCtx, cancelSubtree := context.WithCancel(ctx)
+	defer cancelSubtree()
+	u.subtreeConsumerClient.Start(ctx, u.subtreeMessageHandler(subtreeCtx), kafka.WithLogErrorAndMoveOn(), kafka.WithWaitForFetchHandlers(cancelSubtree))
 	u.txmetaConsumerClient.Start(ctx, u.txmetaMessageHandler(ctx), kafka.WithLogErrorAndMoveOn())
 
 	if u.policyRejectedTxConsumerClient != nil && u.policyRejectedTxCache != nil {
@@ -681,6 +685,9 @@ func (u *Server) Stop(ctx context.Context) error {
 func (u *Server) CheckSubtreeFromBlock(ctx context.Context, request *subtreevalidation_api.CheckSubtreeFromBlockRequest) (*subtreevalidation_api.CheckSubtreeFromBlockResponse, error) {
 	subtreeBlessed, err := u.checkSubtreeFromBlock(ctx, request)
 	if err != nil {
+		if status.Code(err) == codes.Unavailable {
+			return nil, err
+		}
 		return nil, errors.WrapGRPC(err)
 	}
 
@@ -824,15 +831,13 @@ func (u *Server) checkSubtreeFromBlock(ctx context.Context, request *subtreevali
 	}
 
 	currentState, err := u.blockchainClient.ReadFSMState(ctx)
-	var observedState *blockchain.FSMStateType
 	if err != nil {
 		if request.BaseUrl == "legacy" {
 			return false, errors.NewProcessingError("[CheckSubtree] Failed to get FSM current state", err)
 		}
-		// Peer validation does not require FSM availability. Fail closed only
-		// on assembly feeding, including when a failed read returns a state.
-	} else {
-		observedState = &currentState
+		// A successful peer RPC would consume the request while silently
+		// suppressing its mining feed. Let the caller retain and retry it.
+		return false, status.Errorf(codes.Unavailable, "[CheckSubtree] authoritative FSM state unavailable: %v", err)
 	}
 
 	// Only known RUNNING state permits either entry path to feed block
@@ -843,7 +848,7 @@ func (u *Server) checkSubtreeFromBlock(ctx context.Context, request *subtreevali
 	if request.BaseUrl == "legacy" {
 		assemblyPath = "check_subtree_legacy"
 	}
-	addToAssembly := u.allowAssemblyForObservedFSM(observedState, assemblyPath)
+	addToAssembly := u.allowAssemblyForObservedFSM(&currentState, assemblyPath)
 
 	// Check if the base URL is "legacy", which indicates that the subtree is coming from a block from the legacy service.
 	if request.BaseUrl == "legacy" {

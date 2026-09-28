@@ -17,6 +17,16 @@ import (
 // not hold the transition lock indefinitely after the state has been persisted.
 const fsmNotificationEnqueueTimeout = time.Second
 
+// fsmTransitionIntent identifies the only safe replay after an ambiguous write.
+// Every field is protected by fsmMu; the pointer itself is the retry generation.
+type fsmTransitionIntent struct {
+	source      string
+	event       string
+	destination string
+}
+
+const fsmPersistenceRetryInterval = 250 * time.Millisecond
+
 // FSMTransitions is the single source of truth for blockchain FSM transitions.
 // Used by NewFiniteStateMachine and by AvailableEventsForState.
 var FSMTransitions = fsm.Events{
@@ -82,11 +92,16 @@ func (b *Blockchain) NewFiniteStateMachine(opts ...func(*fsm.FSM)) *fsm.FSM {
 				// state, so an explicit retry remains possible. A failed write may
 				// have committed: never attempt an unsafe compensating rollback.
 				b.fsmPersistenceUncertain = true
+				if b.fsmPendingIntent == nil {
+					b.fsmPendingIntent = &fsmTransitionIntent{source: e.Src, event: e.Event, destination: e.Dst}
+				}
+				b.startFSMRetryLocked()
 				b.logger.Errorf("[Blockchain][FiniteStateMachine] Failed to persist %s -> %s; in-memory state remains %s; database may already contain %s: %v", e.Src, e.Dst, e.Src, e.Dst, err)
 				e.Cancel(errors.NewStorageError("failed to persist FSM transition from %s to %s", e.Src, e.Dst, err))
 				return
 			}
 			b.fsmPersistenceUncertain = false
+			b.fsmPendingIntent = nil
 		},
 		"enter_state": func(_ context.Context, e *fsm.Event) {
 			metadata := map[string]string{
@@ -107,11 +122,9 @@ func (b *Blockchain) NewFiniteStateMachine(opts ...func(*fsm.FSM)) *fsm.FSM {
 			select {
 			case b.notifications <- notification:
 			case <-timer.C:
-				// Event already persisted and changed in memory. Return an error,
-				// withhold authority, and retry this notification before admitting
-				// another transition so subscribers see states in order.
+				// The durable state is authoritative. Retain ordered publication
+				// before admitting a different transition.
 				b.fsmNotificationPending = notification
-				e.Err = errors.NewStateError("FSM state persisted but notification publication is pending")
 				go b.retryFSMNotification(notification)
 			}
 
@@ -133,6 +146,46 @@ func (b *Blockchain) NewFiniteStateMachine(opts ...func(*fsm.FSM)) *fsm.FSM {
 	}
 
 	return finiteStateMachine
+}
+
+// startFSMRetryLocked runs one AppCtx-bound reconciler. Tests without an
+// application lifecycle may retry the exact event synchronously instead.
+func (b *Blockchain) startFSMRetryLocked() {
+	if b.fsmRetryRunning || b.AppCtx == nil || b.AppCtx.Err() != nil {
+		return
+	}
+	b.fsmRetryRunning = true
+	go b.retryUncertainFSMTransition()
+}
+
+func (b *Blockchain) retryUncertainFSMTransition() {
+	for {
+		timer := time.NewTimer(fsmPersistenceRetryInterval)
+		select {
+		case <-b.AppCtx.Done():
+			timer.Stop()
+			b.fsmMu.Lock()
+			b.fsmRetryRunning = false
+			b.fsmMu.Unlock()
+			return
+		case <-timer.C:
+		}
+
+		b.fsmMu.Lock()
+		intent := b.fsmPendingIntent
+		if intent == nil || b.AppCtx.Err() != nil {
+			b.fsmRetryRunning = false
+			b.fsmMu.Unlock()
+			return
+		}
+		if b.finiteStateMachine.Current() == intent.source && b.fsmNotificationPending == nil {
+			// sendFSMEventLocked reapplies the RUN checkpoint gate. Its callback
+			// retains this exact pointer on failure and clears it only after an
+			// acknowledged store write.
+			_, _ = b.sendFSMEventLocked(b.AppCtx, &blockchain_api.SendFSMEventRequest{Event: blockchain_api.FSMEventType(blockchain_api.FSMEventType_value[intent.event])})
+		}
+		b.fsmMu.Unlock()
+	}
 }
 
 func (b *Blockchain) retryFSMNotification(notification *blockchain_api.Notification) {

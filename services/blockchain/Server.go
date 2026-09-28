@@ -120,6 +120,8 @@ type Blockchain struct {
 	finiteStateMachine            *fsm.FSM                             // FSM for blockchain state
 	fsmMu                         sync.RWMutex                         // Serialises SendFSMEvent transitions (FSM read-modify-write + stateChangeTimestamp)
 	fsmPersistenceUncertain       bool                                 // Guarded by fsmMu; last write may have committed despite returning an error
+	fsmPendingIntent              *fsmTransitionIntent                 // Guarded by fsmMu; exact transition requiring an acknowledged replay
+	fsmRetryRunning               bool                                 // Guarded by fsmMu; at most one service-lifetime reconciliation worker
 	fsmNotificationPending        *blockchain_api.Notification         // Guarded by fsmMu; persisted transition awaits ordered publication
 	stateChangeTimestamp          time.Time                            // Timestamp of last state change
 	AppCtx                        context.Context                      // Application context
@@ -850,13 +852,10 @@ func (b *Blockchain) startSubscriptions() {
 				}
 				b.subscribersMu.RUnlock()
 
-				// Queue dead subscribers for removal
+				// The manager is the sole deadSubscriptions consumer. Remove
+				// evictions directly so a full removal queue cannot block it.
 				for _, s := range dead {
-					select {
-					case b.deadSubscriptions <- s:
-					case <-b.AppCtx.Done():
-						return
-					}
+					b.removeSubscriber(s)
 				}
 			}()
 			b.stats.NewStat("channel-subscription.Send", true).AddTime(start)
@@ -883,25 +882,25 @@ func (b *Blockchain) startSubscriptions() {
 			b.sendInitialNotification(s)
 
 		case s := <-b.deadSubscriptions:
-			b.subscribersMu.Lock()
-			_, existed := b.subscribers[s]
-			if existed {
-				delete(b.subscribers, s)
-			}
-			remaining := len(b.subscribers)
-			b.subscribersMu.Unlock()
-			if existed && s.pending != nil {
-				// Close pending only on the first dead notice for this subscriber.
-				// A second dead push (e.g. the drain goroutine reporting a Send
-				// error after the broadcast loop has already marked the sub dead
-				// via buffer-full) would panic on a double-close. The map check
-				// above guards that.
-				close(s.pending)
-			}
-			safeClose(s.done)
-			b.logger.Infof("[Blockchain][startSubscriptions] Subscription removed (Total=%d).", remaining)
+			b.removeSubscriber(s)
 		}
 	}
+}
+
+func (b *Blockchain) removeSubscriber(s subscriber) {
+	b.subscribersMu.Lock()
+	_, existed := b.subscribers[s]
+	if existed {
+		delete(b.subscribers, s)
+	}
+	remaining := len(b.subscribers)
+	b.subscribersMu.Unlock()
+	if existed && s.pending != nil {
+		// The map check ensures competing drain and eviction notices close once.
+		close(s.pending)
+	}
+	safeClose(s.done)
+	b.logger.Infof("[Blockchain][startSubscriptions] Subscription removed (Total=%d).", remaining)
 }
 
 // sendDeadline is the maximum time a single Send call is allowed before the
@@ -2899,11 +2898,10 @@ func (b *Blockchain) IsFullyReady(ctx context.Context) (bool, error) {
 }
 
 // SendFSMEvent sends an event to the finite state machine and returns the state
-// reached by an accepted, persisted transition. On a persistence error, memory
-// remains in its prior state and no success notification is sent. The database
-// may nevertheless have committed before returning an error. Retry the failed
-// event or use a convenience RPC to reconcile its target before relying on
-// state across a restart.
+// reached by an accepted, persisted transition. Success does not await subscriber
+// delivery; a delayed notification is retained in order before later transitions.
+// On a persistence error, memory stays in its prior state, but the database may
+// have committed. Only the exact original transition may reconcile that write.
 func (b *Blockchain) SendFSMEvent(ctx context.Context, eventReq *blockchain_api.SendFSMEventRequest) (*blockchain_api.GetFSMStateResponse, error) {
 	// Serialise FSM transitions. SendFSMEvent performs a read-modify-write across
 	// the FSM (prior-state checks -> Event -> stateChangeTimestamp update) that
@@ -2920,6 +2918,10 @@ func (b *Blockchain) SendFSMEvent(ctx context.Context, eventReq *blockchain_api.
 func (b *Blockchain) sendFSMEventLocked(ctx context.Context, eventReq *blockchain_api.SendFSMEventRequest) (*blockchain_api.GetFSMStateResponse, error) {
 	if b.fsmNotificationPending != nil {
 		return nil, errors.WrapGRPC(errors.NewStateError("FSM notification publication is pending"))
+	}
+	if intent := b.fsmPendingIntent; intent != nil &&
+		(intent.source != b.finiteStateMachine.Current() || intent.event != eventReq.Event.String()) {
+		return nil, errors.WrapGRPC(errors.NewStateError("FSM persistence is uncertain; only the original %s transition may be retried", intent.event))
 	}
 	b.logger.Infof("[Blockchain Server] Received FSM event req: %v, will send event to the FSM", eventReq)
 
@@ -3091,26 +3093,16 @@ func HighestCheckpointHeight(checkpoints []chaincfg.Checkpoint) uint32 {
 func (b *Blockchain) sendFSMConvenienceEvent(ctx context.Context, event blockchain_api.FSMEventType, target blockchain_api.FSMStateType) (*emptypb.Empty, error) {
 	b.fsmMu.Lock()
 	defer b.fsmMu.Unlock()
-	if b.fsmNotificationPending != nil {
+	current := b.finiteStateMachine.Current()
+	if intent := b.fsmPendingIntent; intent != nil &&
+		(intent.source != current || intent.event != event.String() || intent.destination != target.String()) {
+		return nil, errors.WrapGRPC(errors.NewStateError("FSM persistence is uncertain; only the original %s transition may be retried", intent.event))
+	}
+	if b.fsmNotificationPending != nil && current != target.String() {
 		return nil, errors.WrapGRPC(errors.NewStateError("FSM notification publication is pending"))
 	}
 
-	current := b.finiteStateMachine.Current()
 	if current == target.String() {
-		if b.fsmPersistenceUncertain {
-			if target == blockchain_api.FSMStateType_RUNNING {
-				if err := b.guardRunBelowHighestCheckpoint(ctx); err != nil {
-					return nil, errors.WrapGRPC(err)
-				}
-			}
-			storeCtx, cancel := b.fsmStoreContext(context.WithoutCancel(ctx))
-			defer cancel()
-			if err := b.store.SetFSMState(storeCtx, current); err != nil {
-				b.logger.Errorf("[Blockchain Server] Failed to reconcile FSM state %s; in-memory state unchanged; database write may have committed: %v", current, err)
-				return nil, errors.WrapGRPC(errors.NewStorageError("failed to reconcile FSM state %s", current, err))
-			}
-			b.fsmPersistenceUncertain = false
-		}
 		return &emptypb.Empty{}, nil
 	}
 	// Neither automatic entry into catchup nor promotion may undo an operator

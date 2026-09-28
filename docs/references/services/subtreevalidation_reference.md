@@ -15,21 +15,20 @@ paused. Paths are
 `kafka_subtree`. Observed states are `idle`, `catchingblocks`, `unknown`, and
 `missing`; RUNNING observations do not increment the counter.
 
-The blockchain client can report a synthetic IDLE after its notification stream
-breaks. Feeding remains disabled until a RUNNING observation returns after cache
-recovery. Block assembly independently recovers stored transactions missing from
-its mining templates at `blockassembly_unminedRecoveryInterval` (default `1h`).
-Recovery requires an authoritative RUNNING response and matching chain tip; real
-IDLE and unavailable or uncertain authority defer it. A deferred or failed pass
-is retried after at most one minute. Cache recovery alone does not replay the
-transactions immediately.
+Assembly feeding uses blockchain's authoritative `ReadFSMState` RPC, not the
+subscription cache. Only a known RUNNING response enables feeding; known IDLE
+and CATCHINGBLOCKS suppress it. A nonlegacy priority RPC returns a retryable
+error before validation when authority is unavailable, so its caller retains
+the request. The subtree Kafka consumer instead keeps its current record while
+retrying the read with paced, cancellable attempts. Its opt-in fetch barrier
+limits retained work to one fetch and stops polling until handlers finish;
+closing the consumer cancels the retry and leaves that record for redelivery.
+Other malformed or failed peer messages retain their existing skip policy.
 
-Recovery rechecks transaction and parent eligibility, including transactions
-already accepted into assembly's queue. It preserves validator-owned locks and
-rebuilds parent-before-child order without changing UTXO state. Selection failure
-leaves the existing template and queue intact. A failed destructive rebuild
-prevents mining and queue consumption until repair succeeds. This is automatic
-template repair, not a service drain or permission to rewind live stores.
+Block assembly's startup unmined reload is separate from subtree Kafka retry.
+Periodic recovery is disabled by default (`blockassembly_unminedRecoveryInterval=0s`);
+operators may configure a positive interval. No recovery pass should be assumed
+to restore a skipped subtree message under the default settings.
 
 Unexpected suppression emits a warning at most once per minute per service
 instance. Expected CATCHINGBLOCKS observations still count for admitted block

@@ -234,6 +234,31 @@ func TestStartSubscriptions_FullBufferMarksSubscriberDead(t *testing.T) {
 	t.Fatalf("stuck subscriber should have been marked dead; subscribers remaining=%d", got)
 }
 
+func TestStartSubscriptions_EvictionCannotBlockOnDeadQueue(t *testing.T) {
+	tc := setup(t)
+	// An already full removal queue must not make its sole consumer enqueue
+	// another removal and stop broadcasting forever.
+	tc.server.deadSubscriptions = make(chan subscriber)
+	go tc.server.startSubscriptions()
+	waitForSubscriptionManagerReady(t, tc.server)
+
+	stuck := newSlowMockSubscribeServer()
+	stuck.gate = make(chan struct{})
+	defer stuck.Cancel()
+	fast := newSlowMockSubscribeServer()
+	defer fast.Cancel()
+	stuckSub := subscriber{subscription: stuck, done: make(chan struct{}), source: "stuck", pending: make(chan *blockchain_api.Notification, 1)}
+	tc.server.newSubscriptions <- stuckSub
+	waitForSubscriberCount(t, tc.server, 1, time.Second)
+	stuckSub.pending <- &blockchain_api.Notification{Type: model.NotificationType_Block}
+	tc.server.newSubscriptions <- subscriber{subscription: fast, done: make(chan struct{}), source: "fast", pending: make(chan *blockchain_api.Notification, subscriberBufferSize)}
+	waitForSubscriberCount(t, tc.server, 2, time.Second)
+	tc.server.notifications <- &blockchain_api.Notification{Type: model.NotificationType_Block}
+	waitForSubscriberCount(t, tc.server, 1, time.Second)
+	tc.server.notifications <- &blockchain_api.Notification{Type: model.NotificationType_Block}
+	require.Eventually(t, func() bool { return len(fast.Received()) >= 2 }, time.Second, 5*time.Millisecond)
+}
+
 // extractTestIndex returns the sequence index encoded in a test notification's
 // Hash field (first byte), plus true. Returns 0, false for notifications that
 // were not produced by the order-preservation test (wrong type, wrong length,

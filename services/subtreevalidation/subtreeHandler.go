@@ -8,6 +8,7 @@ import (
 	"math"
 	"net/url"
 	"runtime"
+	"time"
 
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	"github.com/bsv-blockchain/teranode/errors"
@@ -57,7 +58,7 @@ func (u *Server) subtreeMessageHandler(ctx context.Context) func(msg *kafka.Kafk
 			return nil
 		}
 
-		state, err := u.blockchainClient.ReadFSMState(gCtx)
+		state, err := u.readFSMStateForSubtreeMessage(gCtx)
 		if err != nil {
 			return errors.NewProcessingError("[subtreeMessageHandler] failed to get FSM current state", err)
 		}
@@ -114,6 +115,28 @@ func (u *Server) subtreeMessageHandler(ctx context.Context) func(msg *kafka.Kafk
 		})
 
 		return nil
+	}
+}
+
+// The subtree Kafka consumer waits for this fetch before polling another one.
+// Retain this record until authority is known, or until shutdown leaves its
+// offset uncommitted for redelivery. Other handler errors keep skip semantics.
+func (u *Server) readFSMStateForSubtreeMessage(ctx context.Context) (blockchain.FSMStateType, error) {
+	for {
+		if err := ctx.Err(); err != nil {
+			return blockchain.FSMStateIDLE, err
+		}
+		state, err := u.blockchainClient.ReadFSMState(ctx)
+		if err == nil {
+			return state, nil
+		}
+		timer := time.NewTimer(250 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return blockchain.FSMStateIDLE, ctx.Err()
+		case <-timer.C:
+		}
 	}
 }
 

@@ -413,6 +413,8 @@ type consumerOptions struct {
 	withRetryAndMoveOn    bool
 	withRetryAndStop      bool
 	withLogErrorAndMoveOn bool
+	waitForFetchHandlers  bool
+	fetchHandlerCancel    context.CancelFunc
 	maxRetries            int
 	backoffMultiplier     int
 	backoffDurationType   time.Duration
@@ -451,6 +453,18 @@ func WithLogErrorAndMoveOn() ConsumerOption {
 	}
 }
 
+// WithWaitForFetchHandlers bounds in-flight records to one fetch. Partitions
+// within that fetch still run concurrently; a slow partition delays the next
+// fetch for this consumer only. handlerCancel releases a handler blocked on
+// authority when Close cancels this consumer but its parent remains live.
+// Default consumers remain fully pipelined.
+func WithWaitForFetchHandlers(handlerCancel context.CancelFunc) ConsumerOption {
+	return func(o *consumerOptions) {
+		o.waitForFetchHandlers = true
+		o.fetchHandlerCancel = handlerCancel
+	}
+}
+
 func (k *KafkaConsumerGroup) Start(ctx context.Context, consumerFn func(message *KafkaMessage) error, opts ...ConsumerOption) {
 	if k == nil {
 		return
@@ -482,6 +496,9 @@ func (k *KafkaConsumerGroup) Start(ctx context.Context, consumerFn func(message 
 	// Create internal context and store cancel func before spawning goroutines.
 	// Protected by cancelMu to avoid a data race with Close().
 	internalCtx, cancel := context.WithCancel(ctx)
+	if options.fetchHandlerCancel != nil {
+		context.AfterFunc(internalCtx, options.fetchHandlerCancel)
+	}
 	k.cancelMu.Lock()
 	k.cancel = cancel
 	k.cancelMu.Unlock()
@@ -493,7 +510,7 @@ func (k *KafkaConsumerGroup) Start(ctx context.Context, consumerFn func(message 
 	go func() {
 		defer cancel()
 
-		// Main consume loop — fire-and-forget per-partition fan-out, no barrier.
+		// Main consume loop — fire-and-forget per-partition fan-out by default.
 		//
 		//   [franz-go background fetcher → local record buffer]
 		//             ↓
@@ -506,19 +523,20 @@ func (k *KafkaConsumerGroup) Start(ctx context.Context, consumerFn func(message 
 		// franz-go's EachPartition is dumb-serial — three nested for-loops
 		// calling fn synchronously. To recover the cross-partition parallelism
 		// that c2402191f intended, we spawn a goroutine per partition per
-		// fetch. The puller does NOT wait for those goroutines (no
-		// partitionWg.Wait), so PollFetches is called again immediately and
-		// franz-go's local buffer keeps draining.
+		// fetch. By default the puller does not wait for those goroutines, so
+		// PollFetches runs again immediately. The subtree consumer opts into a
+		// one-fetch barrier: it waits for these handlers before polling again.
 		//
 		// Trade-off: per-partition ordering is preserved within a single
-		// fetch's batch, but NOT across fetches — two consecutive fetches for
-		// the same partition can dispatch two goroutines that run concurrently.
+		// fetch's batch, but NOT across fetches by default — two consecutive
+		// fetches for the same partition can dispatch concurrent goroutines.
+		// The opt-in barrier also preserves ordering across fetches.
 		// Handlers that depend on strict cross-fetch ordering must enforce it
 		// themselves. txmeta entries are independent (and DELETE is sync inside
 		// txmetaHandler) so the txmeta hot path is fine.
 		//
-		// HANDLER CONTRACT — handlers MUST bound their own blocking. Because the
-		// puller does not wait, every parked per-partition goroutine keeps holding
+		// HANDLER CONTRACT — default handlers MUST bound their own blocking.
+		// Without the opt-in barrier, every parked per-partition goroutine holds
 		// the []*kgo.Record it was dispatched with while PollFetches keeps
 		// returning more. A handler that blocks for an unbounded time therefore
 		// reintroduces unbounded goroutine and record retention here, no matter what
@@ -652,6 +670,9 @@ func (k *KafkaConsumerGroup) Start(ctx context.Context, consumerFn func(message 
 						}
 					}(p.Records, hwm, mu)
 				})
+				if options.waitForFetchHandlers {
+					partitionWg.Wait()
+				}
 
 				select {
 				case <-commitTicker.C:
@@ -704,6 +725,9 @@ func (k *KafkaConsumerGroup) startInMemory(ctx context.Context, consumerFn func(
 	//   - It gives the wrapper's shutdown carve-out the same trigger the real consumer
 	//     has, so Close() leaves a failing record uncommitted here too.
 	internalCtx, cancel := context.WithCancel(ctx)
+	if options.fetchHandlerCancel != nil {
+		context.AfterFunc(internalCtx, options.fetchHandlerCancel)
+	}
 
 	k.cancelMu.Lock()
 	k.cancel = cancel

@@ -104,12 +104,18 @@ func TestSubtreeMessageHandlerAssemblyRequiresRunning(t *testing.T) {
 			})
 			require.NoError(t, err)
 
-			err = server.subtreeMessageHandler(ctx)(&kafka.KafkaMessage{Value: payload})
+			handlerCtx := ctx
+			if tt.err != nil && !tt.blocksOnly {
+				var cancel context.CancelFunc
+				handlerCtx, cancel = context.WithTimeout(ctx, 50*time.Millisecond)
+				defer cancel()
+			}
+			err = server.subtreeMessageHandler(handlerCtx)(&kafka.KafkaMessage{Value: payload})
 			if tt.blocksOnly {
 				require.NoError(t, err, "BlocksOnly must not depend on FSM availability")
 				require.Zero(t, client.reads.Load(), "BlocksOnly must not read FSM state")
 			} else if tt.err != nil {
-				require.ErrorIs(t, err, tt.err)
+				require.ErrorIs(t, err, context.DeadlineExceeded)
 			} else {
 				require.NoError(t, err)
 			}
