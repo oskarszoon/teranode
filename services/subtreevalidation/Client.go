@@ -147,6 +147,11 @@ func (s *Client) CheckSubtreeFromBlock(ctx context.Context, subtreeHash chainhas
 
 	_, err := s.apiClient.CheckSubtreeFromBlock(ctx, req)
 	if err != nil {
+		// A detail-free Unavailable after the interceptor's retries is a
+		// local authority/transport outage, not a verdict on the serving peer.
+		if st, ok := status.FromError(err); ok && st.Code() == codes.Unavailable && len(st.Details()) == 0 {
+			return errors.NewServiceError("subtree validation legacy RPC unavailable", err)
+		}
 		return errors.UnwrapGRPC(err)
 	}
 

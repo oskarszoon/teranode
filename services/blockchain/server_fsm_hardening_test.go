@@ -46,13 +46,21 @@ func newFSMHardeningBlockchain(t *testing.T) *Blockchain {
 func TestSendFSMEvent_AcceptedCancellationDoesNotWedge(t *testing.T) {
 	b := newFSMHardeningBlockchain(t)
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+	defer cancel()
+	store := &fsmPersistenceStore{Store: b.store}
+	b.store = store
+	store.setBeforeWrite(func(storeCtx context.Context) {
+		cancel()
+		require.NoError(t, storeCtx.Err(), "accepted write must survive caller cancellation")
+	})
 	resp, err := b.SendFSMEvent(ctx, &blockchain_api.SendFSMEventRequest{Event: blockchain_api.FSMEventType_RUN})
 	require.NoError(t, err)
 	require.Equal(t, blockchain_api.FSMStateType_RUNNING, resp.State)
+	require.EqualValues(t, 1, store.writes.Load())
 	state, err := b.store.GetFSMState(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "RUNNING", state)
+	store.setBeforeWrite(nil)
 	resp, err = b.SendFSMEvent(context.Background(), &blockchain_api.SendFSMEventRequest{Event: blockchain_api.FSMEventType_STOP})
 	require.NoError(t, err, "the next transition must remain usable after request cancellation")
 	require.Equal(t, blockchain_api.FSMStateType_IDLE, resp.State)

@@ -19,6 +19,8 @@ import (
 	kafkamessage "github.com/bsv-blockchain/teranode/util/kafka/kafka_message"
 	"github.com/bsv-blockchain/teranode/util/tracing"
 	"golang.org/x/sync/errgroup"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -122,6 +124,7 @@ func (u *Server) subtreeMessageHandler(ctx context.Context) func(msg *kafka.Kafk
 // Retain this record until authority is known, or until shutdown leaves its
 // offset uncommitted for redelivery. Other handler errors keep skip semantics.
 func (u *Server) readFSMStateForSubtreeMessage(ctx context.Context) (blockchain.FSMStateType, error) {
+	warnedUnimplemented := false
 	for {
 		if err := ctx.Err(); err != nil {
 			return blockchain.FSMStateIDLE, err
@@ -129,6 +132,10 @@ func (u *Server) readFSMStateForSubtreeMessage(ctx context.Context) (blockchain.
 		state, err := u.blockchainClient.ReadFSMState(ctx)
 		if err == nil {
 			return state, nil
+		}
+		if status.Code(err) == codes.Unimplemented && !warnedUnimplemented {
+			u.logger.Warnf("[subtreeMessageHandler] blockchain ReadFSMState RPC is unavailable; upgrade blockchain before subtreevalidation; retaining the Kafka record until authoritative FSM state is available")
+			warnedUnimplemented = true
 		}
 		timer := time.NewTimer(250 * time.Millisecond)
 		select {

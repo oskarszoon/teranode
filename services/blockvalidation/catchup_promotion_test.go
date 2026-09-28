@@ -3,6 +3,7 @@ package blockvalidation
 import (
 	"context"
 	"net/url"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -37,11 +38,13 @@ func (s *promotionFaultStore) SetFSMState(ctx context.Context, state string) err
 // LocalClient has no runtime FSM. Forward these methods to the real authority.
 type promotionAuthorityClient struct {
 	blockchain.ClientI
-	authority   *blockchain.Blockchain
-	runCalls    int
-	beforeRun   func() error
-	cachedReads int
-	cachedState *blockchain.FSMStateType
+	authority     *blockchain.Blockchain
+	runCalls      int
+	beforeRun     func() error
+	catchupCalls  atomic.Int32
+	beforeCatchup func(context.Context) error
+	cachedReads   int
+	cachedState   *blockchain.FSMStateType
 }
 
 func (c *promotionAuthorityClient) Run(ctx context.Context, _ string) error {
@@ -59,11 +62,102 @@ func (c *promotionAuthorityClient) Run(ctx context.Context, _ string) error {
 }
 
 func (c *promotionAuthorityClient) CatchUpBlocks(ctx context.Context) error {
+	c.catchupCalls.Add(1)
+	if c.beforeCatchup != nil {
+		if err := c.beforeCatchup(ctx); err != nil {
+			return err
+		}
+	}
 	_, err := c.authority.CatchUpBlocks(ctx, &emptypb.Empty{})
 	if err != nil {
 		return errors.UnwrapGRPC(err)
 	}
 	return nil
+}
+
+func TestSetFSMCatchingBlocks_RetriesDuringOwningCatchup(t *testing.T) {
+	server, client, store, catchupCtx := newPromotionAuthority(t)
+	_, err := client.authority.Run(context.Background(), &emptypb.Empty{})
+	require.NoError(t, err)
+	var writes atomic.Int32
+	store.fail = func() error {
+		if writes.Add(1) == 1 {
+			return errors.NewStorageError("temporary CATCHUPBLOCKS write failure")
+		}
+		return nil
+	}
+	var size atomic.Int64
+	size.Store(1)
+	require.NoError(t, server.setFSMCatchingBlocks(context.Background(), catchupCtx, &size))
+	require.Equal(t, int32(2), client.catchupCalls.Load())
+	requirePromotionState(t, client, store, blockchain.FSMStateCATCHINGBLOCKS)
+	server.restoreFSMState(context.Background(), catchupCtx)
+	requirePromotionState(t, client, store, blockchain.FSMStateRUNNING)
+}
+
+func TestSetFSMCatchingBlocks_ExhaustionLeavesExactIntentWithoutReplay(t *testing.T) {
+	server, client, store, catchupCtx := newPromotionAuthority(t)
+	_, err := client.authority.Run(context.Background(), &emptypb.Empty{})
+	require.NoError(t, err)
+	var writes atomic.Int32
+	store.fail = func() error {
+		writes.Add(1)
+		return errors.NewStorageError("persistent CATCHUPBLOCKS write failure")
+	}
+	var size atomic.Int64
+	size.Store(1)
+	err = server.setFSMCatchingBlocks(context.Background(), catchupCtx, &size)
+	require.Error(t, err)
+	require.Equal(t, int32(catchupAdmissionAttempts), client.catchupCalls.Load())
+	requirePromotionState(t, client, store, blockchain.FSMStateRUNNING)
+	require.Never(t, func() bool { return writes.Load() > int32(catchupAdmissionAttempts) }, 750*time.Millisecond, 10*time.Millisecond,
+		"no authority worker may write CATCHUPBLOCKS after catchup returns")
+}
+
+func TestSetFSMCatchingBlocks_CancellationStopsFurtherAttempts(t *testing.T) {
+	server, client, store, catchupCtx := newPromotionAuthority(t)
+	_, err := client.authority.Run(context.Background(), &emptypb.Empty{})
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store.fail = func() error {
+		cancel()
+		return errors.NewStorageError("CATCHUPBLOCKS write failed during cancellation")
+	}
+	var size atomic.Int64
+	size.Store(1)
+	err = server.setFSMCatchingBlocks(ctx, catchupCtx, &size)
+	require.Error(t, err)
+	require.Equal(t, int32(1), client.catchupCalls.Load())
+	requirePromotionState(t, client, store, blockchain.FSMStateRUNNING)
+}
+
+func TestSetFSMCatchingBlocks_AttemptTimeoutUsesConfiguredOrDefaultStoreBound(t *testing.T) {
+	for _, tt := range []struct {
+		name           string
+		storeTimeoutMS int
+		want           time.Duration
+	}{
+		{"zero_uses_default", 0, 7 * time.Second},
+		{"negative_uses_default", -1, 7 * time.Second},
+		{"configured", 10, 2010 * time.Millisecond},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server, client, _, catchupCtx := newPromotionAuthority(t)
+			server.settings.BlockChain.StoreDBTimeoutMillis = tt.storeTimeoutMS
+			client.beforeCatchup = func(ctx context.Context) error {
+				deadline, ok := ctx.Deadline()
+				require.True(t, ok)
+				require.InDelta(t, tt.want.Seconds(), time.Until(deadline).Seconds(), 0.25)
+				return errors.NewStateError("stop before FSM admission")
+			}
+			var size atomic.Int64
+			size.Store(1)
+			err := server.setFSMCatchingBlocks(context.Background(), catchupCtx, &size)
+			require.Error(t, err)
+			require.Equal(t, int32(1), client.catchupCalls.Load(), "state refusal must not retry")
+		})
+	}
 }
 
 func (c *promotionAuthorityClient) GetFSMCurrentState(ctx context.Context) (*blockchain.FSMStateType, error) {

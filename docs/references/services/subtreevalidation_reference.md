@@ -25,6 +25,13 @@ limits retained work to one fetch and stops polling until handlers finish;
 closing the consumer cancels the retry and leaves that record for redelivery.
 Other malformed or failed peer messages retain their existing skip policy.
 
+Upgrade blockchain before subtree validation and block validation: older
+blockchain versions return `Unimplemented` for `ReadFSMState`. If subtree
+validation is upgraded first, it logs one upgrade warning for the retained
+Kafka record and keeps retrying without committing it; block-check RPCs fail
+until blockchain serves authoritative FSM reads. Keep the blockchain service
+available during rollout to avoid holding the subtree consumer at one fetch.
+
 Block assembly's startup unmined reload is separate from subtree Kafka retry.
 Periodic recovery is disabled by default (`blockassembly_unminedRecoveryInterval=0s`);
 operators may configure a positive interval. No recovery pass should be assumed

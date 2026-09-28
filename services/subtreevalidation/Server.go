@@ -833,6 +833,11 @@ func (u *Server) checkSubtreeFromBlock(ctx context.Context, request *subtreevali
 	currentState, err := u.blockchainClient.ReadFSMState(ctx)
 	if err != nil {
 		if request.BaseUrl == "legacy" {
+			// Keep a detail-free authority outage retryable across the legacy
+			// RPC boundary. A native detailed verdict still keeps its error code.
+			if st, ok := status.FromError(err); ok && st.Code() == codes.Unavailable && len(st.Details()) == 0 {
+				return false, status.Errorf(codes.Unavailable, "[CheckSubtree] Failed to get FSM current state: %v", err)
+			}
 			return false, errors.NewProcessingError("[CheckSubtree] Failed to get FSM current state", err)
 		}
 		// A successful peer RPC would consume the request while silently

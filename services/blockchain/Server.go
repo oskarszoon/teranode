@@ -51,6 +51,7 @@ import (
 	"github.com/looplab/fsm"
 	"github.com/ordishs/gocore"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/emptypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -121,7 +122,6 @@ type Blockchain struct {
 	fsmMu                         sync.RWMutex                         // Serialises SendFSMEvent transitions (FSM read-modify-write + stateChangeTimestamp)
 	fsmPersistenceUncertain       bool                                 // Guarded by fsmMu; last write may have committed despite returning an error
 	fsmPendingIntent              *fsmTransitionIntent                 // Guarded by fsmMu; exact transition requiring an acknowledged replay
-	fsmRetryRunning               bool                                 // Guarded by fsmMu; at most one service-lifetime reconciliation worker
 	fsmNotificationPending        *blockchain_api.Notification         // Guarded by fsmMu; persisted transition awaits ordered publication
 	stateChangeTimestamp          time.Time                            // Timestamp of last state change
 	AppCtx                        context.Context                      // Application context
@@ -2901,7 +2901,8 @@ func (b *Blockchain) IsFullyReady(ctx context.Context) (bool, error) {
 // reached by an accepted, persisted transition. Success does not await subscriber
 // delivery; a delayed notification is retained in order before later transitions.
 // On a persistence error, memory stays in its prior state, but the database may
-// have committed. Only the exact original transition may reconcile that write.
+// have committed. Only a caller retry of the exact original transition may
+// reconcile that write; no background event runs after an errored RPC.
 func (b *Blockchain) SendFSMEvent(ctx context.Context, eventReq *blockchain_api.SendFSMEventRequest) (*blockchain_api.GetFSMStateResponse, error) {
 	// Serialise FSM transitions. SendFSMEvent performs a read-modify-write across
 	// the FSM (prior-state checks -> Event -> stateChangeTimestamp update) that
@@ -2916,6 +2917,9 @@ func (b *Blockchain) SendFSMEvent(ctx context.Context, eventReq *blockchain_api.
 
 // sendFSMEventLocked requires fsmMu to be held.
 func (b *Blockchain) sendFSMEventLocked(ctx context.Context, eventReq *blockchain_api.SendFSMEventRequest) (*blockchain_api.GetFSMStateResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, status.FromContextError(err).Err()
+	}
 	if b.fsmNotificationPending != nil {
 		return nil, errors.WrapGRPC(errors.NewStateError("FSM notification publication is pending"))
 	}
@@ -2971,6 +2975,9 @@ func (b *Blockchain) sendFSMEventLocked(ctx context.Context, eventReq *blockchai
 			b.logger.Warnf("[Blockchain Server] RUN refused: %s", err.Error())
 			return nil, errors.WrapGRPC(err)
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, status.FromContextError(err).Err()
 	}
 
 	// Once admitted, complete the local transition even if the RPC is cancelled.
@@ -3093,6 +3100,9 @@ func HighestCheckpointHeight(checkpoints []chaincfg.Checkpoint) uint32 {
 func (b *Blockchain) sendFSMConvenienceEvent(ctx context.Context, event blockchain_api.FSMEventType, target blockchain_api.FSMStateType) (*emptypb.Empty, error) {
 	b.fsmMu.Lock()
 	defer b.fsmMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, status.FromContextError(err).Err()
+	}
 	current := b.finiteStateMachine.Current()
 	if intent := b.fsmPendingIntent; intent != nil &&
 		(intent.source != current || intent.event != event.String() || intent.destination != target.String()) {

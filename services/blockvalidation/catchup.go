@@ -19,6 +19,7 @@ import (
 	"github.com/bsv-blockchain/teranode/services/blockchain/blockchain_api"
 	"github.com/bsv-blockchain/teranode/services/blockchain/work"
 	"github.com/bsv-blockchain/teranode/services/blockvalidation/catchup"
+	"github.com/bsv-blockchain/teranode/settings"
 	"github.com/bsv-blockchain/teranode/util/blockassemblyutil"
 	"github.com/bsv-blockchain/teranode/util/tracing"
 	"golang.org/x/sync/errgroup"
@@ -43,6 +44,11 @@ const (
 	// catchup completion boundary. Do not leave an untracked retry goroutine.
 	catchupPromotionAttempts   = 3
 	catchupPromotionRetryDelay = time.Second
+	catchupAdmissionAttempts   = 3
+	catchupAdmissionRetryDelay = time.Second
+	// A gRPC attempt needs room for the configured FSM store write and its
+	// one-second notification enqueue before the caller's child deadline.
+	catchupAdmissionRPCSlack = 2 * time.Second
 )
 
 // CatchupContext holds all the state needed during a catchup operation
@@ -1584,14 +1590,52 @@ func (u *Server) recordMaliciousAttempt(peerID string, reason string) {
 func (u *Server) setFSMCatchingBlocks(ctx context.Context, catchupCtx *CatchupContext, size *atomic.Int64) error {
 	u.logger.Infof("[catchup][%s] Setting node to CATCHINGBLOCKS state for %d blocks", catchupCtx.blockUpTo.Hash().String(), size.Load())
 
-	if err := u.blockchainClient.CatchUpBlocks(ctx); err != nil {
-		if errors.Is(err, errors.ErrStateError) {
-			return errors.NewStateError("[catchup][%s] FSM rejected CATCHUPBLOCKS transition", catchupCtx.blockUpTo.Hash().String(), err)
-		}
-		return errors.NewServiceError("[catchup][%s] failed to transition FSM to CATCHINGBLOCKS", catchupCtx.blockUpTo.Hash().String(), err)
+	storeTimeoutMillis := settings.DefaultBlockchainStoreDBTimeoutMillis
+	if u.settings != nil && u.settings.BlockChain.StoreDBTimeoutMillis > 0 {
+		storeTimeoutMillis = u.settings.BlockChain.StoreDBTimeoutMillis
 	}
+	attemptTimeout := time.Duration(storeTimeoutMillis)*time.Millisecond + catchupAdmissionRPCSlack
+	var err error
+	for attempt := 1; attempt <= catchupAdmissionAttempts; attempt++ {
+		if err = ctx.Err(); err != nil {
+			break
+		}
+		attemptCtx, cancel := context.WithTimeout(ctx, attemptTimeout)
+		err = u.blockchainClient.CatchUpBlocks(attemptCtx)
+		attemptCtxErr := attemptCtx.Err() // Capture before cancel marks every attempt canceled.
+		cancel()
+		if err == nil {
+			return nil
+		}
+		if ctx.Err() != nil || attempt == catchupAdmissionAttempts || !retryableFSMCatchupError(err, attemptCtxErr) {
+			break
+		}
+		u.logger.Warnf("[catchup][%s] CATCHUPBLOCKS attempt %d failed; retrying in %s: %v", catchupCtx.blockUpTo.Hash().String(), attempt, catchupAdmissionRetryDelay, err)
+		timer := time.NewTimer(catchupAdmissionRetryDelay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			err = ctx.Err()
+		case <-timer.C:
+		}
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	if errors.Is(err, errors.ErrStateError) {
+		return errors.NewStateError("[catchup][%s] FSM rejected CATCHUPBLOCKS transition", catchupCtx.blockUpTo.Hash().String(), err)
+	}
+	return errors.NewServiceError("[catchup][%s] failed to transition FSM to CATCHINGBLOCKS", catchupCtx.blockUpTo.Hash().String(), err)
+}
 
-	return nil
+func retryableFSMCatchupError(err, attemptCtxErr error) bool {
+	if errors.Is(err, errors.ErrStateError) || errors.Is(err, errors.ErrInvalidArgument) ||
+		errors.Is(err, context.Canceled) || status.Code(err) == codes.Canceled {
+		return false
+	}
+	return errors.Is(attemptCtxErr, context.DeadlineExceeded) ||
+		errors.Is(err, context.DeadlineExceeded) || status.Code(err) == codes.DeadlineExceeded ||
+		status.Code(err) == codes.Unavailable || errors.IsTransientLocalError(err)
 }
 
 // restoreFSMState restores the FSM state after catchup.

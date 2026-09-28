@@ -2053,6 +2053,14 @@ func (c *Client) CatchUpBlocks(ctx context.Context) error {
 
 	_, err := c.client.CatchUpBlocks(ctx, &emptypb.Empty{})
 	if err != nil {
+		// The catchup caller owns bounded retries. Preserve exhausted raw
+		// transport failures; UnwrapGRPC would turn detail-free statuses into
+		// generic ERR_ERROR and hide their retryable code. Native verdicts keep
+		// their existing detailed decoding.
+		if st, ok := status.FromError(err); ok && len(st.Details()) == 0 &&
+			(st.Code() == codes.Unavailable || st.Code() == codes.DeadlineExceeded) {
+			return err
+		}
 		return errors.UnwrapGRPC(err)
 	}
 

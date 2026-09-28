@@ -25,12 +25,14 @@ import (
 type fsmPersistenceStore struct {
 	blockchainstore.Store
 	mu                sync.Mutex
+	writes            atomic.Int32
 	writeErr          error
 	commitBeforeError bool
 	beforeWrite       func(context.Context)
 }
 
 func (s *fsmPersistenceStore) SetFSMState(ctx context.Context, state string) error {
+	s.writes.Add(1)
 	s.mu.Lock()
 	beforeWrite, writeErr, commitBeforeError := s.beforeWrite, s.writeErr, s.commitBeforeError
 	s.mu.Unlock()
@@ -44,6 +46,80 @@ func (s *fsmPersistenceStore) SetFSMState(ctx context.Context, state string) err
 		return err
 	}
 	return writeErr
+}
+
+func TestFSMFailedCatchupDoesNotReplayAfterCallerReturns(t *testing.T) {
+	for _, committed := range []bool{false, true} {
+		name := "before_commit"
+		if committed {
+			name = "lost_acknowledgement"
+		}
+		t.Run(name, func(t *testing.T) {
+			b, store := newFSMPersistenceTestBlockchain(t, blockchain_api.FSMStateType_RUNNING)
+			appCtx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			b.AppCtx = appCtx
+			b.subscriptionManagerReady.Store(true)
+			store.setFault(teranodeerrors.NewStorageError("catchup write failed"), committed)
+			_, err := b.CatchUpBlocks(context.Background(), &emptypb.Empty{})
+			require.Error(t, err)
+			require.Equal(t, blockchain_api.FSMStateType_RUNNING.String(), b.finiteStateMachine.Current())
+			require.Empty(t, b.notifications)
+			require.True(t, b.fsmPersistenceUncertain)
+			store.setFault(nil, false)
+			require.Never(t, func() bool { return store.writes.Load() > 1 }, 750*time.Millisecond, 10*time.Millisecond,
+				"no worker may finish CATCHUPBLOCKS after the caller received an error")
+			persisted, err := store.GetFSMState(context.Background())
+			require.NoError(t, err)
+			if committed {
+				require.Equal(t, blockchain_api.FSMStateType_CATCHINGBLOCKS.String(), persisted)
+			} else {
+				require.Equal(t, blockchain_api.FSMStateType_RUNNING.String(), persisted)
+			}
+			_, err = b.ReadFSMState(context.Background(), &emptypb.Empty{})
+			require.Error(t, err)
+			_, err = b.Idle(context.Background(), &emptypb.Empty{})
+			require.Error(t, err, "a different event cannot overwrite uncertain persistence")
+			_, err = b.CatchUpBlocks(context.Background(), &emptypb.Empty{})
+			require.NoError(t, err, "an explicit exact retry must reconcile the intent")
+			require.Equal(t, blockchain_api.FSMStateType_CATCHINGBLOCKS.String(), b.finiteStateMachine.Current())
+			require.Len(t, b.notifications, 1)
+		})
+	}
+}
+
+func TestFSMCanceledWhileQueuedDoesNotAdmitCatchup(t *testing.T) {
+	for _, direct := range []bool{false, true} {
+		name := "convenience"
+		if direct {
+			name = "direct"
+		}
+		t.Run(name, func(t *testing.T) {
+			b, store := newFSMPersistenceTestBlockchain(t, blockchain_api.FSMStateType_RUNNING)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			started, done := make(chan struct{}), make(chan error, 1)
+			b.fsmMu.Lock()
+			go func() {
+				close(started)
+				if direct {
+					_, err := b.SendFSMEvent(ctx, &blockchain_api.SendFSMEventRequest{Event: blockchain_api.FSMEventType_CATCHUPBLOCKS})
+					done <- err
+				} else {
+					_, err := b.CatchUpBlocks(ctx, &emptypb.Empty{})
+					done <- err
+				}
+			}()
+			<-started
+			cancel()
+			b.fsmMu.Unlock()
+			require.Error(t, <-done)
+			require.Zero(t, store.writes.Load())
+			require.Equal(t, blockchain_api.FSMStateType_RUNNING.String(), b.finiteStateMachine.Current())
+			require.Empty(t, b.notifications)
+			require.Nil(t, b.fsmPendingIntent)
+		})
+	}
 }
 
 func (s *fsmPersistenceStore) setFault(err error, commitBeforeError bool) {
@@ -62,13 +138,46 @@ func (s *fsmPersistenceStore) setBeforeWrite(fn func(context.Context)) {
 type fsmRetryCheckpointStore struct {
 	*fsmPersistenceStore
 	height atomic.Uint32
+	onRead func()
 }
 
 func (s *fsmRetryCheckpointStore) GetBestBlockHeader(context.Context) (*model.BlockHeader, *model.BlockHeaderMeta, error) {
+	if s.onRead != nil {
+		s.onRead()
+	}
 	return &model.BlockHeader{}, &model.BlockHeaderMeta{Height: s.height.Load()}, nil
 }
 
-func TestFSMUncertainWorkerRechecksCheckpointBeforeRun(t *testing.T) {
+func TestSendFSMEvent_CanceledDuringSuccessfulCheckpointReadDoesNotAdmit(t *testing.T) {
+	b, store := newFSMPersistenceTestBlockchain(t, blockchain_api.FSMStateType_IDLE)
+	params := *b.settings.ChainCfgParams
+	params.Checkpoints = []chaincfg.Checkpoint{{Height: 1}}
+	b.settings.ChainCfgParams = &params
+	checkpointStore := &fsmRetryCheckpointStore{fsmPersistenceStore: store}
+	checkpointStore.height.Store(1)
+	b.store = checkpointStore
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	reads := 0
+	checkpointStore.onRead = func() {
+		reads++
+		cancel()
+	}
+
+	resp, err := b.SendFSMEvent(ctx, &blockchain_api.SendFSMEventRequest{Event: blockchain_api.FSMEventType_RUN})
+	require.Error(t, err)
+	require.Nil(t, resp)
+	require.Equal(t, 1, reads, "the RUN gate must finish a successful checkpoint read")
+	require.Zero(t, store.writes.Load(), "cancellation before admission must not persist RUN")
+	require.Equal(t, blockchain_api.FSMStateType_IDLE.String(), b.finiteStateMachine.Current())
+	require.Nil(t, b.fsmPendingIntent)
+	require.Empty(t, b.notifications)
+	persisted, err := store.GetFSMState(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, blockchain_api.FSMStateType_IDLE.String(), persisted)
+}
+
+func TestFSMUncertainRunRetryRechecksCheckpoint(t *testing.T) {
 	b, faultStore := newFSMPersistenceTestBlockchain(t, blockchain_api.FSMStateType_IDLE)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -85,20 +194,22 @@ func TestFSMUncertainWorkerRechecksCheckpointBeforeRun(t *testing.T) {
 	require.Error(t, err)
 	checkpointStore.height.Store(0)
 	faultStore.setFault(nil, false)
-	time.Sleep(3 * fsmPersistenceRetryInterval)
 	_, err = b.ReadFSMState(context.Background(), &emptypb.Empty{})
 	require.Error(t, err, "below-checkpoint retry must leave authority unavailable")
 	persisted, err := faultStore.GetFSMState(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, blockchain_api.FSMStateType_IDLE.String(), persisted)
+	_, err = b.SendFSMEvent(context.Background(), &blockchain_api.SendFSMEventRequest{Event: blockchain_api.FSMEventType_RUN})
+	require.Error(t, err, "an explicit retry must still obey the checkpoint gate")
 	checkpointStore.height.Store(1)
-	require.Eventually(t, func() bool {
-		state, readErr := b.ReadFSMState(context.Background(), &emptypb.Empty{})
-		return readErr == nil && state.State == blockchain_api.FSMStateType_RUNNING
-	}, 3*time.Second, 10*time.Millisecond)
+	_, err = b.SendFSMEvent(context.Background(), &blockchain_api.SendFSMEventRequest{Event: blockchain_api.FSMEventType_RUN})
+	require.NoError(t, err)
+	state, err := b.ReadFSMState(context.Background(), &emptypb.Empty{})
+	require.NoError(t, err)
+	require.Equal(t, blockchain_api.FSMStateType_RUNNING, state.State)
 }
 
-func TestFSMUncertainCallerRetryRetiresWorkerIntent(t *testing.T) {
+func TestFSMUncertainCallerRetryRetiresIntent(t *testing.T) {
 	b, store := newFSMPersistenceTestBlockchain(t, blockchain_api.FSMStateType_RUNNING)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -111,52 +222,52 @@ func TestFSMUncertainCallerRetryRetiresWorkerIntent(t *testing.T) {
 	require.NoError(t, err)
 	_, err = b.SendFSMEvent(context.Background(), &blockchain_api.SendFSMEventRequest{Event: blockchain_api.FSMEventType_RUN})
 	require.NoError(t, err)
-	time.Sleep(2 * fsmPersistenceRetryInterval)
 	persisted, err := store.GetFSMState(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, blockchain_api.FSMStateType_RUNNING.String(), persisted)
-	require.Len(t, b.notifications, 2, "retired STOP must publish once and never replay after RUN")
+	require.Len(t, b.notifications, 2, "retired STOP must publish once before RUN")
 }
 
-func TestFSMUncertainWorkerShutdownDuringBoundedWrite(t *testing.T) {
+func TestFSMAdmittedWriteCompletesAfterCallerCancellation(t *testing.T) {
 	b, store := newFSMPersistenceTestBlockchain(t, blockchain_api.FSMStateType_RUNNING)
 	ctx, cancel := context.WithCancel(context.Background())
-	b.AppCtx = ctx
-	store.setFault(teranodeerrors.NewStorageError("initial STOP failure"), false)
-	_, err := b.Idle(context.Background(), &emptypb.Empty{})
-	require.Error(t, err)
+	defer cancel()
 	entered, release := make(chan struct{}), make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
 	store.setBeforeWrite(func(storeCtx context.Context) {
 		close(entered)
 		_, hasDeadline := storeCtx.Deadline()
 		if !hasDeadline {
-			panic("replay write must remain bounded")
+			panic("admitted write must remain bounded")
 		}
 		<-release
 	})
-	store.setFault(nil, false)
-	require.Eventually(t, func() bool {
-		select {
-		case <-entered:
-			return true
-		default:
-			return false
-		}
-	}, time.Second, 5*time.Millisecond)
+	done := make(chan error, 1)
+	go func() {
+		_, err := b.Idle(ctx, &emptypb.Empty{})
+		done <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("admitted write did not start")
+	}
 	cancel()
 	close(release)
-	require.Eventually(t, func() bool {
-		b.fsmMu.RLock()
-		defer b.fsmMu.RUnlock()
-		return !b.fsmRetryRunning
-	}, time.Second, 10*time.Millisecond)
+	require.NoError(t, <-done)
 	persisted, err := store.GetFSMState(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, blockchain_api.FSMStateType_IDLE.String(), persisted,
-		"already admitted detached bounded replay may finish after shutdown")
+		"an already admitted detached bounded write may finish after caller cancellation")
 }
 
-func TestFSMUncertainWorkerPreservesCommittedStop(t *testing.T) {
+func TestFSMUncertainExplicitRetryPreservesCommittedStop(t *testing.T) {
 	b, store := newFSMPersistenceTestBlockchain(t, blockchain_api.FSMStateType_RUNNING)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -173,33 +284,30 @@ func TestFSMUncertainWorkerPreservesCommittedStop(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, blockchain_api.FSMStateType_IDLE.String(), persisted)
 	store.setFault(nil, false)
-	require.Eventually(t, func() bool {
-		state, readErr := b.ReadFSMState(context.Background(), &emptypb.Empty{})
-		return readErr == nil && state.State == blockchain_api.FSMStateType_IDLE
-	}, 3*time.Second, 10*time.Millisecond)
+	_, err = b.Idle(context.Background(), &emptypb.Empty{})
+	require.NoError(t, err, "only the exact STOP retry may reconcile a lost acknowledgement")
+	state, err := b.ReadFSMState(context.Background(), &emptypb.Empty{})
+	require.NoError(t, err)
+	require.Equal(t, blockchain_api.FSMStateType_IDLE, state.State)
 	require.Len(t, b.notifications, 1)
 	_, err = b.SendFSMEvent(context.Background(), &blockchain_api.SendFSMEventRequest{Event: blockchain_api.FSMEventType_RUN})
 	require.NoError(t, err)
-	time.Sleep(2 * fsmPersistenceRetryInterval)
 	persisted, err = store.GetFSMState(context.Background())
 	require.NoError(t, err)
-	require.Equal(t, blockchain_api.FSMStateType_RUNNING.String(), persisted, "retired STOP retry must never replay after a later RUN")
+	require.Equal(t, blockchain_api.FSMStateType_RUNNING.String(), persisted, "retired STOP must not overwrite a later RUN")
 	require.Len(t, b.notifications, 2)
 }
 
-func TestFSMUncertainWorkerStopsOnShutdown(t *testing.T) {
+func TestFSMUncertainStopDoesNotReplayInBackground(t *testing.T) {
 	b, store := newFSMPersistenceTestBlockchain(t, blockchain_api.FSMStateType_RUNNING)
 	ctx, cancel := context.WithCancel(context.Background())
 	b.AppCtx = ctx
+	t.Cleanup(cancel)
 	store.setFault(teranodeerrors.NewStorageError("persistent outage"), false)
 	_, err := b.Idle(context.Background(), &emptypb.Empty{})
 	require.Error(t, err)
-	cancel()
-	require.Eventually(t, func() bool {
-		b.fsmMu.RLock()
-		defer b.fsmMu.RUnlock()
-		return !b.fsmRetryRunning
-	}, time.Second, 10*time.Millisecond)
+	store.setFault(nil, false)
+	require.Never(t, func() bool { return store.writes.Load() > 1 }, 750*time.Millisecond, 10*time.Millisecond)
 	require.True(t, b.fsmPersistenceUncertain)
 }
 
