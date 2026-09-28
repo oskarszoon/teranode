@@ -55,3 +55,47 @@ func TestCatchUpBlocksClientPreservesExhaustedRawUnavailable(t *testing.T) {
 	require.True(t, errors.Is(err, errors.ErrStateError), "native state verdict must retain its details")
 	require.Equal(t, int32(4), calls.Load(), "nonretryable native verdict needs only one inner attempt")
 }
+
+func TestRunClientPreservesRawTransportAndNativeErrors(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer listener.Close()
+	var calls atomic.Int32
+	var response atomic.Int32
+	server := grpc.NewServer(grpc.UnaryInterceptor(func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+		if info.FullMethod == blockchain_api.BlockchainAPI_Run_FullMethodName {
+			calls.Add(1)
+			switch response.Load() {
+			case 1:
+				return nil, errors.WrapGRPC(errors.NewServiceUnavailableError("native authority unavailable"))
+			case 2:
+				return nil, errors.WrapGRPC(errors.NewStateError("operator IDLE"))
+			default:
+				return nil, status.Error(codes.Unavailable, "transport outage")
+			}
+		}
+		return handler(ctx, req)
+	}))
+	blockchain_api.RegisterBlockchainAPIServer(server, &blockchain_api.UnimplementedBlockchainAPIServer{})
+	go func() { _ = server.Serve(listener) }()
+	defer server.Stop()
+	settings := test.CreateBaseTestSettings(t)
+	conn, err := util.GetGRPCClient(t.Context(), listener.Addr().String(), &util.ConnectionOptions{
+		MaxRetries: 3, RetryBackoff: time.Millisecond, CallerName: "blockchain-run-test",
+	}, settings)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, conn.Close()) }()
+	client := &Client{client: blockchain_api.NewBlockchainAPIClient(conn), logger: ulogger.TestLogger{}}
+
+	err = client.Run(t.Context(), "test")
+	require.Equal(t, codes.Unavailable, status.Code(err), "outer promotion retry must see exhausted raw transport Unavailable")
+	require.Equal(t, int32(3), calls.Load(), "production interceptor must exhaust its configured inner attempts")
+
+	response.Store(1)
+	err = client.Run(t.Context(), "test")
+	require.True(t, errors.Is(err, errors.ErrServiceUnavailable), "native unavailable code and details must survive client decoding")
+
+	response.Store(2)
+	err = client.Run(t.Context(), "test")
+	require.True(t, errors.Is(err, errors.ErrStateError), "permanent native state verdict must remain distinguishable")
+}

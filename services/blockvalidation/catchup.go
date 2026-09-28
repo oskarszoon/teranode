@@ -40,9 +40,8 @@ const (
 	// catchup teardown or detach the calls from shutdown.
 	catchupReputationReportTimeout = 5 * time.Second
 
-	// Bound recovery from transient FSM persistence or transport failures at the
-	// catchup completion boundary. Do not leave an untracked retry goroutine.
-	catchupPromotionAttempts   = 3
+	// Keep transient RUN promotion retries inside the owning catchup lifecycle.
+	// Each RPC is bounded separately; shutdown interrupts the paced retry.
 	catchupPromotionRetryDelay = time.Second
 	catchupAdmissionAttempts   = 3
 	catchupAdmissionRetryDelay = time.Second
@@ -1590,11 +1589,7 @@ func (u *Server) recordMaliciousAttempt(peerID string, reason string) {
 func (u *Server) setFSMCatchingBlocks(ctx context.Context, catchupCtx *CatchupContext, size *atomic.Int64) error {
 	u.logger.Infof("[catchup][%s] Setting node to CATCHINGBLOCKS state for %d blocks", catchupCtx.blockUpTo.Hash().String(), size.Load())
 
-	storeTimeoutMillis := settings.DefaultBlockchainStoreDBTimeoutMillis
-	if u.settings != nil && u.settings.BlockChain.StoreDBTimeoutMillis > 0 {
-		storeTimeoutMillis = u.settings.BlockChain.StoreDBTimeoutMillis
-	}
-	attemptTimeout := time.Duration(storeTimeoutMillis)*time.Millisecond + catchupAdmissionRPCSlack
+	attemptTimeout := u.fsmTransitionAttemptTimeout()
 	var err error
 	for attempt := 1; attempt <= catchupAdmissionAttempts; attempt++ {
 		if err = ctx.Err(); err != nil {
@@ -1628,6 +1623,14 @@ func (u *Server) setFSMCatchingBlocks(ctx context.Context, catchupCtx *CatchupCo
 	return errors.NewServiceError("[catchup][%s] failed to transition FSM to CATCHINGBLOCKS", catchupCtx.blockUpTo.Hash().String(), err)
 }
 
+func (u *Server) fsmTransitionAttemptTimeout() time.Duration {
+	storeTimeoutMillis := settings.DefaultBlockchainStoreDBTimeoutMillis
+	if u.settings != nil && u.settings.BlockChain.StoreDBTimeoutMillis > 0 {
+		storeTimeoutMillis = u.settings.BlockChain.StoreDBTimeoutMillis
+	}
+	return time.Duration(storeTimeoutMillis)*time.Millisecond + catchupAdmissionRPCSlack
+}
+
 func retryableFSMCatchupError(err, attemptCtxErr error) bool {
 	if errors.Is(err, errors.ErrStateError) || errors.Is(err, errors.ErrInvalidArgument) ||
 		errors.Is(err, context.Canceled) || status.Code(err) == codes.Canceled {
@@ -1641,7 +1644,8 @@ func retryableFSMCatchupError(err, attemptCtxErr error) bool {
 // restoreFSMState restores the FSM state after catchup.
 // Requests RUN from the blockchain authority, which serializes promotion with
 // operator STOP and refuses automatic promotion from IDLE. Transient failures
-// receive bounded retries because a caught-up node may not run catchup again.
+// receive paced retries while this catchup still owns the transition, because a
+// caught-up node may not run catchup again. Every RPC has a bounded deadline.
 //
 // Parameters:
 //   - ctx: Context for cancellation
@@ -1652,18 +1656,22 @@ func (u *Server) restoreFSMState(ctx context.Context, catchupCtx *CatchupContext
 	}
 	var err error
 	attempts := 0
-	for attempts < catchupPromotionAttempts {
+	attemptTimeout := u.fsmTransitionAttemptTimeout()
+	for {
 		if err = ctx.Err(); err != nil {
 			break
 		}
 		attempts++
 		// Never use a cached state read as admission. Only the authority can
 		// decide atomically whether RUN is still permitted after operator STOP.
-		err = u.blockchainClient.Run(ctx, "blockvalidation/Server")
+		attemptCtx, cancel := context.WithTimeout(ctx, attemptTimeout)
+		err = u.blockchainClient.Run(attemptCtx, "blockvalidation/Server")
+		attemptCtxErr := attemptCtx.Err()
+		cancel()
 		if err == nil {
 			return
 		}
-		if ctx.Err() != nil || !retryableFSMPromotionError(err) || attempts == catchupPromotionAttempts {
+		if ctx.Err() != nil || !retryableFSMPromotionError(err, attemptCtxErr) {
 			break
 		}
 		u.logger.Warnf("[catchup][%s] RUN promotion attempt %d failed; retrying in %s: %v", catchupCtx.blockUpTo.Hash().String(), attempts, catchupPromotionRetryDelay, err)
@@ -1687,16 +1695,30 @@ func (u *Server) restoreFSMState(ctx context.Context, catchupCtx *CatchupContext
 		u.logger.Infof("[catchup][%s] Automatic RUN declined while operator IDLE after %d attempts; explicit operator action is required: %v", catchupCtx.blockUpTo.Hash().String(), attempts, err)
 		return
 	}
-	u.logger.Warnf("[catchup][%s] RUNNING not durably confirmed after %d attempts; inspect FSM state, mining readiness and store health before retrying RUN: %v", catchupCtx.blockUpTo.Hash().String(), attempts, err)
+	u.logger.Warnf("[catchup][%s] RUNNING not durably confirmed when catchup ownership ended after %d attempts; inspect FSM state, mining readiness and store health before retrying RUN: %v", catchupCtx.blockUpTo.Hash().String(), attempts, err)
 }
 
-func retryableFSMPromotionError(err error) bool {
+func retryableFSMPromotionError(err, attemptCtxErr error) bool {
 	if errors.Is(err, context.Canceled) || status.Code(err) == codes.Canceled {
+		return false
+	}
+	if errors.Is(err, errors.ErrInvalidArgument) {
 		return false
 	}
 	// A failed checkpoint read is a StateError wrapping a deadline or storage
 	// cause. Retry those causes; plain below-checkpoint/IDLE refusals have none.
-	if errors.Is(err, context.DeadlineExceeded) || status.Code(err) == codes.DeadlineExceeded {
+	// The child deadline may race with a permanent authority verdict, which must
+	// still win rather than turn into a retry loop.
+	if errors.Is(err, errors.ErrStateError) &&
+		!errors.Is(err, context.DeadlineExceeded) &&
+		!errors.Is(err, errors.ErrStorageError) &&
+		!errors.Is(err, errors.ErrStorageUnavailable) &&
+		!errors.Is(err, errors.ErrServiceUnavailable) &&
+		status.Code(err) != codes.DeadlineExceeded && status.Code(err) != codes.Unavailable {
+		return false
+	}
+	if errors.Is(attemptCtxErr, context.DeadlineExceeded) ||
+		errors.Is(err, context.DeadlineExceeded) || status.Code(err) == codes.DeadlineExceeded {
 		return true
 	}
 	return errors.Is(err, errors.ErrStorageError) || errors.Is(err, errors.ErrStorageUnavailable) ||

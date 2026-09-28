@@ -40,7 +40,7 @@ type promotionAuthorityClient struct {
 	blockchain.ClientI
 	authority     *blockchain.Blockchain
 	runCalls      int
-	beforeRun     func() error
+	beforeRun     func(context.Context) error
 	catchupCalls  atomic.Int32
 	beforeCatchup func(context.Context) error
 	cachedReads   int
@@ -50,7 +50,7 @@ type promotionAuthorityClient struct {
 func (c *promotionAuthorityClient) Run(ctx context.Context, _ string) error {
 	c.runCalls++
 	if c.beforeRun != nil {
-		if err := c.beforeRun(); err != nil {
+		if err := c.beforeRun(ctx); err != nil {
 			return err
 		}
 	}
@@ -215,12 +215,67 @@ func TestRestoreFSMState_RetriesPersistenceFailure(t *testing.T) {
 	require.Equal(t, 2, client.runCalls)
 }
 
-func TestRestoreFSMState_ExhaustedPersistenceRetriesRemainCatching(t *testing.T) {
+func TestRestoreFSMState_RecoversAfterLegacyThreeAttemptWindow(t *testing.T) {
 	server, client, store, catchupCtx := newPromotionAuthority(t)
-	store.fail = func() error { return errors.NewStorageError("database unavailable") }
-	server.restoreFSMState(context.Background(), catchupCtx)
-	requirePromotionState(t, client, store, blockchain.FSMStateCATCHINGBLOCKS)
-	require.Equal(t, 3, client.runCalls)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var writes atomic.Int32
+	fourthAttempt := make(chan struct{})
+	store.fail = func() error {
+		attempt := writes.Add(1)
+		if attempt == 4 {
+			close(fourthAttempt)
+		}
+		if attempt <= 5 {
+			return errors.NewStorageError("temporary database outage")
+		}
+		return nil
+	}
+	done := make(chan struct{})
+	go func() {
+		server.restoreFSMState(ctx, catchupCtx)
+		close(done)
+	}()
+	select {
+	case <-fourthAttempt:
+		// The catchup owner remains inside restore after the former retry cap.
+	case <-done:
+		t.Fatal("catchup owner returned before the database recovered")
+	case <-ctx.Done():
+		t.Fatal("RUN promotion did not reach a fourth attempt")
+	}
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatal("RUN promotion did not recover before the owning context ended")
+	}
+	requirePromotionState(t, client, store, blockchain.FSMStateRUNNING)
+	require.Equal(t, 6, client.runCalls, "the owner must retry exact RUN until it is acknowledged")
+}
+
+func TestRestoreFSMState_AttemptTimeoutUsesConfiguredOrDefaultStoreBound(t *testing.T) {
+	for _, tt := range []struct {
+		name           string
+		storeTimeoutMS int
+		want           time.Duration
+	}{
+		{"zero_uses_default", 0, 7 * time.Second},
+		{"negative_uses_default", -1, 7 * time.Second},
+		{"configured", 10, 2010 * time.Millisecond},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server, client, _, catchupCtx := newPromotionAuthority(t)
+			server.settings.BlockChain.StoreDBTimeoutMillis = tt.storeTimeoutMS
+			client.beforeRun = func(ctx context.Context) error {
+				deadline, ok := ctx.Deadline()
+				require.True(t, ok, "every RUN RPC must be bounded independently")
+				require.InDelta(t, tt.want.Seconds(), time.Until(deadline).Seconds(), 0.25)
+				return errors.NewStateError("permanent operator refusal")
+			}
+			server.restoreFSMState(context.Background(), catchupCtx)
+			require.Equal(t, 1, client.runCalls, "permanent state refusal must stop immediately")
+		})
+	}
 }
 
 func TestRestoreFSMState_CancellationStopsRetry(t *testing.T) {
@@ -234,6 +289,8 @@ func TestRestoreFSMState_CancellationStopsRetry(t *testing.T) {
 	server.restoreFSMState(ctx, catchupCtx)
 	requirePromotionState(t, client, store, blockchain.FSMStateCATCHINGBLOCKS)
 	require.Equal(t, 1, client.runCalls)
+	require.Never(t, func() bool { return client.runCalls > 1 }, 250*time.Millisecond, 10*time.Millisecond,
+		"no RUN retry may outlive its owning context")
 }
 
 func TestRestoreFSMState_CancellationInterruptsBackoff(t *testing.T) {
@@ -264,7 +321,7 @@ func TestRestoreFSMState_TransientTransportFailure(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			server, client, store, catchupCtx := newPromotionAuthority(t)
-			client.beforeRun = func() error {
+			client.beforeRun = func(context.Context) error {
 				if client.runCalls == 1 {
 					return tc.err
 				}
@@ -279,10 +336,17 @@ func TestRestoreFSMState_TransientTransportFailure(t *testing.T) {
 
 func TestRestoreFSMState_DoesNotRetryStateRejection(t *testing.T) {
 	server, client, store, catchupCtx := newPromotionAuthority(t)
-	client.beforeRun = func() error { return errors.NewStateError("tip below highest checkpoint") }
+	client.beforeRun = func(context.Context) error { return errors.NewStateError("tip below highest checkpoint") }
 	server.restoreFSMState(context.Background(), catchupCtx)
 	requirePromotionState(t, client, store, blockchain.FSMStateCATCHINGBLOCKS)
 	require.Equal(t, 1, client.runCalls)
+}
+
+func TestRetryableFSMPromotionError_PermanentVerdictWinsConcurrentChildDeadline(t *testing.T) {
+	require.False(t, retryableFSMPromotionError(errors.NewStateError("operator IDLE"), context.DeadlineExceeded),
+		"an expired child deadline cannot turn an authoritative state refusal into an endless retry")
+	require.True(t, retryableFSMPromotionError(errors.NewStateError("tip read failed", context.DeadlineExceeded), context.DeadlineExceeded),
+		"a checkpoint read timeout remains transient")
 }
 
 func TestRestoreFSMState_IgnoresCachedIdle(t *testing.T) {
@@ -297,7 +361,7 @@ func TestRestoreFSMState_IgnoresCachedIdle(t *testing.T) {
 
 func TestRestoreFSMState_RetryPreservesOperatorIdle(t *testing.T) {
 	server, client, store, catchupCtx := newPromotionAuthority(t)
-	client.beforeRun = func() error {
+	client.beforeRun = func(context.Context) error {
 		if client.runCalls == 1 {
 			// Another promotion completes, then an operator parks the node before
 			// our retry. The retry must consult the authority after this STOP.

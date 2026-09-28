@@ -534,7 +534,7 @@ Waits for the FSM to transition from the IDLE state.
 func (b *Blockchain) SendFSMEvent(ctx context.Context, eventReq *blockchain_api.SendFSMEventRequest) (*blockchain_api.GetFSMStateResponse, error)
 ```
 
-Sends an explicit operator event to the finite state machine. Accepted transitions persist their destination before memory, notifications, or metrics change. Success confirms persisted FSM state, while subscriber notification delivery may follow later. Failed writes return an error; the database may nevertheless have committed, so only the exact original transition may be retried. A background worker retries that transition while the service runs. No compensating rollback is attempted.
+Sends an explicit operator event to the finite state machine. Accepted transitions persist their destination before memory, notifications, or metrics change. Success confirms persisted FSM state, while subscriber notification delivery may follow later. Failed writes return an error; the database may nevertheless have committed, so only the exact original transition may be retried by a caller. No compensating rollback is attempted.
 
 ### Run
 
@@ -546,7 +546,7 @@ Automatically promotes `CATCHINGBLOCKS` to `RUNNING`. It refuses automatic promo
 
 The Run, CatchUpBlocks, and Idle convenience RPCs check authoritative state under the transition lock. An already-current target succeeds without writing. After an uncertain persistence result, only a caller retry of the original event and destination may reconcile it; no background FSM event runs after the caller receives an error. A different convenience call cannot overwrite an ambiguous operator STOP. An acknowledged exact retry emits the original transition notification once. Authority reads remain unavailable while persistence is uncertain, and an exhausted or canceled caller may leave that uncertainty for explicit reconciliation. Clients contact the server even when their cached state already matches. A delayed notification blocks different transitions until it is queued, but does not hide an acknowledged durable state from authoritative reads.
 
-Catchup completion makes at most three promotion attempts for transient failures, with cancellable one-second backoff. Exhaustion warns that RUNNING was not durably confirmed and asks the operator to inspect FSM state, mining readiness and store health. This does not retry permanent state rejections or override an operator STOP.
+Catchup completion retries the exact RUN transition for transient failures while the catchup call remains active, with a bounded deadline for each RPC and cancellable one-second backoff. Recovery during that lifecycle can reach RUNNING without operator action. Service cancellation ends the retry; an unresolved write then requires an explicit exact retry. Permanent state rejections stop immediately, and automatic promotion does not override an operator STOP.
 
 ### CatchUpBlocks
 

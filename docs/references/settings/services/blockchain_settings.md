@@ -77,8 +77,9 @@ When using PostgreSQL as the blockchain store, these nested settings configure c
   transition lock. Notification delivery and the complete RPC are not bounded
   by this setting. Large values can delay other transitions after a caller exits.
 - The store helper does not retry. Automatic catchup promotion retries transient
-  failures at most three times with cancellable backoff and warns on exhaustion.
-  Explicit operator requests can be retried after store recovery.
+  failures with cancellable backoff while its catchup call remains active. Each
+  RPC has a bounded deadline; service cancellation ends the retry. Explicit
+  operator requests can be retried after store recovery.
 - Tune using observed store latency under load; the five-second default is not
   a measured production p99 guarantee.
 
