@@ -117,7 +117,7 @@ func TestLoadUnminedSorted_OrdersAndSpills(t *testing.T) {
 	copy(want, txs)
 	stableSortUnminedByCreatedAt(want)
 
-	err := ba.loadUnminedSorted(context.Background(), &sliceUnminedIterator{batches: inBatches(txs, 97)}, map[uint32]bool{})
+	err := ba.loadUnminedSorted(context.Background(), &sliceUnminedIterator{batches: inBatches(txs, 97)}, map[uint32]bool{}, false)
 	require.NoError(t, err)
 
 	got := loadedHashes(t, ba)
@@ -153,7 +153,7 @@ func TestLoadUnminedSorted_ParentsFirstOnTies(t *testing.T) {
 
 	iter := &sliceUnminedIterator{batches: [][]*utxo.UnminedTransaction{{grandchild, child}, {early, parent}}}
 
-	require.NoError(t, ba.loadUnminedSorted(context.Background(), iter, map[uint32]bool{}))
+	require.NoError(t, ba.loadUnminedSorted(context.Background(), iter, map[uint32]bool{}, false))
 
 	require.Equal(t, []chainhash.Hash{early.Hash, parent.Hash, child.Hash, grandchild.Hash}, loadedHashes(t, ba))
 }
@@ -176,7 +176,7 @@ func TestLoadUnminedSorted_FiltersLikeTheInMemoryPath(t *testing.T) {
 
 	iter := &sliceUnminedIterator{batches: [][]*utxo.UnminedTransaction{{keep, coinbase, mined, onSideChain}}}
 
-	require.NoError(t, ba.loadUnminedSorted(context.Background(), iter, map[uint32]bool{7: true}))
+	require.NoError(t, ba.loadUnminedSorted(context.Background(), iter, map[uint32]bool{7: true}, false))
 
 	require.Equal(t, []chainhash.Hash{onSideChain.Hash, keep.Hash}, loadedHashes(t, ba))
 }
@@ -206,7 +206,7 @@ func TestLoadUnminedSorted_Errors(t *testing.T) {
 
 		ba.settings.BlockAssembly.UnminedTxSortBufferRecords = 0
 
-		err := ba.loadUnminedSorted(context.Background(), &sliceUnminedIterator{}, map[uint32]bool{})
+		err := ba.loadUnminedSorted(context.Background(), &sliceUnminedIterator{}, map[uint32]bool{}, false)
 		require.Error(t, err)
 	})
 
@@ -218,7 +218,7 @@ func TestLoadUnminedSorted_Errors(t *testing.T) {
 		ba.settings.BlockAssembly.UnminedTxSortBufferRecords = 10
 
 		boom := errors.NewStorageError("scan failed")
-		err := ba.loadUnminedSorted(context.Background(), &failingUnminedIterator{err: boom}, map[uint32]bool{})
+		err := ba.loadUnminedSorted(context.Background(), &failingUnminedIterator{err: boom}, map[uint32]bool{}, false)
 		require.ErrorIs(t, err, boom)
 	})
 }

@@ -139,6 +139,15 @@ type resetBlocks struct {
 type ResetResponse struct {
 	// Err contains any error encountered during the reset operation
 	Err error
+
+	// Rotated reports that this reset rotated the tx map, discarding any
+	// phantom a storage error left in it before the reset started.
+	Rotated bool
+
+	// StorageFailed reports that this reset hit a disk tx map storage error
+	// itself: its rotation failed, or after the rotation its reload raised a
+	// new reset request or had a map error joined into its failure.
+	StorageFailed bool
 }
 
 // PrecomputedMiningData holds pre-computed data for mining candidate generation.
@@ -352,6 +361,10 @@ type SubtreeProcessor struct {
 	// exposes it for exactly that question.
 	stopped atomic.Bool
 
+	// stopWaitTimeout bounds how long Stop waits for the goroutine to exit;
+	// zero means defaultStopWaitTimeout. Tests shorten it.
+	stopWaitTimeout time.Duration
+
 	// precomputedMiningData holds pre-computed data for mining candidate generation.
 	// Updated by the main goroutine, read atomically by GetMiningCandidate.
 	precomputedMiningData atomic.Pointer[PrecomputedMiningData]
@@ -398,6 +411,22 @@ type SubtreeProcessor struct {
 	// be dropped for the GC — reorgBlocks closes them once the reorg commits or
 	// rolls back and the surviving map is known.
 	diskTxMapRetired []*DiskTxMap
+
+	// diskTxMapResetRequested is set by requestReset when a post-commit disk
+	// tx map storage error is observed: the write is already applied (its
+	// caller cannot roll back), but the filter may now claim entries whose
+	// inpoints never reached disk (a "phantom"), so the map is no longer
+	// trustworthy. BlockAssembler polls TakeResetRequested and, on true,
+	// requests a full reset, which reloads from the UTXO store - the source
+	// of truth - curing the phantom. Take-once (via TakeResetRequested) and
+	// idempotent while set, so a run of post-commit errors queues at most one
+	// reset rather than storming.
+	diskTxMapResetRequested atomic.Bool
+
+	// lastResetStorageFailed and lastResetRotated record the storage outcome
+	// of the reset running now, for runReset to return with it (see reset).
+	lastResetStorageFailed atomic.Bool
+	lastResetRotated       atomic.Bool
 
 	// txMapPool is a reusable transactionMap built in CreateTransactionMap.
 	// Allocated lazily on the first call (sized for that block) and Clear()ed
@@ -684,6 +713,16 @@ func NewSubtreeProcessor(_ context.Context, logger ulogger.Logger, tSettings *se
 	// and fails on the first block that carries non-coinbase transactions.
 	if len(stp.txMapDirs) > 0 {
 		capacity := uint(initialItemsPerFile * ExpectedNumberOfSubtrees)
+
+		// Left by a previous run that exited without closing its maps.
+		removed, sweepErr := removeStaleDiskTxMapDirs(stp.txMapDirs)
+		if len(removed) > 0 {
+			logger.Infof("[SubtreeProcessor] removed %d stale disk tx map dirs left by a previous run: %v", len(removed), removed)
+		}
+
+		if sweepErr != nil {
+			logger.Warnf("[SubtreeProcessor] error removing stale disk tx map dirs, their disk space stays in use: %v", sweepErr)
+		}
 
 		diskMap, diskErr := stp.newDiskTxMap("ba-txmap", capacity)
 		if diskErr != nil {
@@ -991,6 +1030,12 @@ func (stp *SubtreeProcessor) Start(ctx context.Context) {
 						// Finalize block processing - sets current block header, fires SetBlockProcessedAt, etc.
 						stp.finalizeBlockProcessing(processorCtx, moveForwardReq.block)
 
+						// The block is applied and finalized: any disk tx map error from
+						// here on (or lingering from moveForwardBlock's own commit) is
+						// reported, not returned - returning it now would make the
+						// caller retry a block that already succeeded.
+						stp.drainAndLogDiskTxMapErr("moveForwardBlock_commit")
+
 						return nil
 					})
 
@@ -998,14 +1043,10 @@ func (stp *SubtreeProcessor) Start(ctx context.Context) {
 					stp.setCurrentRunningState(StateRunning)
 
 				case resetBlocksMsg := <-stp.resetCh:
-					resetErr := stp.runHandlerWithRecover("reset", func() error {
-						stp.setCurrentRunningState(StateResetBlocks)
-						return stp.reset(resetBlocksMsg.blockHeader, resetBlocksMsg.moveBackBlocks, resetBlocksMsg.moveForwardBlocks,
-							resetBlocksMsg.useFastForwardReset, resetBlocksMsg.postProcess)
-					})
+					resp := stp.runReset(resetBlocksMsg)
 
 					if resetBlocksMsg.responseCh != nil {
-						resetBlocksMsg.responseCh <- ResetResponse{Err: resetErr}
+						resetBlocksMsg.responseCh <- resp
 					}
 
 					stp.setCurrentRunningState(StateRunning)
@@ -1041,6 +1082,8 @@ func (stp *SubtreeProcessor) Start(ctx context.Context) {
 						if err := stp.removeTxFromSubtrees(processorCtx, removeTxHash); err != nil {
 							stp.logger.Errorf("[SubtreeProcessor] error removing tx from subtrees: %s", err.Error())
 						}
+
+						stp.drainAndLogDiskTxMapErr("removeTx")
 					}()
 
 					stp.setCurrentRunningState(StateRunning)
@@ -1052,7 +1095,16 @@ func (stp *SubtreeProcessor) Start(ctx context.Context) {
 				case errCh := <-stp.checkSubtreeProcessorCh:
 					errCh <- stp.runHandlerWithRecover("checkSubtreeProcessor", func() error {
 						stp.setCurrentRunningState(StateCheckSubtreeProcessor)
-						return stp.checkSubtreeProcessor()
+
+						// checkSubtreeProcessor is a read-only diagnostic (CheckBlockAssembly
+						// RPC): it never mutates committed state, so - unlike moveForwardBlock/
+						// reorgBlocks - there is no desync risk in reporting a pending map
+						// error as this call's own failure.
+						if err := stp.checkSubtreeProcessor(); err != nil {
+							return err
+						}
+
+						return stp.diskTxMapErr()
 					})
 
 					stp.setCurrentRunningState(StateRunning)
@@ -1241,6 +1293,10 @@ func (stp *SubtreeProcessor) Start(ctx context.Context) {
 						stp.txCount.Add(addedCount)
 					}
 
+					// No caller waits on dequeued txs: report tx map storage errors
+					// from this pass in the log, as other failures here are.
+					stp.drainAndLogDiskTxMapErr("dequeue")
+
 					// Yield after processing batches to allow other goroutines to run
 					if nrProcessed > 0 {
 						runtime.Gosched() // let sibling hyper-thread breathe while we go around again
@@ -1424,8 +1480,26 @@ func (stp *SubtreeProcessor) Reset(blockHeader *model.BlockHeader, moveBackBlock
 	}
 }
 
+// runReset runs one reset request and returns its response, carrying the
+// storage outcome of that reset (never of an earlier one).
+func (stp *SubtreeProcessor) runReset(msg *resetBlocks) ResetResponse {
+	stp.lastResetStorageFailed.Store(false)
+	stp.lastResetRotated.Store(false)
+
+	err := stp.runHandlerWithRecover("reset", func() error {
+		stp.setCurrentRunningState(StateResetBlocks)
+		return stp.reset(msg.blockHeader, msg.moveBackBlocks, msg.moveForwardBlocks, msg.useFastForwardReset, msg.postProcess)
+	})
+
+	return ResetResponse{
+		Err:           err,
+		Rotated:       stp.lastResetRotated.Load(),
+		StorageFailed: stp.lastResetStorageFailed.Load(),
+	}
+}
+
 func (stp *SubtreeProcessor) reset(blockHeader *model.BlockHeader, moveBackBlocks []*model.Block, moveForwardBlocks []*model.Block,
-	useFastForwardReset bool, postProcess func() error) error {
+	useFastForwardReset bool, postProcess func() error) (err error) {
 	_, _, deferFn := tracing.Tracer("subtreeprocessor").Start(context.Background(), "reset",
 		tracing.WithParentStat(stp.stats),
 		tracing.WithHistogram(prometheusSubtreeProcessorReset),
@@ -1433,6 +1507,34 @@ func (stp *SubtreeProcessor) reset(blockHeader *model.BlockHeader, moveBackBlock
 	)
 
 	defer deferFn()
+
+	// reset has no rollback: it commits to a new state (clearing currentTxMap
+	// below, then reloading) unconditionally, unlike moveForwardBlock/
+	// reorgBlocks which can still swap back before their own commit point. A
+	// disk tx map error here can only be reported, never used to fail back to
+	// a "nothing changed" state that does not exist - so on success it is
+	// logged and counted, and only joined into an existing failure.
+	//
+	// lastResetStorageFailed records whether this reset itself hit a disk tx
+	// map storage error, so BlockAssembler can tell whether a
+	// storage-triggered reset cured the map without consuming the reset
+	// request (only its heartbeat does that). Only what happens after the
+	// rotation counts: the rotation clears any earlier error and request, so
+	// a map error joined into the failure, or a request still pending, when
+	// reset returns was this reset's own. Before the rotation both are left
+	// over from before the reset, and a request stays pending for the
+	// heartbeat (diskTxMapErr raises one for a map error joined into a
+	// pre-rotation failure, whose phantom the rotation never cured).
+	stp.lastResetStorageFailed.Store(false)
+	stp.lastResetRotated.Store(false)
+
+	defer func() {
+		joined := stp.reportOrJoinDiskTxMapErr("reset", &err)
+
+		if stp.lastResetRotated.Load() && (joined || stp.diskTxMapResetRequested.Load()) {
+			stp.lastResetStorageFailed.Store(true)
+		}
+	}()
 
 	ctx := context.Background()
 
@@ -1475,6 +1577,65 @@ func (stp *SubtreeProcessor) reset(blockHeader *model.BlockHeader, moveBackBlock
 		}
 	}
 
+	// Clear current tx map before touching chainedSubtrees/currentSubtree
+	// below: closeChainedSubtrees and replacing currentSubtree are themselves
+	// irreversible (mmap-backed subtrees are closed/unmapped), so checking
+	// here first means a failed rotation leaves STP fully intact - still on
+	// the old header, subtrees and map - rather than committed to an empty
+	// template with a stale, still-populated map. markNotOnLongestChain above
+	// only reads the pre-reset subtrees into a hash list for an external UTXO
+	// store call; it does not touch currentTxMap, chainedSubtrees or
+	// currentSubtree, so reordering around it changes nothing it depends on.
+	//
+	// Best-effort, like resetSubtreeState's Clear of the incoming half:
+	// verify rather than assume, so a failed rotation that leaves the map
+	// still populated fails reset outright instead of silently reloading on
+	// top of stale entries (SetIfNotExists would report them as "already
+	// exists" and drop the corresponding fresh reload data).
+	stp.currentTxMap.Clear()
+
+	if diskMap, ok := stp.currentTxMap.(*DiskTxMap); ok {
+		stp.reportDiskTxMapCloseWarn(diskMap, "reset_clear")
+	}
+
+	if remaining := stp.currentTxMap.Length(); remaining != 0 {
+		// Distinct from the generic disk_tx_map_errors_total{where=...}
+		// post-commit path: this is reset's own rotation failing, which dead-
+		// ends the usual escalation - reset returns an error here, so the
+		// deferred reportOrJoinDiskTxMapErr("reset") only joins any pending
+		// map error into it (err != nil) rather than requesting a reset, and
+		// resetWithOptions only logs the returned error. Counted separately
+		// so this specific, otherwise-silent dead end is visible; it also marks
+		// the reset as storage-failed, so a storage-triggered reset ending
+		// here leaves block assembly degraded (BlockAssembler.onResetDone).
+		prometheusSubtreeProcessorDiskTxMapErrors.WithLabelValues("reset_rotation_failed").Inc()
+		stp.lastResetStorageFailed.Store(true)
+		stp.logger.Errorf("[SubtreeProcessor][reset] tx map rotation failed, still holds %d entries after clear; refusing to reload on top of stale state", remaining)
+
+		return errors.NewProcessingError("[SubtreeProcessor][reset] tx map still holds %d entries after clear, refusing to reload on top of stale state", remaining)
+	}
+
+	// The rotation above is itself the cure for any disk tx map error already
+	// pending, or already requesting a reset, before this point (a stale error
+	// from before reset started, or Clear's own pre-rotation flushAllDisks):
+	// every disk now has a fresh Badger generation, so nothing recorded
+	// against the discarded one is still true of the map's current content.
+	// Drain it log-only - it belongs to a generation that no longer exists,
+	// not to this reset - and clear any pending reset request: re-requesting
+	// here would request a reset FROM WITHIN a reset that just ran, looping
+	// forever on a persistent fault the rotation itself cannot fix. The
+	// reload immediately below can still create its own
+	// phantom against the fresh generation; AddDirectlyReportOnly/
+	// AddNodesDirectlyReportOnly/FlushDiskTxMapForLoad(isReload=true) each
+	// request a reset for that independently, and are deliberately left
+	// untouched by this drain.
+	if staleErr := stp.takeDiskTxMapErrs(); staleErr != nil {
+		stp.logDiskTxMapErr("reset_rotation_stale", staleErr)
+	}
+
+	stp.diskTxMapResetRequested.Store(false)
+	stp.lastResetRotated.Store(true)
+
 	stp.closeChainedSubtrees()
 
 	itemsPerFile := int(stp.currentItemsPerFile.Load())
@@ -1487,9 +1648,6 @@ func (stp *SubtreeProcessor) reset(blockHeader *model.BlockHeader, moveBackBlock
 	if err := stp.currentSubtree.Load().AddCoinbaseNode(); err != nil {
 		return errors.NewProcessingError("[SubtreeProcessor][Reset] error adding coinbase placeholder to new current subtree", err)
 	}
-
-	// clear current tx map
-	stp.currentTxMap.Clear()
 
 	// clear remove map to prevent memory leak - entries for transactions that were
 	// never dequeued would otherwise accumulate indefinitely across resets
@@ -2480,9 +2638,10 @@ func (stp *SubtreeProcessor) processCompleteSubtree(skipNotification bool) (err 
 
 	// Update SubtreeIndex for all txs in this subtree so removeTxFromSubtrees can do O(1) lookup.
 	// Store chainedIdx+1 so that 0 (zero value) means "unassigned" and is safe across serialization.
-	// AddNodesDirectly already wrote the index with each entry.
+	// AddNodesDirectly already wrote the index with each entry. A failure is
+	// recorded on the map and reported when the enclosing operation finishes.
 	if stp.diskTxMap != nil && !stp.subtreeIndexesPredicted.Load() {
-		_ = stp.diskTxMap.UpdateSubtreeIndexBatch(currentSubtree.Nodes, int16(chainedIdx+1))
+		stp.diskTxMap.recordErr(stp.diskTxMap.UpdateSubtreeIndexBatch(currentSubtree.Nodes, int16(chainedIdx+1)))
 	}
 
 	stp.subtreesInBlock++ // Track number of subtrees in current block
@@ -2584,7 +2743,7 @@ func (stp *SubtreeProcessor) bulkBuildSubtrees(ctx context.Context, nodes []subt
 			// Update SubtreeIndex for diskTxMap bookkeeping
 			if stp.diskTxMap != nil {
 				// chainedSubtrees just grew by 1
-				_ = stp.diskTxMap.UpdateSubtreeIndexBatch(currentSt.Nodes, int16(len(stp.chainedSubtrees)))
+				stp.diskTxMap.recordErr(stp.diskTxMap.UpdateSubtreeIndexBatch(currentSt.Nodes, int16(len(stp.chainedSubtrees))))
 			}
 
 			newSt, err := stp.newSubtree(subtreeSize)
@@ -2647,7 +2806,7 @@ func (stp *SubtreeProcessor) bulkBuildSubtrees(ctx context.Context, nodes []subt
 		if stp.diskTxMap != nil {
 			for i, st := range fullSubtrees {
 				// +1 so 0 means "unassigned"
-				_ = stp.diskTxMap.UpdateSubtreeIndexBatch(st.Nodes, int16(baseIdx+i+1))
+				stp.diskTxMap.recordErr(stp.diskTxMap.UpdateSubtreeIndexBatch(st.Nodes, int16(baseIdx+i+1)))
 			}
 		}
 
@@ -2736,7 +2895,33 @@ func (stp *SubtreeProcessor) AddBatchIfRoom(nodes []subtreepkg.Node, txInpoints 
 // Returns:
 //   - error: Any error encountered during addition
 func (stp *SubtreeProcessor) AddDirectly(node *subtreepkg.Node, txInpoints *subtreepkg.TxInpoints, skipNotification bool) error {
-	if err := stp.addNode(*node, txInpoints, skipNotification); err != nil {
+	return stp.addDirectly(node, txInpoints, skipNotification, true)
+}
+
+// AddDirectlyReportOnly behaves like AddDirectly, except a disk tx map error
+// pending when the node has otherwise been placed successfully is logged and
+// counted rather than failing the call. Used when this add is part of
+// reset's postProcess reload: by the time postProcess runs, reset has already
+// committed (cleared the maps, moved the header to the target tip), so there
+// is no "not applied" state left to fail back to - see reset's own handling
+// via reportOrJoinDiskTxMapErr for the same reasoning applied to reset
+// itself.
+func (stp *SubtreeProcessor) AddDirectlyReportOnly(node *subtreepkg.Node, txInpoints *subtreepkg.TxInpoints, skipNotification bool) error {
+	return stp.addDirectly(node, txInpoints, skipNotification, false)
+}
+
+func (stp *SubtreeProcessor) addDirectly(node *subtreepkg.Node, txInpoints *subtreepkg.TxInpoints, skipNotification bool, failOnMapErr bool) (err error) {
+	// Same load-path boundary as AddNodesDirectly (both add directly to the
+	// processor, bypassing the queue): report tx map storage errors once the
+	// node is placed, so a stale error never leaks to a later call, and a
+	// failure here never leaves its own error pending either.
+	if failOnMapErr {
+		defer stp.failOrJoinDiskTxMapErrForLoad("AddDirectly", &err)
+	} else {
+		defer stp.reportOrJoinDiskTxMapErr("AddDirectlyReportOnly", &err)
+	}
+
+	if err = stp.addNode(*node, txInpoints, skipNotification); err != nil {
 		return errors.NewProcessingError("error adding node directly to subtree", err)
 	}
 
@@ -2756,8 +2941,34 @@ func (stp *SubtreeProcessor) AddDirectly(node *subtreepkg.Node, txInpoints *subt
 // Returns:
 //   - error: Any error encountered during addition
 func (stp *SubtreeProcessor) AddNodesDirectly(txs []*utxostore.UnminedTransaction, skipNotification bool) error {
+	return stp.addNodesDirectly(txs, skipNotification, true)
+}
+
+// AddNodesDirectlyReportOnly behaves like AddNodesDirectly, except a disk tx
+// map error pending when the batch has otherwise been placed successfully is
+// logged and counted rather than failing the call. See AddDirectlyReportOnly
+// for why: this is for reset's postProcess reload, which runs after reset has
+// already committed.
+func (stp *SubtreeProcessor) AddNodesDirectlyReportOnly(txs []*utxostore.UnminedTransaction, skipNotification bool) error {
+	return stp.addNodesDirectly(txs, skipNotification, false)
+}
+
+func (stp *SubtreeProcessor) addNodesDirectly(txs []*utxostore.UnminedTransaction, skipNotification bool, failOnMapErr bool) (err error) {
 	if len(txs) == 0 {
 		return nil
+	}
+
+	// Report tx map storage errors once every node is placed, so a stale error
+	// never leaks to a later call (on failure it is joined into this call's
+	// own error instead). On success, a pending error fails the call only when
+	// failOnMapErr: the map may be partially populated, and a restart reloads
+	// it. When called as part of reset's postProcess reload, reset has
+	// already committed, so a pending error there is logged and counted
+	// instead (see AddDirectlyReportOnly).
+	if failOnMapErr {
+		defer stp.failOrJoinDiskTxMapErrForLoad("AddNodesDirectly", &err)
+	} else {
+		defer stp.reportOrJoinDiskTxMapErr("AddNodesDirectlyReportOnly", &err)
 	}
 
 	currentItemsPerFile := int(stp.currentItemsPerFile.Load())
@@ -2859,6 +3070,248 @@ func (stp *SubtreeProcessor) AddNodesDirectly(txs []*utxostore.UnminedTransactio
 	}
 
 	return nil
+}
+
+// flushDiskTxMapWriters flushes stp.diskTxMap's writer so a pre-commit
+// diskTxMapErr() check can see failures for writes this operation itself just
+// made. Writes are batched and only flushed at writerFlushThreshold or on an
+// explicit flush (see disk_tx_map.go); below that threshold they sit
+// unflushed, so a naked diskTxMapErr() call cannot see a flush failure for
+// them. Without this, an operation can commit while some of its own entries
+// silently never reached disk - the filter still claims they exist, but every
+// later Get for them misses.
+//
+// Only diskTxMap is flushed here: it is the map this operation writes into
+// (after any resetSubtreeState swap/allocation). diskTxMapShadow is read-only
+// during the operation. diskTxMapAnchor is NOT read-only in general -
+// moveBackBlockBulkBuild writes moved-back transactions into what becomes the
+// anchor during a multi-block reorg - but it is still covered without an
+// explicit flush here: every read (including the remainder pass that follows
+// moveBack) goes through getFromStoreOrErr, which flushes the target disk
+// synchronously before reading, and any resulting error lands in diskTxMapErr
+// via diskTxMapAnchor. Both halves also have nothing pending that a flush
+// would surface sooner than that synchronous per-read flush already does.
+func (stp *SubtreeProcessor) flushDiskTxMapWriters() {
+	if stp.diskTxMap != nil {
+		_ = stp.diskTxMap.Flush()
+	}
+}
+
+// diskTxMapErr returns, and clears, the storage errors the disk-backed tx maps
+// recorded since the last call. Map operations have no error return and
+// writes are asynchronous, so operations check this when they finish: a
+// failure fails the operation that observes it and the processor keeps
+// running.
+//
+// A non-nil result also requests a reset, wherever it is drained. The drain
+// can't tell whether the error came from the draining operation's own writes
+// (which its rollback undoes) or from an earlier write that never reached
+// disk, whose phantom survives any rollback and would fail every retry; only
+// a reset cures that. reset's post-rotation stale drain is the one exception:
+// it uses takeDiskTxMapErrs.
+//
+// Also checks diskTxMapAnchor: during a multi-block reorg (disableCurrentTxMapPool),
+// resetSubtreeState pins the map reorgBlocks captured for rollback there
+// instead of swapping it into diskTxMapShadow, and processRemainderTxHashes
+// keeps reading from it across every iteration until the reorg's outcome is
+// known. Without checking it here, a read error against the anchor would stay
+// invisible to every iteration's own pre-commit check for the rest of the
+// reorg, surfacing only once finishReorgDiskTxMaps retires and closes it at
+// the very end - well past the point where failing (and rolling back) would
+// still have been correct.
+func (stp *SubtreeProcessor) diskTxMapErr() error {
+	err := stp.takeDiskTxMapErrs()
+	if err != nil {
+		stp.requestReset("disk_tx_map_err")
+	}
+
+	return err
+}
+
+// takeDiskTxMapErrs is diskTxMapErr without the reset request.
+func (stp *SubtreeProcessor) takeDiskTxMapErrs() error {
+	var errs []error
+
+	if stp.diskTxMap != nil {
+		if err := stp.diskTxMap.TakeErr(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	if stp.diskTxMapShadow != nil {
+		if err := stp.diskTxMapShadow.TakeErr(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	if stp.diskTxMapAnchor != nil {
+		if err := stp.diskTxMapAnchor.TakeErr(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	if len(errs) == 0 {
+		return nil
+	}
+
+	return errors.Join(errs...)
+}
+
+// joinDiskTxMapErrOnFailure folds any pending disk tx map error into *errPtr
+// when the operation is already failing, so a failed operation's own storage
+// cause is never hidden and never left pending for whatever succeeds next to
+// have it misattributed. Left untouched on success: handlers with a distinct
+// commit point (moveForwardBlock, reorgBlocks) are responsible for their own
+// pre-commit check and post-commit reporting — see
+// reportOrJoinDiskTxMapErr for the operations that report unconditionally.
+func (stp *SubtreeProcessor) joinDiskTxMapErrOnFailure(errPtr *error) {
+	if *errPtr == nil {
+		return
+	}
+
+	if mapErr := stp.diskTxMapErr(); mapErr != nil {
+		*errPtr = errors.Join(*errPtr, mapErr)
+	}
+}
+
+// reportOrJoinDiskTxMapErr drains pending disk tx map errors at the end of an
+// operation that has (or has not) already committed its state change.
+//
+//   - If the operation is already failing (*errPtr != nil), the map error is
+//     folded in so the caller sees the full picture.
+//   - If the operation succeeded, the map error arrived at or after that
+//     operation's commit point: the state change is already applied and cannot
+//     be rolled back, so turning success into failure here would desync a
+//     caller that treats an error as "not applied". Log and count it instead.
+//
+// where identifies the call site for the log line and the
+// prometheusSubtreeProcessorDiskTxMapErrors counter. joined reports that a map
+// error was folded into the failure.
+func (stp *SubtreeProcessor) reportOrJoinDiskTxMapErr(where string, errPtr *error) (joined bool) {
+	mapErr := stp.diskTxMapErr()
+	if mapErr == nil {
+		return false
+	}
+
+	if *errPtr != nil {
+		*errPtr = errors.Join(*errPtr, mapErr)
+		return true
+	}
+
+	stp.logDiskTxMapErr(where, mapErr)
+	stp.requestReset(where)
+
+	return false
+}
+
+// logDiskTxMapErr logs and counts a disk tx map error observed after its
+// operation's commit point, where the state change is already applied and
+// there is nothing left to fail. where identifies the call site for the log
+// line and the prometheusSubtreeProcessorDiskTxMapErrors counter.
+func (stp *SubtreeProcessor) logDiskTxMapErr(where string, mapErr error) {
+	prometheusSubtreeProcessorDiskTxMapErrors.WithLabelValues(where).Inc()
+	stp.logger.Errorf("[SubtreeProcessor][%s] disk tx map storage error after commit: %v", where, mapErr)
+}
+
+// drainAndLogDiskTxMapErr drains pending disk tx map errors and logs/counts
+// them unconditionally (see logDiskTxMapErr), and requests a reset: this is a
+// genuine post-commit storage error, so the write it came from may never have
+// reached disk while the filter still claims it exists (a phantom). Used at
+// points that are always past a commit: whatever caused the error cannot be
+// un-applied by failing the caller, and only a reset - reloading from the
+// UTXO store - can cure the phantom.
+func (stp *SubtreeProcessor) drainAndLogDiskTxMapErr(where string) {
+	if mapErr := stp.diskTxMapErr(); mapErr != nil {
+		stp.logDiskTxMapErr(where, mapErr)
+		stp.requestReset(where)
+	}
+}
+
+// requestReset records that a post-commit disk tx map storage error was
+// observed and a reset should be requested. Idempotent: a reset already
+// pending (not yet taken by TakeResetRequested) is left alone, so a run of
+// post-commit errors - e.g. a persistent disk fault hitting every dequeue -
+// queues at most one reset instead of storming BlockAssembler.Reset.
+func (stp *SubtreeProcessor) requestReset(where string) {
+	if stp.diskTxMapResetRequested.CompareAndSwap(false, true) {
+		stp.logger.Warnf("[SubtreeProcessor][%s] disk tx map storage error may have left phantom entries; requesting a block assembly reset", where)
+	}
+}
+
+// TakeResetRequested reports, and clears, whether a post-commit disk tx map
+// storage error requested a reset since the last call. BlockAssembler polls
+// this on every heartbeat tick of its main loop - the single reader for every
+// call site that can observe such an error (moveForwardBlock, reorgBlocks,
+// dequeue, removeTx, Stop, reset's own reload) - and, on true, requests its
+// own reset (BlockAssembler.Reset), which reloads unmined transactions from
+// the UTXO store - the source of truth - curing any phantom the storage error
+// left behind.
+func (stp *SubtreeProcessor) TakeResetRequested() bool {
+	return stp.diskTxMapResetRequested.CompareAndSwap(true, false)
+}
+
+// reportDiskTxMapCloseWarn logs and counts m's pending Close warning (see
+// DiskTxMap.TakeCloseWarn), if any. Call this right after m.Clear(): by the
+// time Clear records one, the rotation itself has already succeeded (only
+// the discarded generation's own Close failed), so it is always a benign
+// cleanup failure - never fed into the operation-failing diskTxMapErr path.
+func (stp *SubtreeProcessor) reportDiskTxMapCloseWarn(m *DiskTxMap, where string) {
+	if m == nil {
+		return
+	}
+
+	if warnErr := m.TakeCloseWarn(); warnErr != nil {
+		stp.logDiskTxMapErr(where, warnErr)
+	}
+}
+
+// failOrJoinDiskTxMapErrForLoad drains pending disk tx map errors at the end of
+// a bulk-load operation (AddNodesDirectly, AddDirectly). Unlike
+// reportOrJoinDiskTxMapErr, a pending error on an otherwise successful load
+// fails the call: these paths run before block assembly is fully up (or via
+// direct API calls with no in-flight block to desync), and the map may be
+// partially populated, so surfacing the failure to the caller — who can retry
+// or restart — is safer than silently continuing with missing entries.
+func (stp *SubtreeProcessor) failOrJoinDiskTxMapErrForLoad(where string, errPtr *error) {
+	mapErr := stp.diskTxMapErr()
+	if mapErr == nil {
+		return
+	}
+
+	if *errPtr != nil {
+		*errPtr = errors.Join(*errPtr, mapErr)
+		return
+	}
+
+	*errPtr = errors.NewStorageError("[%s] disk tx map storage error", where, mapErr)
+}
+
+// FlushDiskTxMapForLoad flushes the disk tx map writers and reports any
+// pending storage error. Call this once after an entire bulk load has
+// finished (loadUnminedTransactions, loadUnminedTransactionsWithDiskSort),
+// not per AddDirectly/AddNodesDirectly call: those calls' own deferred
+// boundary check only sees errors an earlier automatic flush (at
+// writerFlushThreshold) already surfaced, so the writes below that
+// threshold - which every load's tail leaves unflushed, and which the
+// disk-sort path (one AddDirectly per tx) leaves unflushed after every
+// single call - are otherwise never checked. Flushing here once, after the
+// whole load, catches that tail without forcing a flush on every
+// AddDirectly call.
+//
+// isReload has the same meaning as elsewhere: false fails the call (the
+// startup load still has a "not applied" state to fail back to); true only
+// logs and counts (reset's report-only reload, which runs after reset has
+// already committed).
+func (stp *SubtreeProcessor) FlushDiskTxMapForLoad(where string, isReload bool) (err error) {
+	stp.flushDiskTxMapWriters()
+
+	if isReload {
+		stp.reportOrJoinDiskTxMapErr(where, &err)
+	} else {
+		stp.failOrJoinDiskTxMapErrForLoad(where, &err)
+	}
+
+	return err
 }
 
 // predictSubtreeIndexes stamps each tx's TxInpoints.SubtreeIndex with the
@@ -3412,6 +3865,15 @@ func (stp *SubtreeProcessor) updatePrecomputedMiningData() {
 //
 // The recovered panic is logged with a stack trace; operators who see
 // repeated panics for the same input have a clear escalation signal.
+//
+// This deliberately does NOT check diskTxMapErr(): several handlers wrapped
+// here (moveForwardBlock, reorgBlocks, reset) commit their state change
+// before returning, and a pending map error observed only here — after fn has
+// already returned successfully — cannot distinguish "this operation caused
+// it" from "an unrelated operation left it pending" or "committed after this
+// operation's own rollback-safe point". Each handler is responsible for
+// checking/draining disk tx map errors itself, at the point where the
+// distinction between "still rollback-able" and "already committed" is known.
 func (stp *SubtreeProcessor) runHandlerWithRecover(name string, fn func() error) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -3419,6 +3881,7 @@ func (stp *SubtreeProcessor) runHandlerWithRecover(name string, fn func() error)
 			err = errors.NewProcessingError("[SubtreeProcessor][%s] panicked: %v", name, r)
 		}
 	}()
+
 	return fn()
 }
 
@@ -3530,6 +3993,10 @@ func (stp *SubtreeProcessor) reorgBlocks(ctx context.Context, moveBackBlocks []*
 	// Badger directories that only Close() removes.
 	defer stp.finishReorgDiskTxMaps()
 
+	// A failed reorg must never leave its own disk tx map errors pending for
+	// whatever succeeds next to have them misattributed.
+	defer stp.joinDiskTxMapErrOnFailure(&err)
+
 	if moveBackBlocks == nil {
 		return errors.NewProcessingError("you must pass in blocks to move down the chain")
 	}
@@ -3605,6 +4072,11 @@ func (stp *SubtreeProcessor) reorgBlocks(ctx context.Context, moveBackBlocks []*
 			stp.finalizeBlockProcessing(ctx, block)
 
 			stp.currentBlockHeader.Store(block.Header)
+
+			// This block is committed: drain and log now rather than let a
+			// benign post-commit residual be misattributed as a pre-commit
+			// failure by the next iteration's moveForwardBlock call.
+			stp.drainAndLogDiskTxMapErr("reorgBlocks_catchup_commit")
 		}
 
 		catchupCommitted = true
@@ -3876,9 +4348,31 @@ func (stp *SubtreeProcessor) reorgBlocks(ctx context.Context, moveBackBlocks []*
 		}
 
 		stp.currentBlockHeader.Store(block.Header)
+
+		// This block is committed: drain and log now rather than let a
+		// benign post-commit residual be misattributed as a pre-commit
+		// failure by the next iteration's moveForwardBlock call.
+		stp.drainAndLogDiskTxMapErr("reorgBlocks_moveforward_commit")
 	}
 
 	movedBackBlockTxMap = nil // free up memory
+
+	// Last chance to fail the whole reorg before the external, irreversible
+	// work below (UTXO store marks, subtree announcements, SetBlockProcessedAt,
+	// finalizeBlockProcessing): everything up to here is in-memory processor
+	// state that the "err != nil" defer above still restores in full. A disk
+	// tx map error recorded by the moveBack loop above, or anything not
+	// already drained by the per-iteration log above, fails the reorg here
+	// while rollback is still correct.
+	//
+	// Flush first: the moveBack loop's own writes (and any of the last
+	// moveForward iteration's writes below writerFlushThreshold) may still be
+	// unflushed - see flushDiskTxMapWriters.
+	stp.flushDiskTxMapWriters()
+
+	if mapErr := stp.diskTxMapErr(); mapErr != nil {
+		return errors.NewStorageError("[reorgBlocks] disk tx map storage error before committing reorg", mapErr)
+	}
 
 	losingTxSet := make(map[chainhash.Hash]struct{})
 	allLosingTxHashes := make([]chainhash.Hash, 0, len(rawLosingTxHashes))
@@ -4017,6 +4511,11 @@ func (stp *SubtreeProcessor) reorgBlocks(ctx context.Context, moveBackBlocks []*
 	} else {
 		return errors.NewProcessingError("[reorgBlocks] no blocks to finalize after reorg")
 	}
+
+	// The reorg is fully committed and finalized past this point (UTXO marks,
+	// subtree announcements, SetBlockProcessedAt, finalizeBlockProcessing all
+	// ran): log and count, don't fail an already-successful reorg.
+	stp.drainAndLogDiskTxMapErr("reorgBlocks_commit")
 
 	return nil
 }
@@ -4867,13 +5366,37 @@ func (stp *SubtreeProcessor) diskTxMapStats() DiskMapStats {
 // closeRetiredDiskTxMaps closes and forgets every disk map displaced by the
 // fresh-allocation path, releasing their Badger directories. Safe to call when
 // none are outstanding.
+//
+// A retired map is being discarded either way, so any error it recorded (or
+// hits during its final Close flush) cannot be undone by failing this call -
+// there is nothing left to roll back to. Log and count it instead of
+// recordErr-ing it onto the surviving map, which would let it resurface later
+// misattributed to whatever operation next checks the map's pending error.
 func (stp *SubtreeProcessor) closeRetiredDiskTxMaps() {
 	for _, retired := range stp.diskTxMapRetired {
 		if retired == nil || retired == stp.diskTxMap || retired == stp.diskTxMapShadow {
 			continue
 		}
 
-		_ = retired.Close()
+		closeErr := retired.Close()
+		takeErr := retired.TakeErr() // after Close, so a final-flush error is included
+
+		// errors.Join here (not a []error slice) so build the argument list
+		// ourselves, skipping nils: teranode/errors.Join calls Error() on
+		// every argument after the first once the first is a non-nil *Error,
+		// without a nil check, and panics if one of them is a nil error.
+		var errs []error
+		if takeErr != nil {
+			errs = append(errs, takeErr)
+		}
+
+		if closeErr != nil {
+			errs = append(errs, closeErr)
+		}
+
+		if mapErr := errors.Join(errs...); mapErr != nil {
+			stp.logDiskTxMapErr("closeRetiredDiskTxMaps", mapErr)
+		}
 	}
 
 	stp.diskTxMapRetired = nil
@@ -4929,6 +5452,7 @@ func (stp *SubtreeProcessor) resetSubtreeState(createProperlySizedSubtrees bool)
 			// inpoints, which is silent corruption rather than a visible error.
 			if stp.diskTxMapShadow.Length() != 0 {
 				stp.diskTxMapShadow.Clear()
+				stp.reportDiskTxMapCloseWarn(stp.diskTxMapShadow, "resetSubtreeState_clear")
 
 				if remaining := stp.diskTxMapShadow.Length(); remaining != 0 {
 					return errors.NewProcessingError("[resetSubtreeState] incoming disk tx map half still holds %d entries after clear, refusing to install it as the current map", remaining)
@@ -5011,6 +5535,28 @@ func (stp *SubtreeProcessor) processRemainderTransactionsAndDequeue(ctx context.
 
 		stp.logger.Debugf("[moveForwardBlock][%s] processRemainderTxHashes with %d subtrees DONE in %s", params.Block.String(), len(params.ChainedSubtrees), time.Since(remainderTxHashesStartTime).String())
 
+		// A second, cheaper pre-commit check before dequeueDuringBlockMovement
+		// drains the queue: this narrows, but does not eliminate, the #852
+		// exposure window. Two things ahead of this point are already
+		// irreversible regardless: the UTXO conflict-resolution swap earlier
+		// in moveForwardBlock, and (on the dispatcher path, skipNotification
+		// false) any subtree announcements processRemainderTxHashes' own
+		// subtree-building already sent via newSubtreeChan while completing a
+		// subtree. Neither of those is undone by the rollback below. What this
+		// check DOES still protect is the queue: a disk tx map error caught
+		// here rolls back cleanly (the double-buffer swap defer applies, and
+		// the queue is untouched), whereas the original check (moveForwardBlock,
+		// after dequeue) catching the very same processRemainderTxHashes write
+		// failure would do so only after dequeueDuringBlockMovement has
+		// already drained matching batches out of the queue - rollback then
+		// restores the in-memory subtree state but not the queue, permanently
+		// losing them (see move_forward_drain_loss_test.go).
+		stp.flushDiskTxMapWriters()
+
+		if mapErr := stp.diskTxMapErr(); mapErr != nil {
+			return errors.NewStorageError("[moveForwardBlock][%s] disk tx map storage error before dequeue", params.Block.String(), mapErr)
+		}
+
 		// Process queue
 		dequeueStartTime := time.Now()
 
@@ -5027,6 +5573,20 @@ func (stp *SubtreeProcessor) processRemainderTransactionsAndDequeue(ctx context.
 		// Process our own block
 		if err := stp.processOwnBlockNodes(ctx, params.Block, params.ChainedSubtrees, params.CurrentSubtree, params.CurrentTxMap, params.SkipNotification); err != nil {
 			return err
+		}
+
+		// Unlike the foreign-block branch above, this path never dequeues:
+		// processOwnBlockNodes only reads the old half and SetIfNotExists's
+		// into the new one, so rollback here is fully safe and there is no
+		// #852 queue-drain exposure to narrow around. This check is therefore
+		// still pre-commit, not post-dequeue - flush this block's own writes
+		// (which may still be below writerFlushThreshold) and fail so the
+		// caller's rollback restores the pre-reset state and can retry, the
+		// same as the foreign-block pre-dequeue check above.
+		stp.flushDiskTxMapWriters()
+
+		if mapErr := stp.diskTxMapErr(); mapErr != nil {
+			return errors.NewStorageError("[moveForwardBlock][%s] disk tx map storage error before commit (own block)", params.Block.String(), mapErr)
 		}
 	}
 
@@ -5157,6 +5717,11 @@ func (stp *SubtreeProcessor) finalizeBlockProcessing(ctx context.Context, block 
 // given. It is akin to moving up the blockchain to the next block.
 func (stp *SubtreeProcessor) moveForwardBlock(ctx context.Context, block *model.Block, skipNotification bool,
 	processedConflictingHashesMap map[chainhash.Hash]struct{}, skipDequeue bool, createProperlySizedSubtrees bool) (transactionMap *SplitSwissMap, losingTxHashesMap txmap.TxMap, err error) {
+	// A failed call must never leave its own disk tx map errors pending for
+	// whatever succeeds next to have them misattributed.
+	// Registered before the nil-block guard so even that early return drains.
+	defer stp.joinDiskTxMapErrOnFailure(&err)
+
 	if block == nil {
 		return nil, nil, errors.NewProcessingError("[moveForwardBlock] you must pass in a block to moveForwardBlock")
 	}
@@ -5251,6 +5816,31 @@ func (stp *SubtreeProcessor) moveForwardBlock(ctx context.Context, block *model.
 		return nil, nil, errors.NewProcessingError("[moveForwardBlock][%s] error processing coinbase utxos", block.String(), err)
 	}
 
+	// On the foreign-block path (the `if` branch above), this point is
+	// reached only after dequeueDuringBlockMovement has already drained the
+	// queue (when not skipped): rollback() does not requeue what it drained,
+	// so a disk tx map error surfacing here can only be from that pass's own
+	// writes (processCoinbaseUtxos does not touch the disk tx map, and every
+	// earlier write - resetSubtreeState, the remainder pass - was already
+	// flushed and checked pre-dequeue, above). Treat the dequeue drain as
+	// this block's own commit point: log and count the error and request a
+	// reset, the same as any other post-commit disk tx map error, instead of
+	// failing the call and losing the drained batches (a new #852 trigger
+	// this fix removes - see move_forward_drain_loss_test.go and the PR
+	// review that flagged it).
+	//
+	// On the own-block path (the `else` branch), there is no dequeue and
+	// nothing here can be post-commit: processOwnBlockNodes's own pre-commit
+	// check, above, already failed and rolled back on any map error, so
+	// nothing is pending by the time this runs - it is a no-op for that path.
+	//
+	// Flush first: dequeueDuringBlockMovement's own SetIfNotExists calls are
+	// batched and may still be below writerFlushThreshold, so a pending flush
+	// failure for them would otherwise stay invisible here and
+	// commit anyway - see flushDiskTxMapWriters.
+	stp.flushDiskTxMapWriters()
+	stp.drainAndLogDiskTxMapErr("moveForwardBlock_postDequeue")
+
 	// Commit point of moveForwardBlock: any captured pointer to the old
 	// currentTxMap (now in currentTxMapShadow) is guaranteed unused. Empty
 	// the shadow in place so the next resetSubtreeState swap exposes a
@@ -5303,6 +5893,7 @@ func (stp *SubtreeProcessor) swapCurrentTxMapBack() {
 		// half before swapping so the retired half ends up empty for the next
 		// cycle, then restore the pre-reset active map.
 		stp.diskTxMap.Clear()
+		stp.reportDiskTxMapCloseWarn(stp.diskTxMap, "swapCurrentTxMapBack_clear")
 
 		stp.diskTxMap, stp.diskTxMapShadow = stp.diskTxMapShadow, stp.diskTxMap
 		stp.currentTxMap = stp.diskTxMap
@@ -5366,6 +5957,7 @@ func (stp *SubtreeProcessor) clearCurrentTxMapShadow() {
 		// Rotates the retired half to a fresh Badger generation and closes the
 		// old one, so the volume returns to holding a single populated map.
 		stp.diskTxMapShadow.Clear()
+		stp.reportDiskTxMapCloseWarn(stp.diskTxMapShadow, "clearCurrentTxMapShadow_clear")
 
 		if remaining := stp.diskTxMapShadow.Length(); remaining != 0 {
 			stp.logger.Warnf("[clearCurrentTxMapShadow] retired disk tx map half still holds %d entries after clear, the next block reset will retry and fail the block if it cannot empty it", remaining)
@@ -5572,7 +6164,9 @@ func (stp *SubtreeProcessor) dequeueDuringBlockMovement(transactionMap *SplitSwi
 					}
 				}
 
-				_ = stp.addNode(node, txInpoints, skipNotification)
+				if addErr := stp.addNode(node, txInpoints, skipNotification); addErr != nil {
+					stp.logger.Errorf("[SubtreeProcessor] error adding node %s during sequential remainder processing: %v", node.Hash.String(), addErr)
+				}
 			}
 
 			itemsProcessed += int64(len(batch.nodes))
@@ -5840,7 +6434,9 @@ func (stp *SubtreeProcessor) processRemainderTxHashes(ctx context.Context, chain
 					return errors.NewProcessingError("[processRemainderTxHashes] error getting node txInpoints from currentTxMap for %s", node.Hash.String())
 				}
 
-				_ = stp.addNode(node, parents, skipNotification)
+				if addErr := stp.addNode(node, parents, skipNotification); addErr != nil {
+					stp.logger.Errorf("[processRemainderTxHashes] error adding node %s: %v", node.Hash.String(), addErr)
+				}
 			}
 		}
 	}
@@ -6006,7 +6602,7 @@ func (stp *SubtreeProcessor) parallelBuildRemainderSubtrees(ctx context.Context,
 		stp.chainedSubtreesTotalSize.Add(oldSubtree.SizeInBytes)
 
 		if stp.diskTxMap != nil {
-			_ = stp.diskTxMap.UpdateSubtreeIndexBatch(oldSubtree.Nodes, int16(chainedIdx+1))
+			stp.diskTxMap.recordErr(stp.diskTxMap.UpdateSubtreeIndexBatch(oldSubtree.Nodes, int16(chainedIdx+1)))
 		}
 
 		stp.subtreesInBlock++
@@ -6832,6 +7428,9 @@ func DeserializeHashesFromReaderIntoBuckets(
 	return nil
 }
 
+// defaultStopWaitTimeout is how long Stop waits for the processor goroutine.
+const defaultStopWaitTimeout = 5 * time.Second
+
 // Stop gracefully shuts down the SubtreeProcessor.
 // It cancels the processor context, which triggers the main goroutine to stop
 // and properly clean up resources including the announcement ticker.
@@ -6846,11 +7445,21 @@ func (stp *SubtreeProcessor) Stop(ctx context.Context) {
 			h.f()
 			// Wait for the main goroutine to exit before cleaning up chainedSubtrees
 			// to avoid data race with closeChainedSubtrees()
-			deadline := time.Now().Add(5 * time.Second)
+			timeout := stp.stopWaitTimeout
+			if timeout <= 0 {
+				timeout = defaultStopWaitTimeout
+			}
+
+			deadline := time.Now().Add(timeout)
 			for !stp.stopped.Load() {
 				if time.Now().After(deadline) {
-					stp.logger.Warnf("[SubtreeProcessor] Stop timeout waiting for goroutine to exit")
-					break
+					// A handler (a long moveForwardBlock, a reset's reload) is
+					// still running and still using the subtrees and disk tx
+					// maps: closing them under it panics its next map write
+					// ("send on closed channel") or unmaps a subtree it is
+					// reading. Leave them for process exit.
+					stp.logger.Warnf("[SubtreeProcessor] Stop timeout waiting for goroutine to exit; leaving subtrees and disk tx maps open for process exit")
+					return
 				}
 				time.Sleep(10 * time.Millisecond)
 			}
@@ -6871,13 +7480,20 @@ func (stp *SubtreeProcessor) Stop(ctx context.Context) {
 		// and only Close() removes them — see closeRetiredDiskTxMaps.
 		if stp.diskTxMap != nil {
 			reportDiskMapStats(stp.diskTxMapStats())
-			_ = stp.diskTxMap.Close()
+			if err := stp.diskTxMap.Close(); err != nil {
+				stp.logger.Errorf("[SubtreeProcessor][Stop] error closing disk tx map: %v", err)
+			}
 			clearDiskMapStats()
 		}
 
 		if stp.diskTxMapShadow != nil {
-			_ = stp.diskTxMapShadow.Close()
+			if err := stp.diskTxMapShadow.Close(); err != nil {
+				stp.logger.Errorf("[SubtreeProcessor][Stop] error closing shadow disk tx map: %v", err)
+			}
 		}
+
+		// Storage errors still pending at shutdown have no operation left to fail.
+		stp.drainAndLogDiskTxMapErr("stop")
 
 		stp.closeRetiredDiskTxMaps()
 	})
