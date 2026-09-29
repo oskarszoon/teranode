@@ -473,8 +473,8 @@ func requireHostEvent(t *testing.T, events chan BanEvent, action, key string) {
 }
 
 // TestBanList_EnforcementRawAliases catches loss of raw-key identity: renewal
-// updates the same key, an equivalent spelling neither removes nor replaces a
-// stored key, and removing one alias leaves an independently stored alias.
+// updates only the same key and equivalent aliases coexist as separate raw
+// keys, while removing any equivalent host spelling removes every alias.
 func TestBanList_EnforcementRawAliases(t *testing.T) {
 	bl := newTestBanList(t)
 	ctx := context.Background()
@@ -494,31 +494,21 @@ func TestBanList_EnforcementRawAliases(t *testing.T) {
 	require.True(t, bl.BannedPeers()[key].ExpirationTime.Equal(renewed))
 	requireStoredRow(t, bl, key, renewed, "192.0.2.7/32")
 
-	// An equivalent spelling that was never added is not an administrative alias.
-	require.NoError(t, bl.Remove(ctx, "::ffff:192.0.2.7"))
-	require.ElementsMatch(t, []string{key}, bl.ListBanned())
-	requireStoredRow(t, bl, key, renewed, "192.0.2.7/32")
-	require.True(t, bl.IsBanned(alias))
-
 	require.NoError(t, bl.Add(ctx, alias, original))
 	requireHostEvent(t, events, "add", alias)
 	require.ElementsMatch(t, []string{key, alias}, bl.ListBanned())
-
-	require.NoError(t, bl.Remove(ctx, key))
-	requireHostEvent(t, events, "remove", key)
-	require.ElementsMatch(t, []string{alias}, bl.ListBanned())
-	require.True(t, bl.IsBanned("[::ffff:192.0.2.7]:18444"))
+	requireStoredRow(t, bl, key, renewed, "192.0.2.7/32")
 	requireStoredRow(t, bl, alias, original, "192.0.2.7/32")
 
-	var removedRows int
-
-	require.NoError(t, bl.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM bans WHERE key = $1", key).Scan(&removedRows))
-	require.Zero(t, removedRows)
-
-	require.NoError(t, bl.Remove(ctx, alias))
-	requireHostEvent(t, events, "remove", alias)
+	// A never-stored equivalent spelling removes every host alias, one raw-key
+	// event each; delivery order is not asserted.
+	require.NoError(t, bl.Remove(ctx, "::ffff:192.0.2.7"))
+	require.Equal(t, map[string]string{key: "192.0.2.7/32", alias: "192.0.2.7/32"},
+		collectRemoveEvents(t, events, 2))
+	requireNoEvent(t, events)
 	require.Empty(t, bl.ListBanned())
-	require.False(t, bl.IsBanned("::ffff:192.0.2.7"))
+	require.Empty(t, persistedKeys(t, bl))
+	require.False(t, bl.IsBanned("[::ffff:192.0.2.7]:18444"))
 }
 
 // TestBanList_EnforcementInvalidInputs is a compatibility control: invalid
