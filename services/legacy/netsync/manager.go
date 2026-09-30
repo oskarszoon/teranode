@@ -1777,8 +1777,6 @@ func (sm *SyncManager) handleBlockMsg(bmsg *blockQueueMsg) error {
 		return errors.NewServiceError("[handleBlockMsg] skipping block %s from disconnected peer %s", bmsg.blockHash, bmsg.peer)
 	}
 
-	catchingBlocks := false
-
 	sm.logger.Debugf("[handleBlockMsg][%s] checking current FSM state", bmsg.blockHash)
 
 	fsmState, err := sm.blockchainClient.GetFSMCurrentState(sm.ctx)
@@ -1786,9 +1784,7 @@ func (sm *SyncManager) handleBlockMsg(bmsg *blockQueueMsg) error {
 		return errors.NewProcessingError("[handleBlockMsg] failed to get current FSM state", err)
 	}
 
-	if fsmState != nil && *fsmState == teranodeblockchain.FSMStateCATCHINGBLOCKS {
-		catchingBlocks = true
-	}
+	catchingBlocks := suppressBlockRejects(fsmState)
 
 	// If we didn't ask for this block then the peer is misbehaving.
 	if _, exists = state.requestedBlocks.Get(bmsg.blockHash); !exists {
@@ -4089,4 +4085,11 @@ func (sm *SyncManager) processTXmetaBatchMessage(data []byte) error {
 	}
 
 	return nil
+}
+
+// suppressBlockRejects reports whether invalid blocks must not be rejected to the
+// serving peer. Only RUNNING proves the node is caught up; IDLE is included
+// because an operator STOP can land while blocks are still syncing.
+func suppressBlockRejects(state *teranodeblockchain.FSMStateType) bool {
+	return state == nil || *state != teranodeblockchain.FSMStateRUNNING
 }

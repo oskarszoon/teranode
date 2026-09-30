@@ -35,6 +35,7 @@ var FSMTransitions = fsm.Events{
 		Name: blockchain_api.FSMEventType_STOP.String(),
 		Src: []string{
 			blockchain_api.FSMStateType_RUNNING.String(),
+			blockchain_api.FSMStateType_CATCHINGBLOCKS.String(),
 		},
 		Dst: blockchain_api.FSMStateType_IDLE.String(),
 	},
