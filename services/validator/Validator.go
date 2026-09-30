@@ -732,8 +732,8 @@ func (v *Validator) ValidateWithOptions(ctx context.Context, tx *bt.Tx, blockHei
 						return
 					}
 
-					if *state == blockchain_api.FSMStateType_CATCHINGBLOCKS {
-						// ignore notifications while syncing or catching up
+					if *state != blockchain_api.FSMStateType_RUNNING {
+						// ignore notifications unless caught up (IDLE can follow a STOP mid-catchup)
 						return
 					}
 				}
@@ -792,7 +792,8 @@ func (v *Validator) publishPolicyRejectedTx(ctx context.Context, ctxLogger ulogg
 			return
 		}
 
-		if *state == blockchain_api.FSMStateType_CATCHINGBLOCKS {
+		// IDLE is included: an operator STOP can land while catchup is running.
+		if *state != blockchain_api.FSMStateType_RUNNING {
 			return
 		}
 	}

@@ -1786,7 +1786,8 @@ func (sm *SyncManager) handleBlockMsg(bmsg *blockQueueMsg) error {
 		return errors.NewProcessingError("[handleBlockMsg] failed to get current FSM state", err)
 	}
 
-	if fsmState != nil && *fsmState == teranodeblockchain.FSMStateCATCHINGBLOCKS {
+	// IDLE is included: an operator STOP can land while blocks are still syncing.
+	if fsmState == nil || *fsmState != teranodeblockchain.FSMStateRUNNING {
 		catchingBlocks = true
 	}
 

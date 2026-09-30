@@ -159,10 +159,11 @@ relay tx invs that post-Genesis peers ban on sight
 > **Getting back to IDLE:** `setfsmstate --fsmstate idle` works from both RUNNING
 > and CATCHINGBLOCKS. From CATCHINGBLOCKS it records the operator's intent to park
 > the node; it does not cancel the catchup batch already in progress. That batch
-> keeps validating blocks under IDLE, where catchup-only safeguards no longer
-> apply: its transactions are fed to block assembly and rejected-transaction
-> messages are published, as they would be in RUNNING. Its final automatic
-> promotion to RUNNING is refused, so the node stays in IDLE. In legacy sync mode
+> keeps validating blocks under IDLE with the catchup safeguards still in force,
+> since they apply in every state except RUNNING: nothing is fed to block
+> assembly, peer subtrees are ignored, and rejected-transaction messages are not
+> published. Its final automatic promotion to RUNNING is refused, so the node
+> stays in IDLE. In legacy sync mode
 > block download is not FSM-gated and continues. Stop the services promptly, and
 > always before destructive recovery such as `rewindblockchain`: IDLE alone does
 > not guarantee that no work is in flight.
