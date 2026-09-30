@@ -120,7 +120,7 @@ The Blockchain service also exposes the following gRPC methods to interact with 
 
 #### 3.3.1. FSM: Idle State
 
-A node reaches `Idle` by being stopped from `Running`, by restoring persisted
+A node reaches `Idle` by being stopped from `Running` or `CatchingBlocks`, by restoring persisted
 `Idle`, or by starting fresh under a context configured to park there (production
 deployments do; see section 3.1). In this state:
 
@@ -144,9 +144,9 @@ Allowed Operations in Idle State:
 
 Services wait for the FSM to leave `Idle` before starting their operations — any
 non-Idle state, including `CatchingBlocks`, releases them (see section 3.5). As
-such, the node should see no activity for as long as the FSM stays in `Idle`.
+such, a node that boots into `Idle` sees no activity until it leaves `Idle`.
 
-The node can also return back to the `Idle` state from `Running`, however this can only be triggered by a manual / external request.
+The node can also return to `Idle` from `Running` or `CatchingBlocks`, but only on a manual / external request. Services that have already started keep running; `Idle` records the operator's intent and blocks automatic promotion, it is not a drain barrier. In particular, a STOP from `CatchingBlocks` does not cancel the catchup batch in progress: it keeps validating blocks under `Idle`, where the catchup-only gates (no block-assembly feeding, no rejected-transaction publishing, pruner `SkipDuringCatchup`) no longer apply, and its final promotion to `Running` is refused. In legacy sync mode, block download is not FSM-gated and continues. Stop the services before destructive recovery such as `rewindblockchain`.
 
 #### 3.3.2. FSM: Running State
 

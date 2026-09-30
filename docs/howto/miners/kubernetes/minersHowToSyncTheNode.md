@@ -402,8 +402,8 @@ snapshot, and that all services can reach their stores. Then start catch-up:
 kubectl exec -it $(kubectl get pods -n teranode-operator -l app=blockchain -o jsonpath='{.items[0].metadata.name}') -n teranode-operator -- teranode-cli setfsmstate --fsmstate catchingblocks
 ```
 
-There is no transition from `CATCHINGBLOCKS` back to `IDLE`, so perform these
-checks before issuing the command. To skip the verification window on an
+`setfsmstate --fsmstate idle` can park the node again, but it does not stop a
+catchup already in progress, so perform these checks before issuing the command. To skip the verification window on an
 unattended node, set `blockchain_initializeNodeInState: "CATCHINGBLOCKS"` in
 the operator configmap before the first start.
 
