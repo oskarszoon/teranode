@@ -3720,7 +3720,7 @@ func Test_Idle(t *testing.T) {
 	}{
 		{
 			name:        "idle request",
-			expectError: true, // Fresh node starts in CATCHINGBLOCKS; STOP event has no CATCHINGBLOCKS->IDLE edge
+			expectError: false, // Fresh node starts in CATCHINGBLOCKS; STOP parks it in IDLE
 		},
 	}
 

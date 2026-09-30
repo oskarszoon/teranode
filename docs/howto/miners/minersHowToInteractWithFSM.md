@@ -123,11 +123,9 @@ The following states are valid for all environments:
 
 ### When a transition is refused
 
-Two rules constrain which transitions are accepted, and both surface as errors
-rather than silent no-ops:
+One rule constrains which transitions are accepted, and it surfaces as an error
+rather than a silent no-op:
 
-- **Only RUN may leave CATCHINGBLOCKS.** A node that is catching up cannot be
-  moved to IDLE; it must finish catching up first.
 - **RUN is refused while the chain tip is below the network's highest hard-coded
   checkpoint.** Mainnet and testnet both have checkpoints; regtest has none. The
   error names both your tip height and the checkpoint it must reach. From IDLE,
@@ -158,8 +156,23 @@ relay tx invs that post-Genesis peers ban on sight
 > an override to force a below-checkpoint node into RUNNING, it no longer exists
 > — that was the hole this rule closes. Let the node catch up.
 >
-> **Getting back to IDLE:** there is no `CATCHINGBLOCKS -> IDLE` transition. Once
-> a node is catching up, the only way out is RUN.
+> **Getting back to IDLE:** `setfsmstate --fsmstate idle` works from both RUNNING
+> and CATCHINGBLOCKS. From CATCHINGBLOCKS it records the operator's intent to park
+> the node; it does not cancel a catchup already in progress. That catchup runs to
+> completion, and its automatic promotion to RUNNING is then refused, so the node
+> stays in IDLE. Stop the services before any destructive recovery such as
+> `rewindblockchain`: IDLE alone does not guarantee that no work is in flight.
+
+### Resuming from IDLE
+
+Choose the resume path by how far the node is behind:
+
+- **Needs to synchronize** (below the highest checkpoint, or behind its peers):
+  `setfsmstate --fsmstate catchingblocks`. The node promotes itself to RUNNING
+  once catchup completes.
+- **Already at the tip**: `setfsmstate --fsmstate running`. Resuming an at-tip
+  node with `catchingblocks` can leave it in CATCHINGBLOCKS with no catchup work
+  to trigger the promotion to RUNNING.
 
 ## Validation
 

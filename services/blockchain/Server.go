@@ -2919,17 +2919,6 @@ func (b *Blockchain) sendFSMEventLocked(ctx context.Context, eventReq *blockchai
 
 	priorState := b.finiteStateMachine.Current()
 
-	// Prevent manual transitions from CATCHINGBLOCKS state
-	// The state should only exit CATCHINGBLOCKS programmatically when catchup completes
-	if priorState == blockchain_api.FSMStateType_CATCHINGBLOCKS.String() {
-		// Only allow RUN event (catchup completion) to exit CATCHINGBLOCKS
-		if eventReq.Event != blockchain_api.FSMEventType_RUN {
-			errMsg := "cannot manually transition from CATCHINGBLOCKS state - catchup must complete first"
-			b.logger.Warnf("[Blockchain Server] %s (attempted event: %v)", errMsg, eventReq.Event)
-			return nil, errors.NewInvalidArgumentError(errMsg)
-		}
-	}
-
 	// Refuse a valid transition to RUNNING while the local chain tip is still below
 	// the network's highest hard-coded checkpoint. Pre-checkpoint heights are
 	// guaranteed to be deep history, so a

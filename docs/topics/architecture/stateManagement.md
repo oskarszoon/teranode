@@ -56,7 +56,7 @@ The FSM handles the following state **transitions**:
 
 - **Run**: Transitions to _Running_ from _Idle_ or _CatchingBlocks_
 - **CatchupBlocks**: Transitions to _CatchingBlocks_ from _Running_ or _Idle_
-- **Stop**: Transitions to _Idle_ from _Running_
+- **Stop**: Transitions to _Idle_ from _Running_ or _CatchingBlocks_
 
 Teranode provides a visualizer tool to generate and visualize the state machine diagram. To run the visualizer, use the command `go run services/blockchain/fsm_visualizer/main.go`. The generated `docs/state-machine.diagram.md` can be visualized using <https://mermaid.live/>.
 

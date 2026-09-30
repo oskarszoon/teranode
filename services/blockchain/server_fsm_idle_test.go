@@ -43,6 +43,23 @@ func TestIdle_AutomaticCatchupCannotEscapeOperatorStop(t *testing.T) {
 	requireIdleBoundaryState(t, b, store, FSMStateRUNNING)
 }
 
+// Rewind preflight requires IDLE, and a fresh node boots into CATCHINGBLOCKS.
+// STOP must park it directly, and catchup completing afterwards must not undo it.
+func TestIdle_StopFromCatchingBlocks(t *testing.T) {
+	ctx := context.Background()
+	b, store := newFSMPersistenceTestBlockchain(t, FSMStateCATCHINGBLOCKS)
+	_, err := b.Idle(ctx, &emptypb.Empty{})
+	require.NoError(t, err)
+	requireIdleBoundaryState(t, b, store, FSMStateIDLE)
+	require.Len(t, b.notifications, 1)
+	<-b.notifications
+
+	_, runErr := b.Run(ctx, &emptypb.Empty{})
+	require.Error(t, runErr, "catchup completion must not promote operator IDLE")
+	requireIdleBoundaryState(t, b, store, FSMStateIDLE)
+	require.Empty(t, b.notifications)
+}
+
 func TestIdle_AutomaticCatchupFromRunningStillWorks(t *testing.T) {
 	b, store := newFSMPersistenceTestBlockchain(t, FSMStateRUNNING)
 	_, err := b.CatchUpBlocks(context.Background(), &emptypb.Empty{})
