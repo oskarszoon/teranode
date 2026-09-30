@@ -3498,12 +3498,12 @@ func (u *BlockValidation) updateSubtreesDAH(ctx context.Context, block *model.Bl
 		return errors.NewServiceError("[updateSubtreesDAH][%s] failed to set block subtrees_set", block.Hash().String(), err)
 	}
 
-	// Load-bearing INFO. The enclosing ValidateBlock and updateSubtreesDAH spans
-	// end with a bare deferFn(), so their DONE lines fire on success and failure
-	// alike. This line runs only after SetBlockSubtreesSet succeeds, which makes
-	// it the only INFO line that marks a block as successfully validated, whether
-	// block.Valid ran synchronously or in the background under opt-in optimistic
-	// mining. Do not demote or remove it without providing another.
+	// Keep at INFO. This line confirms that SetBlockSubtreesSet succeeded, the
+	// write that triggers setMined. The enclosing ValidateBlock and
+	// updateSubtreesDAH spans end with a bare deferFn(), so their DONE lines fire
+	// on failure too and cannot stand in for it. It is not proof that block.Valid
+	// finished: under opt-in optimistic mining the periodic sweep can reach it
+	// first (see KNOWN LIMITATION above).
 	u.logger.Infof("[ValidateBlock][%s] set block subtrees_set", block.Hash().String())
 
 	return nil
