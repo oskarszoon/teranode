@@ -274,7 +274,10 @@ jobs:
 
       # If the Claude step failed (timeout, API error, runner death), or finished "successfully"
       # without ever marking its sticky Complete, that "In Progress" comment is now a zombie.
-      # Mark it Aborted so the PR doesn't show a stuck review.
+      # Rewrite its status line to Aborted, keeping whatever findings it already holds.
+      # Only the first status line counts, so a finished review that quotes the phrase further
+      # down is left alone; ":" inside or outside the bold and extra text such as an emoji are
+      # accepted, since the prompt gives the format only as a template.
       # Concurrency-cancelled runs are intentionally NOT covered: the queued replacement run will
       # find the existing sticky and update it in-place, so no zombie remains in that case.
       - name: Mark in-progress sticky comments as aborted
@@ -286,17 +289,26 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          IDS=$(gh api "/repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-            --jq '.[] | select((.user.login == "claude[bot]" or .user.login == "github-actions[bot]") and (.body | startswith("🤖 **Claude Code Review**")) and (.body | contains("**Status:** In Progress"))) | .id') || true
-          if [ -z "${IDS:-}" ]; then
+          STUCK=$(gh api "/repos/$REPO/issues/$PR_NUMBER/comments" --paginate | jq -r --arg run "$RUN_URL" '
+            def status_idx: split("\n") | map(test("^\\*\\*Status:?\\*\\*")) | index(true);
+            .[] | select((.user.login == "claude[bot]" or .user.login == "github-actions[bot]")
+              and (.body | startswith("🤖 **Claude Code Review**")))
+            | (.body | split("\n")) as $lines
+            | (.body | status_idx) as $i
+            | select($i != null and ($lines[$i] | test("In Progress")))
+            | {id, body: (($lines[:$i]
+                + ["**Status:** Aborted — the review ended without marking itself Complete."]
+                + $lines[$i + 1:]) | join("\n")
+                + "\n\n---\nRe-run by pushing a new commit, or inspect the run: " + $run)}
+            | @base64
+          ') || true
+          if [ -z "${STUCK:-}" ]; then
             echo "No in-progress Claude sticky comments to clean up."
             exit 0
           fi
-          ABORTED_BODY=$(printf '%s\n\n%s\n\n%s' \
-            '🤖 **Claude Code Review**' \
-            '**Status:** Aborted — the review workflow ended before completing.' \
-            "Re-run by pushing a new commit, or inspect the failed run: $RUN_URL")
-          for id in $IDS; do
+          for row in $STUCK; do
+            id=$(printf '%s' "$row" | base64 -d | jq -r .id)
             echo "Marking sticky comment $id as aborted"
-            gh api --method PATCH "/repos/$REPO/issues/comments/$id" -f body="$ABORTED_BODY" || true
+            printf '%s' "$row" | base64 -d | jq '{body}' \
+              | gh api --method PATCH "/repos/$REPO/issues/comments/$id" --input - > /dev/null || true
           done
