@@ -520,7 +520,7 @@ TRACING_INFO_SITES := 61
 
 .PHONY: lint-tracing-info
 lint-tracing-info:
-	@count=$$(git grep -c "tracing\.WithLogMessage(" -- '*.go' ':!*_test.go' ':!test/**' | awk -F: '{s+=$$NF} END {print s+0}'); \
+	@count=$$(git grep -oh "tracing\.WithLogMessage(" -- '*.go' ':!*_test.go' ':!test/**' | wc -l | tr -d ' '); \
 	if [ "$$count" -lt 1 ]; then \
 		echo "lint-tracing-info: counted $$count sites, which cannot be right."; \
 		echo "Either the count command failed (not a git checkout, or git grep"; \
