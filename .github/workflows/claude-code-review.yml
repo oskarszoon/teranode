@@ -85,6 +85,22 @@ jobs:
             core.setOutput('repo_full_name', pr.data.head.repo.full_name);
             core.setOutput('is_draft', pr.data.draft);
 
+            // The commit this PR branched from. The checkout below is the PR's head repository,
+            // usually a fork whose main lags upstream, so origin/main is not a usable base; the
+            // merge base is in the PR's own history, so it is always present in the checkout.
+            try {
+              const { data: cmp } = await github.rest.repos.compareCommitsWithBasehead({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                basehead: `${pr.data.base.sha}...${pr.data.head.sha}`,
+                per_page: 1
+              });
+              core.setOutput('merge_base_sha', cmp.merge_base_commit.sha);
+            } catch (e) {
+              core.warning(`Could not resolve merge base: ${e.message}`);
+              core.setOutput('merge_base_sha', '');
+            }
+
       - name: Skip draft PRs
         if: steps.pr.outputs.is_draft == 'true'
         run: |
@@ -165,6 +181,12 @@ jobs:
               * If fixed: Auto-resolve using `gh api --method PATCH /repos/${{ github.repository }}/pulls/comments/{comment_id} -f state=resolved`
               * If human added feedback/questions: Acknowledge in the thread, don't create a new inline comment
               * If still broken: Leave unresolved, optionally add brief update to the thread
+
+            **Reading the changes:**
+            - MERGE BASE: ${{ steps.pr.outputs.merge_base_sha }} (the commit this PR branched from; it is in the checkout)
+            - `git diff <MERGE BASE> HEAD` is exactly this PR's change set. Never diff against `origin/main`: the checkout is the PR's head repository, usually a fork whose `main` is behind, so that diff would include other people's commits
+            - Start with `git diff --stat <MERGE BASE> HEAD`. On a large PR, review file by file with `git diff <MERGE BASE> HEAD -- <path>` rather than reading the whole `gh pr diff`, whose output gets cut off when the diff is large
+            - If MERGE BASE is empty above, use `gh pr diff` instead
 
             **Review Guidelines:**
             - Work fully autonomously: this is a non-interactive CI run, never pause to ask questions or offer follow-ups
