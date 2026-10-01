@@ -3559,6 +3559,28 @@ func (sm *SyncManager) announceTx(item *TxHashAndFee, parents ...chainhash.Hash)
 	}
 }
 
+// newTxAnnounceBatcher builds the batcher that announces new txs to peers,
+// parents first within each batch.
+//
+// It runs with background=false, so the batcher's worker flushes one batch
+// at a time, in order. With background=true go-batcher starts a goroutine
+// per flush, so a child in one batch could reach peers before its parent in
+// the previous one. The callback does not block: AnnounceNewTransactions
+// hands each batch to an ordered sender and returns.
+func (sm *SyncManager) newTxAnnounceBatcher(size int, timeout time.Duration) *batcher.BatcherWithDedup[TxHashAndFee] {
+	return batcher.NewWithDeduplicationAndPool[TxHashAndFee](size, timeout, func(batch []*TxHashAndFee) {
+		sm.logger.Debugf("announcing %d transactions to peers", len(batch))
+
+		// process the batch, parents first
+		sm.peerNotifier.AnnounceNewTransactions(sm.orderAnnounceBatch(batch))
+	}, false,
+		batcher.WithName("netsync_tx_announce"),
+		batcher.WithLogger(sm.logger),
+		batcher.WithMetrics(batchermetrics.Provider()),
+		batcher.WithTracer(tracing.Tracer("SyncManager").OTelTracer()),
+	)
+}
+
 // orderAnnounceBatch reorders a batch from txAnnounceBatcher so every tx
 // comes after any of its parents in the same batch. The txmeta topic is
 // spread over partitions, so a child can be read, and batched, before its
@@ -3701,17 +3723,7 @@ func New(ctx context.Context, logger ulogger.Logger, tSettings *settings.Setting
 
 	// create the transaction announcement batcher
 	sm.announceParents = txmap.NewSyncedMap[chainhash.Hash, []chainhash.Hash](2 * maxRequestedTxns)
-	sm.txAnnounceBatcher = batcher.NewWithDeduplicationAndPool[TxHashAndFee](maxRequestedTxns, 1*time.Second, func(batch []*TxHashAndFee) {
-		sm.logger.Debugf("announcing %d transactions to peers", len(batch))
-
-		// process the batch, parents first
-		sm.peerNotifier.AnnounceNewTransactions(sm.orderAnnounceBatch(batch))
-	}, true,
-		batcher.WithName("netsync_tx_announce"),
-		batcher.WithLogger(logger),
-		batcher.WithMetrics(batchermetrics.Provider()),
-		batcher.WithTracer(tracing.Tracer("SyncManager").OTelTracer()),
-	)
+	sm.txAnnounceBatcher = sm.newTxAnnounceBatcher(maxRequestedTxns, 1*time.Second)
 
 	// set an eviction function for orphan transactions
 	// this will be called when an orphan transaction is evicted from the map

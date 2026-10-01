@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bsv-blockchain/go-batcher/v2"
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	subtreepkg "github.com/bsv-blockchain/go-subtree"
 	txmap "github.com/bsv-blockchain/go-tx-map"
@@ -52,48 +51,112 @@ func TestOrderAnnounceBatch(t *testing.T) {
 	})
 }
 
-// TestProcessTXmetaBatchMessage_AnnouncesParentsFirst drives the txmeta path:
-// a child read before its parent, as a partitioned topic can deliver them, is
-// announced after the parent.
-func TestProcessTXmetaBatchMessage_AnnouncesParentsFirst(t *testing.T) {
-	parent, child := chainhash.Hash{0x10}, chainhash.Hash{0x20}
-	external := chainhash.Hash{0x30}
+// recordingNotifier records announced batches in order. delayFirst holds the
+// first AnnounceNewTransactions call, so a later flush that does not wait for
+// it would be recorded first.
+type recordingNotifier struct {
+	*MockPeerNotifier
 
-	var (
-		mu        sync.Mutex
-		announced []*TxHashAndFee
-	)
+	delayFirst time.Duration
+
+	mu      sync.Mutex
+	calls   int
+	batches [][]chainhash.Hash
+}
+
+func (n *recordingNotifier) AnnounceNewTransactions(batch []*TxHashAndFee) {
+	n.mu.Lock()
+	n.calls++
+	first := n.calls == 1
+	n.mu.Unlock()
+
+	if first {
+		time.Sleep(n.delayFirst)
+	}
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	n.batches = append(n.batches, announceHashes(batch))
+}
+
+func (n *recordingNotifier) announced() []chainhash.Hash {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	var out []chainhash.Hash
+	for _, batch := range n.batches {
+		out = append(out, batch...)
+	}
+
+	return out
+}
+
+// newAnnounceTestSyncManager returns a SyncManager whose tx announce batcher
+// is built by the production constructor, with a small batch size.
+func newAnnounceTestSyncManager(t *testing.T, notifier PeerNotifier, size int) *SyncManager {
+	t.Helper()
 
 	sm := &SyncManager{
 		logger:          ulogger.TestLogger{},
+		peerNotifier:    notifier,
 		announceParents: txmap.NewSyncedMap[chainhash.Hash, []chainhash.Hash](),
 	}
-	sm.txAnnounceBatcher = batcher.NewWithDeduplication[TxHashAndFee](100, 50*time.Millisecond, func(batch []*TxHashAndFee) {
-		mu.Lock()
-		announced = append(announced, sm.orderAnnounceBatch(batch)...)
-		mu.Unlock()
-	}, false)
+	sm.txAnnounceBatcher = sm.newTxAnnounceBatcher(size, 50*time.Millisecond)
 
-	spends := func(p chainhash.Hash) subtreepkg.TxInpoints {
-		return subtreepkg.NewTxInpointsFromPacked([]chainhash.Hash{p}, []uint32{1, 0})
-	}
+	t.Cleanup(sm.closeTxAnnounceBatcher)
+
+	return sm
+}
+
+func spending(parent chainhash.Hash) meta.Data {
+	return meta.Data{Fee: 1, SizeInBytes: 100, TxInpoints: subtreepkg.NewTxInpointsFromPacked([]chainhash.Hash{parent}, []uint32{1, 0})}
+}
+
+// TestProcessTXmetaBatchMessage_AnnouncesParentsFirst drives the txmeta path
+// through the production batcher: a child read before its parent, as a
+// partitioned topic can deliver them, is announced after the parent.
+func TestProcessTXmetaBatchMessage_AnnouncesParentsFirst(t *testing.T) {
+	parent, child := chainhash.Hash{0x10}, chainhash.Hash{0x20}
+
+	notifier := &recordingNotifier{MockPeerNotifier: NewMockPeerNotifier()}
+	sm := newAnnounceTestSyncManager(t, notifier, 100)
 
 	msg := buildTXmetaBatchMessage(t, []txmetaTestEntry{
-		{hash: child, action: txmetacache.WireActionADD, meta: meta.Data{Fee: 1, SizeInBytes: 100, TxInpoints: spends(parent)}},
-		{hash: parent, action: txmetacache.WireActionADD, meta: meta.Data{Fee: 1, SizeInBytes: 100, TxInpoints: spends(external)}},
+		{hash: child, action: txmetacache.WireActionADD, meta: spending(parent)},
+		{hash: parent, action: txmetacache.WireActionADD, meta: spending(chainhash.Hash{0x30})},
 	})
 
 	require.NoError(t, sm.processTXmetaBatchMessage(msg))
 
-	require.Eventually(t, func() bool {
-		mu.Lock()
-		defer mu.Unlock()
+	require.Eventually(t, func() bool { return len(notifier.announced()) == 2 }, 2*time.Second, 10*time.Millisecond)
+	require.Equal(t, []chainhash.Hash{parent, child}, notifier.announced())
+}
 
-		return len(announced) == 2
-	}, 2*time.Second, 10*time.Millisecond)
+// TestTxAnnounceBatcher_FlushesInOrder covers review: with background=true
+// go-batcher runs each flush on its own goroutine, so a child in one
+// size-triggered batch could be announced before its parent in the batch
+// before it. The first flush is held here, so out-of-order flushing would
+// record the second batch first.
+func TestTxAnnounceBatcher_FlushesInOrder(t *testing.T) {
+	parent, child := chainhash.Hash{0x10}, chainhash.Hash{0x20}
 
-	mu.Lock()
-	defer mu.Unlock()
+	notifier := &recordingNotifier{MockPeerNotifier: NewMockPeerNotifier(), delayFirst: 200 * time.Millisecond}
+	sm := newAnnounceTestSyncManager(t, notifier, 2)
 
-	require.Equal(t, []chainhash.Hash{parent, child}, announceHashes(announced))
+	// Batch size 2: the parent fills the first batch, the child the second.
+	msg := buildTXmetaBatchMessage(t, []txmetaTestEntry{
+		{hash: parent, action: txmetacache.WireActionADD, meta: spending(chainhash.Hash{0x30})},
+		{hash: chainhash.Hash{0x11}, action: txmetacache.WireActionADD, meta: spending(chainhash.Hash{0x31})},
+		{hash: child, action: txmetacache.WireActionADD, meta: spending(parent)},
+		{hash: chainhash.Hash{0x21}, action: txmetacache.WireActionADD, meta: spending(chainhash.Hash{0x32})},
+	})
+
+	require.NoError(t, sm.processTXmetaBatchMessage(msg))
+
+	require.Eventually(t, func() bool { return len(notifier.announced()) == 4 }, 2*time.Second, 10*time.Millisecond)
+
+	got := notifier.announced()
+	require.Equal(t, parent, got[0], "batches were announced out of order: %v", got)
+	require.Equal(t, child, got[2], "batches were announced out of order: %v", got)
 }
