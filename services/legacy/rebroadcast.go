@@ -148,8 +148,9 @@ func (q *rebroadcastQueue) entries() []*rebroadcastEntry {
 
 // retry hands every pending entry to relay as one batch with parents before
 // their children, counts the retry against each entry's budget, and ages out
-// entries that have reached maxTips. Entries whose parents are unknown keep
-// their queue order. Returns the number of entries relayed and aged out.
+// entries that have reached maxTips. Otherwise queue order is kept as far as
+// the known parents allow, see netsync.ParentsFirst. Returns the number of
+// entries relayed and aged out.
 func (q *rebroadcastQueue) retry(maxTips int, relay func([]relayMsg)) (relayed, agedOut int) {
 	if q.len() == 0 {
 		return 0, 0
