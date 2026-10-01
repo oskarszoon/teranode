@@ -3425,12 +3425,13 @@ func (s *server) RelayInventory(invVect *wire.InvVect, data interface{}) {
 // peer is offered them in batch order. Unlike RelayInventory, which starts a
 // goroutine per inv, one goroutine sends the whole batch, and it waits for the
 // previous batch to finish first, so batches never interleave. It never blocks
-// the caller. Like RelayInventory, it stops relaying as soon as the node
-// leaves RUNNING.
+// the caller. Like RelayInventory, it checks canRelayTx before each send and
+// stops once the node has left RUNNING; a send already blocked on relayInv is
+// only interrupted by quit.
 //
 // The ordering has a cost: announce and rebroadcast batches share this one
 // chain, so a batch stuck on relayInv holds up every later batch until it
-// drains, the node leaves RUNNING, or the server quits. peerHandler is the
+// drains or the server quits. peerHandler is the
 // only reader of relayInv, so if it stalls no inv gets through either way;
 // the per-inv goroutines RelayInventory used to start all waited on the same
 // channel. What changes is that later batches wait in order behind the stuck
