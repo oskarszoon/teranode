@@ -142,6 +142,11 @@ jobs:
         if: steps.pr.outputs.is_draft == 'false'
         id: claude-review
         uses: anthropics/claude-code-action@12dd8d74c712f5f3669365b2369b558c495b1104 # v1.0.238
+        env:
+          # Strip Anthropic, cloud and Actions secrets from the environment of commands Claude
+          # runs. The action only sets this when allowed_non_write_users is non-empty. GH_TOKEN
+          # and GITHUB_TOKEN are kept, so gh still works.
+          CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
