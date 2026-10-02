@@ -311,10 +311,18 @@ func (u *Server) batchFetchAndDistribute(ctx context.Context, blockHeaders []*mo
 		// Bound the fetch explicitly: when ctx carries no deadline, DoHTTPRequestBodyReader (used since
 		// bitcoin-sv/teranode#4742) falls back to http_streaming_timeout (600 s in settings.conf), where the
 		// old io.ReadAll-based DoHTTPRequest fell back to http_timeout (30 s in settings.conf).
-		fetchCtx, fetchCancel := u.withCatchupFetchTimeout(ctx)
-		blocks, err := u.fetchBlocksBatch(fetchCtx, batchHeaders[len(batchHeaders)-1].Hash(), uint32(len(batchHeaders)), peerID, baseURL)
-		fetchCancel()
+		blocks, err := u.fetchBlocksBatch(ctx, batchHeaders[len(batchHeaders)-1].Hash(), uint32(len(batchHeaders)), peerID, baseURL)
 		if err != nil {
+			if errors.Is(err, errors.ErrBlockPolicyDeclined) {
+				// The stream is newest-first, so the declined block sits above everything still
+				// undecoded. Fetch and distribute the blocks below it before reporting the decline.
+				if lowerCount := len(batchHeaders) - 1 - len(blocks); lowerCount > 0 {
+					if lowerErr := u.distributeBelowDecline(ctx, batchHeaders[:lowerCount], blockUpTo, startingHeight, &currentIndex, workQueue, peerID, baseURL); lowerErr != nil {
+						u.logger.Warnf("[catchup:batchFetchAndDistribute][%s] could not salvage %d blocks below declined block: %v", blockUpTo.Hash().String(), lowerCount, lowerErr)
+					}
+				}
+			}
+
 			return errors.NewProcessingError("[catchup:batchFetchAndDistribute][%s] failed to fetch batch starting at %s", blockUpTo.Hash().String(), batchHeaders[0].Hash().String(), err)
 		}
 
@@ -1916,6 +1924,12 @@ func (u *Server) fetchBlocksBatch(ctx context.Context, hash *chainhash.Hash, n u
 		}
 		block, decodeErr := decodeBoundedBlock(blockReader, limited, limits)
 		if decodeErr != nil {
+			// The blocks decoded so far are returned with the decline so the caller can fetch the
+			// ones below it instead of losing the whole batch's progress.
+			if errors.Is(decodeErr, errors.ErrBlockPolicyDeclined) {
+				return blocks, decodeErr
+			}
+
 			if classified := classifyBlockStreamErr(ctx, hash, decodeErr); classified != nil {
 				return nil, classified
 			}
@@ -2016,8 +2030,25 @@ func (u *Server) fetchSingleBlock(ctx context.Context, hash *chainhash.Hash, pee
 	// strict framing contract. The /blocks oversend exception above is scoped
 	// to batch interoperability; it does not make arbitrary proxy padding valid
 	// on the single-object endpoint.
-	if _, err = blockReader.Peek(1); err == nil {
+	//
+	// The probe reads a body the peer still controls, so it gets its own budget as the /blocks
+	// probe does. A peer that sends the whole block and never terminates the response must not
+	// make us discard a block we already hold; that case is logged and the block stands.
+	var probeTimedOut atomic.Bool
+
+	probeTimer := time.AfterFunc(overSendProbeTimeout, func() {
+		probeTimedOut.Store(true)
+		cancel()
+	})
+
+	_, err = blockReader.Peek(1)
+
+	probeTimer.Stop()
+
+	if err == nil {
 		return nil, errors.NewExternalError("[catchup:fetchSingleBlock][%s] peer returned trailing block data", hash.String())
+	} else if probeTimedOut.Load() {
+		u.logger.Warnf("[catchup:fetchSingleBlock][%s] peer %s did not terminate the response within %s after the block; keeping the decoded block", hash.String(), peerID, overSendProbeTimeout)
 	} else if !errors.Is(err, io.EOF) {
 		if classified := classifyBlockStreamErr(ctx, hash, err); classified != nil {
 			return nil, classified
@@ -2046,6 +2077,41 @@ func reverseBlocks(blocks []*model.Block) {
 	for j, k := 0, len(blocks)-1; j < k; j, k = j+1, k-1 {
 		blocks[j], blocks[k] = blocks[k], blocks[j]
 	}
+}
+
+// distributeBelowDecline fetches the blocks that sit below a block this node declined on local
+// policy and hands them to the workers, so one oversized block does not cost the progress the
+// rest of its batch could have made. A failure here is returned for logging only; the caller
+// still reports the original decline.
+func (u *Server) distributeBelowDecline(ctx context.Context, lower []*model.BlockHeader, blockUpTo *model.Block, startingHeight uint32,
+	currentIndex *int, workQueue chan<- workItem, peerID, baseURL string) error {
+	blocks, err := u.fetchBlocksBatch(ctx, lower[len(lower)-1].Hash(), uint32(len(lower)), peerID, baseURL)
+	if err != nil {
+		return err
+	}
+
+	if len(blocks) != len(lower) {
+		return errors.NewProcessingError("[catchup:distributeBelowDecline][%s] expected %d blocks, got %d", blockUpTo.Hash().String(), len(lower), len(blocks))
+	}
+
+	reverseBlocks(blocks)
+
+	if err = verifyBlockHeaders(blocks, lower, blockUpTo); err != nil {
+		return err
+	}
+
+	for _, block := range blocks {
+		block.Height = startingHeight + uint32(*currentIndex)
+
+		select {
+		case workQueue <- workItem{block: block, index: *currentIndex}:
+			*currentIndex++
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	return nil
 }
 
 // verifyBlockHeaders checks that each fetched block's hash matches the expected header.

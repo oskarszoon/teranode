@@ -1725,6 +1725,80 @@ func (b *stallAfterDataBody) Read(p []byte) (int, error) {
 
 func (b *stallAfterDataBody) Close() error { return nil }
 
+// A declined block at the top of a newest-first batch must not cost the progress the blocks
+// below it could make: they are fetched, distributed, and the decline is still returned.
+func TestBatchFetchAndDistribute_DeclinedBlockStillDistributesLowerBlocks(t *testing.T) {
+	suite := NewCatchupTestSuite(t)
+	defer suite.Cleanup()
+
+	blocks := testhelpers.CreateTestBlockChain(t, 3)
+	lower, declined := blocks[1], blocks[2]
+
+	lower.TransactionCount = 1
+	lower.SizeInBytes = 80 + util.VarintSize(lower.TransactionCount) + uint64(lower.CoinbaseTx.Size())
+	declined.TransactionCount = 1
+	declined.SizeInBytes = lower.SizeInBytes + 1
+	suite.Server.settings.Policy.ExcessiveBlockSize = int(lower.SizeInBytes)
+
+	lowerBytes, err := lower.Bytes()
+	require.NoError(t, err)
+	declinedBytes, err := declined.Bytes()
+	require.NoError(t, err)
+
+	httpmock.ActivateNonDefault(util.HTTPClient())
+	defer httpmock.DeactivateAndReset()
+	httpmock.RegisterResponder("GET", fmt.Sprintf("http://peer/blocks/%s?n=2", declined.Hash()), httpmock.NewBytesResponder(http.StatusOK, declinedBytes))
+	httpmock.RegisterResponder("GET", fmt.Sprintf("http://peer/blocks/%s?n=1", lower.Hash()), httpmock.NewBytesResponder(http.StatusOK, lowerBytes))
+
+	queue := make(chan workItem, 4)
+	headers := []*model.BlockHeader{lower.Header, declined.Header}
+
+	err = suite.Server.batchFetchAndDistribute(suite.Ctx, headers, queue, "peer", "http://peer", declined, 2, 1)
+	require.Error(t, err)
+	require.ErrorIs(t, err, errors.ErrBlockPolicyDeclined)
+	require.Len(t, queue, 1, "the block below the declined one must still be handed to the workers")
+
+	item := <-queue
+	require.True(t, item.block.Hash().IsEqual(lower.Hash()))
+	require.Equal(t, uint32(1), item.block.Height)
+}
+
+// A peer that sends the whole block and never ends the response must not make fetchSingleBlock
+// discard the block it already holds, and must not hold the read until the fetch deadline.
+func TestFetchSingleBlock_UnterminatedResponseKeepsBlock(t *testing.T) {
+	suite := NewCatchupTestSuite(t)
+	defer suite.Cleanup()
+
+	blocks := testhelpers.CreateTestBlockChain(t, 2)
+	targetHash := blocks[1].Header.Hash()
+
+	blockBytes, err := blocks[1].Bytes()
+	require.NoError(t, err)
+
+	httpmock.ActivateNonDefault(util.HTTPClient())
+	defer httpmock.DeactivateAndReset()
+
+	httpmock.RegisterResponder(
+		"GET",
+		fmt.Sprintf("http://test-peer/block/%s", targetHash.String()),
+		func(req *http.Request) (*http.Response, error) {
+			resp := httpmock.NewBytesResponse(200, nil)
+			resp.Body = &stallAfterDataBody{data: blockBytes, done: req.Context().Done()}
+
+			return resp, nil
+		},
+	)
+
+	start := time.Now()
+	block, err := suite.Server.fetchSingleBlock(suite.Ctx, targetHash, "peerA", "http://test-peer")
+	elapsed := time.Since(start)
+
+	require.NoError(t, err)
+	require.NotNil(t, block)
+	require.True(t, block.Hash().IsEqual(targetHash))
+	require.Less(t, elapsed, overSendProbeTimeout+3*time.Second, "the framing probe must have its own budget")
+}
+
 // TestFetchSingleBlock_CurrentBehavior documents the current behavior of fetchSingleBlock function
 func TestFetchSingleBlock_CurrentBehavior(t *testing.T) {
 	t.Run("Successful Fetch", func(t *testing.T) {

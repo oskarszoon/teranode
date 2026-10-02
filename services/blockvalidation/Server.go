@@ -753,13 +753,17 @@ func isUnvalidatablePeerError(err error) bool {
 // Returns an error if initialization fails due to configuration issues or service unavailability
 // validateCatchupSettings rejects catchup configuration that would deterministically fail every
 // block fetch, so an operator sees the problem at service startup rather than as a silent IBD
-// stall. blockvalidation_max_incoming_block_bytes bounds the per-block transport envelope decoded
+// stall. Both blockvalidation_max_incoming_block_bytes and
+// blockvalidation_max_incoming_block_message_bytes must be positive. The first bounds the per-block transport envelope decoded
 // through decodeBoundedBlock's io.LimitedReader (a DoS guard added alongside this path); a
 // non-positive value is NOT "unlimited" — it leaves the decode with no finite budget — so it is
 // rejected loudly here instead of failing every catchup fetch downstream.
 func validateCatchupSettings(s *settings.Settings) error {
 	if s.BlockValidation.MaxIncomingBlockBytes <= 0 {
 		return errors.NewConfigurationError("blockvalidation_max_incoming_block_bytes must be positive, got %d", s.BlockValidation.MaxIncomingBlockBytes)
+	}
+	if s.BlockValidation.MaxIncomingBlockMessageBytes <= 0 {
+		return errors.NewConfigurationError("blockvalidation_max_incoming_block_message_bytes must be positive, got %d", s.BlockValidation.MaxIncomingBlockMessageBytes)
 	}
 	return nil
 }
@@ -1103,9 +1107,7 @@ func (u *Server) processBlockFoundChannel(ctx context.Context, blockFound proces
 		// state an announcement flood creates — so an unbounded fetch would let
 		// a slow peer pin the worker indefinitely. Same budget as the
 		// priority-queue catchup fetch in addBlockToPriorityQueue.
-		fetchCtx, fetchCancel := u.withCatchupFetchTimeout(ctx)
-		block, err := u.fetchAnnouncedBlock(fetchCtx, blockFound.hash, blockFound.peerID, blockFound.baseURL)
-		fetchCancel()
+		block, err := u.fetchAnnouncedBlock(ctx, blockFound.hash, blockFound.peerID, blockFound.baseURL)
 		if err != nil {
 			if blockFound.errCh != nil {
 				blockFound.errCh <- err
@@ -1779,9 +1781,7 @@ func (u *Server) processBlockFound(ctx context.Context, hash *chainhash.Hash, pe
 		// Bound the fetch: this ctx is the block-processing worker's service-lifetime context
 		// with no deadline of its own. Use the configured block-response budget, including
 		// retry backoff, rather than the more generous subtree streaming timeout.
-		fetchCtx, fetchCancel := u.withCatchupFetchTimeout(ctx)
-		block, err = u.fetchAnnouncedBlock(fetchCtx, hash, peerID, baseURL)
-		fetchCancel()
+		block, err = u.fetchAnnouncedBlock(ctx, hash, peerID, baseURL)
 		if err != nil {
 			return err
 		}
@@ -2285,8 +2285,8 @@ func (u *Server) processCatchupChItem(ctx context.Context, c processBlockCatchup
 		// the silent-retry bucket below, a persistent storage fault that outlasts the
 		// per-block cooldown lets the node silently fall behind while appearing healthy.
 		// Same attempt-cap / no-peer-blame handling, but logged at error level. Must run
-		// before the ErrServiceError||IsLocalError bucket (IsLocalError also matches
-		// ErrStorageError, which would otherwise swallow this at Warnf).
+		// before the isLocalCatchupFault bucket below (it also matches ErrStorageError,
+		// which would otherwise swallow this at Warnf).
 		if errors.Is(err, errors.ErrStorageError) {
 			attempts := u.recordCatchupAttemptUnlessProgress(c.block.Hash())
 			u.logger.Errorf("[catchup] Local STORAGE error during catchup for block %s (attempt %d/%d) — node may fall behind until storage recovers: %v", c.block.Hash().String(), attempts, u.settings.BlockValidation.CatchupMaxAttemptsPerBlock, err)
@@ -2298,13 +2298,10 @@ func (u *Server) processCatchupChItem(ctx context.Context, c processBlockCatchup
 		// Local infrastructure/service failure (e.g. blockchain service unavailable) — not a peer issue.
 		// Must run after the ErrExternal check above (see the ordering note there).
 		//
-		// ErrStorageError belongs here for the same reason: a failed read of our own
-		// blob store — a torn, stale or mis-keyed external transaction (issue 1439) —
-		// is this node's disk being wrong, and no peer can fix it. Without this case
-		// the error fell through to reportCatchupFailureForError and ReportPeerFailure
-		// against an honest primary, and then charged every cached alternative in
-		// turn. recordCatchupPeerFailure already exempts storage errors for exactly
-		// this reason; this closes the matching hole on the terminal-error path.
+		// ErrStorageError is handled by the dedicated branch above, which pre-empts it
+		// (issue 1439: a failed read of our own blob store is this node's fault and must
+		// not be charged to a peer). What still lands here is ErrServiceError,
+		// ErrServiceUnavailable, ErrStorageUnavailable and context errors.
 		//
 		// isLocalCatchupFault is the union of two errors-package helpers, neither of
 		// which covers this on its own; its doc comment carries the reasoning.
@@ -2801,6 +2798,11 @@ func (u *Server) policyDeclineAttemptsExhausted(blockHash *chainhash.Hash, peerI
 	return item != nil && item.Value() >= maxAttempts
 }
 
+// announcedBlockFetchTimeout bounds the fetch of a single announced block, including 429/503
+// retries, so a peer that stalls or rate-limits announcements cannot hold a worker for the
+// longer bulk-catchup budget.
+const announcedBlockFetchTimeout = 30 * time.Second
+
 // fetchAnnouncedBlock preserves the per-peer policy cooldown when the transport
 // decoder declines a declared size before normal block processing can record it.
 // Every announcement fetch uses this gate, including queue classification.
@@ -2808,6 +2810,11 @@ func (u *Server) fetchAnnouncedBlock(ctx context.Context, hash *chainhash.Hash, 
 	if u.policyDeclineAttemptsExhausted(hash, peerID) {
 		return nil, errors.NewBlockPolicyDeclinedError("[fetchAnnouncedBlock][%s] local policy decline cap reached for peer %s; re-fetch suppressed until cooldown expires", hash.String(), peerID)
 	}
+
+	// A live announcement holds one of a small fixed pool of workers, so it gets the short
+	// announcement budget rather than the bulk-catchup response budget fetchSingleBlock applies.
+	ctx, cancel := context.WithTimeout(ctx, announcedBlockFetchTimeout)
+	defer cancel()
 
 	block, err := u.fetchSingleBlock(ctx, hash, peerID, baseURL)
 	if errors.Is(err, errors.ErrBlockPolicyDeclined) {
@@ -2840,11 +2847,8 @@ func (u *Server) addBlockToPriorityQueue(ctx context.Context, blockFound process
 
 	// Create isolated context with timeout for transient fetch operation
 	// This ensures fetch failures don't affect other operations using parent context
-	fetchCtx, fetchCancel := u.withCatchupFetchTimeout(context.Background())
-	defer fetchCancel()
-
-	// Fetch the block to classify it
-	block, err := u.fetchAnnouncedBlock(fetchCtx, blockFound.hash, blockFound.peerID, blockFound.baseURL)
+	// Fetch the block to classify it. The worker ctx is used so shutdown cancels the fetch.
+	block, err := u.fetchAnnouncedBlock(ctx, blockFound.hash, blockFound.peerID, blockFound.baseURL)
 	if err != nil {
 		u.logger.Errorf("[addBlockToPriorityQueue] Failed to fetch block %s: %v", blockFound.hash.String(), err)
 

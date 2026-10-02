@@ -2219,3 +2219,14 @@ func TestValidateCatchupSettings(t *testing.T) {
 		require.Contains(t, err.Error(), "blockvalidation_max_incoming_block_bytes")
 	}
 }
+
+func TestValidateCatchupSettings_MessageBytes(t *testing.T) {
+	for _, bad := range []int64{0, -1} {
+		s := test.CreateBaseTestSettings(t)
+		s.BlockValidation.MaxIncomingBlockMessageBytes = bad
+		err := validateCatchupSettings(s)
+		require.Error(t, err)
+		require.True(t, errors.Is(err, errors.ErrConfiguration), "must be a configuration error for %d", bad)
+		require.Contains(t, err.Error(), "blockvalidation_max_incoming_block_message_bytes")
+	}
+}
