@@ -1606,6 +1606,47 @@ func (u *Server) fetchSubtreeFromPeer(ctx context.Context, subtreeHash *chainhas
 }
 
 // countingReadCloser wraps an io.ReadCloser and counts bytes read
+// blockStreamIdleTimeout is how long a block response body may go without delivering a byte
+// before it is abandoned. The overall fetch budget still applies; this stops a drip-feeding or
+// stalled peer burning all of it without ever reaching the retry or failover logic. A var so
+// tests can shorten it.
+var blockStreamIdleTimeout = 30 * time.Second
+
+// idleDeadlineReadCloser fails a Read that does not complete within idle. Each Read arms the
+// timer before it blocks and disarms it afterwards, so only waiting on the peer counts, not
+// time the consumer spends between reads.
+type idleDeadlineReadCloser struct {
+	io.ReadCloser
+	idle     time.Duration
+	cancel   context.CancelFunc
+	timedOut atomic.Bool
+}
+
+func newIdleDeadlineReadCloser(r io.ReadCloser, idle time.Duration, cancel context.CancelFunc) io.ReadCloser {
+	if idle <= 0 || cancel == nil {
+		return r
+	}
+
+	return &idleDeadlineReadCloser{ReadCloser: r, idle: idle, cancel: cancel}
+}
+
+func (r *idleDeadlineReadCloser) Read(p []byte) (int, error) {
+	timer := time.AfterFunc(r.idle, func() {
+		r.timedOut.Store(true)
+		r.cancel()
+	})
+	n, err := r.ReadCloser.Read(p)
+
+	timer.Stop()
+
+	if err != nil && r.timedOut.Load() {
+		// Fixed message, no wrapped cause: the cause would be a context error and read as local.
+		return n, errors.NewNetworkTimeoutError("peer block response idle for %s", r.idle)
+	}
+
+	return n, err
+}
+
 type countingReadCloser struct {
 	reader    io.ReadCloser
 	bytesRead uint64
@@ -1830,9 +1871,11 @@ func decodeBoundedBlock(r io.Reader, limited *io.LimitedReader, limits blockResp
 	return block, nil
 }
 
-func (u *Server) trackedBlockResponse(ctx context.Context, reader io.ReadCloser, hash *chainhash.Hash, peerID, operation string) io.ReadCloser {
+// idleCancel cancels the request context the body is bound to; it is how a stalled read is
+// interrupted when no byte arrives within blockStreamIdleTimeout.
+func (u *Server) trackedBlockResponse(ctx context.Context, reader io.ReadCloser, idleCancel context.CancelFunc, hash *chainhash.Hash, peerID, operation string) io.ReadCloser {
 	return &countingReadCloser{
-		reader: reader,
+		reader: newIdleDeadlineReadCloser(reader, blockStreamIdleTimeout, idleCancel),
 		onClose: func(bytesRead uint64) {
 			if u.p2pClient == nil || peerID == "" {
 				return
@@ -1902,7 +1945,7 @@ func (u *Server) fetchBlocksBatch(ctx context.Context, hash *chainhash.Hash, n u
 		}
 		return nil, errors.NewProcessingError("[catchup:fetchBlocksBatch][%s] failed to get blocks from peer", hash.String(), err)
 	}
-	trackedBody := u.trackedBlockResponse(ctx, responseBody, hash, peerID, "fetchBlocksBatch")
+	trackedBody := u.trackedBlockResponse(ctx, responseBody, reqCancel, hash, peerID, "fetchBlocksBatch")
 	defer func() { _ = trackedBody.Close() }()
 
 	// One aggregate transport budget for the WHOLE batch response, so n blocks share a single
@@ -2003,9 +2046,14 @@ func (u *Server) fetchSingleBlock(ctx context.Context, hash *chainhash.Hash, pee
 	ctx, cancel := u.withCatchupFetchTimeout(ctx)
 	defer cancel()
 
+	// reqCtx is separate so an idle stall cancels the request without cancelling ctx, which
+	// classifyBlockStreamErr reads to tell the caller's cancel from a peer fault.
+	reqCtx, reqCancel := context.WithCancel(ctx)
+	defer reqCancel()
+
 	// WithRetry backs off on 429/503 (peer rate limiting) instead of failing; the hook
 	// paces every attempt through the per-peer limiter so retries don't re-burst.
-	responseBody, err := util.DoHTTPRequestBodyReaderWithRetryFunc(ctx, blockURL,
+	responseBody, err := util.DoHTTPRequestBodyReaderWithRetryFunc(reqCtx, blockURL,
 		func(c context.Context) error { return u.awaitPeerFetchSlot(c, baseURL) })
 	if err != nil {
 		if classified := classifyBlockStreamErr(ctx, hash, err); classified != nil {
@@ -2013,7 +2061,7 @@ func (u *Server) fetchSingleBlock(ctx context.Context, hash *chainhash.Hash, pee
 		}
 		return nil, errors.NewProcessingError("[catchup:fetchSingleBlock][%s] failed to get block from peer", hash.String(), err)
 	}
-	trackedBody := u.trackedBlockResponse(ctx, responseBody, hash, peerID, "fetchSingleBlock")
+	trackedBody := u.trackedBlockResponse(ctx, responseBody, reqCancel, hash, peerID, "fetchSingleBlock")
 	defer func() { _ = trackedBody.Close() }()
 
 	limited := &io.LimitedReader{R: trackedBody, N: limits.maxTransportBytes}

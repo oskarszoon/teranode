@@ -139,7 +139,7 @@ func TestCatchupFeedback_DownloadAccountingSurvivesCancellation(t *testing.T) {
 			if path == "block" {
 				// Use the same response body without the subtree accounting callback.
 				reader.onClose = nil
-				counted = server.trackedBlockResponse(ctx, reader, hash, "peer", "test")
+				counted = server.trackedBlockResponse(ctx, reader, nil, hash, "peer", "test")
 			}
 			_, err = io.Copy(io.Discard, counted)
 			require.NoError(t, err)

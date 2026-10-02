@@ -1763,6 +1763,46 @@ func TestBatchFetchAndDistribute_DeclinedBlockStillDistributesLowerBlocks(t *tes
 	require.Equal(t, uint32(1), item.block.Height)
 }
 
+// A peer that stops sending mid-body must be cut off by the idle deadline, not hold the read
+// for the whole fetch budget, and the failure must read as the peer's fault, not a local cancel.
+func TestFetchSingleBlock_IdleReadDeadline(t *testing.T) {
+	suite := NewCatchupTestSuite(t)
+	defer suite.Cleanup()
+
+	orig := blockStreamIdleTimeout
+	blockStreamIdleTimeout = 300 * time.Millisecond
+
+	defer func() { blockStreamIdleTimeout = orig }()
+
+	blocks := testhelpers.CreateTestBlockChain(t, 2)
+	targetHash := blocks[1].Header.Hash()
+
+	blockBytes, err := blocks[1].Bytes()
+	require.NoError(t, err)
+
+	httpmock.ActivateNonDefault(util.HTTPClient())
+	defer httpmock.DeactivateAndReset()
+
+	httpmock.RegisterResponder(
+		"GET",
+		fmt.Sprintf("http://test-peer/block/%s", targetHash.String()),
+		func(req *http.Request) (*http.Response, error) {
+			resp := httpmock.NewBytesResponse(200, nil)
+			resp.Body = &stallAfterDataBody{data: blockBytes[:len(blockBytes)/2], done: req.Context().Done()}
+
+			return resp, nil
+		},
+	)
+
+	start := time.Now()
+	_, err = suite.Server.fetchSingleBlock(suite.Ctx, targetHash, "peerA", "http://test-peer")
+	elapsed := time.Since(start)
+
+	require.Error(t, err)
+	require.Less(t, elapsed, 5*time.Second, "the idle deadline must fire long before the fetch budget")
+	require.False(t, errors.IsLocalError(err), "an idle peer is the peer's fault, not a local cancel: %v", err)
+}
+
 // A peer that sends the whole block and never ends the response must not make fetchSingleBlock
 // discard the block it already holds, and must not hold the read until the fetch deadline.
 func TestFetchSingleBlock_UnterminatedResponseKeepsBlock(t *testing.T) {
