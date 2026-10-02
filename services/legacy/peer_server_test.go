@@ -1963,10 +1963,18 @@ func TestAnnounceNewTransactionsReachesPeerInBatchOrder(t *testing.T) {
 	})
 	s.modifyRebroadcastInv = make(chan interface{}, modifyRebroadcastInvBuffer)
 
-	// Play the peerHandler's part.
+	// Play the peerHandler's part until the test ends.
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+
 	go func() {
-		for msg := range s.relayInv {
-			s.handleRelayInvMsg(state, msg)
+		for {
+			select {
+			case msg := <-s.relayInv:
+				s.handleRelayInvMsg(state, msg)
+			case <-stop:
+				return
+			}
 		}
 	}()
 

@@ -51,27 +51,29 @@ func TestOrderAnnounceBatch(t *testing.T) {
 	})
 }
 
-// recordingNotifier records announced batches in order. delayFirst holds the
-// first AnnounceNewTransactions call, so a later flush that does not wait for
-// it would be recorded first.
+// recordingNotifier records announced batches in order. If holdFor is set,
+// the call for the batch containing that tx is held for hold, so a later
+// flush that does not wait for it is recorded first. Keying the hold on
+// content rather than on the first call keeps that deterministic when
+// flushes race.
 type recordingNotifier struct {
 	*MockPeerNotifier
 
-	delayFirst time.Duration
+	holdFor *chainhash.Hash
+	hold    time.Duration
 
 	mu      sync.Mutex
-	calls   int
 	batches [][]chainhash.Hash
 }
 
 func (n *recordingNotifier) AnnounceNewTransactions(batch []*TxHashAndFee) {
-	n.mu.Lock()
-	n.calls++
-	first := n.calls == 1
-	n.mu.Unlock()
-
-	if first {
-		time.Sleep(n.delayFirst)
+	if n.holdFor != nil {
+		for _, item := range batch {
+			if item.TxHash == *n.holdFor {
+				time.Sleep(n.hold)
+				break
+			}
+		}
 	}
 
 	n.mu.Lock()
@@ -136,12 +138,12 @@ func TestProcessTXmetaBatchMessage_AnnouncesParentsFirst(t *testing.T) {
 // TestTxAnnounceBatcher_FlushesInOrder covers review: with background=true
 // go-batcher runs each flush on its own goroutine, so a child in one
 // size-triggered batch could be announced before its parent in the batch
-// before it. The first flush is held here, so out-of-order flushing would
-// record the second batch first.
+// before it. The parent's batch is held here, so out-of-order flushing would
+// always record the child's batch first.
 func TestTxAnnounceBatcher_FlushesInOrder(t *testing.T) {
 	parent, child := chainhash.Hash{0x10}, chainhash.Hash{0x20}
 
-	notifier := &recordingNotifier{MockPeerNotifier: NewMockPeerNotifier(), delayFirst: 200 * time.Millisecond}
+	notifier := &recordingNotifier{MockPeerNotifier: NewMockPeerNotifier(), holdFor: &parent, hold: 200 * time.Millisecond}
 	sm := newAnnounceTestSyncManager(t, notifier, 2)
 
 	// Batch size 2: the parent fills the first batch, the child the second.
