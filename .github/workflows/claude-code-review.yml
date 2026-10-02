@@ -138,6 +138,13 @@ jobs:
           mv "$d.tmp" "$d"
           wc -l "$d"/*
 
+      # --add-dir always points at ccr/, so make sure it exists even when the precompute step is
+      # skipped (no merge base) or fails. Empty, it has no pr.diff and the prompt falls back to
+      # gh pr diff.
+      - name: Ensure change set directory exists
+        if: ${{ !cancelled() && steps.pr.outputs.is_draft == 'false' }}
+        run: mkdir -p "$RUNNER_TEMP/ccr"
+
       - name: Run Claude Code Review
         if: steps.pr.outputs.is_draft == 'false'
         id: claude-review
