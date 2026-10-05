@@ -246,6 +246,7 @@ func New(logger ulogger.Logger, tSettings *settings.Settings, repo *repository.R
 			tSettings.Asset.HTTPRateLimit,
 			tSettings.Asset.HTTPPeerRateMultiplier,
 			tSettings.Asset.HTTPMinerRateLimit,
+			0, // burst == rate; the global rate is already far above any client fan-out
 			"global",
 		)
 		e.Use(globalRL.Middleware())
@@ -258,21 +259,65 @@ func New(logger ulogger.Logger, tSettings *settings.Settings, repo *repository.R
 	// children that are never evicted.
 	e.Use(accessLogMiddleware(logger))
 
-	// Heavy-endpoint rate limiter (applied per-route below).
-	var heavyRateLimiter echo.MiddlewareFunc
+	// Heavy-endpoint rate limiters (applied per-route below). Only the five
+	// routes peer catchup depends on (GET /subtree/:hash, GET
+	// /subtree_data/:hash, POST catchupTxsRoute, GET /blocks/:hash and GET
+	// /block/:hash — see catchupHeavyMW below) get the raised burst. Every
+	// other heavy route keeps burst == rate, so a bulk caller on an unrelated
+	// heavy route (e.g. POST /utxos, up to 1024-way Aerospike fan-out) can't
+	// spend the floor a catching-up peer needs.
+	//
+	// The two limiters are independent per-IP buckets, not a shared budget:
+	// one unverified IP can draw asset_httpHeavyRateLimit sustained on the
+	// catchup routes AND the same rate again, separately, on the other heavy
+	// routes - double the pre-split sustained budget for that IP across the
+	// whole heavy surface. See asset_httpHeavyRateLimit's longdesc.
+	var heavyRateLimiter, catchupRateLimiter echo.MiddlewareFunc
 	if tSettings.Asset.HTTPHeavyRateLimit > 0 {
 		heavyRL := newTieredRateLimiter(
 			tSettings.Asset.HTTPHeavyRateLimit,
 			tSettings.Asset.HTTPPeerRateMultiplier,
 			tSettings.Asset.HTTPMinerRateLimit,
+			0, // burst == rate; only the catchup routes get the raised floor
 			"heavy",
 		)
 		heavyRateLimiter = heavyRL.Middleware()
 		rateLimiters = append(rateLimiters, heavyRL)
+
+		// A catching-up peer fans out many concurrent, typically tier-unverified,
+		// requests at once, so the catchup-route burst floors at the larger of its
+		// two catchup fan-outs (see catchupFanOut).
+		heavyBurst, _ := catchupHeavyBurst(logger, tSettings)
+
+		// heavy_catchup is a distinct metric label from heavy so the two
+		// independent buckets are distinguishable on teranode_asset_http_rate_limited_total.
+		catchupRL := newTieredRateLimiter(
+			tSettings.Asset.HTTPHeavyRateLimit,
+			tSettings.Asset.HTTPPeerRateMultiplier,
+			tSettings.Asset.HTTPMinerRateLimit,
+			heavyBurst,
+			"heavy_catchup",
+		)
+		catchupRateLimiter = catchupRL.Middleware()
+		rateLimiters = append(rateLimiters, catchupRL)
+
+		logger.Infof("[Asset] heavy-endpoint rate limits: catchup routes %d req/s burst %d, other heavy routes %d req/s burst %d (independent per-IP buckets: an unverified IP's sustained budget across the whole heavy surface is up to %d req/s)",
+			tSettings.Asset.HTTPHeavyRateLimit, heavyBurst,
+			tSettings.Asset.HTTPHeavyRateLimit, tSettings.Asset.HTTPHeavyRateLimit,
+			2*tSettings.Asset.HTTPHeavyRateLimit)
 	}
 	heavyMW := func() []echo.MiddlewareFunc {
 		if heavyRateLimiter != nil {
 			return []echo.MiddlewareFunc{heavyRateLimiter}
+		}
+		return nil
+	}
+	// catchupHeavyMW is heavyMW's counterpart for the five routes peer catchup
+	// depends on. It shares the sustained rate but gets the burst floored at
+	// the catchup fan-out (see resolveHeavyBurst).
+	catchupHeavyMW := func() []echo.MiddlewareFunc {
+		if catchupRateLimiter != nil {
+			return []echo.MiddlewareFunc{catchupRateLimiter}
 		}
 		return nil
 	}
@@ -361,11 +406,11 @@ func New(logger ulogger.Logger, tSettings *settings.Settings, repo *repository.R
 	apiGroup.GET("/txmeta_raw/:hash/hex", h.GetTxMetaByTxID(HEX))
 	apiGroup.GET("/txmeta_raw/:hash/json", h.GetTxMetaByTxID(JSON))
 
-	apiGroup.GET("/subtree/:hash", h.GetSubtree(BINARY_STREAM), heavyMW()...)
+	apiGroup.GET("/subtree/:hash", h.GetSubtree(BINARY_STREAM), catchupHeavyMW()...)
 	apiGroup.GET("/subtree/:hash/hex", h.GetSubtree(HEX), heavyMW()...)
 	apiGroup.GET("/subtree/:hash/json", h.GetSubtree(JSON), heavyMW()...)
-	apiGroup.GET("/subtree_data/:hash", h.GetSubtreeData(), heavyMW()...)
-	apiGroup.POST("/subtree/:hash/txs", h.GetTransactions(), heavyMW()...) // BINARY_STREAM only
+	apiGroup.GET("/subtree_data/:hash", h.GetSubtreeData(), catchupHeavyMW()...)
+	apiGroup.POST(catchupTxsRoute, h.GetTransactions(), catchupHeavyMW()...) // BINARY_STREAM only
 
 	apiGroup.GET("/subtree/:hash/txs/json", h.GetSubtreeTxs(JSON))
 
@@ -398,13 +443,13 @@ func New(logger ulogger.Logger, tSettings *settings.Settings, repo *repository.R
 	apiGroup.GET("/blocks", h.GetBlocks)
 	apiGroup.GET("/block_locator", h.GetBlockLocator)
 
-	apiGroup.GET("/blocks/:hash", h.GetNBlocks(BINARY_STREAM), heavyMW()...)
+	apiGroup.GET("/blocks/:hash", h.GetNBlocks(BINARY_STREAM), catchupHeavyMW()...)
 	apiGroup.GET("/blocks/:hash/hex", h.GetNBlocks(HEX), heavyMW()...)
 	apiGroup.GET("/blocks/:hash/json", h.GetNBlocks(JSON), heavyMW()...)
 
 	apiGroup.GET("/block_legacy/:hash", h.GetLegacyBlock(), heavyMW()...) // BINARY_STREAM (also supports ?type=miningcandidate)
 
-	apiGroup.GET("/block/:hash", h.GetBlockByHash(BINARY_STREAM), heavyMW()...)
+	apiGroup.GET("/block/:hash", h.GetBlockByHash(BINARY_STREAM), catchupHeavyMW()...)
 	apiGroup.GET("/block/:hash/hex", h.GetBlockByHash(HEX), heavyMW()...)
 	apiGroup.GET("/block/:hash/json", h.GetBlockByHash(JSON), heavyMW()...)
 	apiGroup.GET("/block/:hash/forks", h.GetBlockForks)
