@@ -2277,3 +2277,10 @@ func TestSyncCoordinator_CatchupFailureReevaluatesCurrentPeer(t *testing.T) {
 		}
 	}
 }
+
+func TestSyncCoordinator_HandleCatchupFailureForPeer_NoSyncPeer(t *testing.T) {
+	sc, _ := newTestSyncCoordinator(t)
+
+	require.NotPanics(t, func() { sc.HandleCatchupFailureForPeer("", "test") })
+	require.NotPanics(t, func() { sc.HandleCatchupFailureForPeer(mustNewPeerID(t).String(), "test") })
+}

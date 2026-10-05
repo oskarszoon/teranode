@@ -359,7 +359,24 @@ func sortPeersByReputationThenSpeed(peers []*p2p.PeerInfo) {
 func filterMaxHeightPeers(peers []*p2p.PeerInfo, excludePeerID string) []*p2p.PeerInfo {
 	candidates := make([]*p2p.PeerInfo, 0, len(peers))
 	prunedCandidates := make([]*p2p.PeerInfo, 0)
+
+	// The tip is the network's, so it is taken over every known peer BEFORE any eligibility
+	// filter, as GetPeersAtMaxHeight did. Taking it after dropping banned, low-reputation or
+	// URL-less peers lets the bar collapse to a far-behind peer during deep IBD, exactly when
+	// the tip peers have just been knocked below the reputation floor; that peer is then
+	// assigned subtrees it cannot serve and burns failover attempts on 404s.
 	var maxHeight, prunedMaxHeight uint32
+	for _, peer := range peers {
+		if peer == nil {
+			continue
+		}
+		if isPrunedPeer(peer.Storage) {
+			prunedMaxHeight = max(prunedMaxHeight, peer.Height)
+		} else {
+			maxHeight = max(maxHeight, peer.Height)
+		}
+	}
+
 	for _, peer := range peers {
 		if peer == nil {
 			continue
@@ -372,15 +389,9 @@ func filterMaxHeightPeers(peers []*p2p.PeerInfo, excludePeerID string) []*p2p.Pe
 		}
 		if isPrunedPeer(peer.Storage) {
 			prunedCandidates = append(prunedCandidates, peer)
-			if peer.Height > prunedMaxHeight {
-				prunedMaxHeight = peer.Height
-			}
 			continue
 		}
 		candidates = append(candidates, peer)
-		if peer.Height > maxHeight {
-			maxHeight = peer.Height
-		}
 	}
 
 	eligible := peersAtHeightThreshold(candidates, maxHeight)

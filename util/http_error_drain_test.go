@@ -2,17 +2,20 @@ package util
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/bsv-blockchain/teranode/errors"
+	"github.com/bsv-blockchain/teranode/ulogger"
 	"github.com/stretchr/testify/require"
 )
 
@@ -373,4 +376,56 @@ func TestBuildHTTPError_StatusClassMapping(t *testing.T) {
 			require.ErrorIs(t, err, tc.target, "the status class mapping must survive the drain change")
 		})
 	}
+}
+
+type capturedLog struct {
+	ulogger.Logger
+	mu    sync.Mutex
+	lines []string
+}
+
+func (c *capturedLog) record(format string, args ...interface{}) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lines = append(c.lines, fmt.Sprintf(format, args...))
+}
+
+func (c *capturedLog) Warnf(format string, args ...interface{})  { c.record(format, args...) }
+func (c *capturedLog) Debugf(format string, args ...interface{}) { c.record(format, args...) }
+
+// TestBuildHTTPError_BodyPrefixGoesToLogNotError pins the diagnostics contract: the failing
+// path and a bounded, %q-escaped body prefix are available to an operator in the log, while the
+// returned error carries neither (it is substring-classified and must not carry peer bytes).
+func TestBuildHTTPError_BodyPrefixGoesToLogNotError(t *testing.T) {
+	logger := &capturedLog{}
+	httpErrorLoggerOnce.Do(func() {})
+
+	orig := httpErrorLogger
+	httpErrorLogger = logger
+
+	defer func() { httpErrorLogger = orig }()
+
+	hostile := "WAF blocked\nERROR forged line\x1b[31m" + strings.Repeat("A", 4*maxErrorBodyBytes)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(hostile))
+	}))
+	defer srv.Close()
+
+	_, err := DoHTTPRequest(context.Background(), srv.URL+"/api/v1/subtree/abc/txs")
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "WAF blocked")
+	require.NotContains(t, err.Error(), "/api/v1/subtree")
+
+	logger.mu.Lock()
+	defer logger.mu.Unlock()
+
+	require.Len(t, logger.lines, 1)
+	line := logger.lines[0]
+	require.Contains(t, line, "/api/v1/subtree/abc/txs", "the failing path must be diagnosable")
+	require.Contains(t, line, "WAF blocked", "the server's reason must be diagnosable")
+	require.NotContains(t, line, "\n", "a peer must not split the log line")
+	require.NotContains(t, line, "\x1b", "terminal escapes must be escaped")
+	require.Less(t, len(line), 4*maxErrorBodyBytes, "the logged prefix must stay bounded")
 }

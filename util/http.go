@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/bsv-blockchain/teranode/errors"
+	"github.com/bsv-blockchain/teranode/ulogger"
 	"github.com/ordishs/gocore"
 )
 
@@ -1074,10 +1075,34 @@ func drainErrorBody(body io.ReadCloser) {
 // local error through legacy substring classification. After counting a small prefix,
 // drainAndCloseErrorBody bounds the remaining drain in bytes and caller time so
 // buffered error responses can reuse their connection without following an endless stream.
+var (
+	httpErrorLogger     ulogger.Logger
+	httpErrorLoggerOnce sync.Once
+)
+
+// logHTTPErrorBody records the full request URL and a bounded, %q-escaped body prefix of a
+// failed peer response. It is deliberately a log line and not part of the returned error. 429
+// and 503 are the expected admission-control answers during catchup, so they log at debug.
+func logHTTPErrorBody(status int, rawURL string, prefix []byte) {
+	httpErrorLoggerOnce.Do(func() {
+		if httpErrorLogger == nil {
+			httpErrorLogger = ulogger.New("http")
+		}
+	})
+
+	if status == http.StatusTooManyRequests || status == http.StatusServiceUnavailable {
+		httpErrorLogger.Debugf("[http] %q returned status [%d] with body prefix (%d bytes) %q", rawURL, status, len(prefix), string(prefix))
+		return
+	}
+
+	httpErrorLogger.Warnf("[http] %q returned status [%d] with body prefix (%d bytes) %q", rawURL, status, len(prefix), string(prefix))
+}
+
 func buildHTTPError(resp *http.Response, rawURL string) error {
 	// Redact to scheme://host: rawURL may be a peer-gossiped DataHubURL whose crafted path (e.g.
 	// one containing "context canceled") would otherwise ride into this message and be substring-
 	// matched by the catchup classifiers.
+	origURL := rawURL
 	rawURL = RedactPeerURL(rawURL)
 	errFn := errors.NewServiceError
 	switch resp.StatusCode {
@@ -1092,17 +1117,22 @@ func buildHTTPError(resp *http.Response, rawURL string) error {
 		// read below completes first, because the deferred call runs last.
 		defer drainAndCloseErrorBody(resp.Body)
 
-		// Drain a bounded amount of the body (helps keep-alive connection reuse) but do
-		// NOT embed the peer-controlled content in the error message. This error feeds
-		// substring-based classification at the catchup reputation gates (IsContextError /
-		// releaseCatchupLock's strings.Contains checks). A hostile or unlucky peer whose
-		// body contained e.g. "context deadline exceeded" or "block assembly is behind"
-		// could otherwise forge a "local" classification — clearing its reputation penalty
-		// AND halting failover to honest peers, re-opening the #1174 wedge. Only the
-		// status code, prefix length, and redacted URL go into the message.
-		n, _ := io.Copy(io.Discard, io.LimitReader(resp.Body, maxErrorBodyBytes))
-		if n > 0 {
-			return errFn("http request [%s] returned status code [%d] (%d body bytes, omitted)", rawURL, resp.StatusCode, n)
+		// Read a bounded prefix of the body but do NOT embed the peer-controlled content in
+		// the error message. This error feeds substring-based classification at the catchup
+		// reputation gates (IsContextError / releaseCatchupLock's strings.Contains checks). A
+		// hostile or unlucky peer whose body contained e.g. "context deadline exceeded" or
+		// "block assembly is behind" could otherwise forge a "local" classification, clearing
+		// its reputation penalty AND halting failover to honest peers, re-opening the #1174
+		// wedge. Only the status code, prefix length and redacted URL go into the message.
+		//
+		// The prefix is still worth having for diagnosis (a 401, or a WAF 400 on a binary POST,
+		// is otherwise indistinguishable from any other failure), so it goes to the log, where
+		// no classifier reads it, %q-escaped so a peer cannot split the line or inject escapes.
+		prefix, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
+		if len(prefix) > 0 {
+			logHTTPErrorBody(resp.StatusCode, origURL, prefix)
+
+			return errFn("http request [%s] returned status code [%d] (%d body bytes, omitted)", rawURL, resp.StatusCode, len(prefix))
 		}
 	}
 

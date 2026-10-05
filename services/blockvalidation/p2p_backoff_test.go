@@ -825,3 +825,24 @@ func TestDistributeSubtreesAcrossPeers_AllPrunedKeepsPrimary(t *testing.T) {
 }
 
 func (m *catchupPeersP2PMock) AddBanScore(context.Context, string, string) error { return nil }
+
+// The tip is the network's: tip peers knocked below the reputation floor must still set the
+// bar, so a far-behind peer is not promoted to serve subtrees it does not have.
+func TestFilterMaxHeightPeers_TipIsTakenBeforeEligibilityFilters(t *testing.T) {
+	lowRepTip := mkTestPeer("tip", "full", 1000)
+	lowRepTip.ReputationScore = 5
+
+	banned := mkTestPeer("banned-tip", "full", 1000)
+	banned.IsBanned = true
+
+	farBehind := mkTestPeer("behind", "full", 400)
+
+	require.Empty(t, filterMaxHeightPeers([]*p2p.PeerInfo{lowRepTip, banned, farBehind}, ""),
+		"a peer 600 blocks behind the network tip must not be eligible just because the tip peers are filtered")
+
+	atTip := mkTestPeer("at-tip", "full", 1000)
+
+	got := filterMaxHeightPeers([]*p2p.PeerInfo{lowRepTip, banned, farBehind, atTip}, "")
+	require.Len(t, got, 1)
+	require.Equal(t, atTip.ID, got[0].ID)
+}
