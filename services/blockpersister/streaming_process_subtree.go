@@ -5,6 +5,7 @@ package blockpersister
 import (
 	"bufio"
 	"context"
+	"io"
 	"runtime"
 
 	"github.com/bsv-blockchain/go-bt/v2"
@@ -72,7 +73,7 @@ func (u *Server) CreateSubtreeDataFileStreaming(ctx context.Context, subtreeHash
 
 		subtreeDataBufferedReader := bufio.NewReaderSize(subtreeDataReader, 32*1024) // 32KB buffer
 
-		if _, err = subtreepkg.NewSubtreeDataFromReader(subtree, subtreeDataBufferedReader); err != nil {
+		if err = validateSubtreeData(subtree, subtreeDataBufferedReader); err != nil {
 			// something failed reading the subtreeData, we need to recreate it
 			u.logger.Warnf("[BlockPersister] existing subtree data for %s is invalid, recreating: %v", subtreeHash.String(), err)
 
@@ -295,12 +296,17 @@ func (u *Server) ProcessSubtreeUTXOStreaming(ctx context.Context, subtreeHash ch
 	// serialises via UTXOWrapper.Bytes -> UTXO.Bytes, which does
 	// `append(b, u.Script...)` — a heap copy — and then writes through a
 	// bufio.Writer (which copies into its internal buffer). No arena-backed
-	// slice survives this function frame.
+	// slice survives the iteration that decoded it, so the arena is reset per
+	// tx and holds one transaction's scripts at a time. Without the reset it
+	// holds every script in the subtree, and its doubling growth needs up to
+	// 3x the subtreeData size at the moment it copies into a new slab.
 	arena := getBlockpersisterArena()
 	defer putBlockpersisterArena(arena)
 	var hashScratch []byte
 
 	for i := 0; i < subtreeLen; i++ {
+		arena.Reset()
+
 		tx := &bt.Tx{}
 
 		if _, err = tx.ReadFromWithArena(bufferedReader, arena); err != nil {
@@ -330,6 +336,63 @@ func (u *Server) ProcessSubtreeUTXOStreaming(ctx context.Context, subtreeHash ch
 	}
 
 	return nil
+}
+
+// validateSubtreeData checks that r holds subtreeData that subtreepkg.NewSubtreeDataFromReader
+// would accept for subtree, without keeping the transactions. NewSubtreeDataFromReader decodes
+// the whole subtree into memory, which for one multi-GiB subtree is enough to OOM the persister
+// just to learn that the file parses. Here each transaction is decoded into a pooled arena,
+// checked against its node hash and dropped, so memory follows the largest transaction instead.
+//
+// It accepts and rejects exactly what NewSubtreeDataFromReader does, which
+// TestValidateSubtreeData_MatchesGoSubtree pins, quirks included: a coinbase is skipped whenever
+// it is decoded at node index 1, and a file that ends on a transaction or field boundary before
+// the last node is accepted.
+func validateSubtreeData(subtree *subtreepkg.Subtree, r io.Reader) error {
+	if subtree == nil || len(subtree.Nodes) == 0 {
+		return subtreepkg.ErrSubtreeNodesEmpty
+	}
+
+	txIndex := 0
+	if subtree.Nodes[0].Hash.Equal(subtreepkg.CoinbasePlaceholderHashValue) {
+		txIndex = 1
+	}
+
+	arena := getBlockpersisterArena()
+	defer putBlockpersisterArena(arena)
+
+	var hashScratch []byte
+
+	for {
+		arena.Reset()
+
+		tx := &bt.Tx{}
+
+		if _, err := tx.ReadFromWithArena(r, arena); err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+
+			return errors.NewProcessingError("error reading transaction at index %d", txIndex, err)
+		}
+
+		if txIndex == 1 && tx.IsCoinbase() {
+			continue
+		}
+
+		if txIndex >= len(subtree.Nodes) {
+			return subtreepkg.ErrTxIndexOutOfBounds
+		}
+
+		var txHash chainhash.Hash
+
+		txHash, hashScratch = tx.HashTxIDInto(hashScratch)
+		if !txHash.Equal(subtree.Nodes[txIndex].Hash) {
+			return errors.NewProcessingError("transaction hash mismatch at index %d: expected %s, got %s", txIndex, subtree.Nodes[txIndex].Hash.String(), txHash.String())
+		}
+
+		txIndex++
+	}
 }
 
 // readSubtree retrieves a subtree from the subtree store and deserializes it.
