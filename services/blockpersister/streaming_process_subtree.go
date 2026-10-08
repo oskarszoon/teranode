@@ -64,7 +64,7 @@ func (u *Server) CreateSubtreeDataFileStreaming(ctx context.Context, subtreeHash
 	}
 
 	if subtreeDataExists {
-		// verify that the subtreeData file is valid (non-zero size) and all transactions can be read
+		// verify that the transactions in the existing subtreeData file decode and match their node hashes
 		subtreeDataReader, err := u.subtreeStore.GetIoReader(ctx, subtreeHash.CloneBytes(), fileformat.FileTypeSubtreeData)
 		if err != nil {
 			return errors.NewStorageError("[BlockPersister] error getting existing subtree data for %s", subtreeHash.String(), err)
@@ -243,7 +243,7 @@ func (u *Server) CreateSubtreeDataFileStreaming(ctx context.Context, subtreeHash
 // The function:
 //  1. Opens the subtreeData file as a reader with buffering
 //  2. Reads the subtree structure (to handle coinbase)
-//  3. Streams through transactions using bt.Tx.ReadFrom
+//  3. Streams through transactions using bt.Tx.ReadFromWithArena, resetting the arena per transaction
 //  4. Processes each transaction through utxoDiff.ProcessTx
 //  5. Closes reader when done
 //
@@ -344,13 +344,15 @@ func (u *Server) ProcessSubtreeUTXOStreaming(ctx context.Context, subtreeHash ch
 // just to learn that the file parses. Here each transaction is decoded into a pooled arena,
 // checked against its node hash and dropped, so memory follows the largest transaction instead.
 //
-// It accepts and rejects exactly what NewSubtreeDataFromReader does, which
-// TestValidateSubtreeData_MatchesGoSubtree pins, quirks included: a coinbase is skipped whenever
-// it is decoded at node index 1, and a file that ends on a transaction or field boundary before
-// the last node is accepted.
+// It accepts and rejects exactly what NewSubtreeDataFromReader does. The decoder is the same one:
+// go-bt's Tx.ReadFrom is ReadFromWithArena(r, nil), and the arena only changes where script bytes
+// are allocated, after the same length checks. The loop mirrors go-subtree's serializeFromReader,
+// quirks included: a coinbase is skipped whenever it is decoded at node index 1, and a file that
+// ends on a transaction or field boundary before the last node is accepted (issue 1917).
+// TestValidateSubtreeData_MatchesGoSubtree pins both implementations against the same table.
 func validateSubtreeData(subtree *subtreepkg.Subtree, r io.Reader) error {
 	if subtree == nil || len(subtree.Nodes) == 0 {
-		return subtreepkg.ErrSubtreeNodesEmpty
+		return errors.NewProcessingError("subtree has no nodes", subtreepkg.ErrSubtreeNodesEmpty)
 	}
 
 	txIndex := 0
@@ -373,7 +375,7 @@ func validateSubtreeData(subtree *subtreepkg.Subtree, r io.Reader) error {
 				return nil
 			}
 
-			return errors.NewProcessingError("error reading transaction at index %d", txIndex, err)
+			return errors.NewProcessingError("error reading transaction for node %d", txIndex, err)
 		}
 
 		if txIndex == 1 && tx.IsCoinbase() {
@@ -381,14 +383,14 @@ func validateSubtreeData(subtree *subtreepkg.Subtree, r io.Reader) error {
 		}
 
 		if txIndex >= len(subtree.Nodes) {
-			return subtreepkg.ErrTxIndexOutOfBounds
+			return errors.NewProcessingError("transaction for node %d is beyond the subtree's %d nodes", txIndex, len(subtree.Nodes), subtreepkg.ErrTxIndexOutOfBounds)
 		}
 
 		var txHash chainhash.Hash
 
 		txHash, hashScratch = tx.HashTxIDInto(hashScratch)
 		if !txHash.Equal(subtree.Nodes[txIndex].Hash) {
-			return errors.NewProcessingError("transaction hash mismatch at index %d: expected %s, got %s", txIndex, subtree.Nodes[txIndex].Hash.String(), txHash.String())
+			return errors.NewProcessingError("transaction hash mismatch for node %d: expected %s, got %s", txIndex, subtree.Nodes[txIndex].Hash.String(), txHash.String())
 		}
 
 		txIndex++

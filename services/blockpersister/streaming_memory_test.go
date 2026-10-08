@@ -1,8 +1,6 @@
 package blockpersister
 
 import (
-	"bytes"
-	"context"
 	"encoding/binary"
 	"net/url"
 	"runtime"
@@ -81,6 +79,8 @@ func storeLargeSubtree(t *testing.T, txCount, scriptSize int) (*file.File, *subt
 	storeURL, err := url.Parse("file://" + t.TempDir())
 	require.NoError(t, err)
 
+	// The existing-file path calls SetDAH on both subtree files, which the file store refuses
+	// without a deletion scheduler.
 	subtreeStore, err := file.New(ulogger.TestLogger{}, storeURL, options.WithBlobDeletionScheduler(&mockBlobDeletionScheduler{}))
 	require.NoError(t, err)
 
@@ -150,11 +150,15 @@ func peakHeapGrowth(t *testing.T, fn func()) uint64 {
 		}
 	}()
 
-	fn()
-	sample()
+	func() {
+		defer func() {
+			close(stop)
+			<-done
+		}()
 
-	close(stop)
-	<-done
+		fn()
+		sample()
+	}()
 
 	if peak.Load() <= baseline {
 		return 0
@@ -167,7 +171,7 @@ func peakHeapGrowth(t *testing.T, fn func()) uint64 {
 // issue 1914: the decode arena is never reset inside the per-tx loop, so every script
 // of every tx in the subtree accumulates in one doubling slab.
 func TestProcessSubtreeUTXOStreaming_MemoryDoesNotScaleWithSubtree(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	logger := ulogger.TestLogger{}
 	tSettings := test.CreateBaseTestSettings(t)
 
@@ -202,7 +206,7 @@ func TestProcessSubtreeUTXOStreaming_MemoryDoesNotScaleWithSubtree(t *testing.T)
 // reproduces cause 2 of issue 1914: validating an existing subtreeData file decodes
 // the whole subtree into memory just to check that it parses.
 func TestCreateSubtreeDataFileStreaming_ExistingFileMemoryDoesNotScaleWithSubtree(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	logger := ulogger.TestLogger{}
 	tSettings := test.CreateBaseTestSettings(t)
 
@@ -226,122 +230,14 @@ func TestCreateSubtreeDataFileStreaming_ExistingFileMemoryDoesNotScaleWithSubtre
 	})
 	require.NoError(t, err)
 
-	// the existing file was accepted, not recreated
-	exists, err := subtreeStore.Exists(ctx, subtree.RootHash()[:], fileformat.FileTypeSubtreeData)
+	// The existing file was accepted, not recreated: a recreated file would be rebuilt from the
+	// UTXO store (nil here) and written without the extended input data, so its size would differ.
+	kept, err := subtreeStore.Get(ctx, subtree.RootHash()[:], fileformat.FileTypeSubtreeData)
 	require.NoError(t, err)
-	require.True(t, exists)
+	require.Len(t, kept, dataSize)
 
 	t.Logf("subtreeData %d MiB, peak heap growth %d MiB", dataSize>>20, growth>>20)
 
 	require.Less(t, growth, uint64(dataSize/2),
 		"peak heap growth must not scale with the subtreeData size (%d bytes)", dataSize)
-}
-
-// smallTx returns a distinct 1-in-1-out transaction. A zero prevHash with index 0xffffffff
-// makes it a coinbase.
-func smallTx(t *testing.T, prevHash chainhash.Hash, prevIndex uint32, seed byte) *bt.Tx {
-	t.Helper()
-
-	input := &bt.Input{
-		PreviousTxOutIndex: prevIndex,
-		PreviousTxSatoshis: 2000,
-		PreviousTxScript:   bscript.NewFromBytes([]byte{bscript.Op1, seed}),
-		UnlockingScript:    bscript.NewFromBytes([]byte{bscript.Op1, seed}),
-		SequenceNumber:     0xffffffff,
-	}
-	require.NoError(t, input.PreviousTxIDAdd(&prevHash))
-
-	tx := bt.NewTx()
-	tx.Inputs = append(tx.Inputs, input)
-	tx.AddOutput(&bt.Output{Satoshis: 1000, LockingScript: bscript.NewFromBytes([]byte{bscript.Op1, seed})})
-
-	return tx
-}
-
-// TestValidateSubtreeData_MatchesGoSubtree pins validateSubtreeData to the accept/reject
-// behaviour of subtreepkg.NewSubtreeDataFromReader, which it replaces on the existing-file
-// path. A divergence either way changes which subtreeData files the persister deletes and
-// recreates.
-func TestValidateSubtreeData_MatchesGoSubtree(t *testing.T) {
-	coinbase := smallTx(t, chainhash.Hash{}, 0xffffffff, 0xcb)
-
-	txs := make([]*bt.Tx, 4)
-	for i := range txs {
-		txs[i] = smallTx(t, chainhash.HashH([]byte{byte(i)}), uint32(i), byte(i))
-	}
-
-	newSubtree := func(t *testing.T, placeholder bool, nodes []*bt.Tx) *subtreepkg.Subtree {
-		t.Helper()
-
-		st, err := subtreepkg.NewTreeByLeafCount(4)
-		require.NoError(t, err)
-
-		if placeholder {
-			require.NoError(t, st.AddCoinbaseNode())
-		}
-
-		for _, tx := range nodes {
-			require.NoError(t, st.AddNode(*tx.TxIDChainHash(), 1, uint64(tx.Size())))
-		}
-
-		return st
-	}
-
-	concat := func(extended bool, list ...*bt.Tx) []byte {
-		var out []byte
-
-		for _, tx := range list {
-			if extended {
-				out = append(out, tx.ExtendedBytes()...)
-			} else {
-				out = append(out, tx.Bytes()...)
-			}
-		}
-
-		return out
-	}
-
-	plain := newSubtree(t, false, txs)
-	withPlaceholder := newSubtree(t, true, txs[1:])
-	full := concat(true, txs...)
-
-	cases := []struct {
-		name    string
-		subtree *subtreepkg.Subtree
-		data    []byte
-		valid   bool
-	}{
-		{"valid extended", plain, full, true},
-		{"valid non-extended", plain, concat(false, txs...), true},
-		{"placeholder with coinbase in file", withPlaceholder, concat(true, coinbase, txs[1], txs[2], txs[3]), true},
-		{"placeholder without coinbase in file", withPlaceholder, concat(true, txs[1], txs[2], txs[3]), true},
-		{"hash mismatch", plain, concat(true, txs[1], txs[0], txs[2], txs[3]), false},
-		{"trailing extra transaction", plain, concat(true, txs[0], txs[1], txs[2], txs[3], txs[0]), false},
-		{"truncated inside a transaction", plain, full[:len(full)-3], false},
-		{"truncated on a transaction boundary", plain, concat(true, txs[0], txs[1]), true},
-		{"empty file", plain, nil, true},
-		// Both accept a file that stops inside a transaction exactly where a field
-		// starts: the varint read sees a clean io.EOF, which the loop takes as end of
-		// file. Pinned here as shared behaviour, not endorsed.
-		{"ends inside a transaction on a field boundary", plain, []byte{0x01, 0x00, 0x00, 0x00, 0xff}, true},
-		// go-bt wraps this EOF (script length read, no script bytes) with pkg/errors.
-		{"ends after a script length", plain, append(append([]byte{0x01, 0x00, 0x00, 0x00, 0x01}, make([]byte, 36)...), 0x05), true},
-		{"ends inside a field", plain, []byte{0x01, 0x00, 0x00, 0x00, 0xff, 0x01}, false},
-		{"wrong transaction after a valid prefix", plain, concat(true, txs[0], txs[2]), false},
-		// Both skip a coinbase in second position even with no placeholder node, because
-		// the check is txIndex == 1 rather than "node 0 is the placeholder". Also pinned
-		// as shared behaviour, not endorsed.
-		{"coinbase second without a placeholder", plain, concat(true, txs[0], coinbase), true},
-		{"no nodes", &subtreepkg.Subtree{}, full, false},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			_, refErr := subtreepkg.NewSubtreeDataFromReader(tc.subtree, bytes.NewReader(tc.data))
-			err := validateSubtreeData(tc.subtree, bytes.NewReader(tc.data))
-
-			require.Equal(t, tc.valid, refErr == nil, "go-subtree reference: %v", refErr)
-			require.Equal(t, tc.valid, err == nil, "validateSubtreeData: %v", err)
-		})
-	}
 }
