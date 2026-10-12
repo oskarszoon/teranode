@@ -14,16 +14,18 @@ every stack — the `Provisioned by` column says which one mounts each file:
 
 | Dashboard | File | Provisioned by | What it shows |
 | --- | --- | --- | --- |
-| Teranode Service Overview | `deploy/docker/base/grafana_dashboards/teranode/teranode-overview-dashboard.json` | Docker quickstart, `deploy/docker/monitoring` | Top-level health across all services: throughput, latencies, error rates |
-| Aerospike Batch Index Bottleneck Diagnostic | `deploy/docker/base/grafana_dashboards/teranode/teranode-batch-index-dashboard.json` | Docker quickstart, `deploy/docker/monitoring` | Aerospike batch index buffer pressure, a common scaling bottleneck |
-| Aerospike Namespace | `deploy/docker/base/grafana_dashboards/aerospike/aerospike-namespace.json` | Docker quickstart, `deploy/docker/monitoring` | Namespace-level memory, disk, and object counts |
-| Aerospike Latency | `deploy/docker/base/grafana_dashboards/aerospike/aerospike-latency.json` | Docker quickstart, `deploy/docker/monitoring` | Read/write/batch latency buckets for the UTXO store |
+| Teranode Service Overview | `deploy/docker/base/grafana_dashboards/teranode/teranode-overview-dashboard.json` | `deploy/docker/monitoring`; the quickstart ships its own copy | Top-level health across all services: throughput, latencies, error rates |
+| Aerospike Batch Index Bottleneck Diagnostic | `deploy/docker/base/grafana_dashboards/teranode/teranode-batch-index-dashboard.json` | `deploy/docker/monitoring`; the quickstart ships its own copy | Aerospike batch index buffer pressure, a common scaling bottleneck |
+| Aerospike Namespace | `deploy/docker/base/grafana_dashboards/aerospike/aerospike-namespace.json` | `deploy/docker/monitoring`; the quickstart ships its own copy | Namespace-level memory, disk, and object counts |
+| Aerospike Latency | `deploy/docker/base/grafana_dashboards/aerospike/aerospike-latency.json` | `deploy/docker/monitoring`; the quickstart ships its own copy | Read/write/batch latency buckets for the UTXO store |
 | BlockAssembler State Monitoring | `compose/grafana/dashboards/blockassembly-state.json` | Nothing on the operator paths — **import by hand** (only the developer multi-node stacks `compose/docker-compose-ss.yml` and `test/docker-compose-host.yml` mount it) | Block assembler state timeline (`running`, `reorging`, `movingUp`, ...), state durations, and transition rates — see [dashboard notes](https://github.com/bsv-blockchain/teranode/blob/main/compose/grafana/dashboards/README.md) |
 
-The Grafana service in the Docker stacks mounts a single dashboards directory —
-`config/grafana_dashboards` on the quickstart,
-`deploy/docker/base/grafana_dashboards` for `deploy/docker/monitoring` — and
-provisions only what is in it. Both carry the four dashboards above. On the quickstart, Grafana and
+The Grafana service in the Docker stacks provisions only the dashboards in the
+directory it mounts. `deploy/docker/monitoring` mounts
+`deploy/docker/base/grafana_dashboards`, the files listed above. The quickstart
+ships its own copies in
+[`config/grafana_dashboards/`](https://github.com/bsv-blockchain/teranode-quickstart/tree/main/config/grafana_dashboards),
+which may differ from the files here. On the quickstart, Grafana and
 Prometheus come up with the `monitoring` compose profile, which is part of the
 default `COMPOSE_PROFILES` (`legacy,p2p,monitoring`). Grafana is then reachable
 at `http://localhost:3005` and Prometheus at `http://localhost:9090` (both
