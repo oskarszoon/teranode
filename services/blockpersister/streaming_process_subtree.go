@@ -314,25 +314,31 @@ func (u *Server) ProcessSubtreeUTXOStreaming(ctx context.Context, subtreeHash ch
 			return errors.NewProcessingError("[BlockPersister] error reading transaction at index %d from subtree %s", i, subtreeHash.String(), err)
 		}
 
-		// 4. Process this transaction through UTXO diff
-		if err = utxoDiff.ProcessTx(tx); err != nil {
-			return errors.NewProcessingError("[BlockPersister] error processing tx for UTXO at index %d", i, err)
-		}
+		// 4. Check the transaction against its node before it reaches the UTXO diff, so a wrong
+		// one writes nothing. Only the placeholder node takes the coinbase unchecked; a coinbase
+		// anywhere else is checked like any other transaction.
+		coinbaseForPlaceholder := false
 
 		if subtree.Nodes[i].Hash.Equal(*subtreepkg.CoinbasePlaceholderHash) {
-			// check whether the first transaction was actually the coinbase, otherwise we should skip that and move i forward
-			if !tx.IsCoinbase() {
+			if tx.IsCoinbase() {
+				coinbaseForPlaceholder = true
+			} else {
+				// the file leaves the coinbase out, so this transaction belongs to the next node
 				i++
 			}
 		}
 
-		// check the tx hash matches the expected hash (from subtree), except for coinbase
-		if !tx.IsCoinbase() {
+		if !coinbaseForPlaceholder {
 			var txHash chainhash.Hash
 			txHash, hashScratch = tx.HashTxIDInto(hashScratch)
 			if !txHash.Equal(subtree.Nodes[i].Hash) {
 				return errors.NewProcessingError("[BlockPersister] transaction hash mismatch at index %d: expected %s, got %s", i, subtree.Nodes[i].Hash.String(), txHash.String())
 			}
+		}
+
+		// 5. Process this transaction through UTXO diff
+		if err = utxoDiff.ProcessTx(tx); err != nil {
+			return errors.NewProcessingError("[BlockPersister] error processing tx for UTXO at index %d", i, err)
 		}
 	}
 
@@ -353,14 +359,12 @@ func (u *Server) ProcessSubtreeUTXOStreaming(ctx context.Context, subtreeHash ch
 // only changes where script bytes are allocated, after the same length checks.
 //
 // Two kinds of file that go-subtree's serializeFromReader accepts are rejected here. Reused, each
-// gets DAH 0, and nothing else deletes it:
+// gets DAH 0, phase 2 fails on it on every attempt, and nothing else deletes it:
 //   - A file that ends on a transaction or field boundary before the last node, an empty file
-//     included. go-bt returns a clean io.EOF there, and phase 2 fails on the missing tail on
-//     every attempt (issue 1917).
+//     included. go-bt returns a clean io.EOF there, and phase 2 reads every node (issue 1917).
 //   - A coinbase anywhere but first under the placeholder. serializeFromReader skips any coinbase
-//     it decodes while standing at node index 1, without a hash check. Phase 2 also skips the
-//     hash check for a coinbase and processes it in that node's place, then fails on the next
-//     node or, at the last node, persists the coinbase instead of the node's transaction.
+//     it decodes while standing at node index 1, without a hash check. Phase 2 takes the coinbase
+//     unchecked only at the placeholder node.
 //
 // Since every node must be seen, how a read error is classified no longer decides whether an
 // incomplete file passes: an error before the last node rejects the file either way. So
