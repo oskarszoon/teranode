@@ -200,7 +200,7 @@ This is a core function of the blockpersister service that handles the complete 
     6. **Close and finalize** the UTXO difference set once all transactions are processed, before the block file is written
     7. **Write the complete block** to persistent storage and finalize it
 
-    A failure at any step aborts the UTXO difference set and the block file, so a failed attempt leaves none of the three files behind. An error finalizing either fails the block. The Server treats `BLOB_EXISTS` as "already persisted" only when the block file exists.
+    A failure before the UTXO files are finalized aborts them, and a failure while writing the block file aborts it, so a failed attempt never leaves a block file behind. A failure after the UTXO files are finalized leaves them in place without a block file, and the retry removes them in step 2. An error finalizing either fails the block. The Server treats `BLOB_EXISTS` as "already persisted" only when the block file exists.
 
 **Parameters:**
 
