@@ -14,15 +14,16 @@ every stack — the `Provisioned by` column says which one mounts each file:
 
 | Dashboard | File | Provisioned by | What it shows |
 | --- | --- | --- | --- |
-| Teranode Service Overview | `deploy/docker/base/grafana_dashboards/teranode/teranode-overview-dashboard.json` | Operator Docker stacks (`deploy/docker/mainnet`, `deploy/docker/testnet`, `deploy/docker/monitoring`) | Top-level health across all services: throughput, latencies, error rates |
-| Aerospike Batch Index Bottleneck Diagnostic | `deploy/docker/base/grafana_dashboards/teranode/teranode-batch-index-dashboard.json` | Operator Docker stacks | Aerospike batch index buffer pressure, a common scaling bottleneck |
-| Aerospike Namespace | `deploy/docker/base/grafana_dashboards/aerospike/aerospike-namespace.json` | Operator Docker stacks | Namespace-level memory, disk, and object counts |
-| Aerospike Latency | `deploy/docker/base/grafana_dashboards/aerospike/aerospike-latency.json` | Operator Docker stacks | Read/write/batch latency buckets for the UTXO store |
+| Teranode Service Overview | `deploy/docker/base/grafana_dashboards/teranode/teranode-overview-dashboard.json` | Docker quickstart, `deploy/docker/monitoring` | Top-level health across all services: throughput, latencies, error rates |
+| Aerospike Batch Index Bottleneck Diagnostic | `deploy/docker/base/grafana_dashboards/teranode/teranode-batch-index-dashboard.json` | Docker quickstart, `deploy/docker/monitoring` | Aerospike batch index buffer pressure, a common scaling bottleneck |
+| Aerospike Namespace | `deploy/docker/base/grafana_dashboards/aerospike/aerospike-namespace.json` | Docker quickstart, `deploy/docker/monitoring` | Namespace-level memory, disk, and object counts |
+| Aerospike Latency | `deploy/docker/base/grafana_dashboards/aerospike/aerospike-latency.json` | Docker quickstart, `deploy/docker/monitoring` | Read/write/batch latency buckets for the UTXO store |
 | BlockAssembler State Monitoring | `compose/grafana/dashboards/blockassembly-state.json` | Nothing on the operator paths — **import by hand** (only the developer multi-node stacks `compose/docker-compose-ss.yml` and `test/docker-compose-host.yml` mount it) | Block assembler state timeline (`running`, `reorging`, `movingUp`, ...), state durations, and transition rates — see [dashboard notes](https://github.com/bsv-blockchain/teranode/blob/main/compose/grafana/dashboards/README.md) |
 
-The Grafana service in the Docker stacks mounts a single dashboards directory,
-`deploy/docker/base/grafana_dashboards`, so the four dashboards in that directory
-— and only those — are provisioned automatically. On the quickstart, Grafana and
+The Grafana service in the Docker stacks mounts a single dashboards directory —
+`config/grafana_dashboards` on the quickstart,
+`deploy/docker/base/grafana_dashboards` for `deploy/docker/monitoring` — and
+provisions only what is in it. Both carry the four dashboards above. On the quickstart, Grafana and
 Prometheus come up with the `monitoring` compose profile, which is part of the
 default `COMPOSE_PROFILES` (`legacy,p2p,monitoring`). Grafana is then reachable
 at `http://localhost:3005` and Prometheus at `http://localhost:9090` (both
@@ -33,9 +34,9 @@ guide](docker/minersHowToTroubleshooting.md) if Grafana shows no data.
 The BlockAssembler State Monitoring dashboard is **not** provisioned on either
 operator path. To use it, import
 `compose/grafana/dashboards/blockassembly-state.json` manually (Grafana →
-Dashboards → Import → Upload JSON file), or drop the file into
-`deploy/docker/base/grafana_dashboards/teranode/` before starting the stack so
-the existing provisioning picks it up.
+Dashboards → Import → Upload JSON file), or drop the file into the mounted
+dashboards directory (`config/grafana_dashboards/teranode/` on the quickstart)
+before starting the stack so the existing provisioning picks it up.
 
 On Kubernetes, Prometheus and Grafana are not deployed by the Teranode
 operator itself — point your cluster's existing Prometheus at the Teranode
@@ -155,12 +156,12 @@ Teranode ships five block-assembler alert rules — `BlockAssemblerStuckInState`
 `SlowTipAdvance`, `FrequentReorgs`, `BlockAssemblyBehindTip` and
 `BlockAssemblyProcessingStuck` — in
 [`deploy/docker/base/blockassembly.rules.yml`](https://github.com/bsv-blockchain/teranode/blob/main/deploy/docker/base/blockassembly.rules.yml).
-Every Prometheus config used by a Docker stack in the repo loads that file via
-`rule_files`, so on the operator `mainnet` and `testnet` stacks those five are
-already being evaluated. Alert *delivery* is a different matter: only the
-`deploy/docker/base` stack runs an Alertmanager, and it has no notifier
-attached, so firing alerts are visible in the Prometheus and Alertmanager UIs
-but are not sent anywhere until you add a receiver.
+The Docker quickstart ships the same rules, and every Prometheus config used by
+a Docker stack in this repo loads that file via `rule_files`, so those five are
+already being evaluated. Alert *delivery* is a different matter: the quickstart
+runs an Alertmanager with no notifier attached, so firing alerts are visible in
+the Prometheus and Alertmanager UIs but are not sent anywhere until you add a
+receiver. The Docker stacks in this repo run no Alertmanager.
 
 Everything beyond block assembly is left to the operator — thresholds depend on
 your hardware, network, and risk tolerance. Both state metrics are numeric
