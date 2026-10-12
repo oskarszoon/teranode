@@ -1037,6 +1037,9 @@ func TestProcessSubtreeUTXOStreaming_TakesTheCoinbaseFromTheBlock(t *testing.T) 
 		{name: "placeholder-only subtree, file holds another transaction", subtree: placeholderOnly, file: concat(txs[1]), coinbaseTx: coinbase, processed: []*bt.Tx{coinbase}},
 		{name: "block without a coinbase, file opens with one", subtree: withPlaceholder, file: concat(coinbase, txs[1], txs[2], txs[3]), processed: []*bt.Tx{coinbase, txs[1], txs[2], txs[3]}},
 		{name: "block without a coinbase, file leaves it out", subtree: withPlaceholder, file: concat(txs[1], txs[2], txs[3]), processed: []*bt.Tx{txs[1], txs[2], txs[3]}},
+		// Nothing is read for a placeholder-only subtree, so the fallback never sees the file's
+		// coinbase. The case needs a coinbase-only block, which has no subtrees.
+		{name: "block without a coinbase, placeholder-only subtree, file holds one", subtree: placeholderOnly, file: concat(coinbase)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			gotAdditions, gotDeletions, err := runPhase2(t, tc.subtree, tc.file, tc.coinbaseTx)

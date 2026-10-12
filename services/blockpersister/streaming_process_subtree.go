@@ -265,7 +265,8 @@ func (u *Server) CreateSubtreeDataFileStreaming(ctx context.Context, subtreeHash
 //   - ctx: Context for the operation
 //   - subtreeHash: Hash identifier of the subtree to process
 //   - coinbaseTx: The block's coinbase, processed for a coinbase placeholder at node 0. May be nil
-//     for a block started from a seed, in which case a coinbase opening the file is used instead.
+//     for a block started from a seed. A coinbase opening the file is then used instead, but only
+//     when the subtree has a node after the placeholder: otherwise nothing is read.
 //   - utxoDiff: UTXO set difference tracker to record changes
 //
 // Returns an error if any part of the process fails.
@@ -309,7 +310,10 @@ func (u *Server) ProcessSubtreeUTXOStreaming(ctx context.Context, subtreeHash ch
 	// coinbase or leave it out, and a coinbase it holds need not be this block's: the file is keyed
 	// by subtree hash, and competing blocks can share their first subtree. So the block's own
 	// coinbase is processed, and a coinbase opening the file is read and dropped. Only a block
-	// without one, started from a seed, falls back to the file's.
+	// without one, started from a seed, falls back to the file's, and only when the subtree has a
+	// node after the placeholder. A placeholder-only subtree reads nothing, so its file's coinbase
+	// is never seen. That needs a coinbase-only block below the seed, and a coinbase-only block
+	// has no subtrees.
 	coinbaseMayOpen := len(nodes) > 0 && nodes[0].Hash.Equal(subtreepkg.CoinbasePlaceholderHashValue)
 	if coinbaseMayOpen {
 		txIndex = 1
