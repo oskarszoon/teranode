@@ -569,9 +569,10 @@ func smallTx(t *testing.T, prevHash chainhash.Hash, prevIndex uint32, seed byte)
 // index 0 exempt. A change either way changes which subtreeData files the persister deletes and
 // recreates.
 //
-// validateSubtreeData is stricter than the reader alone in two ways, each marked readerAccepts:
-// a file that ends on a transaction or field boundary before the last node (issue 1917), and a
-// coinbase anywhere but first under the placeholder. It is stricter than catchup only on a
+// validateSubtreeData is stricter than the reader alone in three ways, each marked readerAccepts:
+// a file that ends on a transaction or field boundary before the last node (issue 1917), one that
+// ends partway through a transaction after it, and a coinbase anywhere but first under the
+// placeholder. It is stricter than catchup on a partial transaction after the last node and on a
 // second coinbase under the placeholder, marked catchupAccepts.
 func TestValidateSubtreeData_AgainstGoSubtreeAndCatchup(t *testing.T) {
 	coinbase := smallTx(t, chainhash.Hash{}, 0xffffffff, 0xcb)
@@ -674,9 +675,11 @@ func TestValidateSubtreeData_AgainstGoSubtreeAndCatchup(t *testing.T) {
 		{name: "coinbase in place of the last node without a placeholder", subtree: twoNodes, data: concat(true, txs[0], coinbase, txs[1]), readerAccepts: true},
 		{name: "placeholder with the coinbase twice", subtree: withPlaceholder, data: concat(true, coinbase, coinbase, txs[1], txs[2], txs[3]), readerAccepts: true, catchupAccepts: true},
 
-		// Accepted by all three. Every node is seen before the clean EOF, and phase 2 reads
-		// Length() transactions and never reaches the partial one.
-		{name: "complete, then ends inside a trailing transaction on a field boundary", subtree: plain, data: append(concat(true, txs...), 0x01, 0x00, 0x00, 0x00, 0xff), valid: true},
+		// go-bt returns a clean io.EOF for a transaction cut on a field boundary, so the reader and
+		// the catchup checks accept these. Phase 2 never reads the partial transaction, but the
+		// file is kept with DAH 0 and served to peers.
+		{name: "complete, then ends inside a trailing transaction on a field boundary", subtree: plain, data: append(concat(true, txs...), 0x01, 0x00, 0x00, 0x00, 0xff), readerAccepts: true, catchupAccepts: true},
+		{name: "placeholder only, a transaction cut on a field boundary", subtree: placeholderOnly, data: []byte{0x01, 0x00, 0x00, 0x00, 0xff}, readerAccepts: true, catchupAccepts: true},
 		// The only place where how a read error is classified changes the verdict: after the last
 		// node. io.ErrUnexpectedEOF is not end of file, so all three reject it.
 		{name: "complete, then cut inside a trailing transaction's version", subtree: plain, data: append(concat(true, txs...), 0x01, 0x00), valid: false},
@@ -1053,6 +1056,159 @@ func TestProcessSubtreeUTXOStreaming_TakesTheCoinbaseFromTheBlock(t *testing.T) 
 
 			require.Equal(t, wantAdditions, gotAdditions, "utxo-additions")
 			require.Equal(t, wantDeletions, gotDeletions, "utxo-deletions")
+		})
+	}
+}
+
+// wantSetupBlockUtxoFiles returns the utxo-additions and utxo-deletions the setup block should
+// persist: its four transactions, coinbase first.
+func wantSetupBlockUtxoFiles(t *testing.T, block *model.Block, extendedTxs []*bt.Tx) (additions, deletions []byte) {
+	t.Helper()
+
+	ctx := t.Context()
+	store := memory.New()
+
+	utxoDiff, err := utxopersister.NewUTXOSet(ctx, ulogger.TestLogger{}, test.CreateBaseTestSettings(t), store, block.Header.Hash(), block.Height)
+	require.NoError(t, err)
+
+	for _, tx := range extendedTxs {
+		require.NoError(t, utxoDiff.ProcessTx(tx))
+	}
+
+	require.NoError(t, utxoDiff.Close())
+
+	additions, err = store.Get(ctx, block.Header.Hash()[:], fileformat.FileTypeUtxoAdditions)
+	require.NoError(t, err)
+
+	deletions, err = store.Get(ctx, block.Header.Hash()[:], fileformat.FileTypeUtxoDeletions)
+	require.NoError(t, err)
+
+	return additions, deletions
+}
+
+// requirePersistedFiles checks which of the block's three persisted files exist.
+func requirePersistedFiles(t *testing.T, blockStore blob.Store, hash *chainhash.Hash, want bool) {
+	t.Helper()
+
+	for _, fileType := range []fileformat.FileType{fileformat.FileTypeUtxoAdditions, fileformat.FileTypeUtxoDeletions, fileformat.FileTypeBlock} {
+		exists, err := blockStore.Exists(t.Context(), hash[:], fileType)
+		require.NoError(t, err)
+		require.Equal(t, want, exists, "%s exists", fileType)
+	}
+}
+
+// TestPersistBlock_RetriesCleanlyAfterAFailedAttempt checks that a failed attempt leaves none of
+// the block's files behind. A utxo file finalised from a partial diff made every retry fail with
+// BLOB_EXISTS, which the Server read as "already persisted", so the block was marked persisted with
+// an empty UTXO diff and no block file.
+func TestPersistBlock_RetriesCleanlyAfterAFailedAttempt(t *testing.T) {
+	block, blockBytes, extendedTxs, mockUTXOStore, subtreeStore, blockStore, blockchainClient, tSettings := setup(t)
+	ctx := t.Context()
+
+	failing := &failingReadStore{Memory: subtreeStore, after: 10, err: io.ErrClosedPipe}
+	first := New(ctx, ulogger.TestLogger{}, tSettings, blockStore, failing, mockUTXOStore, blockchainClient)
+	require.Error(t, first.persistBlock(ctx, block.Header.Hash(), blockBytes))
+	requirePersistedFiles(t, blockStore, block.Header.Hash(), false)
+
+	retry := New(ctx, ulogger.TestLogger{}, tSettings, blockStore, subtreeStore, mockUTXOStore, blockchainClient)
+	require.NoError(t, retry.persistBlock(ctx, block.Header.Hash(), blockBytes))
+	requirePersistedFiles(t, blockStore, block.Header.Hash(), true)
+
+	wantAdditions, wantDeletions := wantSetupBlockUtxoFiles(t, block, extendedTxs)
+
+	gotAdditions, err := blockStore.Get(ctx, block.Header.Hash()[:], fileformat.FileTypeUtxoAdditions)
+	require.NoError(t, err)
+	require.Equal(t, wantAdditions, gotAdditions)
+
+	gotDeletions, err := blockStore.Get(ctx, block.Header.Hash()[:], fileformat.FileTypeUtxoDeletions)
+	require.NoError(t, err)
+	require.Equal(t, wantDeletions, gotDeletions)
+}
+
+// TestPersistBlock_ClearsUtxoFilesLeftWithoutABlockFile checks the retry after an attempt that
+// stopped between finalising the utxo files and writing the block file, the last file written. The
+// leftover utxo files are replaced, not trusted.
+func TestPersistBlock_ClearsUtxoFilesLeftWithoutABlockFile(t *testing.T) {
+	block, blockBytes, extendedTxs, mockUTXOStore, subtreeStore, blockStore, blockchainClient, tSettings := setup(t)
+	ctx := t.Context()
+
+	for _, fileType := range []fileformat.FileType{fileformat.FileTypeUtxoAdditions, fileformat.FileTypeUtxoDeletions} {
+		require.NoError(t, blockStore.Set(ctx, block.Header.Hash()[:], fileType, []byte("left over from an earlier attempt")))
+	}
+
+	persister := New(ctx, ulogger.TestLogger{}, tSettings, blockStore, subtreeStore, mockUTXOStore, blockchainClient)
+	require.NoError(t, persister.persistBlock(ctx, block.Header.Hash(), blockBytes))
+	requirePersistedFiles(t, blockStore, block.Header.Hash(), true)
+
+	wantAdditions, _ := wantSetupBlockUtxoFiles(t, block, extendedTxs)
+
+	gotAdditions, err := blockStore.Get(ctx, block.Header.Hash()[:], fileformat.FileTypeUtxoAdditions)
+	require.NoError(t, err)
+	require.Equal(t, wantAdditions, gotAdditions)
+}
+
+// TestPersistBlock_ReportsABlockAlreadyPersisted checks that a block whose block file exists is
+// reported as BLOB_EXISTS before any work is done, and that the Server reads BLOB_EXISTS as
+// "already persisted" only when the block file is there.
+func TestPersistBlock_ReportsABlockAlreadyPersisted(t *testing.T) {
+	block, blockBytes, _, mockUTXOStore, subtreeStore, blockStore, blockchainClient, tSettings := setup(t)
+	ctx := t.Context()
+	hash := block.Header.Hash()
+
+	persister := New(ctx, ulogger.TestLogger{}, tSettings, blockStore, subtreeStore, mockUTXOStore, blockchainClient)
+
+	blobExists := errors.NewStorageError("error creating additions file", errors.NewBlobAlreadyExistsError("utxo-additions already exists"))
+	require.False(t, persister.blockAlreadyPersisted(ctx, hash, blobExists), "BLOB_EXISTS without a block file")
+
+	require.NoError(t, blockStore.Set(ctx, hash[:], fileformat.FileTypeBlock, blockBytes))
+
+	err := persister.persistBlock(ctx, hash, blockBytes)
+	require.True(t, errors.Is(err, errors.ErrBlobAlreadyExists), "persistBlock: %v", err)
+	require.True(t, persister.blockAlreadyPersisted(ctx, hash, err))
+	require.False(t, persister.blockAlreadyPersisted(ctx, hash, errors.NewProcessingError("some other failure")))
+
+	for _, fileType := range []fileformat.FileType{fileformat.FileTypeUtxoAdditions, fileformat.FileTypeUtxoDeletions} {
+		exists, err := blockStore.Exists(ctx, hash[:], fileType)
+		require.NoError(t, err)
+		require.False(t, exists, "%s written for a block already persisted", fileType)
+	}
+}
+
+// finaliseFailingStore fails to finalise one file type, as a store does when its final write or
+// rename fails.
+type finaliseFailingStore struct {
+	*memory.Memory
+	fileType fileformat.FileType
+}
+
+func (s *finaliseFailingStore) SetFromReader(ctx context.Context, key []byte, fileType fileformat.FileType, reader io.ReadCloser, opts ...options.FileOption) error {
+	if fileType != s.fileType {
+		return s.Memory.SetFromReader(ctx, key, fileType, reader, opts...)
+	}
+
+	_, _ = io.Copy(io.Discard, reader)
+	_ = reader.Close()
+
+	return errors.NewStorageError("finalising %s failed", fileType)
+}
+
+// TestPersistBlock_FailsWhenAFileDoesNotFinalise checks that persistBlock returns an error, and
+// leaves no block file, when one of its files fails to finalise. The errors used to be logged and
+// dropped, and the block was marked persisted without the file.
+func TestPersistBlock_FailsWhenAFileDoesNotFinalise(t *testing.T) {
+	for _, fileType := range []fileformat.FileType{fileformat.FileTypeUtxoAdditions, fileformat.FileTypeUtxoDeletions, fileformat.FileTypeBlock} {
+		t.Run(string(fileType), func(t *testing.T) {
+			block, blockBytes, _, mockUTXOStore, subtreeStore, _, blockchainClient, tSettings := setup(t)
+			ctx := t.Context()
+
+			blockStore := &finaliseFailingStore{Memory: memory.New(), fileType: fileType}
+
+			persister := New(ctx, ulogger.TestLogger{}, tSettings, blockStore, subtreeStore, mockUTXOStore, blockchainClient)
+			require.Error(t, persister.persistBlock(ctx, block.Header.Hash(), blockBytes))
+
+			exists, err := blockStore.Exists(ctx, block.Header.Hash()[:], fileformat.FileTypeBlock)
+			require.NoError(t, err)
+			require.False(t, exists, "block file written although %s did not finalise", fileType)
 		})
 	}
 }

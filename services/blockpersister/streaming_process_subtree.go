@@ -399,11 +399,14 @@ func (u *Server) ProcessSubtreeUTXOStreaming(ctx context.Context, subtreeHash ch
 // the one NewSubtreeDataFromReader uses: go-bt's Tx.ReadFrom is ReadFromWithArena(r, nil), and
 // the arena only changes where script bytes are allocated, after the same length checks.
 //
-// Two kinds of file that go-subtree's serializeFromReader accepts are rejected here. Reused, each
-// gets DAH 0, phase 2 fails on it on every attempt, and nothing else deletes it:
+// Three kinds of file that go-subtree's serializeFromReader accepts are rejected here. Reused,
+// each gets DAH 0 and is served to peers as it is, and nothing else deletes it:
 //   - A file that ends on a transaction or field boundary before the last node, an empty file
 //     included when a node needs a transaction. go-bt returns a clean io.EOF there, and phase 2
-//     reads every node (issue 1917).
+//     reads every node, so it fails on such a file on every attempt (issue 1917).
+//   - A file that ends partway through a transaction on a field boundary after the last node,
+//     including a coinbase cut short under a placeholder-only subtree. go-bt returns a clean
+//     io.EOF there too; the bytes it consumed first tell it apart from the end of the file.
 //   - A coinbase anywhere but first under the placeholder. serializeFromReader skips any coinbase
 //     it decodes while standing at node index 1, without a hash check. Phase 2 checks it like any
 //     other transaction.
@@ -439,13 +442,20 @@ func validateSubtreeData(subtree *subtreepkg.Subtree, r io.Reader) error {
 
 		tx := &bt.Tx{}
 
-		if _, err := tx.ReadFromWithArena(reader, arena); err != nil {
+		if n, err := tx.ReadFromWithArena(reader, arena); err != nil {
 			// The store failed, so the file's contents are unknown rather than wrong.
 			if reader.err != nil {
 				return errors.NewStorageError("error reading subtreeData for node %d", txIndex, reader.err)
 			}
 
 			if errors.Is(err, io.EOF) {
+				// go-bt counts the bytes it consumed before every error, so a clean end of file is
+				// one that falls exactly between transactions. Anything else is a partial transaction,
+				// after the last node as much as before it.
+				if n > 0 {
+					return errors.NewProcessingError("subtreeData ends inside the transaction for node %d", txIndex)
+				}
+
 				if txIndex < len(subtree.Nodes) {
 					return errors.NewProcessingError("subtreeData is incomplete (%d of %d txs missing)", len(subtree.Nodes)-txIndex, len(subtree.Nodes))
 				}
