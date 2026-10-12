@@ -74,7 +74,18 @@ func (u *Server) CreateSubtreeDataFileStreaming(ctx context.Context, subtreeHash
 		subtreeDataBufferedReader := bufio.NewReaderSize(subtreeDataReader, 32*1024) // 32KB buffer
 
 		if err = validateSubtreeData(subtree, subtreeDataBufferedReader); err != nil {
-			// something failed reading the subtreeData, we need to recreate it
+			// A read error or a cancelled context says nothing about the file, and deleting it would
+			// throw away what may be the only copy: the rebuild needs the block's transactions, which
+			// the UTXO store may already have pruned. Only a file whose contents are wrong is
+			// deleted and recreated.
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return errors.NewContextCanceledError("[BlockPersister] cancelled while checking existing subtree data for %s", subtreeHash.String(), ctxErr)
+			}
+
+			if errors.Is(err, errors.ErrStorageError) {
+				return errors.NewStorageError("[BlockPersister] error reading existing subtree data for %s", subtreeHash.String(), err)
+			}
+
 			u.logger.Warnf("[BlockPersister] existing subtree data for %s is invalid, recreating: %v", subtreeHash.String(), err)
 
 			// delete the invalid file
@@ -243,19 +254,22 @@ func (u *Server) CreateSubtreeDataFileStreaming(ctx context.Context, subtreeHash
 // The function:
 //  1. Opens the subtreeData file as a reader with buffering
 //  2. Reads the subtree structure (to handle coinbase)
-//  3. Streams through transactions using bt.Tx.ReadFromWithArena, resetting the arena per transaction
-//  4. Processes each transaction through utxoDiff.ProcessTx
-//  5. Closes reader when done
+//  3. Processes the block's coinbase if node 0 is the coinbase placeholder
+//  4. Streams through transactions using bt.Tx.ReadFromWithArena, resetting the arena per transaction
+//  5. Checks each transaction against its node, then processes it through utxoDiff.ProcessTx
+//  6. Closes reader when done
 //
 // Memory usage is minimal - only one transaction in memory at a time.
 //
 // Parameters:
 //   - ctx: Context for the operation
 //   - subtreeHash: Hash identifier of the subtree to process
+//   - coinbaseTx: The block's coinbase, processed for a coinbase placeholder at node 0. May be nil
+//     for a block started from a seed, in which case a coinbase opening the file is used instead.
 //   - utxoDiff: UTXO set difference tracker to record changes
 //
 // Returns an error if any part of the process fails.
-func (u *Server) ProcessSubtreeUTXOStreaming(ctx context.Context, subtreeHash chainhash.Hash, utxoDiff *utxopersister.UTXOSet) error {
+func (u *Server) ProcessSubtreeUTXOStreaming(ctx context.Context, subtreeHash chainhash.Hash, coinbaseTx *bt.Tx, utxoDiff *utxopersister.UTXOSet) error {
 	ctx, _, deferFn := tracing.Tracer("blockpersister").Start(ctx, "ProcessSubtreeUTXOStreaming",
 		tracing.WithDebugLogMessage(u.logger, "[ProcessSubtreeUTXOStreaming] called for subtree %s", subtreeHash.String()),
 	)
@@ -287,8 +301,25 @@ func (u *Server) ProcessSubtreeUTXOStreaming(ctx context.Context, subtreeHash ch
 		return err
 	}
 
-	// 3. Stream through transactions and process UTXO changes
-	subtreeLen := subtree.Length()
+	// One read of the nodes slice, for the reason model.MissingSubtreeDataTxs sets out.
+	nodes := subtree.Nodes
+	txIndex := 0
+
+	// 3. A coinbase placeholder at node 0 stands for the block's coinbase. The file may open with a
+	// coinbase or leave it out, and a coinbase it holds need not be this block's: the file is keyed
+	// by subtree hash, and competing blocks can share their first subtree. So the block's own
+	// coinbase is processed, and a coinbase opening the file is read and dropped. Only a block
+	// without one, started from a seed, falls back to the file's.
+	coinbaseMayOpen := len(nodes) > 0 && nodes[0].Hash.Equal(subtreepkg.CoinbasePlaceholderHashValue)
+	if coinbaseMayOpen {
+		txIndex = 1
+
+		if coinbaseTx != nil {
+			if err = utxoDiff.ProcessTx(coinbaseTx); err != nil {
+				return errors.NewProcessingError("[BlockPersister] error processing the block's coinbase for subtree %s", subtreeHash.String(), err)
+			}
+		}
+	}
 
 	// Arena-backed tx decode is safe here because utxoDiff is
 	// *utxopersister.UTXOSet (NOT services/blockpersister/utxoset/model.UTXODiff,
@@ -305,41 +336,46 @@ func (u *Server) ProcessSubtreeUTXOStreaming(ctx context.Context, subtreeHash ch
 	defer putBlockpersisterArena(arena)
 	var hashScratch []byte
 
-	for i := 0; i < subtreeLen; i++ {
+	// 4. Stream one transaction per remaining node. The loop is driven by the nodes, as
+	// validateSubtreeData's is, so a file phase 1 accepts is one this loop reads to the end.
+	for txIndex < len(nodes) {
 		arena.Reset()
 
 		tx := &bt.Tx{}
 
 		if _, err = tx.ReadFromWithArena(bufferedReader, arena); err != nil {
-			return errors.NewProcessingError("[BlockPersister] error reading transaction at index %d from subtree %s", i, subtreeHash.String(), err)
+			return errors.NewProcessingError("[BlockPersister] error reading transaction for node %d from subtree %s", txIndex, subtreeHash.String(), err)
 		}
 
-		// 4. Check the transaction against its node before it reaches the UTXO diff, so a wrong
-		// one writes nothing. Only the placeholder node takes the coinbase unchecked; a coinbase
-		// anywhere else is checked like any other transaction.
-		coinbaseForPlaceholder := false
+		if coinbaseMayOpen {
+			coinbaseMayOpen = false
 
-		if subtree.Nodes[i].Hash.Equal(*subtreepkg.CoinbasePlaceholderHash) {
 			if tx.IsCoinbase() {
-				coinbaseForPlaceholder = true
-			} else {
-				// the file leaves the coinbase out, so this transaction belongs to the next node
-				i++
+				if coinbaseTx == nil {
+					if err = utxoDiff.ProcessTx(tx); err != nil {
+						return errors.NewProcessingError("[BlockPersister] error processing the file's coinbase for subtree %s", subtreeHash.String(), err)
+					}
+				}
+
+				continue
 			}
 		}
 
-		if !coinbaseForPlaceholder {
-			var txHash chainhash.Hash
-			txHash, hashScratch = tx.HashTxIDInto(hashScratch)
-			if !txHash.Equal(subtree.Nodes[i].Hash) {
-				return errors.NewProcessingError("[BlockPersister] transaction hash mismatch at index %d: expected %s, got %s", i, subtree.Nodes[i].Hash.String(), txHash.String())
-			}
+		// 5. Check the transaction against its node before it reaches the UTXO diff, so a wrong
+		// one writes nothing. A coinbase anywhere but opening the file is checked like any other
+		// transaction.
+		var txHash chainhash.Hash
+
+		txHash, hashScratch = tx.HashTxIDInto(hashScratch)
+		if !txHash.Equal(nodes[txIndex].Hash) {
+			return errors.NewProcessingError("[BlockPersister] transaction hash mismatch at index %d: expected %s, got %s", txIndex, nodes[txIndex].Hash.String(), txHash.String())
 		}
 
-		// 5. Process this transaction through UTXO diff
 		if err = utxoDiff.ProcessTx(tx); err != nil {
-			return errors.NewProcessingError("[BlockPersister] error processing tx for UTXO at index %d", i, err)
+			return errors.NewProcessingError("[BlockPersister] error processing tx for UTXO at index %d", txIndex, err)
 		}
+
+		txIndex++
 	}
 
 	return nil
@@ -353,22 +389,25 @@ func (u *Server) ProcessSubtreeUTXOStreaming(ctx context.Context, subtreeHash ch
 //
 // It accepts only a file that phase 2 can read to the end: one transaction per node, in node
 // order, each hashing to its node. When node 0 is the coinbase placeholder, the file may open
-// with the block's coinbase or leave it out. Phase 2 reads it either way, deciding by the node's
-// hash rather than by the subtree's position in the block. The decoder is the one
-// NewSubtreeDataFromReader uses: go-bt's Tx.ReadFrom is ReadFromWithArena(r, nil), and the arena
-// only changes where script bytes are allocated, after the same length checks.
+// with a coinbase or leave it out. Phase 2 processes the block's own coinbase either way and drops
+// one opening the file, deciding by the node's hash rather than by the subtree's position in the
+// block. So a subtree holding only the placeholder is complete with an empty file. The decoder is
+// the one NewSubtreeDataFromReader uses: go-bt's Tx.ReadFrom is ReadFromWithArena(r, nil), and
+// the arena only changes where script bytes are allocated, after the same length checks.
 //
 // Two kinds of file that go-subtree's serializeFromReader accepts are rejected here. Reused, each
 // gets DAH 0, phase 2 fails on it on every attempt, and nothing else deletes it:
 //   - A file that ends on a transaction or field boundary before the last node, an empty file
-//     included. go-bt returns a clean io.EOF there, and phase 2 reads every node (issue 1917).
+//     included when a node needs a transaction. go-bt returns a clean io.EOF there, and phase 2
+//     reads every node (issue 1917).
 //   - A coinbase anywhere but first under the placeholder. serializeFromReader skips any coinbase
-//     it decodes while standing at node index 1, without a hash check. Phase 2 takes the coinbase
-//     unchecked only at the placeholder node.
+//     it decodes while standing at node index 1, without a hash check. Phase 2 checks it like any
+//     other transaction.
 //
-// Since every node must be seen, how a read error is classified no longer decides whether an
-// incomplete file passes: an error before the last node rejects the file either way. So
-// teranode's errors.Is is enough for the end-of-file test.
+// An error from r itself, rather than from decoding what r returned, is reported as a storage
+// error: the store failed, and the file's contents are unknown rather than wrong, so the caller
+// keeps it. Since every node must be seen, how a decode error is classified no longer decides
+// whether an incomplete file passes, so teranode's errors.Is is enough for the end-of-file test.
 // TestValidateSubtreeData_AgainstGoSubtreeAndCatchup runs this, go-subtree's reader and the
 // catchup fetcher's checks against one table.
 func validateSubtreeData(subtree *subtreepkg.Subtree, r io.Reader) error {
@@ -389,12 +428,19 @@ func validateSubtreeData(subtree *subtreepkg.Subtree, r io.Reader) error {
 
 	var hashScratch []byte
 
+	reader := &readErrRecorder{r: r}
+
 	for {
 		arena.Reset()
 
 		tx := &bt.Tx{}
 
-		if _, err := tx.ReadFromWithArena(r, arena); err != nil {
+		if _, err := tx.ReadFromWithArena(reader, arena); err != nil {
+			// The store failed, so the file's contents are unknown rather than wrong.
+			if reader.err != nil {
+				return errors.NewStorageError("error reading subtreeData for node %d", txIndex, reader.err)
+			}
+
 			if errors.Is(err, io.EOF) {
 				if txIndex < len(subtree.Nodes) {
 					return errors.NewProcessingError("subtreeData is incomplete (%d of %d txs missing)", len(subtree.Nodes)-txIndex, len(subtree.Nodes))
@@ -427,6 +473,23 @@ func validateSubtreeData(subtree *subtreepkg.Subtree, r io.Reader) error {
 
 		txIndex++
 	}
+}
+
+// readErrRecorder passes reads through and keeps the first error the underlying reader returns
+// other than io.EOF. A decode failure on its own cannot tell a file that is wrong from a store that
+// failed partway through it; this can.
+type readErrRecorder struct {
+	r   io.Reader
+	err error
+}
+
+func (e *readErrRecorder) Read(p []byte) (int, error) {
+	n, err := e.r.Read(p)
+	if err != nil && err != io.EOF && e.err == nil { //nolint:errorlint // io.EOF is returned unwrapped by contract
+		e.err = err
+	}
+
+	return n, err
 }
 
 // readSubtree retrieves a subtree from the subtree store and deserializes it.

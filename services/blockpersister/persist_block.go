@@ -126,7 +126,7 @@ func (u *Server) persistBlock(ctx context.Context, hash *chainhash.Hash, blockBy
 			for i, subtreeHash := range block.Subtrees {
 				u.logger.Debugf("[persistBlock][%s] processing UTXO for subtree %d / %d [%s]", block.String(), i+1, len(block.Subtrees), subtreeHash.String())
 
-				if err := u.ProcessSubtreeUTXOStreaming(ctx, *subtreeHash, utxoDiff); err != nil {
+				if err := u.ProcessSubtreeUTXOStreaming(ctx, *subtreeHash, block.CoinbaseTx, utxoDiff); err != nil {
 					return err
 				}
 			}

@@ -18,7 +18,9 @@ import (
 	"github.com/bsv-blockchain/teranode/pkg/fileformat"
 	"github.com/bsv-blockchain/teranode/services/utxopersister"
 	"github.com/bsv-blockchain/teranode/services/utxopersister/filestorer"
+	"github.com/bsv-blockchain/teranode/stores/blob"
 	"github.com/bsv-blockchain/teranode/stores/blob/memory"
+	"github.com/bsv-blockchain/teranode/stores/blob/options"
 	"github.com/bsv-blockchain/teranode/ulogger"
 	"github.com/bsv-blockchain/teranode/util/test"
 	"github.com/stretchr/testify/mock"
@@ -368,7 +370,7 @@ func TestProcessSubtreeUTXOStreaming_ReadingTransactionByTransaction(t *testing.
 	require.NoError(t, err)
 	defer utxoDiff.Close()
 
-	err = persister.ProcessSubtreeUTXOStreaming(ctx, *subtree.RootHash(), utxoDiff)
+	err = persister.ProcessSubtreeUTXOStreaming(ctx, *subtree.RootHash(), nil, utxoDiff)
 	require.NoError(t, err)
 }
 
@@ -520,7 +522,7 @@ func TestProcessSubtreeUTXOStreaming_OutputMatchesPlainDecode(t *testing.T) {
 	persister := New(ctx, logger, tSettings, nil, subtreeStore, nil, nil)
 
 	gotAdditions, gotDeletions := persist(func(utxoDiff *utxopersister.UTXOSet) {
-		require.NoError(t, persister.ProcessSubtreeUTXOStreaming(ctx, *subtree.RootHash(), utxoDiff))
+		require.NoError(t, persister.ProcessSubtreeUTXOStreaming(ctx, *subtree.RootHash(), nil, utxoDiff))
 	})
 
 	wantAdditions, wantDeletions := persist(func(utxoDiff *utxopersister.UTXOSet) {
@@ -613,6 +615,7 @@ func TestValidateSubtreeData_AgainstGoSubtreeAndCatchup(t *testing.T) {
 	plain := newSubtree(t, false, txs)
 	withPlaceholder := newSubtree(t, true, txs[1:])
 	twoNodes := newSubtree(t, false, txs[:2])
+	placeholderOnly := newSubtree(t, true, nil)
 	full := concat(true, txs...)
 
 	// version, one input, a zero outpoint, then an unlocking-script length of 2^30 + 1, one past
@@ -620,11 +623,12 @@ func TestValidateSubtreeData_AgainstGoSubtreeAndCatchup(t *testing.T) {
 	oversizedScript := append(append([]byte{0x01, 0x00, 0x00, 0x00, 0x01}, make([]byte, 36)...), 0xfe, 0x01, 0x00, 0x00, 0x40)
 
 	cases := []struct {
-		name    string
-		subtree *subtreepkg.Subtree
-		data    []byte
-		readErr error // returned by the reader once data is exhausted, in place of io.EOF
-		valid   bool  // validateSubtreeData accepts it
+		name      string
+		subtree   *subtreepkg.Subtree
+		data      []byte
+		readErr   error // returned by the reader once data is exhausted, in place of io.EOF
+		readFails bool  // the reject is a storage error, so the caller keeps the file
+		valid     bool  // validateSubtreeData accepts it
 
 		// Set only where validateSubtreeData rejects what a reference accepts.
 		readerAccepts  bool // go-subtree's reader alone accepts it
@@ -643,9 +647,14 @@ func TestValidateSubtreeData_AgainstGoSubtreeAndCatchup(t *testing.T) {
 		{name: "wrong transaction after a valid prefix", subtree: plain, data: concat(true, txs[0], txs[2]), valid: false},
 		{name: "ends inside a field", subtree: plain, data: []byte{0x01, 0x00, 0x00, 0x00, 0xff, 0x01}, valid: false},
 		{name: "script length above MaxArenaAlloc", subtree: plain, data: oversizedScript, valid: false},
-		{name: "reader fails before the first byte", subtree: plain, readErr: io.ErrClosedPipe, valid: false},
-		{name: "reader fails after a full transaction", subtree: plain, data: concat(true, txs[0]), readErr: io.ErrClosedPipe, valid: false},
-		{name: "unexpected EOF on a transaction boundary", subtree: plain, data: concat(true, txs[0]), readErr: io.ErrUnexpectedEOF, valid: false},
+		{name: "reader fails before the first byte", subtree: plain, readErr: io.ErrClosedPipe, readFails: true},
+		{name: "reader fails after a full transaction", subtree: plain, data: concat(true, txs[0]), readErr: io.ErrClosedPipe, readFails: true},
+		{name: "reader returns unexpected EOF on a transaction boundary", subtree: plain, data: concat(true, txs[0]), readErr: io.ErrUnexpectedEOF, readFails: true},
+		// A placeholder-only subtree is complete with or without the coinbase in the file. Phase 2
+		// processes the block's coinbase and reads nothing.
+		{name: "placeholder only, empty file", subtree: placeholderOnly, valid: true},
+		{name: "placeholder only, coinbase in file", subtree: placeholderOnly, data: concat(true, coinbase), valid: true},
+		{name: "placeholder only, another transaction in file", subtree: placeholderOnly, data: concat(true, txs[1]), valid: false},
 		{name: "no nodes", subtree: &subtreepkg.Subtree{}, data: full, valid: false},
 
 		// go-bt returns a clean io.EOF when the stream ends where a transaction or a field
@@ -696,14 +705,25 @@ func TestValidateSubtreeData_AgainstGoSubtreeAndCatchup(t *testing.T) {
 			}
 
 			require.Equal(t, tc.valid, err == nil, "validateSubtreeData: %v", err)
+
+			if err != nil {
+				require.Equal(t, tc.readFails, errors.Is(err, errors.ErrStorageError), "storage error: %v", err)
+			}
+
+			// What phase 1 relies on when it reuses a file: phase 2 can read it to the end.
+			if tc.valid {
+				_, _, phase2Err := runPhase2(t, tc.subtree, tc.data, coinbase)
+				require.NoError(t, phase2Err, "phase 2 on a file validateSubtreeData accepts")
+			}
 		})
 	}
 }
 
 // TestProcessSubtreeUTXOStreaming_ChecksEachTxBeforeProcessingIt feeds phase 2 a file holding a
 // transaction its node does not name, and checks that nothing of that transaction reaches the UTXO
-// additions. A coinbase must be hash-checked too: only the placeholder node may take the coinbase
-// unchecked, or phase 2 would persist it in another node's place and succeed.
+// additions. A coinbase must be hash-checked too: only one opening the file under the placeholder
+// is exempt, or phase 2 would persist it in another node's place and succeed. Under the
+// placeholder, the block's coinbase is processed before anything is read.
 func TestProcessSubtreeUTXOStreaming_ChecksEachTxBeforeProcessingIt(t *testing.T) {
 	ctx := t.Context()
 	logger := ulogger.TestLogger{}
@@ -759,7 +779,7 @@ func TestProcessSubtreeUTXOStreaming_ChecksEachTxBeforeProcessingIt(t *testing.T
 	}{
 		{name: "wrong transaction at the last node", subtree: newSubtree(t, false, txs[0], txs[1]), file: []*bt.Tx{txs[0], txs[2]}, processed: []*bt.Tx{txs[0]}},
 		{name: "coinbase at the last node without a placeholder", subtree: newSubtree(t, false, txs[0], txs[1]), file: []*bt.Tx{txs[0], coinbase}, processed: []*bt.Tx{txs[0]}},
-		{name: "wrong transaction where the file leaves the coinbase out", subtree: newSubtree(t, true, txs[0]), file: []*bt.Tx{txs[2]}},
+		{name: "wrong transaction where the file leaves the coinbase out", subtree: newSubtree(t, true, txs[0]), file: []*bt.Tx{txs[2]}, processed: []*bt.Tx{coinbase}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			subtreeBytes, err := tc.subtree.Serialize()
@@ -777,7 +797,7 @@ func TestProcessSubtreeUTXOStreaming_ChecksEachTxBeforeProcessingIt(t *testing.T
 			persister := New(ctx, logger, tSettings, nil, subtreeStore, nil, nil)
 
 			got := additions(t, func(utxoDiff *utxopersister.UTXOSet) {
-				err := persister.ProcessSubtreeUTXOStreaming(ctx, *tc.subtree.RootHash(), utxoDiff)
+				err := persister.ProcessSubtreeUTXOStreaming(ctx, *tc.subtree.RootHash(), coinbase, utxoDiff)
 				require.ErrorContains(t, err, "transaction hash mismatch at index 1")
 			})
 
@@ -788,6 +808,248 @@ func TestProcessSubtreeUTXOStreaming_ChecksEachTxBeforeProcessingIt(t *testing.T
 			})
 
 			require.Equal(t, want, got)
+		})
+	}
+}
+
+// TestPersistBlock_AdditionsIncludeTheCoinbase persists the setup block, whose only subtree opens
+// with the coinbase placeholder, and checks that its utxo-additions and utxo-deletions match the
+// block's four transactions processed in order, coinbase first. The existing subtreeData file is
+// written by Data.Serialize, which leaves the coinbase out under the placeholder. Phase 2 has to
+// take the coinbase from the block, because it is not in the file.
+func TestPersistBlock_AdditionsIncludeTheCoinbase(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		existingFile bool
+	}{
+		{name: "existing file without the coinbase", existingFile: true},
+		{name: "file created by phase 1, with the coinbase", existingFile: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			block, blockBytes, extendedTxs, mockUTXOStore, subtreeStore, blockStore, blockchainClient, tSettings := setup(t)
+			ctx := t.Context()
+
+			if !tc.existingFile {
+				require.NoError(t, subtreeStore.Del(ctx, block.Subtrees[0][:], fileformat.FileTypeSubtreeData))
+			}
+
+			persister := New(ctx, ulogger.TestLogger{}, tSettings, blockStore, subtreeStore, mockUTXOStore, blockchainClient)
+			require.NoError(t, persister.persistBlock(ctx, block.Header.Hash(), blockBytes))
+
+			wantStore := memory.New()
+
+			want, err := utxopersister.NewUTXOSet(ctx, ulogger.TestLogger{}, tSettings, wantStore, block.Header.Hash(), block.Height)
+			require.NoError(t, err)
+
+			for _, tx := range extendedTxs {
+				require.NoError(t, want.ProcessTx(tx))
+			}
+
+			require.NoError(t, want.Close())
+
+			for _, fileType := range []fileformat.FileType{fileformat.FileTypeUtxoAdditions, fileformat.FileTypeUtxoDeletions} {
+				wantBytes, err := wantStore.Get(ctx, block.Header.Hash()[:], fileType)
+				require.NoError(t, err)
+
+				gotBytes, err := blockStore.Get(ctx, block.Header.Hash()[:], fileType)
+				require.NoError(t, err)
+
+				require.Equal(t, wantBytes, gotBytes, "%s", fileType)
+			}
+		})
+	}
+}
+
+// failingReadStore serves every subtreeData file through a reader that returns the first after
+// bytes of the stored file and then fails with err, as a store does on a transient I/O error.
+type failingReadStore struct {
+	*memory.Memory
+	after int
+	err   error
+}
+
+func (s *failingReadStore) GetIoReader(ctx context.Context, key []byte, fileType fileformat.FileType, opts ...options.FileOption) (io.ReadCloser, error) {
+	if fileType != fileformat.FileTypeSubtreeData {
+		return s.Memory.GetIoReader(ctx, key, fileType, opts...)
+	}
+
+	b, err := s.Memory.Get(ctx, key, fileType, opts...)
+	if err != nil {
+		return nil, err
+	}
+
+	return io.NopCloser(io.MultiReader(bytes.NewReader(b[:s.after]), iotest.ErrReader(s.err))), nil
+}
+
+// TestCreateSubtreeDataFileStreaming_KeepsTheFileOnReadError checks that phase 1 deletes an
+// existing subtreeData file only when its contents are wrong. A read error from the store, or a
+// cancelled context, says nothing about the file. Deleting it there would throw away the only copy,
+// and the rebuild needs the block's transactions, which the UTXO store may already have pruned.
+func TestCreateSubtreeDataFileStreaming_KeepsTheFileOnReadError(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		readErr error // returned by the store's reader partway through the file
+		cancel  bool  // the context is cancelled before the check, and the file is short
+	}{
+		{name: "store read fails", readErr: io.ErrClosedPipe},
+		{name: "store read is cancelled", readErr: context.Canceled},
+		{name: "context cancelled while a short file is rejected", cancel: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			block, _, extendedTxs, mockUTXOStore, subtreeStore, _, blockchainClient, tSettings := setup(t)
+
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+
+			key := block.Subtrees[0][:]
+
+			original, err := subtreeStore.Get(ctx, key, fileformat.FileTypeSubtreeData)
+			require.NoError(t, err)
+
+			stored := original
+
+			var store blob.Store = subtreeStore
+
+			if tc.readErr != nil {
+				// fail inside the second transaction
+				store = &failingReadStore{Memory: subtreeStore, after: len(extendedTxs[1].ExtendedBytes()) + 10, err: tc.readErr}
+			} else {
+				stored = original[:len(extendedTxs[1].ExtendedBytes())]
+				require.NoError(t, subtreeStore.Del(ctx, key, fileformat.FileTypeSubtreeData))
+				require.NoError(t, subtreeStore.Set(ctx, key, fileformat.FileTypeSubtreeData, stored))
+			}
+
+			if tc.cancel {
+				cancel()
+			}
+
+			persister := New(ctx, ulogger.TestLogger{}, tSettings, memory.New(), store, mockUTXOStore, blockchainClient)
+
+			require.Error(t, persister.CreateSubtreeDataFileStreaming(ctx, *block.Subtrees[0], block, 1))
+
+			kept, err := subtreeStore.Get(t.Context(), key, fileformat.FileTypeSubtreeData)
+			require.NoError(t, err, "the existing subtreeData file must not be deleted")
+			require.Equal(t, stored, kept)
+			mockUTXOStore.AssertNotCalled(t, "BatchDecorate", mock.Anything, mock.Anything, mock.Anything)
+		})
+	}
+}
+
+// utxoDiffFiles runs process against a fresh UTXO diff and returns the utxo-additions and
+// utxo-deletions it wrote.
+func utxoDiffFiles(t *testing.T, process func(utxoDiff *utxopersister.UTXOSet)) (additions, deletions []byte) {
+	t.Helper()
+
+	ctx := t.Context()
+	blockStore := memory.New()
+	blockHash := chainhash.DoubleHashH([]byte("utxo-diff-files"))
+
+	utxoDiff, err := utxopersister.NewUTXOSet(ctx, ulogger.TestLogger{}, test.CreateBaseTestSettings(t), blockStore, &blockHash, 2000)
+	require.NoError(t, err)
+
+	process(utxoDiff)
+	require.NoError(t, utxoDiff.Close())
+
+	additions, err = blockStore.Get(ctx, blockHash[:], fileformat.FileTypeUtxoAdditions)
+	require.NoError(t, err)
+
+	deletions, err = blockStore.Get(ctx, blockHash[:], fileformat.FileTypeUtxoDeletions)
+	require.NoError(t, err)
+
+	return additions, deletions
+}
+
+// runPhase2 stores subtree and data in a fresh store, runs ProcessSubtreeUTXOStreaming on them with
+// coinbaseTx, and returns what it wrote and the error it returned.
+func runPhase2(t *testing.T, subtree *subtreepkg.Subtree, data []byte, coinbaseTx *bt.Tx) (additions, deletions []byte, err error) {
+	t.Helper()
+
+	ctx := t.Context()
+
+	subtreeBytes, serr := subtree.Serialize()
+	require.NoError(t, serr)
+
+	subtreeStore := memory.New()
+	require.NoError(t, subtreeStore.Set(ctx, subtree.RootHash()[:], fileformat.FileTypeSubtree, subtreeBytes))
+	require.NoError(t, subtreeStore.Set(ctx, subtree.RootHash()[:], fileformat.FileTypeSubtreeData, data))
+
+	persister := New(ctx, ulogger.TestLogger{}, test.CreateBaseTestSettings(t), nil, subtreeStore, nil, nil)
+
+	additions, deletions = utxoDiffFiles(t, func(utxoDiff *utxopersister.UTXOSet) {
+		err = persister.ProcessSubtreeUTXOStreaming(ctx, *subtree.RootHash(), coinbaseTx, utxoDiff)
+	})
+
+	return additions, deletions, err
+}
+
+// TestProcessSubtreeUTXOStreaming_TakesTheCoinbaseFromTheBlock checks what phase 2 writes for a
+// subtree that opens with the coinbase placeholder. The block's own coinbase is processed whether
+// the file opens with a coinbase, leaves it out, or holds a competing block's. The file is keyed by
+// subtree hash, and competing blocks can share their first subtree. Only a block without a
+// coinbase, started from a seed, falls back to the file's.
+func TestProcessSubtreeUTXOStreaming_TakesTheCoinbaseFromTheBlock(t *testing.T) {
+	coinbase := smallTx(t, chainhash.Hash{}, 0xffffffff, 0xcb)
+	otherCoinbase := smallTx(t, chainhash.Hash{}, 0xffffffff, 0xcc)
+
+	txs := make([]*bt.Tx, 4)
+	for i := range txs {
+		txs[i] = smallTx(t, chainhash.HashH([]byte{byte(i)}), uint32(i), byte(i))
+	}
+
+	newSubtree := func(nodes ...*bt.Tx) *subtreepkg.Subtree {
+		st, err := subtreepkg.NewTreeByLeafCount(4)
+		require.NoError(t, err)
+		require.NoError(t, st.AddCoinbaseNode())
+
+		for _, tx := range nodes {
+			require.NoError(t, st.AddNode(*tx.TxIDChainHash(), 1, uint64(tx.Size())))
+		}
+
+		return st
+	}
+
+	withPlaceholder := newSubtree(txs[1:]...)
+	placeholderOnly := newSubtree()
+
+	concat := func(list ...*bt.Tx) []byte {
+		var out []byte
+		for _, tx := range list {
+			out = append(out, tx.ExtendedBytes()...)
+		}
+
+		return out
+	}
+
+	for _, tc := range []struct {
+		name       string
+		subtree    *subtreepkg.Subtree
+		file       []byte
+		coinbaseTx *bt.Tx
+		processed  []*bt.Tx
+	}{
+		{name: "file opens with the block's coinbase", subtree: withPlaceholder, file: concat(coinbase, txs[1], txs[2], txs[3]), coinbaseTx: coinbase, processed: []*bt.Tx{coinbase, txs[1], txs[2], txs[3]}},
+		{name: "file leaves the coinbase out", subtree: withPlaceholder, file: concat(txs[1], txs[2], txs[3]), coinbaseTx: coinbase, processed: []*bt.Tx{coinbase, txs[1], txs[2], txs[3]}},
+		{name: "file opens with a competing block's coinbase", subtree: withPlaceholder, file: concat(otherCoinbase, txs[1], txs[2], txs[3]), coinbaseTx: coinbase, processed: []*bt.Tx{coinbase, txs[1], txs[2], txs[3]}},
+		{name: "placeholder-only subtree, empty file", subtree: placeholderOnly, coinbaseTx: coinbase, processed: []*bt.Tx{coinbase}},
+		{name: "placeholder-only subtree, file holds the coinbase", subtree: placeholderOnly, file: concat(coinbase), coinbaseTx: coinbase, processed: []*bt.Tx{coinbase}},
+		// Phase 1 rejects this file. Phase 2 reads nothing for a placeholder-only subtree, so it no
+		// longer indexes past the nodes on it (issue 1918).
+		{name: "placeholder-only subtree, file holds another transaction", subtree: placeholderOnly, file: concat(txs[1]), coinbaseTx: coinbase, processed: []*bt.Tx{coinbase}},
+		{name: "block without a coinbase, file opens with one", subtree: withPlaceholder, file: concat(coinbase, txs[1], txs[2], txs[3]), processed: []*bt.Tx{coinbase, txs[1], txs[2], txs[3]}},
+		{name: "block without a coinbase, file leaves it out", subtree: withPlaceholder, file: concat(txs[1], txs[2], txs[3]), processed: []*bt.Tx{txs[1], txs[2], txs[3]}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gotAdditions, gotDeletions, err := runPhase2(t, tc.subtree, tc.file, tc.coinbaseTx)
+			require.NoError(t, err)
+
+			wantAdditions, wantDeletions := utxoDiffFiles(t, func(utxoDiff *utxopersister.UTXOSet) {
+				for _, tx := range tc.processed {
+					require.NoError(t, utxoDiff.ProcessTx(tx))
+				}
+			})
+
+			require.Equal(t, wantAdditions, gotAdditions, "utxo-additions")
+			require.Equal(t, wantDeletions, gotDeletions, "utxo-deletions")
 		})
 	}
 }

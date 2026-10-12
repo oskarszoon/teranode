@@ -193,7 +193,7 @@ func TestProcessSubtreeUTXOStreaming_MemoryDoesNotScaleWithSubtree(t *testing.T)
 	defer func() { _ = utxoDiff.Close() }()
 
 	growth := peakHeapGrowth(t, func() {
-		err = persister.ProcessSubtreeUTXOStreaming(ctx, *subtree.RootHash(), utxoDiff)
+		err = persister.ProcessSubtreeUTXOStreaming(ctx, *subtree.RootHash(), nil, utxoDiff)
 	})
 	require.NoError(t, err)
 
