@@ -5,6 +5,7 @@ package blockpersister
 import (
 	"bufio"
 	"context"
+	stderrors "errors" //nolint:depguard // stdlib errors.Is, to test end of file exactly as go-subtree does
 	"io"
 	"runtime"
 
@@ -294,12 +295,13 @@ func (u *Server) ProcessSubtreeUTXOStreaming(ctx context.Context, subtreeHash ch
 	// *utxopersister.UTXOSet (NOT services/blockpersister/utxoset/model.UTXODiff,
 	// which retains script slices in an in-memory map). UTXOSet.ProcessTx
 	// serialises via UTXOWrapper.Bytes -> UTXO.Bytes, which does
-	// `append(b, u.Script...)` — a heap copy — and then writes through a
-	// bufio.Writer (which copies into its internal buffer). No arena-backed
-	// slice survives the iteration that decoded it, so the arena is reset per
-	// tx and holds one transaction's scripts at a time. Without the reset it
-	// holds every script in the subtree, and its doubling growth needs up to
-	// 3x the subtreeData size at the moment it copies into a new slab.
+	// `append(b, u.Script...)` — a heap copy — before anything is written. No
+	// arena-backed slice survives the iteration that decoded it, so the arena is
+	// reset per tx and holds one transaction's scripts at a time (plus, for a tx
+	// that grows it mid-decode, the older slabs its earlier scripts point into).
+	// Without the reset it holds every script in the subtree, and its doubling
+	// growth needs up to 3x the subtreeData size at the moment it copies into a
+	// new slab.
 	arena := getBlockpersisterArena()
 	defer putBlockpersisterArena(arena)
 	var hashScratch []byte
@@ -371,7 +373,10 @@ func validateSubtreeData(subtree *subtreepkg.Subtree, r io.Reader) error {
 		tx := &bt.Tx{}
 
 		if _, err := tx.ReadFromWithArena(r, arena); err != nil {
-			if errors.Is(err, io.EOF) {
+			// stdlib errors.Is, as go-subtree uses: teranode's errors.Is also matches
+			// gRPC status errors by message, which would read an "EOF" in one as the
+			// end of the file.
+			if stderrors.Is(err, io.EOF) {
 				return nil
 			}
 

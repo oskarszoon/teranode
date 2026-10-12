@@ -13,13 +13,16 @@ import (
 	"github.com/bsv-blockchain/go-bt/v2/bscript"
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	subtreepkg "github.com/bsv-blockchain/go-subtree"
+	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/model"
 	"github.com/bsv-blockchain/teranode/pkg/fileformat"
 	"github.com/bsv-blockchain/teranode/services/utxopersister"
 	"github.com/bsv-blockchain/teranode/stores/blob/file"
 	"github.com/bsv-blockchain/teranode/stores/blob/options"
+	"github.com/bsv-blockchain/teranode/stores/utxo"
 	"github.com/bsv-blockchain/teranode/ulogger"
 	"github.com/bsv-blockchain/teranode/util/test"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -212,7 +215,14 @@ func TestCreateSubtreeDataFileStreaming_ExistingFileMemoryDoesNotScaleWithSubtre
 
 	subtreeStore, subtree, dataSize := storeLargeSubtree(t, largeSubtreeTxCount, largeSubtreeScriptSize)
 
-	persister := New(ctx, logger, tSettings, nil, subtreeStore, nil, nil)
+	// Accepting the valid file never touches the UTXO store. If validation wrongly rejected it,
+	// the rebuild would call BatchDecorate: make that fail the test cleanly rather than nil-deref
+	// in an errgroup goroutine, which would take the whole test binary down.
+	utxoStore := &utxo.MockUtxostore{}
+	utxoStore.On("BatchDecorate", mock.Anything, mock.Anything, mock.Anything).
+		Return(errors.NewProcessingError("existing subtreeData was rejected and is being rebuilt"))
+
+	persister := New(ctx, logger, tSettings, nil, subtreeStore, utxoStore, nil)
 
 	// The existing-file path only uses the block for logging; it never reads its coinbase.
 	block := &model.Block{
@@ -229,12 +239,7 @@ func TestCreateSubtreeDataFileStreaming_ExistingFileMemoryDoesNotScaleWithSubtre
 		err = persister.CreateSubtreeDataFileStreaming(ctx, *subtree.RootHash(), block, 1)
 	})
 	require.NoError(t, err)
-
-	// The existing file was accepted, not recreated: a recreated file would be rebuilt from the
-	// UTXO store (nil here) and written without the extended input data, so its size would differ.
-	kept, err := subtreeStore.Get(ctx, subtree.RootHash()[:], fileformat.FileTypeSubtreeData)
-	require.NoError(t, err)
-	require.Len(t, kept, dataSize)
+	utxoStore.AssertNotCalled(t, "BatchDecorate", mock.Anything, mock.Anything, mock.Anything)
 
 	t.Logf("subtreeData %d MiB, peak heap growth %d MiB", dataSize>>20, growth>>20)
 

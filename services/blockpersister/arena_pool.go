@@ -11,10 +11,12 @@ const (
 	blockpersisterArenaShrinkCap  = 64 << 20 // 64 MiB
 )
 
-// blockpersisterArenaPool holds bt.Arena instances reused across subtree
-// UTXO streaming. The contract: callers Get an arena before the decode
-// loop, Put it back when the loop returns. Put runs ResetAndShrink so a
-// one-off oversized decode doesn't bloat the pool's idle footprint.
+// blockpersisterArenaPool holds bt.Arena instances reused by the subtree
+// UTXO streaming loop and by existing-subtreeData validation, which phase 1
+// runs for several subtrees at once, each with its own arena. The contract:
+// callers Get an arena before the decode loop, Put it back when the loop
+// returns. Put runs ResetAndShrink so a one-off oversized decode doesn't
+// bloat the pool's idle footprint.
 var blockpersisterArenaPool = sync.Pool{
 	New: func() any { return bt.NewArena(blockpersisterArenaInitialCap) },
 }
