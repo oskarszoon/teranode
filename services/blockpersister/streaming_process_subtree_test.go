@@ -560,15 +560,18 @@ func smallTx(t *testing.T, prevHash chainhash.Hash, prevIndex uint32, seed byte)
 	return tx
 }
 
-// TestValidateSubtreeData_MatchesGoSubtreePlusMissingTxs pins validateSubtreeData to the
-// accept/reject behaviour of subtreepkg.NewSubtreeDataFromReader, which it replaces on the
-// existing-file path, followed by model.MissingSubtreeDataTxs with the placeholder at index 0
-// exempt, as the catchup fetcher runs them. A divergence either way changes which subtreeData
-// files the persister deletes and recreates.
+// TestValidateSubtreeData_AgainstGoSubtreeAndCatchup pins validateSubtreeData, row by row,
+// against two references. One is subtreepkg.NewSubtreeDataFromReader, which it replaces on the
+// existing-file path. The other is that reader followed by the catchup fetcher's checks,
+// model.MissingSubtreeDataTxs and model.FirstMismatchedSubtreeDataTx with the placeholder at
+// index 0 exempt. A change either way changes which subtreeData files the persister deletes and
+// recreates.
 //
-// Rows marked short are the ones the reader alone accepts and the completeness check rejects:
-// a file that ends on a transaction or field boundary before the last node (issue 1917).
-func TestValidateSubtreeData_MatchesGoSubtreePlusMissingTxs(t *testing.T) {
+// validateSubtreeData is stricter than the reader alone in two ways, each marked readerAccepts:
+// a file that ends on a transaction or field boundary before the last node (issue 1917), and a
+// coinbase anywhere but first under the placeholder. It is stricter than catchup only on a
+// second coinbase under the placeholder, marked catchupAccepts.
+func TestValidateSubtreeData_AgainstGoSubtreeAndCatchup(t *testing.T) {
 	coinbase := smallTx(t, chainhash.Hash{}, 0xffffffff, 0xcb)
 
 	txs := make([]*bt.Tx, 4)
@@ -609,6 +612,7 @@ func TestValidateSubtreeData_MatchesGoSubtreePlusMissingTxs(t *testing.T) {
 
 	plain := newSubtree(t, false, txs)
 	withPlaceholder := newSubtree(t, true, txs[1:])
+	twoNodes := newSubtree(t, false, txs[:2])
 	full := concat(true, txs...)
 
 	// version, one input, a zero outpoint, then an unlocking-script length of 2^30 + 1, one past
@@ -620,8 +624,11 @@ func TestValidateSubtreeData_MatchesGoSubtreePlusMissingTxs(t *testing.T) {
 		subtree *subtreepkg.Subtree
 		data    []byte
 		readErr error // returned by the reader once data is exhausted, in place of io.EOF
-		valid   bool
-		short   bool // the go-subtree reader accepts it, MissingSubtreeDataTxs does not
+		valid   bool  // validateSubtreeData accepts it
+
+		// Set only where validateSubtreeData rejects what a reference accepts.
+		readerAccepts  bool // go-subtree's reader alone accepts it
+		catchupAccepts bool // the reader followed by the catchup checks accepts it
 	}{
 		{name: "valid extended", subtree: plain, data: full, valid: true},
 		{name: "valid non-extended", subtree: plain, data: concat(false, txs...), valid: true},
@@ -643,21 +650,29 @@ func TestValidateSubtreeData_MatchesGoSubtreePlusMissingTxs(t *testing.T) {
 
 		// go-bt returns a clean io.EOF when the stream ends where a transaction or a field
 		// starts, so the reader stops there without having seen every node.
-		{name: "truncated on a transaction boundary", subtree: plain, data: concat(true, txs[0], txs[1]), short: true},
-		{name: "empty file", subtree: plain, short: true},
-		{name: "ends inside a transaction on a field boundary", subtree: plain, data: []byte{0x01, 0x00, 0x00, 0x00, 0xff}, short: true},
+		{name: "truncated on a transaction boundary", subtree: plain, data: concat(true, txs[0], txs[1]), readerAccepts: true},
+		{name: "empty file", subtree: plain, readerAccepts: true},
+		{name: "ends inside a transaction on a field boundary", subtree: plain, data: []byte{0x01, 0x00, 0x00, 0x00, 0xff}, readerAccepts: true},
 		// go-bt wraps this EOF (script length read, no script bytes) with pkg/errors.
-		{name: "ends after a script length", subtree: plain, data: append(append([]byte{0x01, 0x00, 0x00, 0x00, 0x01}, make([]byte, 36)...), 0x05), short: true},
-		{name: "placeholder with an empty file", subtree: withPlaceholder, short: true},
-		{name: "placeholder with only the coinbase in file", subtree: withPlaceholder, data: concat(true, coinbase), short: true},
-		{name: "placeholder without coinbase, last node missing", subtree: withPlaceholder, data: concat(true, txs[1], txs[2]), short: true},
+		{name: "ends after a script length", subtree: plain, data: append(append([]byte{0x01, 0x00, 0x00, 0x00, 0x01}, make([]byte, 36)...), 0x05), readerAccepts: true},
+		{name: "placeholder with an empty file", subtree: withPlaceholder, readerAccepts: true},
+		{name: "placeholder with only the coinbase in file", subtree: withPlaceholder, data: concat(true, coinbase), readerAccepts: true},
+		{name: "placeholder without coinbase, last node missing", subtree: withPlaceholder, data: concat(true, txs[1], txs[2]), readerAccepts: true},
 
-		// Shared go-subtree behaviour, pinned rather than endorsed.
-		// Every node is seen before the clean EOF. Phase 2 reads Length() transactions and never
-		// reaches the partial one.
+		// go-subtree's reader skips any coinbase it decodes at node index 1, unchecked, and phase 2
+		// processes a coinbase in whatever node's place it lands.
+		{name: "coinbase second without a placeholder", subtree: plain, data: concat(true, txs[0], coinbase, txs[1], txs[2], txs[3]), readerAccepts: true},
+		// Phase 2 would persist the coinbase instead of node 1's transaction and report success.
+		{name: "coinbase in place of the last node without a placeholder", subtree: twoNodes, data: concat(true, txs[0], coinbase, txs[1]), readerAccepts: true},
+		// Phase 2 would process the second coinbase in node 1's place, then fail on node 2.
+		{name: "placeholder with the coinbase twice", subtree: withPlaceholder, data: concat(true, coinbase, coinbase, txs[1], txs[2], txs[3]), readerAccepts: true, catchupAccepts: true},
+
+		// Accepted by all three. Every node is seen before the clean EOF, and phase 2 reads
+		// Length() transactions and never reaches the partial one.
 		{name: "complete, then ends inside a trailing transaction on a field boundary", subtree: plain, data: append(concat(true, txs...), 0x01, 0x00, 0x00, 0x00, 0xff), valid: true},
-		// The coinbase skip keys on txIndex == 1, not on node 0 being the placeholder.
-		{name: "coinbase second without a placeholder", subtree: plain, data: concat(true, txs[0], coinbase, txs[1], txs[2], txs[3]), valid: true},
+		// The only place where how a read error is classified changes the verdict: after the last
+		// node. io.ErrUnexpectedEOF is not end of file, so all three reject it.
+		{name: "complete, then cut inside a trailing transaction's version", subtree: plain, data: append(concat(true, txs...), 0x01, 0x00), valid: false},
 	}
 
 	for _, tc := range cases {
@@ -673,11 +688,13 @@ func TestValidateSubtreeData_MatchesGoSubtreePlusMissingTxs(t *testing.T) {
 			data, refErr := subtreepkg.NewSubtreeDataFromReader(tc.subtree, newReader())
 			err := validateSubtreeData(tc.subtree, newReader())
 
-			require.Equal(t, tc.valid || tc.short, refErr == nil, "go-subtree reader: %v", refErr)
+			require.Equal(t, tc.valid || tc.readerAccepts, refErr == nil, "go-subtree reader: %v", refErr)
 
 			if refErr == nil {
 				missing := model.MissingSubtreeDataTxs(tc.subtree, data, true)
-				require.Equal(t, tc.valid, missing == 0, "model.MissingSubtreeDataTxs: %d missing", missing)
+				idx, _, _, mismatched := model.FirstMismatchedSubtreeDataTx(tc.subtree, data, true)
+				require.Equal(t, tc.valid || tc.catchupAccepts, missing == 0 && !mismatched,
+					"catchup checks: %d missing, mismatch at %d: %v", missing, idx, mismatched)
 			}
 
 			require.Equal(t, tc.valid, err == nil, "validateSubtreeData: %v", err)

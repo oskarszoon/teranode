@@ -5,7 +5,6 @@ package blockpersister
 import (
 	"bufio"
 	"context"
-	stderrors "errors" //nolint:depguard // stdlib errors.Is, to test end of file exactly as go-subtree does
 	"io"
 	"runtime"
 
@@ -346,26 +345,38 @@ func (u *Server) ProcessSubtreeUTXOStreaming(ctx context.Context, subtreeHash ch
 // just to learn that the file parses. Here each transaction is decoded into a pooled arena,
 // checked against its node hash and dropped, so memory follows the largest transaction instead.
 //
-// It accepts and rejects what NewSubtreeDataFromReader followed by model.MissingSubtreeDataTxs
-// does, with the coinbase placeholder at index 0 exempt. The decoder is the same one: go-bt's
-// Tx.ReadFrom is ReadFromWithArena(r, nil), and the arena only changes where script bytes are
-// allocated, after the same length checks. The loop mirrors go-subtree's serializeFromReader,
-// including its quirk of skipping a coinbase whenever one is decoded at node index 1.
+// It accepts only a file that phase 2 can read to the end: one transaction per node, in node
+// order, each hashing to its node. When node 0 is the coinbase placeholder, the file may open
+// with the block's coinbase or leave it out. Phase 2 reads it either way, deciding by the node's
+// hash rather than by the subtree's position in the block. The decoder is the one
+// NewSubtreeDataFromReader uses: go-bt's Tx.ReadFrom is ReadFromWithArena(r, nil), and the arena
+// only changes where script bytes are allocated, after the same length checks.
 //
-// The reader alone accepts a file that ends on a transaction or field boundary before the last
-// node, an empty file included, because go-bt returns a clean io.EOF there. Reused, such a file
-// gets DAH 0 and phase 2, which reads every node, fails on it on every attempt (issue 1917). So a
-// clean EOF is accepted only once every node has been seen. The placeholder is exempt because
-// txIndex starts past it: phase 2 reads the file with or without the coinbase, deciding by the
-// node's hash rather than by the subtree's position in the block.
-// TestValidateSubtreeData_MatchesGoSubtreePlusMissingTxs runs both against one table.
+// Two kinds of file that go-subtree's serializeFromReader accepts are rejected here. Reused, each
+// gets DAH 0, and nothing else deletes it:
+//   - A file that ends on a transaction or field boundary before the last node, an empty file
+//     included. go-bt returns a clean io.EOF there, and phase 2 fails on the missing tail on
+//     every attempt (issue 1917).
+//   - A coinbase anywhere but first under the placeholder. serializeFromReader skips any coinbase
+//     it decodes while standing at node index 1, without a hash check. Phase 2 also skips the
+//     hash check for a coinbase and processes it in that node's place, then fails on the next
+//     node or, at the last node, persists the coinbase instead of the node's transaction.
+//
+// Since every node must be seen, how a read error is classified no longer decides whether an
+// incomplete file passes: an error before the last node rejects the file either way. So
+// teranode's errors.Is is enough for the end-of-file test.
+// TestValidateSubtreeData_AgainstGoSubtreeAndCatchup runs this, go-subtree's reader and the
+// catchup fetcher's checks against one table.
 func validateSubtreeData(subtree *subtreepkg.Subtree, r io.Reader) error {
 	if subtree == nil || len(subtree.Nodes) == 0 {
 		return errors.NewProcessingError("subtree has no nodes", subtreepkg.ErrSubtreeNodesEmpty)
 	}
 
 	txIndex := 0
-	if subtree.Nodes[0].Hash.Equal(subtreepkg.CoinbasePlaceholderHashValue) {
+
+	// Under the placeholder, the file may open with the coinbase. Nowhere else may it appear.
+	coinbaseMayOpen := subtree.Nodes[0].Hash.Equal(subtreepkg.CoinbasePlaceholderHashValue)
+	if coinbaseMayOpen {
 		txIndex = 1
 	}
 
@@ -380,10 +391,7 @@ func validateSubtreeData(subtree *subtreepkg.Subtree, r io.Reader) error {
 		tx := &bt.Tx{}
 
 		if _, err := tx.ReadFromWithArena(r, arena); err != nil {
-			// stdlib errors.Is, as go-subtree uses: teranode's errors.Is also matches
-			// gRPC status errors by message, which would read an "EOF" in one as the
-			// end of the file.
-			if stderrors.Is(err, io.EOF) {
+			if errors.Is(err, io.EOF) {
 				if txIndex < len(subtree.Nodes) {
 					return errors.NewProcessingError("subtreeData is incomplete (%d of %d txs missing)", len(subtree.Nodes)-txIndex, len(subtree.Nodes))
 				}
@@ -394,8 +402,12 @@ func validateSubtreeData(subtree *subtreepkg.Subtree, r io.Reader) error {
 			return errors.NewProcessingError("error reading transaction for node %d", txIndex, err)
 		}
 
-		if txIndex == 1 && tx.IsCoinbase() {
-			continue
+		if coinbaseMayOpen {
+			coinbaseMayOpen = false
+
+			if tx.IsCoinbase() {
+				continue
+			}
 		}
 
 		if txIndex >= len(subtree.Nodes) {

@@ -13,16 +13,14 @@ import (
 	"github.com/bsv-blockchain/go-bt/v2/bscript"
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	subtreepkg "github.com/bsv-blockchain/go-subtree"
-	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/model"
 	"github.com/bsv-blockchain/teranode/pkg/fileformat"
 	"github.com/bsv-blockchain/teranode/services/utxopersister"
 	"github.com/bsv-blockchain/teranode/stores/blob/file"
 	"github.com/bsv-blockchain/teranode/stores/blob/options"
-	"github.com/bsv-blockchain/teranode/stores/utxo"
+	utxosql "github.com/bsv-blockchain/teranode/stores/utxo/sql"
 	"github.com/bsv-blockchain/teranode/ulogger"
 	"github.com/bsv-blockchain/teranode/util/test"
-	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -215,12 +213,14 @@ func TestCreateSubtreeDataFileStreaming_ExistingFileMemoryDoesNotScaleWithSubtre
 
 	subtreeStore, subtree, dataSize := storeLargeSubtree(t, largeSubtreeTxCount, largeSubtreeScriptSize)
 
-	// Accepting the valid file never touches the UTXO store. If validation wrongly rejected it,
-	// the rebuild would call BatchDecorate: make that fail the test cleanly rather than nil-deref
-	// in an errgroup goroutine, which would take the whole test binary down.
-	utxoStore := &utxo.MockUtxostore{}
-	utxoStore.On("BatchDecorate", mock.Anything, mock.Anything, mock.Anything).
-		Return(errors.NewProcessingError("existing subtreeData was rejected and is being rebuilt"))
+	// Accepting the valid file never touches the UTXO store. The store is empty, so if validation
+	// wrongly rejected the file, the rebuild would fail in BatchDecorate with TX_NOT_FOUND, and
+	// the NoError below would catch it.
+	utxoStoreURL, err := url.Parse("sqlitememory:///persister_existing_file")
+	require.NoError(t, err)
+
+	utxoStore, err := utxosql.New(ctx, logger, tSettings, utxoStoreURL)
+	require.NoError(t, err)
 
 	persister := New(ctx, logger, tSettings, nil, subtreeStore, utxoStore, nil)
 
@@ -233,13 +233,10 @@ func TestCreateSubtreeDataFileStreaming_ExistingFileMemoryDoesNotScaleWithSubtre
 		Subtrees: []*chainhash.Hash{subtree.RootHash()},
 	}
 
-	var err error
-
 	growth := peakHeapGrowth(t, func() {
 		err = persister.CreateSubtreeDataFileStreaming(ctx, *subtree.RootHash(), block, 1)
 	})
 	require.NoError(t, err)
-	utxoStore.AssertNotCalled(t, "BatchDecorate", mock.Anything, mock.Anything, mock.Anything)
 
 	t.Logf("subtreeData %d MiB, peak heap growth %d MiB", dataSize>>20, growth>>20)
 
