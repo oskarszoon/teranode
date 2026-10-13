@@ -384,6 +384,7 @@ func (u *Server) Start(ctx context.Context, readyCh chan<- struct{}) error {
 						u.logger.Infof("[BlockPersister] Block %s already exists, skipping...", block.String())
 					} else {
 						u.logger.Errorf("[BlockPersister] Failed to persist block %s: %v", block.String(), err)
+						time.Sleep(u.settings.BlockPersister.PersistSleep) // The next attempt is the same block
 
 						continue
 					}
@@ -392,6 +393,7 @@ func (u *Server) Start(ctx context.Context, readyCh chan<- struct{}) error {
 				// Mark block as persisted in database
 				if err = u.blockchainClient.SetBlockPersistedAt(ctx, block.Hash()); err != nil {
 					u.logger.Errorf("[BlockPersister] Failed to mark block %s as persisted: %v", block.String(), err)
+					time.Sleep(u.settings.BlockPersister.PersistSleep)
 
 					continue
 				}
