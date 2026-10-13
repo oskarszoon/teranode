@@ -598,7 +598,7 @@ func (s *SplitTxInpointsMap) ParallelBulkSetIfNotExists(
 	// one goroutine per non-empty bucket would create up to nrOfBuckets (default
 	// 16*1024) goroutines for a large bulk insert, where scheduler churn and
 	// memory spikes can dominate. Cap fan-out at GOMAXPROCS (matching
-	// SplitSwissMap.Clear / bulkBuildSubtrees); each worker strides over buckets.
+	// bulkBuildSubtrees); each worker strides over buckets.
 	numWorkers := runtime.GOMAXPROCS(0)
 	if numWorkers > int(s.nrOfBuckets) {
 		numWorkers = int(s.nrOfBuckets)
