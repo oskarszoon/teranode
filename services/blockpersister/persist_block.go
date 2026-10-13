@@ -68,7 +68,10 @@ func (u *Server) persistBlock(ctx context.Context, hash *chainhash.Hash, blockBy
 
 	// Any of the block's files that exist were left by an attempt that stopped before the end, and
 	// are replaced rather than trusted: utxo files without the block file, or a block file without
-	// its utxo files, which versions that finalised the block file first left on a crash.
+	// its utxo files, which versions that finalised the block file first left on a crash. All of them
+	// are checked before any is removed, so a failed check removes nothing.
+	var leftOver []fileformat.FileType
+
 	for _, fileType := range []fileformat.FileType{fileformat.FileTypeBlock, fileformat.FileTypeUtxoAdditions, fileformat.FileTypeUtxoDeletions} {
 		exists, err := u.blockStore.Exists(ctx, hash[:], fileType)
 		if err != nil {
@@ -76,11 +79,15 @@ func (u *Server) persistBlock(ctx context.Context, hash *chainhash.Hash, blockBy
 		}
 
 		if exists {
-			u.logger.Warnf("[persistBlock][%s] removing %s left by an attempt that did not finish", block.String(), fileType)
+			leftOver = append(leftOver, fileType)
+		}
+	}
 
-			if err = u.blockStore.Del(ctx, hash[:], fileType); err != nil {
-				return errors.NewStorageError("[persistBlock][%s] error removing %s", block.String(), fileType, err)
-			}
+	for _, fileType := range leftOver {
+		u.logger.Warnf("[persistBlock][%s] removing %s left by an attempt that did not finish", block.String(), fileType)
+
+		if err = u.blockStore.Del(ctx, hash[:], fileType); err != nil {
+			return errors.NewStorageError("[persistBlock][%s] error removing %s", block.String(), fileType, err)
 		}
 	}
 

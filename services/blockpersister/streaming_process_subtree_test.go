@@ -1271,27 +1271,35 @@ func (s *existsFailingStore) Exists(ctx context.Context, key []byte, fileType fi
 // files fails the block before anything is removed or written, and that the Server does not read
 // BLOB_EXISTS as "already persisted" when it cannot check.
 func TestPersistBlock_StopsWhenItCannotCheckForAFile(t *testing.T) {
-	for _, fileType := range []fileformat.FileType{fileformat.FileTypeBlock, fileformat.FileTypeUtxoAdditions} {
-		t.Run(string(fileType), func(t *testing.T) {
+	tests := []struct {
+		name     string
+		failing  fileformat.FileType
+		leftOver fileformat.FileType
+	}{
+		{name: "block file check fails", failing: fileformat.FileTypeBlock, leftOver: fileformat.FileTypeUtxoDeletions},
+		{name: "utxo-additions check fails", failing: fileformat.FileTypeUtxoAdditions, leftOver: fileformat.FileTypeUtxoDeletions},
+		{name: "utxo-deletions check fails after the block file is found", failing: fileformat.FileTypeUtxoDeletions, leftOver: fileformat.FileTypeBlock},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
 			block, blockBytes, _, mockUTXOStore, subtreeStore, _, blockchainClient, tSettings := setup(t)
 			ctx := t.Context()
 			hash := block.Header.Hash()
 
-			blockStore := &existsFailingStore{Memory: memory.New(), fileType: fileType}
-			require.NoError(t, blockStore.Set(ctx, hash[:], fileformat.FileTypeUtxoDeletions, []byte("left over from an earlier attempt")))
+			blockStore := &existsFailingStore{Memory: memory.New(), fileType: tt.failing}
+			require.NoError(t, blockStore.Set(ctx, hash[:], tt.leftOver, []byte("left over from an earlier attempt")))
 
 			persister := New(ctx, ulogger.TestLogger{}, tSettings, blockStore, subtreeStore, mockUTXOStore, blockchainClient)
 
 			err := persister.persistBlock(ctx, hash, blockBytes)
 			require.True(t, errors.Is(err, errors.ErrStorageError), "persistBlock: %v", err)
 
-			leftOver, err := blockStore.Memory.Exists(ctx, hash[:], fileformat.FileTypeUtxoDeletions)
-			require.NoError(t, err)
-			require.True(t, leftOver, "utxo-deletions removed although the check failed")
-
-			written, err := blockStore.Memory.Exists(ctx, hash[:], fileformat.FileTypeBlock)
-			require.NoError(t, err)
-			require.False(t, written, "block file written although the check failed")
+			for _, fileType := range []fileformat.FileType{fileformat.FileTypeBlock, fileformat.FileTypeUtxoAdditions, fileformat.FileTypeUtxoDeletions} {
+				exists, err := blockStore.Memory.Exists(ctx, hash[:], fileType)
+				require.NoError(t, err)
+				require.Equal(t, fileType == tt.leftOver, exists, "%s exists after a failed check", fileType)
+			}
 
 			require.False(t, persister.blockAlreadyPersisted(ctx, hash, errors.NewBlobAlreadyExistsError("block already persisted")))
 		})
