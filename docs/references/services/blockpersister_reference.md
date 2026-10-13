@@ -193,14 +193,14 @@ This is a core function of the blockpersister service that handles the complete 
     The function implements a multi-stage persistence process:
 
     1. **Convert raw block bytes** into a structured block model
-    2. **Check for the block file**, which is written last: if it exists, the block is already persisted and `BLOB_EXISTS` is returned before any work. UTXO files without a block file are left from an attempt that stopped early, and are removed
+    2. **Check for the block's files**: the block file and, when `ProcessUTXOFiles` is on, both UTXO files. If they all exist, the block is already persisted and `BLOB_EXISTS` is returned before any work. Any of them that exist without the rest were left by an attempt that stopped early, and are removed: UTXO files without the block file, or a block file without its UTXO files, which versions that finalized the block file first left on a crash
     3. **Create a new UTXO difference set** for tracking changes
     4. **Process the coinbase transaction** if no subtrees are present
     5. **For blocks with subtrees**, process each subtree concurrently according to configured limits
     6. **Close and finalize** the UTXO difference set once all transactions are processed, before the block file is written
     7. **Write the complete block** to persistent storage and finalize it
 
-    A failure before the UTXO files are finalized aborts them, and a failure while writing the block file aborts it, so a failed attempt never leaves a block file behind. A failure after the UTXO files are finalized leaves them in place without a block file, and the retry removes them in step 2. An error finalizing either fails the block. The Server treats `BLOB_EXISTS` as "already persisted" only when the block file exists.
+    A failure before the UTXO files are finalized aborts them, and a failure while writing the block file aborts it, so a failed attempt never leaves a block file behind. A failure after the UTXO files are finalized leaves them in place without a block file, and the retry removes them in step 2. An error finalizing either fails the block. The Server treats `BLOB_EXISTS` as "already persisted" only when the block's files all exist, by the same check as step 2.
 
 **Parameters:**
 
