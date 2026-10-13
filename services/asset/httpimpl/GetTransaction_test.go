@@ -275,6 +275,17 @@ func TestGetTransaction_MarksItsOwnNotFound(t *testing.T) {
 		"a store fault whose text says not found": {
 			errors.NewServiceError("aerospike get failed: Namespace not found"), http.StatusNotFound, false,
 		},
+		// The repository counts a tx store's blob not-found as a miss, as it does
+		// ErrNotFound, so it is the same verdict.
+		"the tx store has no blob": {errors.NewBlobNotFoundError("blob not found"), http.StatusNotFound, true},
+		// A store that calls its not-found a storage failure has failed while it
+		// looked; that is a fault, not an answer about the transaction.
+		"a storage error over a not-found": {
+			errors.NewStorageError("tx store read failed", errors.NewNotFoundError("not found")), http.StatusNotFound, false,
+		},
+		// The repository hands this class back raw even when the UTXO store failed,
+		// so marking it would deny a transaction the node may hold.
+		"a tx not-found the repository does not vet": {errors.NewTxNotFoundError("tx not found"), http.StatusNotFound, false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			httpServer, mockRepo, echoContext, responseRecorder := GetMockHTTP(t, nil)
