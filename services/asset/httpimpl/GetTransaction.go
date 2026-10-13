@@ -159,7 +159,7 @@ func (h *HTTP) getTransaction(c echo.Context, mode ReadMode) error {
 
 	b, err := h.repository.GetTransaction(ctx, hash)
 	if err != nil {
-		if errors.Is(err, errors.ErrNotFound) || strings.Contains(err.Error(), "not found") {
+		if errors.Is(err, errors.ErrNotFound) || errors.Is(err, errors.ErrBlobNotFound) || strings.Contains(err.Error(), "not found") {
 			// Marks this 404 as the handler's verdict on the transaction, as opposed
 			// to a route that failed to match; see util.AssetNotFoundHeader. Only a
 			// miss marks it: a store fault can say "not found" without being one,

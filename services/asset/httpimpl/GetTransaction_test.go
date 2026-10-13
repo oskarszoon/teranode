@@ -278,6 +278,8 @@ func TestGetTransaction_MarksItsOwnNotFound(t *testing.T) {
 		// The repository counts a tx store's blob not-found as a miss, as it does
 		// ErrNotFound, so it is the same verdict.
 		"the tx store has no blob": {errors.NewBlobNotFoundError("blob not found"), http.StatusNotFound, true},
+		// The class decides the 404, not the wording.
+		"a blob miss whose text does not say so": {errors.NewBlobNotFoundError("no tx blob for this hash"), http.StatusNotFound, true},
 		// A store that calls its not-found a storage failure has failed while it
 		// looked; that is a fault, not an answer about the transaction.
 		"a storage error over a not-found": {
