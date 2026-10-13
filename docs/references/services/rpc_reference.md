@@ -1879,6 +1879,8 @@ Conditions that return a bitcoind-compatible code and message:
 
 -28 is transient and clears on its own: retry the same request after a short delay rather than treating it as a failure. On these commands a store or service fault never returns -5, -8 or -28; it returns the command's fallback code (usually -32603) with a generic message, and the detail goes to the node's log.
 
+`getblockhash` does not follow this table yet: it answers a height with no block with -5 `Block not found`, where bitcoind and `getblockbyheight` answer -8 `Block height out of range`.
+
 ## Connection Limiting
 
 The RPC interface implements connection limiting to prevent resource exhaustion. Default limits:
