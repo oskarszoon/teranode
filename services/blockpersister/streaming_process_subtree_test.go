@@ -1253,6 +1253,51 @@ func TestPersistBlock_RebuildsABlockFileLeftWithoutItsUtxoFiles(t *testing.T) {
 	}
 }
 
+// existsFailingStore cannot check for one file type, as a store does when it cannot be reached.
+type existsFailingStore struct {
+	*memory.Memory
+	fileType fileformat.FileType
+}
+
+func (s *existsFailingStore) Exists(ctx context.Context, key []byte, fileType fileformat.FileType, opts ...options.FileOption) (bool, error) {
+	if fileType == s.fileType {
+		return false, errors.NewStorageError("checking for %s failed", fileType)
+	}
+
+	return s.Memory.Exists(ctx, key, fileType, opts...)
+}
+
+// TestPersistBlock_StopsWhenItCannotCheckForAFile checks that an error checking for the block's
+// files fails the block before anything is removed or written, and that the Server does not read
+// BLOB_EXISTS as "already persisted" when it cannot check.
+func TestPersistBlock_StopsWhenItCannotCheckForAFile(t *testing.T) {
+	for _, fileType := range []fileformat.FileType{fileformat.FileTypeBlock, fileformat.FileTypeUtxoAdditions} {
+		t.Run(string(fileType), func(t *testing.T) {
+			block, blockBytes, _, mockUTXOStore, subtreeStore, _, blockchainClient, tSettings := setup(t)
+			ctx := t.Context()
+			hash := block.Header.Hash()
+
+			blockStore := &existsFailingStore{Memory: memory.New(), fileType: fileType}
+			require.NoError(t, blockStore.Set(ctx, hash[:], fileformat.FileTypeUtxoDeletions, []byte("left over from an earlier attempt")))
+
+			persister := New(ctx, ulogger.TestLogger{}, tSettings, blockStore, subtreeStore, mockUTXOStore, blockchainClient)
+
+			err := persister.persistBlock(ctx, hash, blockBytes)
+			require.True(t, errors.Is(err, errors.ErrStorageError), "persistBlock: %v", err)
+
+			leftOver, err := blockStore.Memory.Exists(ctx, hash[:], fileformat.FileTypeUtxoDeletions)
+			require.NoError(t, err)
+			require.True(t, leftOver, "utxo-deletions removed although the check failed")
+
+			written, err := blockStore.Memory.Exists(ctx, hash[:], fileformat.FileTypeBlock)
+			require.NoError(t, err)
+			require.False(t, written, "block file written although the check failed")
+
+			require.False(t, persister.blockAlreadyPersisted(ctx, hash, errors.NewBlobAlreadyExistsError("block already persisted")))
+		})
+	}
+}
+
 // finaliseFailingStore fails to finalise one file type, as a store does when its final write or
 // rename fails.
 type finaliseFailingStore struct {
