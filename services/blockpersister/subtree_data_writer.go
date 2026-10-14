@@ -20,8 +20,10 @@ import (
 // A batch that arrives before the batches ahead of it is parked in pending until they have been
 // written. The window bounds how far ahead that can be: WriteBatch admits batches nextIndex up to
 // nextIndex+window-1, and a batch beyond that waits until the batches before it are written. So
-// pending never holds more than window batches. Without the bound, one slow batch lets every
-// later batch park, and pending grows to the whole subtree.
+// pending never holds more than window batches. That bounds pending only: a waiting batch still
+// holds its txBytes on its own goroutine, so the bytes held at once also count the waiters (see
+// NewSubtreeDataWriter). Without the bound, one slow batch lets every later batch park, and
+// pending grows to the whole subtree.
 type SubtreeDataWriter struct {
 	// storer is the underlying file storer for writing to blob storage
 	storer *filestorer.FileStorer
@@ -42,9 +44,6 @@ type SubtreeDataWriter struct {
 	// pending stores batch data that has arrived but can't be written yet
 	// because earlier batches haven't arrived
 	pending map[int][][]byte
-
-	// peakPending is the most batches pending has held at once
-	peakPending int
 
 	// closed indicates if the writer has been closed
 	closed bool
@@ -86,6 +85,8 @@ type SubtreeDataWriter struct {
 // wait while batch nextIndex is still running, and fetching would stall. With window equal to the
 // limit, every running batch is inside the window as long as pending is empty, so a call waits
 // only when batches complete out of order, and pending then holds at most limit-1 batches.
+// pending is not all that is held, though: each batch waiting on the window or still fetching
+// holds its own txBytes, so the serialized bytes held at once come to about 2*limit-1 batches.
 func NewSubtreeDataWriter(ctx context.Context, storer *filestorer.FileStorer, window int) *SubtreeDataWriter {
 	w := &SubtreeDataWriter{
 		storer:    storer,
@@ -140,7 +141,6 @@ func (w *SubtreeDataWriter) WriteBatch(batchIndex int, txBytes [][]byte) error {
 
 	// Store this batch in pending
 	w.pending[batchIndex] = txBytes
-	w.peakPending = max(w.peakPending, len(w.pending))
 
 	// Try to write all sequential batches starting from nextIndex
 	for {

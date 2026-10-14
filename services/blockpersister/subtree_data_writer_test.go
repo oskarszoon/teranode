@@ -65,7 +65,11 @@ func pendingLen(w *SubtreeDataWriter) int {
 
 // TestSubtreeDataWriter_PendingNeverExceedsTheWindow holds batch 0 back while every later batch
 // arrives, the order one slow fetch produces. Without a bound every later batch parks in pending,
-// and on the fresh-create path pending grows to the whole subtree (issue 1916).
+// and on the fresh-create path pending grows to the whole subtree (issue 1916). Batch 3, the first
+// past the opening window, is held back too, so the bound is checked again once the window has
+// moved. pending is read only when every goroutine in the bubble is blocked. Between those points
+// it can briefly hold window batches, when batch nextIndex is inserted before the drain, which no
+// test can observe.
 func TestSubtreeDataWriter_PendingNeverExceedsTheWindow(t *testing.T) {
 	const (
 		window     = 3
@@ -88,6 +92,10 @@ func TestSubtreeDataWriter_PendingNeverExceedsTheWindow(t *testing.T) {
 		)
 
 		for i := 1; i < batchCount; i++ {
+			if i == window {
+				continue
+			}
+
 			wg.Go(func() {
 				errs[i] = writer.WriteBatch(i, [][]byte{{byte(i)}})
 
@@ -97,22 +105,26 @@ func TestSubtreeDataWriter_PendingNeverExceedsTheWindow(t *testing.T) {
 
 		synctest.Wait()
 
-		// Batches 1 and 2 are inside the window and parked. Batches 3 to 9 wait for batch 0.
+		// Batches 1 and 2 are inside the window and parked. Batches 4 to 9 wait for batch 0.
 		require.Equal(t, window-1, pendingLen(writer))
 		require.EqualValues(t, window-1, returned.Load())
 
+		// Batch 0 drains 1 and 2, and the window moves to 3 to 5. Batches 4 and 5 park, and
+		// 6 to 9 wait for batch 3.
 		require.NoError(t, writer.WriteBatch(0, [][]byte{{0}}))
-		waitOrFail(t, &wg, writer, "batches waiting on the window did not return after batch 0 was written")
+		synctest.Wait()
+
+		require.Equal(t, window-1, pendingLen(writer))
+		require.EqualValues(t, 2*(window-1), returned.Load())
+
+		require.NoError(t, writer.WriteBatch(window, [][]byte{{window}}))
+		waitOrFail(t, &wg, writer, "batches waiting on the window did not return after batches 0 and 3 were written")
 
 		for i, err := range errs {
 			require.NoError(t, err, "batch %d", i)
 		}
 
-		writer.mu.Lock()
-		peak := writer.peakPending
-		writer.mu.Unlock()
-
-		require.LessOrEqual(t, peak, window)
+		require.Zero(t, pendingLen(writer))
 		require.NoError(t, writer.Close(ctx))
 	})
 
