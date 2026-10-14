@@ -145,6 +145,12 @@ type Server struct {
 	// adaptiveFetch tracks whether subtreeData downloads should be skipped
 	// when transactions are expected to already be in the local UTXO store via propagation.
 	adaptiveFetch *adaptivefetch.State
+
+	// peerProbePool and blockProbePool limit txmeta cache-probe workers across
+	// all concurrent peer-subtree and block-validation lookups respectively;
+	// see probeTxMetaCache.
+	peerProbePool  probePool
+	blockProbePool probePool
 }
 
 // New creates a new Server instance with the provided dependencies.
@@ -856,6 +862,7 @@ func (u *Server) checkSubtreeFromBlock(ctx context.Context, request *subtreevali
 			BaseURL:       request.BaseUrl,
 			TxHashes:      txHashes,
 			AllowFailFast: false,
+			FromBlock:     true,
 		}
 
 		// CheckSubtree responds to peer subtree-validation requests. The request
@@ -949,6 +956,7 @@ func (u *Server) checkSubtreeFromBlock(ctx context.Context, request *subtreevali
 		SubtreeHash:   *hash,
 		BaseURL:       request.BaseUrl,
 		AllowFailFast: false,
+		FromBlock:     true,
 	}
 
 	// Call the ValidateSubtreeInternal method

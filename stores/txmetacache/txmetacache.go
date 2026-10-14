@@ -32,6 +32,7 @@ import (
 	"github.com/bsv-blockchain/teranode/stores/utxo/meta"
 	"github.com/bsv-blockchain/teranode/ulogger"
 	"github.com/bsv-blockchain/teranode/util"
+	"github.com/cespare/xxhash/v2"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -412,6 +413,44 @@ func (t *TxMetaCache) GetMetaCached(_ context.Context, hash chainhash.Hash) (*me
 	t.metrics.hits.Add(1)
 
 	return d, true
+}
+
+// GetMetaCachedMulti is GetMetaCached for many hashes: out[i] is the cached
+// entry for hashes[i], or nil on a miss. Lookups that share a cache bucket take
+// its read lock once, so pass hashes grouped by ProbeRangeOf to get the
+// benefit. keyHashes, if non-nil, holds KeyHash(&hashes[i]) so the cache does
+// not hash them again. Same read-only contract as GetMetaCached.
+func (t *TxMetaCache) GetMetaCachedMulti(_ context.Context, hashes []chainhash.Hash, keyHashes []uint64, out []*meta.Data) {
+	t.cache.GetMulti(hashes, keyHashes, out)
+
+	hits := 0
+
+	for _, d := range out[:len(hashes)] {
+		if d != nil {
+			hits++
+		}
+	}
+
+	t.metrics.hits.Add(uint64(hits))                 //nolint:gosec // non-negative count
+	t.metrics.misses.Add(uint64(len(hashes) - hits)) //nolint:gosec // non-negative count
+}
+
+// ProbeRanges is the number of disjoint, contiguous cache bucket ranges that
+// batched cache lookups are grouped by (see ProbeRangeOf). With the production
+// bucket count each range spans 32 buckets.
+const ProbeRanges = min(256, BucketsCount)
+
+// KeyHash is the hash the cache places a transaction's entry by.
+func KeyHash(hash *chainhash.Hash) uint64 {
+	return xxhash.Sum64(hash[:])
+}
+
+// ProbeRangeOf returns the bucket range of the entry whose KeyHash is
+// keyHash. Grouping a large lookup by range and handing each group to
+// GetMetaCachedMulti makes every bucket's read lock be taken once per group
+// instead of once per key.
+func ProbeRangeOf(keyHash uint64) int {
+	return int(keyHash % BucketsCount / (BucketsCount / ProbeRanges))
 }
 
 // GetMeta retrieves transaction metadata for a given transaction hash, first checking the cache
