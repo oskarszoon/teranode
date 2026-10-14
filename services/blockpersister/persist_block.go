@@ -69,8 +69,13 @@ func (u *Server) persistBlock(ctx context.Context, hash *chainhash.Hash, blockBy
 	// Any of the block's files that exist were left by an attempt that stopped before the end, and
 	// are replaced rather than trusted: utxo files without the block file, or a block file without
 	// its utxo files, which versions that finalised the block file first left on a crash. All of them
-	// are checked before any is removed, so a failed check removes nothing.
-	var leftOver []fileformat.FileType
+	// are checked before any is removed, so a failed check removes nothing. A block file is removed
+	// only once the utxo files are finalised, just before it is rewritten, so an attempt that cannot
+	// rebuild them leaves it where it was.
+	var (
+		leftOverUtxoFiles []fileformat.FileType
+		blockFileLeftOver bool
+	)
 
 	for _, fileType := range []fileformat.FileType{fileformat.FileTypeBlock, fileformat.FileTypeUtxoAdditions, fileformat.FileTypeUtxoDeletions} {
 		exists, err := u.blockStore.Exists(ctx, hash[:], fileType)
@@ -78,12 +83,18 @@ func (u *Server) persistBlock(ctx context.Context, hash *chainhash.Hash, blockBy
 			return errors.NewStorageError("[persistBlock][%s] error checking for %s", block.String(), fileType, err)
 		}
 
-		if exists {
-			leftOver = append(leftOver, fileType)
+		if !exists {
+			continue
+		}
+
+		if fileType == fileformat.FileTypeBlock {
+			blockFileLeftOver = true
+		} else {
+			leftOverUtxoFiles = append(leftOverUtxoFiles, fileType)
 		}
 	}
 
-	for _, fileType := range leftOver {
+	for _, fileType := range leftOverUtxoFiles {
 		u.logger.Warnf("[persistBlock][%s] removing %s left by an attempt that did not finish", block.String(), fileType)
 
 		if err = u.blockStore.Del(ctx, hash[:], fileType); err != nil {
@@ -182,6 +193,14 @@ func (u *Server) persistBlock(ctx context.Context, hash *chainhash.Hash, blockBy
 		}
 
 		utxoDiffClosed = true
+	}
+
+	if blockFileLeftOver {
+		u.logger.Warnf("[persistBlock][%s] replacing %s left by an attempt that did not finish", block.String(), fileformat.FileTypeBlock)
+
+		if err = u.blockStore.Del(ctx, hash[:], fileformat.FileTypeBlock); err != nil {
+			return errors.NewStorageError("[persistBlock][%s] error removing %s", block.String(), fileformat.FileTypeBlock, err)
+		}
 	}
 
 	// Now, write the block file

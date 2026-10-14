@@ -1253,6 +1253,45 @@ func TestPersistBlock_RebuildsABlockFileLeftWithoutItsUtxoFiles(t *testing.T) {
 	}
 }
 
+// TestPersistBlock_KeepsABlockFileWhenItsUtxoFilesCannotBeRebuilt checks that a block file left
+// without its utxo files stays where it was when the rebuild fails, for example because the subtree
+// data cannot be read. It is removed only once the utxo files are finalised.
+func TestPersistBlock_KeepsABlockFileWhenItsUtxoFilesCannotBeRebuilt(t *testing.T) {
+	tests := []struct {
+		name     string
+		leftOver []fileformat.FileType
+	}{
+		{name: "no utxo files", leftOver: []fileformat.FileType{fileformat.FileTypeBlock}},
+		{name: "no utxo-deletions", leftOver: []fileformat.FileType{fileformat.FileTypeBlock, fileformat.FileTypeUtxoAdditions}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			block, blockBytes, _, mockUTXOStore, subtreeStore, blockStore, blockchainClient, tSettings := setup(t)
+			ctx := t.Context()
+			hash := block.Header.Hash()
+
+			for _, fileType := range tt.leftOver {
+				require.NoError(t, blockStore.Set(ctx, hash[:], fileType, blockBytes))
+			}
+
+			failing := &failingReadStore{Memory: subtreeStore, after: 0, err: io.ErrClosedPipe}
+			persister := New(ctx, ulogger.TestLogger{}, tSettings, blockStore, failing, mockUTXOStore, blockchainClient)
+			require.Error(t, persister.persistBlock(ctx, hash, blockBytes))
+
+			got, err := blockStore.Get(ctx, hash[:], fileformat.FileTypeBlock)
+			require.NoError(t, err, "the block file was removed by an attempt that could not rebuild the utxo files")
+			require.Equal(t, blockBytes, got)
+
+			for _, fileType := range []fileformat.FileType{fileformat.FileTypeUtxoAdditions, fileformat.FileTypeUtxoDeletions} {
+				exists, err := blockStore.Exists(ctx, hash[:], fileType)
+				require.NoError(t, err)
+				require.False(t, exists, "%s exists after a failed rebuild", fileType)
+			}
+		})
+	}
+}
+
 // existsFailingStore cannot check for one file type, as a store does when it cannot be reached.
 type existsFailingStore struct {
 	*memory.Memory

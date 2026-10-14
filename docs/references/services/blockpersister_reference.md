@@ -193,7 +193,7 @@ This is a core function of the blockpersister service that handles the complete 
     The function implements a multi-stage persistence process:
 
     1. **Convert raw block bytes** into a structured block model
-    2. **Check for the block's files**: the block file and, when `ProcessUTXOFiles` is on, both UTXO files. If they all exist, the block is already persisted and `BLOB_EXISTS` is returned before any work. Any of them that exist without the rest were left by an attempt that stopped early, and are removed: UTXO files without the block file, or a block file without its UTXO files, which versions that finalized the block file first left on a crash
+    2. **Check for the block's files**: the block file and, when `ProcessUTXOFiles` is on, both UTXO files. If they all exist, the block is already persisted and `BLOB_EXISTS` is returned before any work. Any of them that exist without the rest were left by an attempt that stopped early, and are replaced: UTXO files without the block file, or a block file without its UTXO files, which versions that finalized the block file first left on a crash. Leftover UTXO files are removed before the rebuild. A leftover block file is removed only after the UTXO files are finalized, just before it is rewritten, so an attempt that cannot rebuild them leaves it in place
     3. **Create a new UTXO difference set** for tracking changes
     4. **Process the coinbase transaction** if no subtrees are present
     5. **For blocks with subtrees**, process each subtree concurrently according to configured limits
