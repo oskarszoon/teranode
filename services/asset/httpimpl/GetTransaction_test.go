@@ -321,48 +321,88 @@ func TestGetTransaction_MarksItsOwnNotFound(t *testing.T) {
 }
 
 // TestGetTransaction_MarksAMissBehindAnHTTPTxStore drives the handler over a real
-// repository: a UTXO store that does not hold the transaction and an http:// tx store
-// that answers 404. That is a miss in both, so the 404 is marked. The tx store's error
-// reaches isTransactionMiss as the repository returns it, so an HTTP store that wrapped
-// its 404 in a storage error left the miss unmarked and getrawtransaction answered it
-// as a node fault.
+// repository: a UTXO store that does not hold the transaction and an http:// tx store.
+// When the blob server answers that it does not hold the blob either, that is a miss in
+// both, so the 404 is marked; the tx store's error reaches isTransactionMiss as the
+// repository returns it. Anything else answering on the tx store's address, or a blob
+// server that fails, is a fault and must not deny the transaction.
 func TestGetTransaction_MarksAMissBehindAnHTTPTxStore(t *testing.T) {
 	initPrometheusMetrics()
 
-	ctx := context.Background()
 	logger := ulogger.TestLogger{}
-	tSettings := test.CreateBaseTestSettings(t)
 
-	blobServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer blobServer.Close()
+	for name, tc := range map[string]struct {
+		txStore func(t *testing.T) http.Handler
+		status  int
+		marked  bool
+	}{
+		"the blob server does not hold it": {
+			txStore: func(t *testing.T) http.Handler {
+				memoryURL, err := url.Parse("memory://")
+				require.NoError(t, err)
 
-	txStoreURL, err := url.Parse(blobServer.URL)
-	require.NoError(t, err)
+				blobServer, err := blob.NewHTTPBlobServer(logger, memoryURL, "")
+				require.NoError(t, err)
 
-	txStore, err := blob.NewStore(logger, txStoreURL)
-	require.NoError(t, err)
+				return blobServer
+			},
+			status: http.StatusNotFound,
+			marked: true,
+		},
+		// A wrong base URL or a proxy: a 404 that is not the blob server's verdict.
+		"something else answers 404": {
+			txStore: func(*testing.T) http.Handler { return http.NotFoundHandler() },
+			status:  http.StatusInternalServerError,
+		},
+		"the blob server fails": {
+			txStore: func(*testing.T) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					http.Error(w, "disk read failed", http.StatusInternalServerError)
+				})
+			},
+			status: http.StatusInternalServerError,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			tSettings := test.CreateBaseTestSettings(t)
 
-	utxoStoreURL, err := url.Parse("sqlitememory:///get_transaction_http_tx_store")
-	require.NoError(t, err)
+			blobServer := httptest.NewServer(tc.txStore(t))
+			t.Cleanup(blobServer.Close)
 
-	utxoStore, err := utxosql.New(ctx, logger, tSettings, utxoStoreURL)
-	require.NoError(t, err)
+			txStoreURL, err := url.Parse(blobServer.URL)
+			require.NoError(t, err)
 
-	repo, err := repository.NewRepository(logger, tSettings, utxoStore, txStore, nil, nil, nil, nil, nil, nil)
-	require.NoError(t, err)
+			txStore, err := blob.NewStore(logger, txStoreURL)
+			require.NoError(t, err)
 
-	httpServer, _, echoContext, responseRecorder := GetMockHTTP(t, nil)
-	httpServer.repository = repo
+			utxoStoreURL, err := url.Parse("sqlitememory:///" + t.Name())
+			require.NoError(t, err)
 
-	echoContext.SetPath("/tx/:hash/hex")
-	echoContext.SetParamNames("hash")
-	echoContext.SetParamValues("9d45ad79ad3c6baecae872c0e35022d60c3bbbd024ccce06690321ece15ea995")
+			utxoStore, err := utxosql.New(ctx, logger, tSettings, utxoStoreURL)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = utxoStore.Close(ctx) })
 
-	err = httpServer.GetTransaction(HEX)(echoContext)
-	echoErr := &echo.HTTPError{}
-	require.True(t, errors.As(err, &echoErr))
-	require.Equal(t, http.StatusNotFound, echoErr.Code)
-	require.Equal(t, util.AssetNotFoundTx, responseRecorder.Header().Get(util.AssetNotFoundHeader))
+			repo, err := repository.NewRepository(logger, tSettings, utxoStore, txStore, nil, nil, nil, nil, nil, nil)
+			require.NoError(t, err)
+
+			httpServer, _, echoContext, responseRecorder := GetMockHTTP(t, nil)
+			httpServer.repository = repo
+
+			echoContext.SetPath("/tx/:hash/hex")
+			echoContext.SetParamNames("hash")
+			echoContext.SetParamValues("9d45ad79ad3c6baecae872c0e35022d60c3bbbd024ccce06690321ece15ea995")
+
+			err = httpServer.GetTransaction(HEX)(echoContext)
+			echoErr := &echo.HTTPError{}
+			require.True(t, errors.As(err, &echoErr))
+			require.Equal(t, tc.status, echoErr.Code)
+
+			if tc.marked {
+				require.Equal(t, util.AssetNotFoundTx, responseRecorder.Header().Get(util.AssetNotFoundHeader))
+			} else {
+				require.Empty(t, responseRecorder.Header().Get(util.AssetNotFoundHeader))
+			}
+		})
+	}
 }

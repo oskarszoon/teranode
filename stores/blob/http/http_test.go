@@ -3,12 +3,14 @@ package http
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/pkg/fileformat"
@@ -508,40 +510,230 @@ func TestHTTPStore_ConflictIsBlobAlreadyExists(t *testing.T) {
 	require.ErrorIs(t, err, errors.ErrBlobAlreadyExists)
 }
 
-// TestHTTPStore_GetMissIsNotFound pins that Get reports a 404 the way the other blob stores
-// report a miss: as ErrNotFound with no storage error in the chain. Callers that tell a miss
-// from a store fault by ErrStorageError - the asset tx 404 marker, for one - would otherwise
-// read every miss behind an http:// store as a fault. Any other failure is still a storage
-// error.
+// newStoreFor returns a client for server with no auth token, so the blob_httpAuthToken
+// fallback cannot leak into the test.
+func newStoreFor(t *testing.T, server *httptest.Server) *HTTPStore {
+	t.Helper()
+
+	storeURL, err := url.Parse(server.URL)
+	require.NoError(t, err)
+
+	store, err := New(ulogger.TestLogger{}, storeURL, options.WithHTTPAuthToken(""))
+	require.NoError(t, err)
+
+	return store
+}
+
+// answerMiss answers the way the blob server answers a miss.
+func answerMiss(w http.ResponseWriter, _ *http.Request) {
+	http.Error(w, NotFoundMsg, http.StatusNotFound)
+}
+
+// TestHTTPStore_GetMissIsNotFound pins that a read reports a miss the way the other blob
+// stores do - a not-found with no storage error in the chain - and only for a 404 the blob
+// server sent. Callers that tell a miss from a store fault by ErrStorageError - the asset tx
+// 404 marker, for one - would otherwise read every miss behind an http:// store as a fault,
+// and a 404 from a wrong base URL or a proxy as a miss.
 func TestHTTPStore_GetMissIsNotFound(t *testing.T) {
+	key := []byte{0x01, 0x02, 0xab}
+
+	reads := map[string]func(*HTTPStore) error{
+		"Get": func(s *HTTPStore) error {
+			_, err := s.Get(context.Background(), key, fileformat.FileTypeTx)
+			return err
+		},
+		"GetIoReader": func(s *HTTPStore) error {
+			rc, err := s.GetIoReader(context.Background(), key, fileformat.FileTypeTx)
+			if rc != nil {
+				_ = rc.Close()
+			}
+
+			return err
+		},
+	}
+
+	for name, tc := range map[string]struct {
+		handler http.HandlerFunc
+		miss    bool
+	}{
+		"the blob server's 404 is a miss":     {answerMiss, true},
+		"a 404 with no body is a store fault": {func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotFound) }, false},
+		"a mux's 404 is a store fault":        {http.NotFound, false},
+		"a 404 that only starts with the server's body is a store fault": {func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(NotFoundMsg + "\nfrom a proxy"))
+		}, false},
+		"a 500 is a store fault": {func(w http.ResponseWriter, _ *http.Request) { http.Error(w, "boom", http.StatusInternalServerError) }, false},
+	} {
+		for op, read := range reads {
+			t.Run(name+"/"+op, func(t *testing.T) {
+				server := httptest.NewServer(tc.handler)
+				t.Cleanup(server.Close)
+
+				err := read(newStoreFor(t, server))
+				require.Error(t, err)
+
+				if tc.miss {
+					require.ErrorIs(t, err, errors.ErrNotFound)
+					require.NotErrorIs(t, err, errors.ErrStorageError)
+					require.NotSame(t, errors.ErrNotFound, err, "the miss carries what was missing and where")
+					require.Contains(t, err.Error(), "ab0201", "the key, as the other stores print it")
+					require.Contains(t, err.Error(), fileformat.FileTypeTx.String())
+					require.Contains(t, err.Error(), server.URL)
+					require.NotContains(t, err.Error(), "EXTRA")
+				} else {
+					require.ErrorIs(t, err, errors.ErrStorageError)
+					require.NotErrorIs(t, err, errors.ErrNotFound)
+				}
+			})
+		}
+	}
+}
+
+// TestHTTPStore_GetTruncatedBodyIsStorageError pins that Get reports a body cut short as a
+// storage error, as its doc says, not as the bare transport error.
+func TestHTTPStore_GetTruncatedBodyIsStorageError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "100")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("short"))
+	}))
+	t.Cleanup(server.Close)
+
+	_, err := newStoreFor(t, server).Get(context.Background(), []byte("k"), fileformat.FileTypeTx)
+	require.ErrorIs(t, err, errors.ErrStorageError)
+	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+	require.NotErrorIs(t, err, errors.ErrNotFound)
+	require.NotContains(t, err.Error(), "EXTRA")
+}
+
+// TestHTTPStore_ReadsHonourContext pins that cancelling the caller's context stops a request in
+// flight. Without it a read runs until the client's own 30s timeout, whatever the caller wants.
+func TestHTTPStore_ReadsHonourContext(t *testing.T) {
+	for op, call := range map[string]func(context.Context, *HTTPStore) error{
+		"GetIoReader": func(ctx context.Context, s *HTTPStore) error {
+			rc, err := s.GetIoReader(ctx, []byte("k"), fileformat.FileTypeTx)
+			if rc != nil {
+				_ = rc.Close()
+			}
+
+			return err
+		},
+		"Get": func(ctx context.Context, s *HTTPStore) error {
+			_, err := s.Get(ctx, []byte("k"), fileformat.FileTypeTx)
+			return err
+		},
+		"Exists": func(ctx context.Context, s *HTTPStore) error {
+			_, err := s.Exists(ctx, []byte("k"), fileformat.FileTypeTx)
+			return err
+		},
+		"Health": func(ctx context.Context, s *HTTPStore) error {
+			_, _, err := s.Health(ctx, false)
+			return err
+		},
+	} {
+		t.Run(op, func(t *testing.T) {
+			arrived := make(chan struct{}, 1)
+			release := make(chan struct{})
+
+			server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+				// Never block here: a retried request would hold Close up forever.
+				select {
+				case arrived <- struct{}{}:
+				default:
+				}
+
+				select {
+				case <-r.Context().Done():
+				case <-release:
+				}
+			}))
+			// Cleanups run last-in first-out: release the handler before Close waits for it.
+			t.Cleanup(server.Close)
+			t.Cleanup(func() { close(release) })
+
+			store := newStoreFor(t, server)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			done := make(chan error, 1)
+
+			go func() { done <- call(ctx, store) }()
+
+			select {
+			case <-arrived:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the request never reached the server")
+			}
+
+			cancel()
+
+			select {
+			case err := <-done:
+				require.ErrorIs(t, err, context.Canceled)
+			case <-time.After(5 * time.Second):
+				t.Fatalf("%s kept running after its context was cancelled", op)
+			}
+		})
+	}
+}
+
+// TestHTTPStore_ExistsTellsMissFromFault pins that Exists answers false only for a 404. A HEAD
+// response carries no body, so its 404 cannot be checked against NotFoundMsg; every other
+// status is a storage error, not an absent blob.
+func TestHTTPStore_ExistsTellsMissFromFault(t *testing.T) {
 	for name, tc := range map[string]struct {
 		status int
-		miss   bool
+		exists bool
+		fault  bool
 	}{
-		"a 404 is a miss":        {http.StatusNotFound, true},
-		"a 500 is a store fault": {http.StatusInternalServerError, false},
+		"200 is held":          {http.StatusOK, true, false},
+		"404 is not held":      {http.StatusNotFound, false, false},
+		"500 is a store fault": {http.StatusInternalServerError, false, true},
 	} {
 		t.Run(name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.WriteHeader(tc.status)
 			}))
-			defer server.Close()
+			t.Cleanup(server.Close)
 
-			storeURL, err := url.Parse(server.URL)
-			require.NoError(t, err)
+			exists, err := newStoreFor(t, server).Exists(context.Background(), []byte("k"), fileformat.FileTypeTx)
+			require.Equal(t, tc.exists, exists)
 
-			store, err := New(ulogger.TestLogger{}, storeURL)
-			require.NoError(t, err)
-
-			_, err = store.Get(context.Background(), []byte("k"), fileformat.FileTypeTx)
-			require.Error(t, err)
-
-			if tc.miss {
-				require.ErrorIs(t, err, errors.ErrNotFound)
-				require.NotErrorIs(t, err, errors.ErrStorageError)
-			} else {
+			if tc.fault {
 				require.ErrorIs(t, err, errors.ErrStorageError)
-				require.NotErrorIs(t, err, errors.ErrNotFound)
+				require.Contains(t, err.Error(), "500")
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+// TestHTTPStore_DelTreatsOnlyTheServersMissAsGone pins that Del reads a 404 as "already gone"
+// only when the blob server sent it. The server has never answered DELETE with 404 - a missing
+// blob is a 204 - so any other 404 is something else on that address, and calling it success
+// would report a delete that never happened.
+func TestHTTPStore_DelTreatsOnlyTheServersMissAsGone(t *testing.T) {
+	for name, tc := range map[string]struct {
+		handler http.HandlerFunc
+		fault   bool
+	}{
+		"204 is deleted":                      {func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }, false},
+		"the blob server's 404 is gone":       {answerMiss, false},
+		"a 404 with no body is a store fault": {func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotFound) }, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewServer(tc.handler)
+			t.Cleanup(server.Close)
+
+			err := newStoreFor(t, server).Del(context.Background(), []byte("k"), fileformat.FileTypeTx)
+			if tc.fault {
+				require.ErrorIs(t, err, errors.ErrStorageError)
+				require.Contains(t, err.Error(), "404")
+			} else {
+				require.NoError(t, err)
 			}
 		})
 	}

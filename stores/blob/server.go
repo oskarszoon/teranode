@@ -36,11 +36,14 @@ import (
 
 	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/pkg/fileformat"
+	blobhttp "github.com/bsv-blockchain/teranode/stores/blob/http"
 	"github.com/bsv-blockchain/teranode/stores/blob/options"
 	"github.com/bsv-blockchain/teranode/ulogger"
 )
 
-const NotFoundMsg = "Not found"
+// NotFoundMsg is the body a miss is answered with. The HTTP client owns it: it reads a 404 as a
+// miss only with this body.
+const NotFoundMsg = blobhttp.NotFoundMsg
 
 // HTTPBlobServer provides an HTTP interface to a blob storage backend.
 // It implements the http.Handler interface and exposes blob operations as RESTful endpoints.
