@@ -58,8 +58,8 @@ const (
 type HTTPStore struct {
 	// baseURL is the base URL of the remote blob server (e.g., "http://localhost:8080")
 	baseURL string
-	// redactedBaseURL is baseURL with any password masked, for error text. A miss reaches
-	// public API responses - the asset service answers a transaction 404 with it.
+	// redactedBaseURL is baseURL with any password masked, for fault error text. A miss does
+	// not name the server at all: the asset service answers a transaction 404 with its text.
 	redactedBaseURL string
 	// authToken is the shared secret presented on mutating requests. Empty means none is sent.
 	authToken string
@@ -279,7 +279,7 @@ func (s *HTTPStore) Get(ctx context.Context, key []byte, fileType fileformat.Fil
 //   - opts: Optional file options
 //
 // Only a 404 carrying the blob server's NotFoundMsg is a miss, returned as a not-found naming
-// the blob and the server. Any other 404 comes from something else on that address, so it is
+// the blob. Any other 404 comes from something else on that address, so it is
 // a storage error, as is every other failure.
 //
 // Returns:
@@ -309,7 +309,8 @@ func (s *HTTPStore) GetIoReader(ctx context.Context, key []byte, fileType filefo
 		resp.Body.Close()
 
 		if miss {
-			return nil, errors.NewNotFoundError("[HTTPStore] %s %s not found at %s", fileType, util.ReverseAndHexEncodeSlice(key), s.redactedBaseURL)
+			// The blob, not the server: this text reaches public API responses.
+			return nil, errors.NewNotFoundError("[HTTPStore] %s %s not found", fileType, util.ReverseAndHexEncodeSlice(key))
 		}
 
 		return nil, errors.NewStorageError("[HTTPStore] GetIoReader failed with status code 404 without the blob server's not-found body")

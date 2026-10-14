@@ -576,10 +576,10 @@ func TestHTTPStore_GetMissIsNotFound(t *testing.T) {
 				if tc.miss {
 					require.ErrorIs(t, err, errors.ErrNotFound)
 					require.NotErrorIs(t, err, errors.ErrStorageError)
-					require.NotSame(t, errors.ErrNotFound, err, "the miss carries what was missing and where")
+					require.NotSame(t, errors.ErrNotFound, err, "the miss names what was missing")
 					require.Contains(t, err.Error(), "ab0201", "the key, as the other stores print it")
 					require.Contains(t, err.Error(), fileformat.FileTypeTx.String())
-					require.Contains(t, err.Error(), server.URL)
+					require.NotContains(t, err.Error(), server.Listener.Addr().String(), "a miss does not name the blob server")
 					require.NotContains(t, err.Error(), "EXTRA")
 				} else {
 					require.ErrorIs(t, err, errors.ErrStorageError)
@@ -590,24 +590,53 @@ func TestHTTPStore_GetMissIsNotFound(t *testing.T) {
 	}
 }
 
-// TestHTTPStore_MissDoesNotEchoAPassword pins that the base URL a miss names has its password
-// masked. The miss is not only logged: the asset service answers a transaction 404 with it.
-func TestHTTPStore_MissDoesNotEchoAPassword(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(answerMiss))
+const storePassword = "s3cret-password"
+
+// newStoreWithPassword returns a client for a server running handler, through a store URL that
+// carries a password, and the server's host.
+func newStoreWithPassword(t *testing.T, handler http.HandlerFunc) (*HTTPStore, string) {
+	t.Helper()
+
+	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
 
 	storeURL, err := url.Parse(server.URL)
 	require.NoError(t, err)
 
-	storeURL.User = url.UserPassword("blob", "s3cret-password")
+	storeURL.User = url.UserPassword("blob", storePassword)
 
 	store, err := New(ulogger.TestLogger{}, storeURL, options.WithHTTPAuthToken(""))
 	require.NoError(t, err)
 
-	_, err = store.Get(context.Background(), []byte("k"), fileformat.FileTypeTx)
+	return store, storeURL.Host
+}
+
+// TestHTTPStore_MissDoesNotNameTheServer pins that a miss names the blob, not the blob server.
+// It is not only logged: the asset service answers a transaction 404 with its text, so the
+// server's address - and any password in the store URL - would reach every caller asking for
+// a transaction the node does not hold.
+func TestHTTPStore_MissDoesNotNameTheServer(t *testing.T) {
+	store, host := newStoreWithPassword(t, answerMiss)
+
+	_, err := store.Get(context.Background(), []byte("k"), fileformat.FileTypeTx)
 	require.ErrorIs(t, err, errors.ErrNotFound)
-	require.Contains(t, err.Error(), storeURL.Host)
-	require.NotContains(t, err.Error(), "s3cret-password")
+	require.NotContains(t, err.Error(), host)
+	require.NotContains(t, err.Error(), storePassword)
+}
+
+// TestHTTPStore_FaultRedactsThePassword pins that a fault, which does name the blob server so
+// an operator can find it, masks the password in the store URL.
+func TestHTTPStore_FaultRedactsThePassword(t *testing.T) {
+	store, host := newStoreWithPassword(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "100")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("short"))
+	})
+
+	_, err := store.Get(context.Background(), []byte("k"), fileformat.FileTypeTx)
+	require.ErrorIs(t, err, errors.ErrStorageError)
+	require.Contains(t, err.Error(), host)
+	require.NotContains(t, err.Error(), storePassword)
 }
 
 // TestHTTPStore_GetTruncatedBodyIsStorageError pins that Get reports a body cut short as a
