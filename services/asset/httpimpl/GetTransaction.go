@@ -218,10 +218,12 @@ func (h *HTTP) getTransaction(c echo.Context, mode ReadMode) error {
 // isTransactionMiss reports whether a repository GetTransaction error says the
 // node does not hold the transaction.
 //
-// The classes are the tx-store miss set in repository.GetTransaction, because that
-// is the set it converts to a fault when the UTXO store failed; a class it returns
-// raw may sit on top of a UTXO fault and cannot be marked. A storage error anywhere
-// in the chain is the store failing while it looked, not a miss, whatever it wraps.
+// It is the tx-store miss set in repository.GetTransaction, {ErrNotFound,
+// ErrBlobNotFound}, minus anything with a storage error in the chain. Only that set
+// is converted to a fault when the UTXO store failed, so a class the repository
+// returns raw, such as ErrTxNotFound, may sit on top of a UTXO fault and cannot be
+// marked. A storage error is the store failing while it looked, not a miss,
+// whatever it wraps.
 func isTransactionMiss(err error) bool {
 	if errors.Is(err, errors.ErrStorageError) {
 		return false
