@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -592,9 +593,43 @@ func TestHTTPStore_GetMissIsNotFound(t *testing.T) {
 
 const storePassword = "s3cret-password"
 
+// logRecorder is the testing.T a ulogger.UnifiedTestLogger writes to. It keeps every line, so a
+// test can read what was logged.
+type logRecorder struct {
+	t     *testing.T
+	mu    sync.Mutex
+	lines []string
+}
+
+func (r *logRecorder) Errorf(format string, args ...interface{}) { r.t.Errorf(format, args...) }
+func (r *logRecorder) FailNow()                                  { r.t.FailNow() }
+
+func (r *logRecorder) Logf(format string, args ...any) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.lines = append(r.lines, fmt.Sprintf(format, args...))
+}
+
+// warnings returns the lines logged at Warn.
+func (r *logRecorder) warnings() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	var warnings []string
+
+	for _, line := range r.lines {
+		if strings.Contains(line, " WARN: ") {
+			warnings = append(warnings, line)
+		}
+	}
+
+	return warnings
+}
+
 // newStoreWithPassword returns a client for a server running handler, through a store URL that
-// carries a password, and the server's host.
-func newStoreWithPassword(t *testing.T, handler http.HandlerFunc) (*HTTPStore, string) {
+// carries a password, with the server's host and what the client logs.
+func newStoreWithPassword(t *testing.T, handler http.HandlerFunc) (*HTTPStore, string, *logRecorder) {
 	t.Helper()
 
 	server := httptest.NewServer(handler)
@@ -605,48 +640,90 @@ func newStoreWithPassword(t *testing.T, handler http.HandlerFunc) (*HTTPStore, s
 
 	storeURL.User = url.UserPassword("blob", storePassword)
 
-	store, err := New(ulogger.TestLogger{}, storeURL, options.WithHTTPAuthToken(""))
+	recorder := &logRecorder{t: t}
+	logger := ulogger.NewUnifiedTestLogger(recorder, t.Name(), "test")
+
+	store, err := New(logger, storeURL, options.WithHTTPAuthToken(""))
 	require.NoError(t, err)
 
-	return store, storeURL.Host
+	return store, storeURL.Host, recorder
 }
 
-// TestHTTPStore_MissDoesNotNameTheServer pins that a miss names the blob, not the blob server.
-// It is not only logged: the asset service answers a transaction 404 with its text, so the
-// server's address - and any password in the store URL - would reach every caller asking for
-// a transaction the node does not hold.
-func TestHTTPStore_MissDoesNotNameTheServer(t *testing.T) {
-	store, host := newStoreWithPassword(t, answerMiss)
+// TestHTTPStore_AddressGoesToTheLogNotTheError pins where the blob server's address goes. Not
+// into an error: the asset service answers a transaction request with the error text, a 404
+// for a miss and a 500 for a fault, so the address - and any password in the store URL - would
+// reach whoever asked. The operator still needs it to tell which server misbehaved, so every
+// fault logs it at Warn with the password masked. A miss is routine and logs nothing.
+func TestHTTPStore_AddressGoesToTheLogNotTheError(t *testing.T) {
+	ctx := context.Background()
+	key := []byte("k")
 
-	_, err := store.Get(context.Background(), []byte("k"), fileformat.FileTypeTx)
-	require.ErrorIs(t, err, errors.ErrNotFound)
-	require.NotContains(t, err.Error(), host)
-	require.NotContains(t, err.Error(), storePassword)
+	get := func(s *HTTPStore) error {
+		_, err := s.Get(ctx, key, fileformat.FileTypeTx)
+		return err
+	}
+	getIoReader := func(s *HTTPStore) error {
+		rc, err := s.GetIoReader(ctx, key, fileformat.FileTypeTx)
+		if rc != nil {
+			_ = rc.Close()
+		}
+
+		return err
+	}
+	answer := func(status int) http.HandlerFunc {
+		return func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(status) }
+	}
+
+	for name, tc := range map[string]struct {
+		handler http.HandlerFunc
+		call    func(*HTTPStore) error
+		fault   bool
+	}{
+		"a miss":                  {answerMiss, get, false},
+		"a foreign 404 on Get":    {answer(http.StatusNotFound), get, true},
+		"a foreign 404 on reader": {answer(http.StatusNotFound), getIoReader, true},
+		"a 500 on Get":            {answer(http.StatusInternalServerError), get, true},
+		"a 500 on reader":         {answer(http.StatusInternalServerError), getIoReader, true},
+		"a body cut short on Get": {truncatedBody, get, true},
+		"a foreign 404 on Del":    {answer(http.StatusNotFound), func(s *HTTPStore) error { return s.Del(ctx, key, fileformat.FileTypeTx) }, true},
+		"a 500 on Exists":         {answer(http.StatusInternalServerError), func(s *HTTPStore) error { _, err := s.Exists(ctx, key, fileformat.FileTypeTx); return err }, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			store, host, recorder := newStoreWithPassword(t, tc.handler)
+
+			err := tc.call(store)
+			require.Error(t, err)
+			require.NotContains(t, err.Error(), host, "the error text reaches API responses")
+			require.NotContains(t, err.Error(), storePassword)
+
+			warnings := recorder.warnings()
+
+			if !tc.fault {
+				require.ErrorIs(t, err, errors.ErrNotFound)
+				require.Empty(t, warnings, "a miss is routine, not worth a warning")
+
+				return
+			}
+
+			require.ErrorIs(t, err, errors.ErrStorageError)
+			require.Len(t, warnings, 1)
+			require.Contains(t, warnings[0], host, "the operator needs to know which server misbehaved")
+			require.NotContains(t, warnings[0], storePassword)
+		})
+	}
 }
 
-// TestHTTPStore_FaultRedactsThePassword pins that a fault, which does name the blob server so
-// an operator can find it, masks the password in the store URL.
-func TestHTTPStore_FaultRedactsThePassword(t *testing.T) {
-	store, host := newStoreWithPassword(t, func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Length", "100")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("short"))
-	})
-
-	_, err := store.Get(context.Background(), []byte("k"), fileformat.FileTypeTx)
-	require.ErrorIs(t, err, errors.ErrStorageError)
-	require.Contains(t, err.Error(), host)
-	require.NotContains(t, err.Error(), storePassword)
+// truncatedBody declares more bytes than it sends, so the client's body read fails.
+func truncatedBody(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Length", "100")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("short"))
 }
 
 // TestHTTPStore_GetTruncatedBodyIsStorageError pins that Get reports a body cut short as a
 // storage error, as its doc says, not as the bare transport error.
 func TestHTTPStore_GetTruncatedBodyIsStorageError(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Length", "100")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("short"))
-	}))
+	server := httptest.NewServer(http.HandlerFunc(truncatedBody))
 	t.Cleanup(server.Close)
 
 	_, err := newStoreFor(t, server).Get(context.Background(), []byte("k"), fileformat.FileTypeTx)

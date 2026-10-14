@@ -58,8 +58,9 @@ const (
 type HTTPStore struct {
 	// baseURL is the base URL of the remote blob server (e.g., "http://localhost:8080")
 	baseURL string
-	// redactedBaseURL is baseURL with any password masked, for fault error text. A miss does
-	// not name the server at all: the asset service answers a transaction 404 with its text.
+	// redactedBaseURL is baseURL with any password masked, for the Warn line logged with a
+	// fault. Error text never names the server: the asset service answers a transaction request
+	// with it, a 404 for a miss and a 500 for a fault.
 	redactedBaseURL string
 	// authToken is the shared secret presented on mutating requests. Empty means none is sent.
 	authToken string
@@ -228,6 +229,7 @@ func (s *HTTPStore) Exists(ctx context.Context, key []byte, fileType fileformat.
 	case http.StatusNotFound:
 		return false, nil
 	default:
+		s.logger.Warnf("[HTTPStore] Exists %s %s: %s answered status code %d", fileType, util.ReverseAndHexEncodeSlice(key), s.redactedBaseURL, resp.StatusCode)
 		return false, errors.NewStorageError("[HTTPStore] Exists failed with status code %d", resp.StatusCode)
 	}
 }
@@ -261,7 +263,8 @@ func (s *HTTPStore) Get(ctx context.Context, key []byte, fileType fileformat.Fil
 
 	value, err := io.ReadAll(rc)
 	if err != nil {
-		return nil, errors.NewStorageError("[HTTPStore] Get failed to read %s %s from %s", fileType, util.ReverseAndHexEncodeSlice(key), s.redactedBaseURL, err)
+		s.logger.Warnf("[HTTPStore] Get %s %s: reading the body from %s failed: %v", fileType, util.ReverseAndHexEncodeSlice(key), s.redactedBaseURL, err)
+		return nil, errors.NewStorageError("[HTTPStore] Get failed to read %s %s", fileType, util.ReverseAndHexEncodeSlice(key), err)
 	}
 
 	return value, nil
@@ -280,7 +283,8 @@ func (s *HTTPStore) Get(ctx context.Context, key []byte, fileType fileformat.Fil
 //
 // Only a 404 carrying the blob server's NotFoundMsg is a miss, returned as a not-found naming
 // the blob. Any other 404 comes from something else on that address, so it is
-// a storage error, as is every other failure.
+// a storage error, as is every other failure. Neither names the server; a fault logs it at
+// Warn instead.
 //
 // Returns:
 //   - io.ReadCloser: Reader for streaming the blob data
@@ -309,13 +313,16 @@ func (s *HTTPStore) GetIoReader(ctx context.Context, key []byte, fileType filefo
 		resp.Body.Close()
 
 		if miss {
-			// The blob, not the server: this text reaches public API responses.
 			return nil, errors.NewNotFoundError("[HTTPStore] %s %s not found", fileType, util.ReverseAndHexEncodeSlice(key))
 		}
+
+		s.logger.Warnf("[HTTPStore] GetIoReader %s %s: %s answered 404 without the blob server's not-found body", fileType, util.ReverseAndHexEncodeSlice(key), s.redactedBaseURL)
 
 		return nil, errors.NewStorageError("[HTTPStore] GetIoReader failed with status code 404 without the blob server's not-found body")
 	default:
 		resp.Body.Close()
+		s.logger.Warnf("[HTTPStore] GetIoReader %s %s: %s answered status code %d", fileType, util.ReverseAndHexEncodeSlice(key), s.redactedBaseURL, resp.StatusCode)
+
 		return nil, errors.NewStorageError("[HTTPStore] GetIoReader failed with status code %d", resp.StatusCode)
 	}
 }
@@ -494,6 +501,8 @@ func (s *HTTPStore) Del(ctx context.Context, key []byte, fileType fileformat.Fil
 		if isBlobServerMiss(resp) {
 			return nil
 		}
+
+		s.logger.Warnf("[HTTPStore] Del %s %s: %s answered 404 without the blob server's not-found body", fileType, util.ReverseAndHexEncodeSlice(key), s.redactedBaseURL)
 
 		return errors.NewStorageError("[HTTPStore] Del failed with status code 404 without the blob server's not-found body")
 	}
