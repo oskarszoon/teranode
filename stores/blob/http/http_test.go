@@ -590,6 +590,26 @@ func TestHTTPStore_GetMissIsNotFound(t *testing.T) {
 	}
 }
 
+// TestHTTPStore_MissDoesNotEchoAPassword pins that the base URL a miss names has its password
+// masked. The miss is not only logged: the asset service answers a transaction 404 with it.
+func TestHTTPStore_MissDoesNotEchoAPassword(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(answerMiss))
+	t.Cleanup(server.Close)
+
+	storeURL, err := url.Parse(server.URL)
+	require.NoError(t, err)
+
+	storeURL.User = url.UserPassword("blob", "s3cret-password")
+
+	store, err := New(ulogger.TestLogger{}, storeURL, options.WithHTTPAuthToken(""))
+	require.NoError(t, err)
+
+	_, err = store.Get(context.Background(), []byte("k"), fileformat.FileTypeTx)
+	require.ErrorIs(t, err, errors.ErrNotFound)
+	require.Contains(t, err.Error(), storeURL.Host)
+	require.NotContains(t, err.Error(), "s3cret-password")
+}
+
 // TestHTTPStore_GetTruncatedBodyIsStorageError pins that Get reports a body cut short as a
 // storage error, as its doc says, not as the bare transport error.
 func TestHTTPStore_GetTruncatedBodyIsStorageError(t *testing.T) {

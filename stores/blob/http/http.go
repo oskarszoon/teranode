@@ -58,6 +58,9 @@ const (
 type HTTPStore struct {
 	// baseURL is the base URL of the remote blob server (e.g., "http://localhost:8080")
 	baseURL string
+	// redactedBaseURL is baseURL with any password masked, for error text. A miss reaches
+	// public API responses - the asset service answers a transaction 404 with it.
+	redactedBaseURL string
 	// authToken is the shared secret presented on mutating requests. Empty means none is sent.
 	authToken string
 	// httpClient is the HTTP client used for making requests with configurable timeout
@@ -148,8 +151,9 @@ func New(logger ulogger.Logger, storeURL *url.URL, opts ...options.StoreOption) 
 	base.RawFragment = ""
 
 	return &HTTPStore{
-		baseURL:   strings.TrimSuffix(base.String(), "/"),
-		authToken: authToken,
+		baseURL:         strings.TrimSuffix(base.String(), "/"),
+		redactedBaseURL: strings.TrimSuffix(base.Redacted(), "/"),
+		authToken:       authToken,
 		httpClient: &http.Client{
 			Timeout:       30 * time.Second,
 			CheckRedirect: refuseBlobRedirect,
@@ -257,7 +261,7 @@ func (s *HTTPStore) Get(ctx context.Context, key []byte, fileType fileformat.Fil
 
 	value, err := io.ReadAll(rc)
 	if err != nil {
-		return nil, errors.NewStorageError("[HTTPStore] Get failed to read %s %s from %s", fileType, util.ReverseAndHexEncodeSlice(key), s.baseURL, err)
+		return nil, errors.NewStorageError("[HTTPStore] Get failed to read %s %s from %s", fileType, util.ReverseAndHexEncodeSlice(key), s.redactedBaseURL, err)
 	}
 
 	return value, nil
@@ -305,7 +309,7 @@ func (s *HTTPStore) GetIoReader(ctx context.Context, key []byte, fileType filefo
 		resp.Body.Close()
 
 		if miss {
-			return nil, errors.NewNotFoundError("[HTTPStore] %s %s not found at %s", fileType, util.ReverseAndHexEncodeSlice(key), s.baseURL)
+			return nil, errors.NewNotFoundError("[HTTPStore] %s %s not found at %s", fileType, util.ReverseAndHexEncodeSlice(key), s.redactedBaseURL)
 		}
 
 		return nil, errors.NewStorageError("[HTTPStore] GetIoReader failed with status code 404 without the blob server's not-found body")
