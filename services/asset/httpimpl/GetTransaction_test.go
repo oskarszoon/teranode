@@ -277,11 +277,13 @@ func TestGetTransaction_MarksItsOwnNotFound(t *testing.T) {
 		"the transaction is not held": {errors.NewNotFoundError("transaction not found"), http.StatusNotFound, true},
 		"the repository failed":       {errors.NewProcessingError("error getting transaction"), http.StatusInternalServerError, false},
 		// A store fault can say "not found" without being a miss: a misconfigured
-		// aerospike namespace does. The text still earns a 404 for callers that read
-		// the status alone, but only the class marks it as a verdict, so
-		// getrawtransaction does not answer -5 for a transaction it may hold.
+		// aerospike namespace does. The class decides the 404, never the text, so
+		// it is a fault for every caller, not only for getrawtransaction.
 		"a store fault whose text says not found": {
-			errors.NewServiceError("aerospike get failed: Namespace not found"), http.StatusNotFound, false,
+			errors.NewServiceError("aerospike get failed: Namespace not found"), http.StatusInternalServerError, false,
+		},
+		"a processing error whose text says not found": {
+			errors.NewProcessingError("record not found in the index"), http.StatusInternalServerError, false,
 		},
 		// The repository counts a tx store's blob not-found as a miss, as it does
 		// ErrNotFound, so it is the same verdict.
@@ -289,13 +291,16 @@ func TestGetTransaction_MarksItsOwnNotFound(t *testing.T) {
 		// The class decides the 404, not the wording.
 		"a blob miss whose text does not say so": {errors.NewBlobNotFoundError("no tx blob for this hash"), http.StatusNotFound, true},
 		// A store that calls its not-found a storage failure has failed while it
-		// looked; that is a fault, not an answer about the transaction.
+		// looked; that is a fault, not an answer about the transaction. Its class
+		// keeps the 404 for callers that read the status alone, unmarked.
 		"a storage error over a not-found": {
 			errors.NewStorageError("tx store read failed", errors.NewNotFoundError("not found")), http.StatusNotFound, false,
 		},
-		// The repository hands this class back raw even when the UTXO store failed,
-		// so marking it would deny a transaction the node may hold.
-		"a tx not-found the repository does not vet": {errors.NewTxNotFoundError("tx not found"), http.StatusNotFound, false},
+		// Outside the tx-store miss set, the only set the repository vets against a
+		// UTXO fault, so it cannot be told from a fault. Only its text earned it a
+		// 404. The repository never returns it: it drops the UTXO store's error and
+		// no tx store reports a miss with this class.
+		"a tx not-found the repository does not vet": {errors.NewTxNotFoundError("tx not found"), http.StatusInternalServerError, false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			httpServer, mockRepo, echoContext, responseRecorder := GetMockHTTP(t, nil)
