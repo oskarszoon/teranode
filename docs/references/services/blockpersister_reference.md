@@ -334,20 +334,19 @@ Processes UTXO changes by reading from the subtree data files. This phase runs *
 #### SubtreeDataWriter
 
 ```go
-type SubtreeDataWriter struct {
-    storer      *filestorer.FileStorer
-    nextBatchID int
-    // ... additional fields
-}
+func NewSubtreeDataWriter(ctx context.Context, storer *filestorer.FileStorer, window int) *SubtreeDataWriter
 ```
 
 The `SubtreeDataWriter` provides **ordered batch writes** for subtree data. It ensures batches are written in the correct order even when produced concurrently.
 
 **Key Methods:**
 
-- `WriteBatch(batchID int, txData [][]byte) error`: Writes a batch of transaction data at the specified position
-- `Close() error`: Finalizes the file (aborts if batches are pending)
+- `WriteBatch(batchIndex int, txBytes [][]byte) error`: Writes a batch of transaction data at the specified position
+- `Close(ctx context.Context) error`: Finalizes the file (aborts if batches are pending)
 - `Abort(err error)`: Aborts the write operation without finalizing
+
+!!! note "Bounded Window"
+    A batch that arrives before the batches ahead of it is held in memory until they are written. `WriteBatch` admits at most `window` batches counting from the next one to write, and a batch further ahead waits, so one slow batch cannot make the writer hold the whole subtree. `CreateSubtreeDataFileStreaming` passes its batch fetch concurrency, `max(4, NumCPU/2)`, as the window. The window bounds the parked batches only: batches waiting on the window and batches still fetching hold their own bytes, so the serialized bytes held at once come to about `2 × window − 1` batches. When `ctx` is cancelled, as the batch errgroup's context is when a batch fails, waiting batches return an error instead of waiting for a batch that will never arrive.
 
 !!! tip "Error Safety"
     If `Close()` is called while batches are still pending (gaps in batch sequence), the writer automatically aborts instead of finalizing an incomplete file.

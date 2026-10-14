@@ -27,6 +27,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// writerTestWindow admits every batch the single-goroutine writer tests below write ahead of
+// nextIndex. A smaller window would make those calls wait for a batch only they could send.
+const writerTestWindow = 3
+
 func TestSubtreeDataWriter_OrderedWrites(t *testing.T) {
 	logger := ulogger.NewVerboseTestLogger(t)
 	settings := test.CreateBaseTestSettings(t)
@@ -39,7 +43,7 @@ func TestSubtreeDataWriter_OrderedWrites(t *testing.T) {
 	storer, err := filestorer.NewFileStorer(ctx, logger, settings, blockStore, key, fileType)
 	require.NoError(t, err)
 
-	writer := NewSubtreeDataWriter(storer)
+	writer := NewSubtreeDataWriter(ctx, storer, writerTestWindow)
 
 	tx1 := []byte("tx1data")
 	tx2 := []byte("tx2data")
@@ -76,7 +80,7 @@ func TestSubtreeDataWriter_ConcurrentWrites(t *testing.T) {
 	storer, err := filestorer.NewFileStorer(ctx, logger, settings, blockStore, key, fileType)
 	require.NoError(t, err)
 
-	writer := NewSubtreeDataWriter(storer)
+	writer := NewSubtreeDataWriter(ctx, storer, writerTestWindow)
 
 	batchCount := 10
 	done := make(chan error, batchCount)
@@ -119,7 +123,7 @@ func TestSubtreeDataWriter_ClosedWriter(t *testing.T) {
 	storer, err := filestorer.NewFileStorer(ctx, logger, settings, blockStore, key, fileType)
 	require.NoError(t, err)
 
-	writer := NewSubtreeDataWriter(storer)
+	writer := NewSubtreeDataWriter(ctx, storer, writerTestWindow)
 
 	err = writer.Close(ctx)
 	require.NoError(t, err)
@@ -141,7 +145,7 @@ func TestSubtreeDataWriter_IncompleteSequence(t *testing.T) {
 	storer, err := filestorer.NewFileStorer(ctx, logger, settings, blockStore, key, fileType)
 	require.NoError(t, err)
 
-	writer := NewSubtreeDataWriter(storer)
+	writer := NewSubtreeDataWriter(ctx, storer, writerTestWindow)
 
 	err = writer.WriteBatch(0, [][]byte{[]byte("tx0")})
 	require.NoError(t, err)
@@ -166,7 +170,7 @@ func TestSubtreeDataWriter_AbortDoesNotSaveFile(t *testing.T) {
 	storer, err := filestorer.NewFileStorer(ctx, logger, settings, blockStore, key, fileType)
 	require.NoError(t, err)
 
-	writer := NewSubtreeDataWriter(storer)
+	writer := NewSubtreeDataWriter(ctx, storer, writerTestWindow)
 
 	// Write some data
 	err = writer.WriteBatch(0, [][]byte{[]byte("tx0data")})
@@ -196,7 +200,7 @@ func TestSubtreeDataWriter_CloseWithPendingBatchesAbortsFile(t *testing.T) {
 	storer, err := filestorer.NewFileStorer(ctx, logger, settings, blockStore, key, fileType)
 	require.NoError(t, err)
 
-	writer := NewSubtreeDataWriter(storer)
+	writer := NewSubtreeDataWriter(ctx, storer, writerTestWindow)
 
 	// Write batch 0 and 2, but NOT batch 1 - creating a gap
 	err = writer.WriteBatch(0, [][]byte{[]byte("tx0data")})
