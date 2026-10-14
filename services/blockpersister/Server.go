@@ -212,6 +212,18 @@ func (u *Server) getNextBlockToProcess(ctx context.Context) (*model.Block, error
 	return blocks[0], nil
 }
 
+// sleepUnlessDone waits PersistSleep, or until ctx is done. The processing loop checks ctx at the
+// top of every iteration, so a shutdown stops it at once instead of after the sleep.
+func (u *Server) sleepUnlessDone(ctx context.Context) {
+	timer := time.NewTimer(u.settings.BlockPersister.PersistSleep)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+	case <-timer.C:
+	}
+}
+
 // Start initializes and begins the block persister service operations.
 //
 // This method starts the main processing loop and sets up HTTP services if configured.
@@ -353,13 +365,13 @@ func (u *Server) Start(ctx context.Context, readyCh chan<- struct{}) error {
 				block, err := u.getNextBlockToProcess(ctx)
 				if err != nil {
 					u.logger.Errorf("[BlockPersister] Error getting next block to process: %v", err)
-					time.Sleep(u.settings.BlockPersister.PersistSleep) // Sleep after error
+					u.sleepUnlessDone(ctx) // Sleep after error
 
 					continue
 				}
 
 				if block == nil {
-					time.Sleep(u.settings.BlockPersister.PersistSleep) // Sleep when no blocks available
+					u.sleepUnlessDone(ctx) // Sleep when no blocks available
 
 					continue
 				}
@@ -372,7 +384,7 @@ func (u *Server) Start(ctx context.Context, readyCh chan<- struct{}) error {
 				blockBytes, err := block.Bytes()
 				if err != nil {
 					u.logger.Errorf("[BlockPersister] Failed to get block bytes: %v", err)
-					time.Sleep(u.settings.BlockPersister.PersistSleep)
+					u.sleepUnlessDone(ctx)
 
 					continue
 				}
@@ -384,7 +396,7 @@ func (u *Server) Start(ctx context.Context, readyCh chan<- struct{}) error {
 						u.logger.Infof("[BlockPersister] Block %s already exists, skipping...", block.String())
 					} else {
 						u.logger.Errorf("[BlockPersister] Failed to persist block %s: %v", block.String(), err)
-						time.Sleep(u.settings.BlockPersister.PersistSleep) // The next attempt is the same block
+						u.sleepUnlessDone(ctx) // The next attempt is the same block
 
 						continue
 					}
@@ -393,7 +405,7 @@ func (u *Server) Start(ctx context.Context, readyCh chan<- struct{}) error {
 				// Mark block as persisted in database
 				if err = u.blockchainClient.SetBlockPersistedAt(ctx, block.Hash()); err != nil {
 					u.logger.Errorf("[BlockPersister] Failed to mark block %s as persisted: %v", block.String(), err)
-					time.Sleep(u.settings.BlockPersister.PersistSleep)
+					u.sleepUnlessDone(ctx)
 
 					continue
 				}
