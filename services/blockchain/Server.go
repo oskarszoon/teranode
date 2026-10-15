@@ -2885,7 +2885,7 @@ func (b *Blockchain) SendNotification(ctx context.Context, req *blockchain_api.N
 	// per subscriber, so one oversized payload costs N times its own size. The
 	// gRPC receive limit is a gigabyte, which is no bound at all here.
 	if len(req.GetBase_URL()) > maxNotificationBaseURLLen {
-		return nil, errors.WrapGRPC(errors.NewInvalidArgumentError("[Blockchain][SendNotification] base_URL must be at most %d bytes, got %d", maxNotificationBaseURLLen, len(req.GetBase_URL())))
+		return nil, errors.WrapGRPC(errors.NewInvalidArgumentError("[Blockchain][SendNotification] base_URL must be at most %d bytes, got %d", maxNotificationBaseURLLen, len(req.GetBase_URL()))) // urlsafe: an int byte limit and a length, no URL value
 	}
 
 	if md := req.GetMetadata().GetMetadata(); len(md) > 0 {
