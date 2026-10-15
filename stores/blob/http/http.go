@@ -177,7 +177,7 @@ func New(logger ulogger.Logger, storeURL *url.URL, opts ...options.StoreOption) 
 //   - string: Description of the health status
 //   - error: Any error that occurred during the health check
 func (s *HTTPStore) Health(ctx context.Context, checkLiveness bool) (int, string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/health", s.baseURL), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/health", s.baseURL), nil) // urlsafe: builds the request URL sent to the blob server, not a log line; the credentials in baseURL are the point
 	if err != nil {
 		return http.StatusServiceUnavailable, "HTTP Store: Service Unavailable", errors.NewStorageError("[HTTPStore] Health check failed to create request", err)
 	}
@@ -210,7 +210,7 @@ func (s *HTTPStore) Exists(ctx context.Context, key []byte, fileType fileformat.
 	encodedKey := base64.URLEncoding.EncodeToString(key) + "." + fileType.String()
 
 	query := options.FileOptionsToQuery(fileType, opts...)
-	url := fmt.Sprintf(blobURLFormat, s.baseURL, encodedKey, query.Encode())
+	url := fmt.Sprintf(blobURLFormat, s.baseURL, encodedKey, query.Encode()) // urlsafe: builds the request URL sent to the blob server, not a log line; the credentials in baseURL are the point
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, url, nil)
 	if err != nil {
@@ -229,7 +229,7 @@ func (s *HTTPStore) Exists(ctx context.Context, key []byte, fileType fileformat.
 	case http.StatusNotFound:
 		return false, nil
 	default:
-		s.logger.Warnf("[HTTPStore] Exists %s %s: %s answered status code %d", fileType, util.ReverseAndHexEncodeSlice(key), s.redactedBaseURL, resp.StatusCode)
+		s.logger.Warnf("[HTTPStore] Exists %s %s: %s answered status code %d", fileType, util.ReverseAndHexEncodeSlice(key), s.redactedBaseURL, resp.StatusCode) // urlsafe: redactedBaseURL is base.Redacted() output, set in New
 		return false, errors.NewStorageError("[HTTPStore] Exists failed with status code %d", resp.StatusCode)
 	}
 }
@@ -263,7 +263,7 @@ func (s *HTTPStore) Get(ctx context.Context, key []byte, fileType fileformat.Fil
 
 	value, err := io.ReadAll(rc)
 	if err != nil {
-		s.logger.Warnf("[HTTPStore] Get %s %s: reading the body from %s failed: %v", fileType, util.ReverseAndHexEncodeSlice(key), s.redactedBaseURL, err)
+		s.logger.Warnf("[HTTPStore] Get %s %s: reading the body from %s failed: %v", fileType, util.ReverseAndHexEncodeSlice(key), s.redactedBaseURL, err) // urlsafe: redactedBaseURL is base.Redacted() output, set in New
 		return nil, errors.NewStorageError("[HTTPStore] Get failed to read %s %s", fileType, util.ReverseAndHexEncodeSlice(key), err)
 	}
 
@@ -293,7 +293,7 @@ func (s *HTTPStore) GetIoReader(ctx context.Context, key []byte, fileType filefo
 	encodedKey := base64.URLEncoding.EncodeToString(key) + "." + fileType.String()
 
 	query := options.FileOptionsToQuery(fileType, opts...)
-	url := fmt.Sprintf(blobURLFormat, s.baseURL, encodedKey, query.Encode())
+	url := fmt.Sprintf(blobURLFormat, s.baseURL, encodedKey, query.Encode()) // urlsafe: builds the request URL sent to the blob server, not a log line; the credentials in baseURL are the point
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -316,12 +316,12 @@ func (s *HTTPStore) GetIoReader(ctx context.Context, key []byte, fileType filefo
 			return nil, errors.NewNotFoundError("[HTTPStore] %s %s not found", fileType, util.ReverseAndHexEncodeSlice(key))
 		}
 
-		s.logger.Warnf("[HTTPStore] GetIoReader %s %s: %s answered 404 without the blob server's not-found body", fileType, util.ReverseAndHexEncodeSlice(key), s.redactedBaseURL)
+		s.logger.Warnf("[HTTPStore] GetIoReader %s %s: %s answered 404 without the blob server's not-found body", fileType, util.ReverseAndHexEncodeSlice(key), s.redactedBaseURL) // urlsafe: redactedBaseURL is base.Redacted() output, set in New
 
 		return nil, errors.NewStorageError("[HTTPStore] GetIoReader failed with status code 404 without the blob server's not-found body")
 	default:
 		resp.Body.Close()
-		s.logger.Warnf("[HTTPStore] GetIoReader %s %s: %s answered status code %d", fileType, util.ReverseAndHexEncodeSlice(key), s.redactedBaseURL, resp.StatusCode)
+		s.logger.Warnf("[HTTPStore] GetIoReader %s %s: %s answered status code %d", fileType, util.ReverseAndHexEncodeSlice(key), s.redactedBaseURL, resp.StatusCode) // urlsafe: redactedBaseURL is base.Redacted() output, set in New
 
 		return nil, errors.NewStorageError("[HTTPStore] GetIoReader failed with status code %d", resp.StatusCode)
 	}
@@ -382,7 +382,7 @@ func (s *HTTPStore) SetFromReader(ctx context.Context, key []byte, fileType file
 		query.Set(options.AllowOverwriteQueryParam, "true")
 	}
 
-	url := fmt.Sprintf(blobURLFormat, s.baseURL, encodedKey, query.Encode())
+	url := fmt.Sprintf(blobURLFormat, s.baseURL, encodedKey, query.Encode()) // urlsafe: builds the request URL sent to the blob server, not a log line; the credentials in baseURL are the point
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, value)
 	if err != nil {
@@ -433,7 +433,7 @@ func (s *HTTPStore) SetDAH(ctx context.Context, key []byte, fileType fileformat.
 	encodedKey := base64.URLEncoding.EncodeToString(key) + "." + fileType.String()
 
 	query := options.FileOptionsToQuery(fileType, opts...)
-	url := fmt.Sprintf(blobURLFormatWithDAH, s.baseURL, encodedKey, query.Encode(), dah)
+	url := fmt.Sprintf(blobURLFormatWithDAH, s.baseURL, encodedKey, query.Encode(), dah) // urlsafe: builds the request URL sent to the blob server, not a log line; the credentials in baseURL are the point
 
 	req, err := http.NewRequestWithContext(ctx, "PATCH", url, nil)
 	if err != nil {
@@ -480,7 +480,7 @@ func (s *HTTPStore) Del(ctx context.Context, key []byte, fileType fileformat.Fil
 	encodedKey := base64.URLEncoding.EncodeToString(key) + "." + fileType.String()
 
 	query := options.FileOptionsToQuery(fileType, opts...)
-	url := fmt.Sprintf(blobURLFormat, s.baseURL, encodedKey, query.Encode())
+	url := fmt.Sprintf(blobURLFormat, s.baseURL, encodedKey, query.Encode()) // urlsafe: builds the request URL sent to the blob server, not a log line; the credentials in baseURL are the point
 
 	req, err := http.NewRequestWithContext(ctx, "DELETE", url, nil)
 	if err != nil {
@@ -502,7 +502,7 @@ func (s *HTTPStore) Del(ctx context.Context, key []byte, fileType fileformat.Fil
 			return nil
 		}
 
-		s.logger.Warnf("[HTTPStore] Del %s %s: %s answered 404 without the blob server's not-found body", fileType, util.ReverseAndHexEncodeSlice(key), s.redactedBaseURL)
+		s.logger.Warnf("[HTTPStore] Del %s %s: %s answered 404 without the blob server's not-found body", fileType, util.ReverseAndHexEncodeSlice(key), s.redactedBaseURL) // urlsafe: redactedBaseURL is base.Redacted() output, set in New
 
 		return errors.NewStorageError("[HTTPStore] Del failed with status code 404 without the blob server's not-found body")
 	}

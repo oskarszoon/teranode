@@ -32,7 +32,6 @@ import (
 	"github.com/bsv-blockchain/teranode/services/validator"
 	"github.com/bsv-blockchain/teranode/stores/blob"
 	blobmemory "github.com/bsv-blockchain/teranode/stores/blob/memory"
-	blockchainstore "github.com/bsv-blockchain/teranode/stores/blockchain"
 	"github.com/bsv-blockchain/teranode/stores/utxo"
 	"github.com/bsv-blockchain/teranode/stores/utxo/meta"
 	"github.com/bsv-blockchain/teranode/stores/utxo/sql"
@@ -40,6 +39,7 @@ import (
 	"github.com/bsv-blockchain/teranode/util"
 	"github.com/bsv-blockchain/teranode/util/kafka" //nolint:gci
 	"github.com/bsv-blockchain/teranode/util/test"
+	teranodetestutil "github.com/bsv-blockchain/teranode/util/testutil"
 	"github.com/jarcoal/httpmock"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
@@ -105,7 +105,7 @@ func TestBlockValidationValidateSubtree(t *testing.T) {
 		nilConsumer := &kafka.KafkaConsumerGroup{}
 		tSettings := test.CreateBaseTestSettings(t)
 
-		subtreeValidation, err := New(context.Background(), ulogger.TestLogger{}, tSettings, subtreeStore, txStore, txMetaStore, validatorClient, blockchainClient, nilConsumer, nilConsumer, nil, nil)
+		subtreeValidation, err := New(newCancelCtx(t), ulogger.TestLogger{}, tSettings, subtreeStore, txStore, txMetaStore, validatorClient, blockchainClient, nilConsumer, nilConsumer, nil, nil)
 		require.NoError(t, err)
 
 		v := ValidateSubtree{
@@ -155,13 +155,13 @@ func setup(t *testing.T) (utxo.Store, *validator.MockValidator, blob.Store, blob
 
 	validatorClient := &validator.MockValidator{UtxoStore: utxoStore}
 
-	mockBlockChainStore := &blockchainstore.MockStore{}
-
-	// Create LocalClient properly using the constructor to ensure all fields are initialized
-	blockchainClient, err := blockchain.NewLocalClient(logger, tSettings, mockBlockChainStore, subtreeStore, utxoStore)
-	if err != nil {
-		panic(err)
-	}
+	// Real sqlitememory-backed blockchain client (per repo testing convention:
+	// don't mock the blockchain client/store). Unlike blockchainstore.MockStore,
+	// this store has a genesis best block from creation, so New()'s
+	// updateBestBlock/blockchainSubscriptionListener never hits the
+	// "no best block set" retry loop that MockStore left running for the
+	// lifetime of the test binary.
+	blockchainClient := teranodetestutil.NewMemorySQLiteBlockchainClient(logger, tSettings, t)
 
 	return utxoStore, validatorClient, txStore, subtreeStore, blockchainClient, func() {
 		httpmock.DeactivateAndReset()
@@ -191,7 +191,7 @@ func TestBlockValidationValidateSubtreeInternalWithMissingTx(t *testing.T) {
 
 	tSettings := test.CreateBaseTestSettings(t)
 
-	subtreeValidation, err := New(context.Background(), ulogger.TestLogger{}, tSettings, subtreeStore, txStore, utxoStore, validatorClient, blockchainClient, nilConsumer, nilConsumer, nil, nil)
+	subtreeValidation, err := New(newCancelCtx(t), ulogger.TestLogger{}, tSettings, subtreeStore, txStore, utxoStore, validatorClient, blockchainClient, nilConsumer, nilConsumer, nil, nil)
 	require.NoError(t, err)
 
 	// Create a mock context
@@ -251,7 +251,7 @@ func TestBlockValidationValidateSubtreeInternalLegacy(t *testing.T) {
 
 	tSettings := test.CreateBaseTestSettings(t)
 
-	subtreeValidation, err := New(context.Background(), ulogger.TestLogger{}, tSettings, subtreeStore, txStore, utxoStore, validatorClient, blockchainClient, nilConsumer, nilConsumer, nil, nil)
+	subtreeValidation, err := New(newCancelCtx(t), ulogger.TestLogger{}, tSettings, subtreeStore, txStore, utxoStore, validatorClient, blockchainClient, nilConsumer, nilConsumer, nil, nil)
 	require.NoError(t, err)
 
 	// Create a mock context
@@ -287,7 +287,7 @@ func TestValidateSubtreeInternal_DuplicateTxid(t *testing.T) {
 	nilConsumer := &kafka.KafkaConsumerGroup{}
 	tSettings := test.CreateBaseTestSettings(t)
 
-	subtreeValidation, err := New(context.Background(), ulogger.TestLogger{}, tSettings, subtreeStore, txStore, utxoStore, validatorClient, blockchainClient, nilConsumer, nilConsumer, nil, nil)
+	subtreeValidation, err := New(newCancelCtx(t), ulogger.TestLogger{}, tSettings, subtreeStore, txStore, utxoStore, validatorClient, blockchainClient, nilConsumer, nilConsumer, nil, nil)
 	require.NoError(t, err)
 
 	v := ValidateSubtree{
@@ -323,7 +323,7 @@ func TestValidateSubtreeInternal_RetryBackoffAndMetrics(t *testing.T) {
 	tSettings.SubtreeValidation.ProcessTxMetaUsingCacheMissingTxThreshold = 1
 
 	nilConsumer := &kafka.KafkaConsumerGroup{}
-	subtreeValidation, err := New(context.Background(), ulogger.TestLogger{}, tSettings, subtreeStore, txStore, utxoStore, validatorClient, blockchainClient, nilConsumer, nilConsumer, nil, nil)
+	subtreeValidation, err := New(newCancelCtx(t), ulogger.TestLogger{}, tSettings, subtreeStore, txStore, utxoStore, validatorClient, blockchainClient, nilConsumer, nilConsumer, nil, nil)
 	require.NoError(t, err)
 
 	retryCounterStart := testutil.ToFloat64(prometheusSubtreeValidationValidateSubtreeRetry)
@@ -344,6 +344,50 @@ func TestValidateSubtreeInternal_RetryBackoffAndMetrics(t *testing.T) {
 	retryCounterDelta := testutil.ToFloat64(prometheusSubtreeValidationValidateSubtreeRetry) - retryCounterStart
 	assert.Equal(t, float64(2), retryCounterDelta, "maxRetries=2 should produce exactly 2 retries (3 total attempts)")
 	assert.GreaterOrEqual(t, elapsed, 2*retrySleep, "retry loop should wait retrySleepDuration between retry attempts")
+}
+
+// A store miss above blockvalidation_processTxMetaUsingStore_MissingTxThreshold under fail
+// fast must wait and retry like a cache miss, then fetch the missing txs on the final attempt.
+// It used to return THRESHOLD_EXCEEDED on the first attempt, which dropped every announced
+// subtree with 2+ txs this node had not seen yet and left it to block validation.
+func TestValidateSubtreeInternal_StoreMissesRetryThenFetch(t *testing.T) {
+	InitPrometheusMetrics()
+
+	utxoStore, validatorClient, txStore, subtreeStore, blockchainClient, deferFunc := setup(t)
+	defer deferFunc()
+
+	retrySleep := 20 * time.Millisecond
+	tSettings := test.CreateBaseTestSettings(t)
+	tSettings.Block.FailFastValidation = true
+	tSettings.BlockValidation.ValidationWarmupCount = 0
+	tSettings.BlockValidation.ValidationMaxRetries = 2
+	tSettings.BlockValidation.RetrySleep = retrySleep
+	tSettings.BlockValidation.ValidationRetrySleep = retrySleep
+	tSettings.SubtreeValidation.ProcessTxMetaUsingCacheMissingTxThreshold = 1000
+	tSettings.BlockValidation.ProcessTxMetaUsingStoreMissingTxThreshold = 1
+
+	nilConsumer := &kafka.KafkaConsumerGroup{}
+	subtreeValidation, err := New(context.Background(), ulogger.TestLogger{}, tSettings, subtreeStore, txStore, utxoStore, validatorClient, blockchainClient, nilConsumer, nilConsumer, nil, nil)
+	require.NoError(t, err)
+
+	retryCounterStart := testutil.ToFloat64(prometheusSubtreeValidationValidateSubtreeRetry)
+
+	v := ValidateSubtree{
+		SubtreeHash:   *hash1,
+		BaseURL:       "not-a-url",
+		TxHashes:      []chainhash.Hash{*hash1, *hash2},
+		AllowFailFast: true,
+	}
+
+	_, err = subtreeValidation.ValidateSubtreeInternal(context.Background(), v, chaincfg.GenesisActivationHeight, nil)
+
+	// Neither tx exists anywhere, so the final attempt's network fetch fails. What matters is
+	// that it got there: the store-miss threshold did not end validation early.
+	require.Error(t, err)
+	require.False(t, errors.Is(err, errors.ErrThresholdExceeded), "store misses must not abort the subtree: %v", err)
+
+	retryCounterDelta := testutil.ToFloat64(prometheusSubtreeValidationValidateSubtreeRetry) - retryCounterStart
+	assert.Equal(t, float64(2), retryCounterDelta, "store misses should be retried maxRetries times before the final attempt")
 }
 
 func TestServer_prepareTxsPerLevel(t *testing.T) {
@@ -950,7 +994,7 @@ func TestSubtreeValidationWhenBlessMissingTransactions(t *testing.T) {
 		// Setup and run validation
 		nilConsumer := &kafka.KafkaConsumerGroup{}
 		tSettings := test.CreateBaseTestSettings(t)
-		subtreeValidation, err := New(context.Background(), ulogger.TestLogger{}, tSettings, subtreeStore, txStore, utxoStore, validatorClient, blockchainClient, nilConsumer, nilConsumer, nil, nil)
+		subtreeValidation, err := New(newCancelCtx(t), ulogger.TestLogger{}, tSettings, subtreeStore, txStore, utxoStore, validatorClient, blockchainClient, nilConsumer, nilConsumer, nil, nil)
 		require.NoError(t, err)
 
 		// Validate subtree1
