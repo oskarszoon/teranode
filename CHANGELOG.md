@@ -113,6 +113,12 @@ Upgrading from v0.16.0 changes nothing for them; upgrading from an earlier relea
   `false`, neither ran, yet the block was still flagged as mined. The loader does not report
   unknown keys, so a leftover `false` is ignored without an error and those nodes take on
   the mined-tagging write load again. Delete the key from your config. (#2019)
+- **`ProcessBlock` refuses a legacy block whose parent is not stored.** Block validation's
+  `ProcessBlock` gRPC call used to answer success for a block with baseURL `legacy` and no stored
+  parent: it handed the block to catch-up and stored nothing. It now returns `ERR_SERVICE_ERROR`.
+  An empty `BaseUrl` defaults to `legacy`, so any external caller that omits it gets the same
+  refusal and must submit the parent first. Legacy sync keeps the block and retries it once the
+  parent commits. Blocks announced by p2p peers still go to catch-up. (#2021)
 
 - **This release removes four Aerospike pruner metrics.** External monitoring systems must
   remove queries for `utxo_pruner_parents_skipped_pruned_total`,
