@@ -412,3 +412,245 @@ func Test_checkCounterConflictingOnCurrentChainBatch_equivalence(t *testing.T) {
 		require.Positivef(t, seen[v], "no seed produced verdict %q; retune the generator", v)
 	}
 }
+
+// The walk budget covers the union of every cone in the batch. Each
+// per-transaction walk of this chain fits the budget; the batch's one walk visits
+// the counter-spender plus every chain member, one more than the budget, and must
+// fail closed with the retryable walk-limit error rather than pass or reject.
+func Test_checkCounterConflictingOnCurrentChainBatch_budgetCoversUnion(t *testing.T) {
+	const chainLength = 10
+
+	ctx := context.Background()
+	tSettings := test.CreateBaseTestSettings(t)
+	tSettings.UtxoStore.ConflictingChildrenMaxNodes = chainLength
+
+	store := newSQLUtxoStore(t, ctx, tSettings)
+	_, chain := buildConflictingChain(t, ctx, store, chainLength)
+
+	s, block, cachedSubtrees := newCachedCheckServer(t, store, tSettings, chain, []uint32{77})
+
+	for _, txHash := range chain {
+		require.NoError(t, s.checkCounterConflictingOnCurrentChain(ctx, txHash, map[uint32]bool{77: true}),
+			"each per-transaction walk fits the budget on its own")
+	}
+
+	err := s.checkCachedSubtreesAgainstCandidateChain(ctx, block, cachedSubtrees)
+	require.ErrorIs(t, err, errors.ErrUtxoWalkLimitExceeded)
+	require.NotErrorIs(t, err, errors.ErrTxInvalid)
+}
+
+// A trailer can name a transaction whose record, or whose parent's record, has
+// been pruned since the subtree was blessed. Its counter-spenders cannot be
+// derived, so it is dropped from the check and the block passes on the rest, as
+// the per-transaction loop's ErrTxNotFound skip did. Dropping one must not hide a
+// real conflict on another.
+func Test_checkCounterConflictingOnCurrentChainBatch_notFoundDropped(t *testing.T) {
+	ctx := context.Background()
+	tSettings := test.CreateBaseTestSettings(t)
+
+	newFixture := func(t *testing.T, counterOpts ...utxo.CreateOption) (utxo.Store, []chainhash.Hash) {
+		store := newSQLUtxoStore(t, ctx, tSettings)
+		_, chain := buildConflictingChain(t, ctx, store, 3, counterOpts...)
+
+		// a conflicting tx whose parent the store no longer holds
+		orphanParent := buildTx(t, []outpoint{{tx: parentTx1, vout: 0}}, 1, 9001)
+		_, _, err := store.SpendAndCreate(ctx, orphanParent, 122, utxo.WithCreateOnly())
+		require.NoError(t, err)
+
+		orphan := spendingChild(t, orphanParent, 0)
+		createConflicting(t, ctx, store, orphan)
+		require.NoError(t, store.Delete(ctx, orphanParent.TxIDChainHash()))
+
+		// and one whose own record is gone
+		pruned := chainhash.HashH([]byte("pruned-conflicting-tx"))
+
+		return store, append([]chainhash.Hash{pruned, *orphan.TxIDChainHash()}, chain...)
+	}
+
+	t.Run("dropped and the rest passes", func(t *testing.T) {
+		store, conflictingTxs := newFixture(t)
+		s, block, cachedSubtrees := newCachedCheckServer(t, store, tSettings, conflictingTxs, []uint32{77})
+
+		notFound, err := s.checkCounterConflictingOnCurrentChainBatch(ctx, conflictingTxs, map[uint32]bool{77: true})
+		require.NoError(t, err)
+		require.ElementsMatch(t, conflictingTxs[:2], notFound)
+
+		require.NoError(t, s.checkCachedSubtreesAgainstCandidateChain(ctx, block, cachedSubtrees))
+	})
+
+	t.Run("a real conflict on another tx still rejects", func(t *testing.T) {
+		store, conflictingTxs := newFixture(t, utxo.WithMinedBlockInfo(utxo.MinedBlockInfo{BlockID: 77, BlockHeight: 100}))
+		s, block, cachedSubtrees := newCachedCheckServer(t, store, tSettings, conflictingTxs, []uint32{77})
+
+		err := s.checkCachedSubtreesAgainstCandidateChain(ctx, block, cachedSubtrees)
+		require.ErrorIs(t, err, errors.ErrTxInvalid)
+	})
+}
+
+// Decision for records missing further out than a transaction and its parents:
+// a cone member the store does not hold is a leaf of the walk, and a
+// counter-conflicting member whose GetMeta is not found counts as not mined; the
+// rest of the union is still checked. The per-transaction check abandoned the
+// whole transaction on any missing member, so here it passes a block whose
+// counter-spender is mined on the candidate chain, and the batch rejects it.
+func Test_checkCounterConflictingOnCurrentChainBatch_missingMemberMidCone(t *testing.T) {
+	ctx := context.Background()
+	tSettings := test.CreateBaseTestSettings(t)
+
+	store := newSQLUtxoStore(t, ctx, tSettings)
+	counter, chain := buildConflictingChain(t, ctx, store, 3, utxo.WithMinedBlockInfo(utxo.MinedBlockInfo{BlockID: 77, BlockHeight: 100}))
+
+	// the counter-spender's child, a member of the counter-conflicting cone, is gone
+	counterChild := spendingChild(t, counter, 0)
+	spendAndCreate(t, ctx, store, counterChild)
+	require.NoError(t, store.Delete(ctx, counterChild.TxIDChainHash()))
+
+	s, block, cachedSubtrees := newCachedCheckServer(t, store, tSettings, chain, []uint32{77})
+
+	err := s.checkCounterConflictingOnCurrentChain(ctx, chain[0], map[uint32]bool{77: true})
+	require.ErrorIs(t, err, errors.ErrTxNotFound, "the per-transaction check gives up on a missing member")
+
+	err = s.checkCachedSubtreesAgainstCandidateChain(ctx, block, cachedSubtrees)
+	require.ErrorIs(t, err, errors.ErrTxInvalid)
+	require.Contains(t, err.Error(), counter.TxIDChainHash().String(), "the verdict names the mined counter-conflicting tx")
+
+	t.Run("a store fault is still a processing error", func(t *testing.T) {
+		faulty := &faultyGetMetaStore{Store: store, fail: *counterChild.TxIDChainHash()}
+		s, block, cachedSubtrees := newCachedCheckServer(t, faulty, tSettings, chain, []uint32{77})
+
+		err := s.checkCachedSubtreesAgainstCandidateChain(ctx, block, cachedSubtrees)
+		require.ErrorIs(t, err, errors.ErrStorageError)
+		require.NotErrorIs(t, err, errors.ErrTxInvalid, "a fault anywhere wins over a mined member, so the verdict is retryable")
+	})
+}
+
+// faultyGetMetaStore fails GetMeta for one hash with a storage error.
+type faultyGetMetaStore struct {
+	utxo.Store
+	fail chainhash.Hash
+}
+
+func (f *faultyGetMetaStore) GetMeta(ctx context.Context, hash *chainhash.Hash, data *meta.Data) error {
+	if hash.Equal(f.fail) {
+		return errors.NewStorageError("store down")
+	}
+
+	return f.Store.GetMeta(ctx, hash, data)
+}
+
+// A frozen output anywhere the per-transaction check would have looked is a
+// processing error from the batch too: on a counter-spender's own input (the
+// counter-spender is the frozen sentinel), deep in a counter-spender's cone, and
+// in a conflicting transaction's own cone.
+func Test_checkCounterConflictingOnCurrentChainBatch_frozen(t *testing.T) {
+	ctx := context.Background()
+	tSettings := test.CreateBaseTestSettings(t)
+
+	check := func(t *testing.T, store utxo.Store, conflictingTxs []chainhash.Hash, wantMessage string) {
+		t.Helper()
+
+		s, block, cachedSubtrees := newCachedCheckServer(t, store, tSettings, conflictingTxs, []uint32{77})
+
+		err := s.checkCachedSubtreesAgainstCandidateChain(ctx, block, cachedSubtrees)
+		require.Error(t, err)
+		require.NotErrorIs(t, err, errors.ErrTxInvalid)
+		require.Contains(t, err.Error(), wantMessage)
+	}
+
+	t.Run("frozen direct counter", func(t *testing.T) {
+		store := newSQLUtxoStore(t, ctx, tSettings)
+
+		_, _, err := store.SpendAndCreate(ctx, parentTx1, 122, utxo.WithCreateOnly())
+		require.NoError(t, err)
+
+		freezeOutput(t, ctx, store, parentTx1, 2, tSettings)
+		createConflicting(t, ctx, store, tx1)
+
+		check(t, store, []chainhash.Hash{*tx1.TxIDChainHash()}, "counter conflicting tx is frozen")
+	})
+
+	t.Run("frozen deep in counter cone", func(t *testing.T) {
+		store := newSQLUtxoStore(t, ctx, tSettings)
+		counter, chain := buildConflictingChain(t, ctx, store, 3)
+
+		counterChild := spendingChild(t, counter, 0)
+		spendAndCreate(t, ctx, store, counterChild)
+		freezeOutput(t, ctx, store, counterChild, 0, tSettings)
+
+		check(t, store, chain, "a counter-conflicting tx has frozen child")
+	})
+
+	t.Run("frozen in own cone", func(t *testing.T) {
+		store := newSQLUtxoStore(t, ctx, tSettings)
+		_, chain := buildConflictingChain(t, ctx, store, 3)
+
+		// the chain tip's output is unspent; freezing it puts the sentinel in
+		// every chain member's own cone and in no counter-spender's
+		tip, err := store.Get(ctx, &chain[len(chain)-1], fields.Tx)
+		require.NoError(t, err)
+		freezeOutput(t, ctx, store, tip.Tx, 0, tSettings)
+
+		check(t, store, chain, "child transaction is frozen")
+	})
+}
+
+// The fresh path asks the same question of every transaction the store flags
+// Conflicting, from concurrent decorate batches. It must ask it once for the
+// whole set after every batch has decorated, not once per transaction inside
+// each batch, and a genuine conflict must still surface as tx-invalid through its
+// wrapping. Unlike the cached path, a transaction whose counter-spenders cannot
+// be derived is still a retryable failure there, as it was before.
+func Test_processTxMetaUsingStore_batchedConflictCheck(t *testing.T) {
+	const chainLength = 60
+
+	ctx := context.Background()
+
+	newFixture := func(t *testing.T, counterOpts ...utxo.CreateOption) (*readCountingUtxoStore, *Server, []chainhash.Hash) {
+		tSettings := test.CreateBaseTestSettings(t)
+		// several concurrent decorate batches, each seeing conflicting txs
+		tSettings.BlockValidation.ProcessTxMetaUsingStoreBatchSize = 8
+		tSettings.BlockValidation.ProcessTxMetaUsingStoreConcurrency = 4
+
+		store := newSQLUtxoStore(t, ctx, tSettings)
+		_, chain := buildConflictingChain(t, ctx, store, chainLength, counterOpts...)
+
+		countingStore := &readCountingUtxoStore{Store: store}
+
+		return countingStore, &Server{logger: ulogger.NewErrorTestLogger(t), settings: tSettings, utxoStore: countingStore}, chain
+	}
+
+	run := func(s *Server, txHashes []chainhash.Hash) error {
+		_, err := s.processTxMetaUsingStore(ctx, txHashes, make([]metaSliceItem, len(txHashes)), map[uint32]bool{77: true}, true, false, true)
+		return err
+	}
+
+	t.Run("one batched check", func(t *testing.T) {
+		countingStore, s, chain := newFixture(t)
+
+		require.NoError(t, run(s, chain))
+
+		// c = 6: one decorate read per tx, the batched check's four (see the
+		// cached-path scaling test), and one of headroom. The per-transaction
+		// check needed ~N^2/2.
+		reads := countingStore.reads.Load()
+		t.Logf("%d store reads for a %d-transaction conflicting chain", reads, chainLength)
+		require.LessOrEqual(t, reads, int64(6*chainLength))
+	})
+
+	t.Run("a genuine conflict is tx-invalid", func(t *testing.T) {
+		_, s, chain := newFixture(t, utxo.WithMinedBlockInfo(utxo.MinedBlockInfo{BlockID: 77, BlockHeight: 100}))
+
+		require.ErrorIs(t, run(s, chain), errors.ErrTxInvalid)
+	})
+
+	t.Run("an underivable tx is still a retryable failure", func(t *testing.T) {
+		countingStore, s, chain := newFixture(t)
+
+		// chain[1]'s parent, chain[0], is gone; chain[0] is not asked about
+		require.NoError(t, countingStore.Delete(ctx, &chain[0]))
+
+		err := run(s, chain[1:])
+		require.ErrorIs(t, err, errors.ErrTxNotFound)
+		require.NotErrorIs(t, err, errors.ErrTxInvalid)
+	})
+}

@@ -319,3 +319,40 @@ func (u *Server) firstMinedOnChain(ctx context.Context, members map[chainhash.Ha
 
 	return mined, nil
 }
+
+// conflictingTxCollector gathers the conflicting transactions that concurrent
+// processTxMetaUsingStore batches decorate, so they can be checked in one batch.
+type conflictingTxCollector struct {
+	mu     sync.Mutex
+	hashes []chainhash.Hash
+}
+
+func (c *conflictingTxCollector) add(hash chainhash.Hash) {
+	c.mu.Lock()
+	c.hashes = append(c.hashes, hash)
+	c.mu.Unlock()
+}
+
+// checkCollectedConflictingTxs runs checkCounterConflictingOnCurrentChainBatch
+// over everything collected, and nothing when nothing was. Unlike the cached
+// path, a transaction whose counter-spenders cannot be derived fails the check
+// here, retryably, as the per-transaction check did on this path: the record was
+// decorated moments ago, so a missing record is a transient gap, not a pruned
+// trailer entry.
+func (u *Server) checkCollectedConflictingTxs(ctx context.Context, conflicting *conflictingTxCollector, blockIds map[uint32]bool) error {
+	if len(conflicting.hashes) == 0 {
+		return nil
+	}
+
+	notFound, err := u.checkCounterConflictingOnCurrentChainBatch(ctx, conflicting.hashes, blockIds)
+	if err != nil {
+		return errors.NewProcessingError("[processTxMetaUsingStore] failed to check %d counter conflicting tx(s) on current chain", len(conflicting.hashes), err)
+	}
+
+	if len(notFound) > 0 {
+		return errors.NewProcessingError("[processTxMetaUsingStore] failed to check %d counter conflicting tx(s) on current chain", len(conflicting.hashes),
+			errors.NewTxNotFoundError("[processTxMetaUsingStore][%s] tx or parent record not found, %d tx(s) affected", notFound[0].String(), len(notFound)))
+	}
+
+	return nil
+}
