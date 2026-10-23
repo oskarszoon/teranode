@@ -550,7 +550,22 @@ Upgrading from v0.16.0 changes nothing for them; upgrading from an earlier relea
   path, a counter-conflicting record missing from the store no longer skips that
   transaction's whole check: the record counts as not mined and the rest is still
   checked. On the fresh path, a missing record deep in a cone is no longer a retryable
-  error: it is treated the same way. (bsv-blockchain/teranode#2037)
+  error: it is treated the same way.
+
+  The conflicting-walk histograms change meaning on these two paths:
+  `teranode_utxo_conflicting_walk_nodes`, `teranode_utxo_conflicting_walk_depth` and
+  `teranode_utxo_conflicting_walk_duration`.
+  - Before: one sample per per-transaction walk, usually two per conflicting transaction
+    (its counter-spender's walk and its own).
+  - Now: one sample per block-level batch, covering every root. For the same block the
+    sample count drops, and each sample's nodes, depth and duration rise.
+  - A batch sample's nodes can legitimately exceed `utxostore_conflictingChildrenMaxNodes`,
+    up to that budget times the batch's roots. An alert on walk size near the setting
+    reads differently after upgrading.
+  - Blessing a single missing transaction, and conflict processing, still record one
+    sample per walk, so the histograms now mix both kinds.
+
+  (bsv-blockchain/teranode#2037)
 
 ### Not breaking, but worth knowing
 
