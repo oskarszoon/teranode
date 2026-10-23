@@ -100,6 +100,10 @@ func (u *Server) checkCounterConflictingOnCurrentChainBatch(ctx context.Context,
 		return nil, errors.NewProcessingError("[checkCounterConflictingOnCurrentChainBatch] failed to walk the counter-spenders of %d transaction(s)", len(txs), err)
 	}
 
+	// The per-transaction check compares some positions against
+	// CoinbasePlaceholderHashValue and others against FrozenBytesTxHash. go-subtree
+	// defines both as the same all-0xFF hash, so one comparison per cone covers
+	// every position; Test_frozenSentinelsAreOneValue pins that.
 	for _, childHash := range counterCone {
 		if childHash.Equal(subtreepkg.FrozenBytesTxHash) {
 			return nil, errors.NewProcessingError("[checkCounterConflictingOnCurrentChainBatch] a counter-conflicting tx has frozen child")

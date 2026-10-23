@@ -684,3 +684,12 @@ func Test_processTxMetaUsingStore_batchedConflictCheck(t *testing.T) {
 		require.NotErrorIs(t, err, errors.ErrTxInvalid)
 	})
 }
+
+// The per-transaction check tests a frozen output against
+// CoinbasePlaceholderHashValue in some positions and FrozenBytesTxHash in others;
+// the batch uses one of them per position. That is parity only while go-subtree
+// defines both as the same hash. If they ever diverge, this fails, and both
+// checks have to be revisited position by position.
+func Test_frozenSentinelsAreOneValue(t *testing.T) {
+	require.Equal(t, subtreepkg.CoinbasePlaceholderHashValue, subtreepkg.FrozenBytesTxHash)
+}
