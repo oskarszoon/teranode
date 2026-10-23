@@ -532,6 +532,23 @@ Upgrading from v0.16.0 changes nothing for them; upgrading from an earlier relea
   shape. The same collapse on the HTTP blob store's own client and server is fixed
   too; no shipped configuration uses that store. (#1963)
 
+- **`utxostore_conflictingChildrenMaxNodes` now bounds a whole block's conflict check,
+  not each transaction's walk.** Subtree validation used to check a block's conflicting
+  transactions one at a time, re-walking the cones they share. A long conflicting chain
+  cost about N²/2 store reads, so a 1,788-transaction chain took about five hours. That
+  is far past the 30-minute `subtreevalidation_check_block_subtrees_timeout`, and since
+  each retry started again from zero, the node wedged. `CheckBlockSubtrees` on cached
+  subtrees, and the batched store lookup of fresh subtrees, now walk all of a block's
+  conflicting transactions once on a shared visited set. The node budget (default
+  100000) applies to that one walk. A block whose conflicting cones together exceed
+  the budget now fails closed with `ERR_UTXO_WALK_LIMIT_EXCEEDED` and is retried, where
+  before every per-transaction walk fit. Raise the setting if a node logs that error
+  for a legitimate block; `<=0` disables the budget. Two smaller changes come with it.
+  On the cached path, a counter-conflicting record missing from the store no longer
+  skips that transaction's whole check: the record counts as not mined and the rest
+  is still checked. On the fresh path, a missing record deep in a cone is no longer
+  a retryable error: it is treated the same way. (bsv-blockchain/teranode#2037)
+
 ### Not breaking, but worth knowing
 
 - **Mining candidates no longer build on the old tip during a reorg.** While block

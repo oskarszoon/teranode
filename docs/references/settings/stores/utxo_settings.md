@@ -44,6 +44,7 @@
 | MaxMinedBatchSize | int | 1024 | utxostore_maxMinedBatchSize | Max mined transaction batch size |
 | BlockHeightRetentionAdjustment | int32 | 0 | utxostore_blockHeightRetentionAdjustment | **CRITICAL** - Retention adjustment |
 | DisableDAHCleaner | bool | false | utxostore_disableDAHCleaner | **CRITICAL** - DAH cleaner process control |
+| ConflictingChildrenMaxNodes | int | 100000 | utxostore_conflictingChildrenMaxNodes | Fail-closed node budget for a conflicting-descendant walk; subtree validation walks a block's conflicting transactions as one batch, so the budget covers the union of their cones (<=0 = unlimited) |
 
 ### PostgreSQL Connection Pool (PostgresPool)
 
