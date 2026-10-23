@@ -86,8 +86,10 @@ func spendAndCreate(t *testing.T, ctx context.Context, store utxo.Store, tx *bt.
 // buildConflictingChain stores the issue 2037 shape: counter is the recorded
 // spender of the parentTx1 output that tx1 also spends, and tx1 heads a linear
 // chain of n conflicting transactions, each a conflicting child of the one before.
-// The chain is returned head first.
-func buildConflictingChain(t *testing.T, ctx context.Context, store utxo.Store, n int, counterOpts ...utxo.CreateOption) (*bt.Tx, []chainhash.Hash) {
+// With recordedSpenders, each chain member after tx1 is also the recorded spender
+// of the output it spends, so it is its own counter-spender. The chain is returned
+// head first.
+func buildConflictingChain(t *testing.T, ctx context.Context, store utxo.Store, n int, recordedSpenders bool, counterOpts ...utxo.CreateOption) (*bt.Tx, []chainhash.Hash) {
 	t.Helper()
 
 	_, _, err := store.SpendAndCreate(ctx, parentTx1, 122, utxo.WithCreateOnly())
@@ -105,6 +107,12 @@ func buildConflictingChain(t *testing.T, ctx context.Context, store utxo.Store, 
 
 	for len(chain) < n {
 		child := spendingChild(t, prev, 0)
+
+		if recordedSpenders {
+			_, _, err = store.SpendAndCreate(ctx, child, 123, utxo.WithSpendOnly(), utxo.WithIgnoreConflicting(true))
+			require.NoError(t, err)
+		}
+
 		createConflicting(t, ctx, store, child)
 		chain = append(chain, *child.TxIDChainHash())
 		prev = child
@@ -169,31 +177,42 @@ func newCachedCheckServer(t *testing.T, store utxo.Store, tSettings *settings.Se
 // chain, so store reads grow as N^2/2 (a 1,788-transaction chain took about five
 // hours). Checked as one batch, each record is read a constant number of times.
 //
-// The bound is c = 5 reads per conflicting transaction. For this shape the
+// Both chain shapes are covered: members linked only as conflicting children
+// (their parent records no spender), and members that are also their parent's
+// recorded spender, so each is its own counter-spender and its cone is walked as
+// a counter-spender cone.
+//
+// The bound is c = 6 reads per conflicting transaction. For these shapes the
 // batched check needs four: its own inpoints and its parent's spenders (phase 1),
 // one read as a member of the walk (phase 2), and one GetMeta as a member of the
-// counter-conflicting union (phase 3). The fifth leaves room for the reads that
-// discover which cached transactions are conflicting.
+// counter-conflicting union (phase 3). One more is for the reads that discover
+// which cached transactions are conflicting, when those come from the store
+// rather than the subtree trailer, and one is headroom.
 func Test_checkCachedSubtreesAgainstCandidateChain_scaling(t *testing.T) {
 	const chainLength = 200
 
-	ctx := context.Background()
-	tSettings := test.CreateBaseTestSettings(t)
+	for _, recordedSpenders := range []bool{false, true} {
+		t.Run(map[bool]string{false: "conflicting children", true: "recorded spenders"}[recordedSpenders], func(t *testing.T) {
+			ctx := context.Background()
+			tSettings := test.CreateBaseTestSettings(t)
+			tSettings.UtxoStore.SpendBatcherDurationMillis = 1
 
-	store := newSQLUtxoStore(t, ctx, tSettings)
-	_, chain := buildConflictingChain(t, ctx, store, chainLength)
+			store := newSQLUtxoStore(t, ctx, tSettings)
+			_, chain := buildConflictingChain(t, ctx, store, chainLength, recordedSpenders)
 
-	countingStore := &readCountingUtxoStore{Store: store}
-	s, block, cachedSubtrees := newCachedCheckServer(t, countingStore, tSettings, chain, []uint32{77})
+			countingStore := &readCountingUtxoStore{Store: store}
+			s, block, cachedSubtrees := newCachedCheckServer(t, countingStore, tSettings, chain, []uint32{77})
 
-	require.NoError(t, s.checkCachedSubtreesAgainstCandidateChain(ctx, block, cachedSubtrees))
+			require.NoError(t, s.checkCachedSubtreesAgainstCandidateChain(ctx, block, cachedSubtrees))
 
-	reads := countingStore.reads.Load()
-	t.Logf("%d store reads for a %d-transaction conflicting chain", reads, chainLength)
+			reads := countingStore.reads.Load()
+			t.Logf("%d store reads for a %d-transaction conflicting chain", reads, chainLength)
 
-	require.LessOrEqualf(t, reads, int64(5*chainLength),
-		"the cached-subtree conflict check must read a conflicting chain O(N) times, got %d reads for N=%d (O(N^2) is the per-transaction re-walk of issue 2037)",
-		reads, chainLength)
+			require.LessOrEqualf(t, reads, int64(6*chainLength),
+				"the cached-subtree conflict check must read a conflicting chain O(N) times, got %d reads for N=%d (O(N^2) is the per-transaction re-walk of issue 2037)",
+				reads, chainLength)
+		})
+	}
 }
 
 // verdict is the class of a conflict-check outcome: what block validation acts on.
@@ -306,9 +325,9 @@ func Test_checkCounterConflictingOnCurrentChainBatch_equivalence(t *testing.T) {
 		for i := 0; i < txsPerSeed; i++ {
 			isConflicting := rng.IntN(2) == 0
 
-			pool := unspent
+			pool, fromSpent := unspent, false
 			if isConflicting && len(spent) > 0 && rng.IntN(10) < 6 {
-				pool = spent
+				pool, fromSpent = spent, true
 			}
 
 			if len(pool) == 0 {
@@ -341,14 +360,25 @@ func Test_checkCounterConflictingOnCurrentChainBatch_equivalence(t *testing.T) {
 				opts = append(opts, utxo.WithMinedBlockInfo(utxo.MinedBlockInfo{BlockID: offChainBlock, BlockHeight: 100}))
 			}
 
+			// a conflicting tx over unspent outputs is sometimes also their
+			// recorded spender, which makes it its own counter-spender
+			recordsSpend := !isConflicting || !fromSpent && rng.IntN(2) == 0
+
 			if isConflicting {
+				if recordsSpend {
+					_, _, err := store.SpendAndCreate(ctx, tx, 123, utxo.WithSpendOnly(), utxo.WithIgnoreConflicting(true))
+					require.NoError(t, err)
+				}
+
 				_, _, err := store.SpendAndCreate(ctx, tx, 123, append(opts, utxo.WithConflicting(true), utxo.WithCreateOnly())...)
 				require.NoError(t, err)
 
 				conflicting = append(conflicting, *tx.TxIDChainHash())
 			} else {
 				spendAndCreate(t, ctx, store, tx, opts...)
+			}
 
+			if recordsSpend {
 				for idx := range picked {
 					spent = append(spent, pool[idx])
 				}
@@ -425,7 +455,7 @@ func Test_checkCounterConflictingOnCurrentChainBatch_budgetCoversUnion(t *testin
 	tSettings.UtxoStore.ConflictingChildrenMaxNodes = chainLength
 
 	store := newSQLUtxoStore(t, ctx, tSettings)
-	_, chain := buildConflictingChain(t, ctx, store, chainLength)
+	_, chain := buildConflictingChain(t, ctx, store, chainLength, false)
 
 	s, block, cachedSubtrees := newCachedCheckServer(t, store, tSettings, chain, []uint32{77})
 
@@ -450,7 +480,7 @@ func Test_checkCounterConflictingOnCurrentChainBatch_notFoundDropped(t *testing.
 
 	newFixture := func(t *testing.T, counterOpts ...utxo.CreateOption) (utxo.Store, []chainhash.Hash) {
 		store := newSQLUtxoStore(t, ctx, tSettings)
-		_, chain := buildConflictingChain(t, ctx, store, 3, counterOpts...)
+		_, chain := buildConflictingChain(t, ctx, store, 3, false, counterOpts...)
 
 		// a conflicting tx whose parent the store no longer holds
 		orphanParent := buildTx(t, []outpoint{{tx: parentTx1, vout: 0}}, 1, 9001)
@@ -498,7 +528,7 @@ func Test_checkCounterConflictingOnCurrentChainBatch_missingMemberMidCone(t *tes
 	tSettings := test.CreateBaseTestSettings(t)
 
 	store := newSQLUtxoStore(t, ctx, tSettings)
-	counter, chain := buildConflictingChain(t, ctx, store, 3, utxo.WithMinedBlockInfo(utxo.MinedBlockInfo{BlockID: 77, BlockHeight: 100}))
+	counter, chain := buildConflictingChain(t, ctx, store, 3, false, utxo.WithMinedBlockInfo(utxo.MinedBlockInfo{BlockID: 77, BlockHeight: 100}))
 
 	// the counter-spender's child, a member of the counter-conflicting cone, is gone
 	counterChild := spendingChild(t, counter, 0)
@@ -571,7 +601,7 @@ func Test_checkCounterConflictingOnCurrentChainBatch_frozen(t *testing.T) {
 
 	t.Run("frozen deep in counter cone", func(t *testing.T) {
 		store := newSQLUtxoStore(t, ctx, tSettings)
-		counter, chain := buildConflictingChain(t, ctx, store, 3)
+		counter, chain := buildConflictingChain(t, ctx, store, 3, false)
 
 		counterChild := spendingChild(t, counter, 0)
 		spendAndCreate(t, ctx, store, counterChild)
@@ -582,7 +612,7 @@ func Test_checkCounterConflictingOnCurrentChainBatch_frozen(t *testing.T) {
 
 	t.Run("frozen in own cone", func(t *testing.T) {
 		store := newSQLUtxoStore(t, ctx, tSettings)
-		_, chain := buildConflictingChain(t, ctx, store, 3)
+		_, chain := buildConflictingChain(t, ctx, store, 3, false)
 
 		// the chain tip's output is unspent; freezing it puts the sentinel in
 		// every chain member's own cone and in no counter-spender's
@@ -612,7 +642,7 @@ func Test_processTxMetaUsingStore_batchedConflictCheck(t *testing.T) {
 		tSettings.BlockValidation.ProcessTxMetaUsingStoreConcurrency = 4
 
 		store := newSQLUtxoStore(t, ctx, tSettings)
-		_, chain := buildConflictingChain(t, ctx, store, chainLength, counterOpts...)
+		_, chain := buildConflictingChain(t, ctx, store, chainLength, false, counterOpts...)
 
 		countingStore := &readCountingUtxoStore{Store: store}
 
