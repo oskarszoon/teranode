@@ -443,30 +443,111 @@ func Test_checkCounterConflictingOnCurrentChainBatch_equivalence(t *testing.T) {
 	}
 }
 
-// The walk budget covers the union of every cone in the batch. Each
-// per-transaction walk of this chain fits the budget; the batch's one walk visits
-// the counter-spender plus every chain member, one more than the budget, and must
-// fail closed with the retryable walk-limit error rather than pass or reject.
-func Test_checkCounterConflictingOnCurrentChainBatch_budgetCoversUnion(t *testing.T) {
-	const chainLength = 10
+// buildIndependentConflicts stores n unrelated double spends. Each has its own
+// parent, the parent's recorded spender (the counter-spender) and a conflicting
+// tx over the same output; no cone has a descendant. It returns the conflicting
+// txs.
+func buildIndependentConflicts(t *testing.T, ctx context.Context, store utxo.Store, n int) []chainhash.Hash {
+	t.Helper()
 
-	ctx := context.Background()
-	tSettings := test.CreateBaseTestSettings(t)
-	tSettings.UtxoStore.ConflictingChildrenMaxNodes = chainLength
+	conflicting := make([]chainhash.Hash, 0, n)
 
-	store := newSQLUtxoStore(t, ctx, tSettings)
-	_, chain := buildConflictingChain(t, ctx, store, chainLength, false)
+	for i := 0; i < n; i++ {
+		salt := uint32(50_000 + 10*i)
 
-	s, block, cachedSubtrees := newCachedCheckServer(t, store, tSettings, chain, []uint32{77})
+		funding := bt.NewTx()
+		require.NoError(t, funding.AddP2PKHOutputFromScript(parentTx1.Outputs[0].LockingScript, 1_000_000))
+		funding.LockTime = salt
 
-	for _, txHash := range chain {
-		require.NoError(t, s.checkCounterConflictingOnCurrentChain(ctx, txHash, map[uint32]bool{77: true}),
-			"each per-transaction walk fits the budget on its own")
+		parent := buildTx(t, []outpoint{{tx: funding, vout: 0}}, 1, salt+1)
+		_, _, err := store.SpendAndCreate(ctx, parent, 122, utxo.WithCreateOnly())
+		require.NoError(t, err)
+
+		spendAndCreate(t, ctx, store, buildTx(t, []outpoint{{tx: parent, vout: 0}}, 1, salt+2))
+
+		tx := buildTx(t, []outpoint{{tx: parent, vout: 0}}, 1, salt+3)
+		createConflicting(t, ctx, store, tx)
+		conflicting = append(conflicting, *tx.TxIDChainHash())
 	}
 
-	err := s.checkCachedSubtreesAgainstCandidateChain(ctx, block, cachedSubtrees)
-	require.ErrorIs(t, err, errors.ErrUtxoWalkLimitExceeded)
-	require.NotErrorIs(t, err, errors.ErrTxInvalid)
+	return conflicting
+}
+
+// The walk budget is utxostore_conflictingChildrenMaxNodes times the number of
+// roots the batch walks (its conflicting txs and their counter-spenders). That is
+// the old aggregate bound: N per-transaction walks of at most maxNodes each. A
+// block of many small, unrelated conflicts must pass wherever every per-tx walk
+// did, however many there are; a single cone too big for the old budget must
+// still fail closed.
+func Test_checkCounterConflictingOnCurrentChainBatch_budgetScalesWithRoots(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("many independent conflicts with empty cones pass", func(t *testing.T) {
+		const conflicts = 20
+
+		tSettings := test.CreateBaseTestSettings(t)
+		tSettings.UtxoStore.SpendBatcherDurationMillis = 1
+		tSettings.UtxoStore.ConflictingChildrenMaxNodes = 3
+
+		store := newSQLUtxoStore(t, ctx, tSettings)
+		conflicting := buildIndependentConflicts(t, ctx, store, conflicts)
+
+		s, block, cachedSubtrees := newCachedCheckServer(t, store, tSettings, conflicting, []uint32{77})
+
+		for _, txHash := range conflicting {
+			require.NoError(t, s.checkCounterConflictingOnCurrentChain(ctx, txHash, map[uint32]bool{77: true}),
+				"each per-transaction walk fits the budget")
+		}
+
+		// 2*conflicts nodes in all, far past maxNodes, but within maxNodes per root
+		require.NoError(t, s.checkCachedSubtreesAgainstCandidateChain(ctx, block, cachedSubtrees))
+	})
+
+	t.Run("a chain passes where every per-tx walk does", func(t *testing.T) {
+		const chainLength = 10
+
+		tSettings := test.CreateBaseTestSettings(t)
+		tSettings.UtxoStore.ConflictingChildrenMaxNodes = chainLength
+
+		store := newSQLUtxoStore(t, ctx, tSettings)
+		_, chain := buildConflictingChain(t, ctx, store, chainLength, false)
+
+		s, block, cachedSubtrees := newCachedCheckServer(t, store, tSettings, chain, []uint32{77})
+
+		for _, txHash := range chain {
+			require.NoError(t, s.checkCounterConflictingOnCurrentChain(ctx, txHash, map[uint32]bool{77: true}))
+		}
+
+		require.NoError(t, s.checkCachedSubtreesAgainstCandidateChain(ctx, block, cachedSubtrees))
+	})
+
+	t.Run("one oversized cone still fails closed", func(t *testing.T) {
+		const coneLength = 10
+
+		tSettings := test.CreateBaseTestSettings(t)
+		tSettings.UtxoStore.ConflictingChildrenMaxNodes = 5
+
+		store := newSQLUtxoStore(t, ctx, tSettings)
+		counter, chain := buildConflictingChain(t, ctx, store, 1, false)
+
+		// two roots (tx1 and its counter-spender), so a budget of 10, against a
+		// counter-spender cone of 10 more
+		prev := counter
+		for i := 0; i < coneLength; i++ {
+			child := spendingChild(t, prev, 0)
+			spendAndCreate(t, ctx, store, child)
+			prev = child
+		}
+
+		s, block, cachedSubtrees := newCachedCheckServer(t, store, tSettings, chain, []uint32{77})
+
+		require.ErrorIs(t, s.checkCounterConflictingOnCurrentChain(ctx, chain[0], map[uint32]bool{77: true}), errors.ErrUtxoWalkLimitExceeded,
+			"the per-transaction walk exceeds the budget too")
+
+		err := s.checkCachedSubtreesAgainstCandidateChain(ctx, block, cachedSubtrees)
+		require.ErrorIs(t, err, errors.ErrUtxoWalkLimitExceeded)
+		require.NotErrorIs(t, err, errors.ErrTxInvalid)
+	})
 }
 
 // A trailer can name a transaction whose record, or whose parent's record, has
@@ -692,4 +773,40 @@ func Test_processTxMetaUsingStore_batchedConflictCheck(t *testing.T) {
 // checks have to be revisited position by position.
 func Test_frozenSentinelsAreOneValue(t *testing.T) {
 	require.Equal(t, subtreepkg.CoinbasePlaceholderHashValue, subtreepkg.FrozenBytesTxHash)
+}
+
+// The verdict names what condemned the block. A mined direct counter-spender is
+// named with the conflicting tx it was spent against, so an operator can see
+// which cached entry led to the rejection. A mined tx deeper in a counter-spender
+// cone is named alone: the walk does not record which root reached it.
+func Test_checkCounterConflictingOnCurrentChainBatch_namesTheConflict(t *testing.T) {
+	ctx := context.Background()
+	tSettings := test.CreateBaseTestSettings(t)
+	mined := utxo.WithMinedBlockInfo(utxo.MinedBlockInfo{BlockID: 77, BlockHeight: 100})
+
+	t.Run("direct counter-spender", func(t *testing.T) {
+		store := newSQLUtxoStore(t, ctx, tSettings)
+		counter, chain := buildConflictingChain(t, ctx, store, 1, false, mined)
+		s, block, cachedSubtrees := newCachedCheckServer(t, store, tSettings, chain, []uint32{77})
+
+		err := s.checkCachedSubtreesAgainstCandidateChain(ctx, block, cachedSubtrees)
+		require.ErrorIs(t, err, errors.ErrTxInvalid)
+		require.Contains(t, err.Error(), chain[0].String())
+		require.Contains(t, err.Error(), counter.TxIDChainHash().String())
+	})
+
+	t.Run("deep in a counter-spender cone", func(t *testing.T) {
+		store := newSQLUtxoStore(t, ctx, tSettings)
+		counter, chain := buildConflictingChain(t, ctx, store, 1, false)
+
+		counterChild := spendingChild(t, counter, 0)
+		spendAndCreate(t, ctx, store, counterChild, mined)
+
+		s, block, cachedSubtrees := newCachedCheckServer(t, store, tSettings, chain, []uint32{77})
+
+		err := s.checkCachedSubtreesAgainstCandidateChain(ctx, block, cachedSubtrees)
+		require.ErrorIs(t, err, errors.ErrTxInvalid)
+		require.Contains(t, err.Error(), counterChild.TxIDChainHash().String())
+		require.NotContains(t, err.Error(), chain[0].String())
+	})
 }

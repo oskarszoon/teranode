@@ -2,6 +2,7 @@ package subtreevalidation
 
 import (
 	"context"
+	"slices"
 	"sync"
 
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
@@ -43,11 +44,11 @@ const counterConflictingBatchFanOut = 128
 //     read, and its counter-spenders derived exactly as
 //     utxo.GetCounterConflictingTxHashes derives them, including the out-of-range
 //     input error and the frozen sentinel.
-//  2. One walk. utxo.GetConflictingChildrenFromRoots runs twice on one visited
-//     set: first from every counter-spender, which yields the union of the
-//     counter-spender cones, then from the transactions themselves, which yields
-//     the union of their own cones less what the first pass already saw. A frozen
-//     sentinel in either union is a processing error.
+//  2. One walk. utxo.GetConflictingChildrenFromRoots walks two passes on one
+//     visited set: first from every counter-spender, which yields the union of
+//     the counter-spender cones, then from the transactions themselves, which
+//     yields the union of their own cones less what the first pass already saw. A
+//     frozen sentinel in either union is a processing error.
 //  3. Mined check. The counter-conflicting union — the transactions, their
 //     counter-spenders and the counter-spender cones — is read with GetMeta and
 //     checked against blockIds. Own-cone members are frozen-checked only, as in
@@ -55,9 +56,13 @@ const counterConflictingBatchFanOut = 128
 //
 // # BUDGET
 //
-// utxostore_conflictingChildrenMaxNodes bounds the whole phase 2 walk — every
-// transaction visited across both passes — not each cone, since there is now one
-// walk. Exceeding it fails closed with ERR_UTXO_WALK_LIMIT_EXCEEDED.
+// utxostore_conflictingChildrenMaxNodes is a per-root budget, as it was for each
+// per-transaction walk. The phase 2 walk may visit it times the number of
+// distinct roots (transactions and counter-spenders): the aggregate bound of the
+// per-transaction walks, so any block whose every per-transaction walk fit still
+// passes, however many conflicting transactions it carries. Exceeding it fails
+// closed with ERR_UTXO_WALK_LIMIT_EXCEEDED. The price is that a single runaway
+// cone is stopped only after that many reads, not after maxNodes.
 //
 // # MISSING RECORDS
 //
@@ -83,7 +88,7 @@ func (u *Server) checkCounterConflictingOnCurrentChainBatch(ctx context.Context,
 	ctx, _, deferFn := tracing.Tracer("subtreevalidation").Start(ctx, "checkCounterConflictingOnCurrentChainBatch")
 	defer deferFn()
 
-	txs, notFound, counterSpenders, err := u.counterSpendersBatch(ctx, txHashes)
+	txs, notFound, counterSpenders, spentAgainst, err := u.counterSpendersBatch(ctx, txHashes)
 	if err != nil {
 		return nil, err
 	}
@@ -92,13 +97,12 @@ func (u *Server) checkCounterConflictingOnCurrentChainBatch(ctx context.Context,
 		return notFound, nil
 	}
 
-	maxNodes := u.settings.UtxoStore.ConflictingChildrenMaxNodes
-	visited := make(map[chainhash.Hash]struct{}, len(txs)+len(counterSpenders))
-
-	counterCone, err := utxo.GetConflictingChildrenFromRoots(ctx, u.utxoStore, counterSpenders, visited, maxNodes)
+	cones, err := utxo.GetConflictingChildrenFromRoots(ctx, u.utxoStore, [][]chainhash.Hash{counterSpenders, txs}, u.settings.UtxoStore.ConflictingChildrenMaxNodes)
 	if err != nil {
-		return nil, errors.NewProcessingError("[checkCounterConflictingOnCurrentChainBatch] failed to walk the counter-spenders of %d transaction(s)", len(txs), err)
+		return nil, errors.NewProcessingError("[checkCounterConflictingOnCurrentChainBatch] failed to walk the cones of %d transaction(s) and %d counter-spender(s)", len(txs), len(counterSpenders), err)
 	}
+
+	counterCone, ownCone := cones[0], cones[1]
 
 	// The per-transaction check compares some positions against
 	// CoinbasePlaceholderHashValue and others against FrozenBytesTxHash. go-subtree
@@ -108,11 +112,6 @@ func (u *Server) checkCounterConflictingOnCurrentChainBatch(ctx context.Context,
 		if childHash.Equal(subtreepkg.FrozenBytesTxHash) {
 			return nil, errors.NewProcessingError("[checkCounterConflictingOnCurrentChainBatch] a counter-conflicting tx has frozen child")
 		}
-	}
-
-	ownCone, err := utxo.GetConflictingChildrenFromRoots(ctx, u.utxoStore, txs, visited, maxNodes)
-	if err != nil {
-		return nil, errors.NewProcessingError("[checkCounterConflictingOnCurrentChainBatch] failed to walk the child transactions of %d transaction(s)", len(txs), err)
 	}
 
 	for _, childHash := range ownCone {
@@ -138,6 +137,18 @@ func (u *Server) checkCounterConflictingOnCurrentChainBatch(ctx context.Context,
 	}
 
 	if minedHash != nil {
+		// Name the conflicting tx that condemns the block where that is cheap: the
+		// mined tx is one of the conflicting txs, or the direct counter-spender of
+		// one. A tx found deeper in a counter-spender's cone is named alone; the
+		// walk does not record which root reached each node.
+		if slices.Contains(txs, *minedHash) {
+			return nil, errors.NewTxInvalidError("[checkCounterConflictingOnCurrentChainBatch][%s] conflicting transaction is already mined on our chain", minedHash.String())
+		}
+
+		if conflictingTx, ok := spentAgainst[*minedHash]; ok {
+			return nil, errors.NewTxInvalidError("[checkCounterConflictingOnCurrentChainBatch][%s] counter-conflicting transaction %s is already mined on our chain", conflictingTx.String(), minedHash.String())
+		}
+
 		return nil, errors.NewTxInvalidError("[checkCounterConflictingOnCurrentChainBatch][%s] counter-conflicting transaction is already mined on our chain", minedHash.String())
 	}
 
@@ -148,7 +159,9 @@ func (u *Server) checkCounterConflictingOnCurrentChainBatch(ctx context.Context,
 // It returns the deduplicated transactions whose records and parent records were
 // all found, those that were not, and the unique counter-spenders of the found
 // ones, each derived as utxo.GetCounterConflictingTxHashes derives them.
-func (u *Server) counterSpendersBatch(ctx context.Context, txHashes []chainhash.Hash) (txs, notFound, counterSpenders []chainhash.Hash, err error) {
+// spentAgainst maps each counter-spender to the first transaction, in txHashes
+// order, that it is a counter-spender of.
+func (u *Server) counterSpendersBatch(ctx context.Context, txHashes []chainhash.Hash) (txs, notFound, counterSpenders []chainhash.Hash, spentAgainst map[chainhash.Hash]chainhash.Hash, err error) {
 	unique := make([]chainhash.Hash, 0, len(txHashes))
 	seen := make(map[chainhash.Hash]struct{}, len(txHashes))
 
@@ -163,7 +176,7 @@ func (u *Server) counterSpendersBatch(ctx context.Context, txHashes []chainhash.
 	// whole transaction (see GetCounterConflictingTxHashes).
 	txMetas, err := u.getBatch(ctx, unique, fields.TxInpoints)
 	if err != nil {
-		return nil, nil, nil, errors.NewProcessingError("[checkCounterConflictingOnCurrentChainBatch] failed to get the inpoints of %d transaction(s)", len(unique), err)
+		return nil, nil, nil, nil, errors.NewProcessingError("[checkCounterConflictingOnCurrentChainBatch] failed to get the inpoints of %d transaction(s)", len(unique), err)
 	}
 
 	parentIdx := make(map[chainhash.Hash]int)
@@ -184,10 +197,10 @@ func (u *Server) counterSpendersBatch(ctx context.Context, txHashes []chainhash.
 
 	parentMetas, err := u.getBatch(ctx, parents, fields.Utxos)
 	if err != nil {
-		return nil, nil, nil, errors.NewProcessingError("[checkCounterConflictingOnCurrentChainBatch] failed to get the spenders of %d parent transaction(s)", len(parents), err)
+		return nil, nil, nil, nil, errors.NewProcessingError("[checkCounterConflictingOnCurrentChainBatch] failed to get the spenders of %d parent transaction(s)", len(parents), err)
 	}
 
-	seenSpenders := make(map[chainhash.Hash]struct{})
+	spentAgainst = make(map[chainhash.Hash]chainhash.Hash)
 
 	for i, txHash := range unique {
 		txMeta := txMetas[i]
@@ -217,7 +230,7 @@ func (u *Server) counterSpendersBatch(ctx context.Context, txHashes []chainhash.
 
 			// check the length of the spending txs, if it's less than the index, then the input is not spent
 			if len(spendingDatas) <= int(inpoint.Index) {
-				return nil, nil, nil, errors.NewProcessingError("[checkCounterConflictingOnCurrentChainBatch][%s] cannot process counter conflicting, input %d of %s is out of range (len: %d)", txHash.String(), inpoint.Index, inpoint.Hash.String(), len(spendingDatas))
+				return nil, nil, nil, nil, errors.NewProcessingError("[checkCounterConflictingOnCurrentChainBatch][%s] cannot process counter conflicting, input %d of %s is out of range (len: %d)", txHash.String(), inpoint.Index, inpoint.Hash.String(), len(spendingDatas))
 			}
 
 			spendingData := spendingDatas[inpoint.Index]
@@ -227,11 +240,11 @@ func (u *Server) counterSpendersBatch(ctx context.Context, txHashes []chainhash.
 
 			// if a transaction is frozen, the counter-transaction will be the same as the coinbase placeholder
 			if spendingData.TxID.Equal(subtreepkg.CoinbasePlaceholderHashValue) {
-				return nil, nil, nil, errors.NewProcessingError("[checkCounterConflictingOnCurrentChainBatch][%s] counter conflicting tx is frozen", txHash.String())
+				return nil, nil, nil, nil, errors.NewProcessingError("[checkCounterConflictingOnCurrentChainBatch][%s] counter conflicting tx is frozen", txHash.String())
 			}
 
-			if _, ok := seenSpenders[*spendingData.TxID]; !ok {
-				seenSpenders[*spendingData.TxID] = struct{}{}
+			if _, ok := spentAgainst[*spendingData.TxID]; !ok {
+				spentAgainst[*spendingData.TxID] = txHash
 				counterSpenders = append(counterSpenders, *spendingData.TxID)
 			}
 		}
@@ -239,7 +252,7 @@ func (u *Server) counterSpendersBatch(ctx context.Context, txHashes []chainhash.
 		txs = append(txs, txHash)
 	}
 
-	return txs, notFound, counterSpenders, nil
+	return txs, notFound, counterSpenders, spentAgainst, nil
 }
 
 // getBatch reads hashes concurrently, index-aligned. A record the store does not
