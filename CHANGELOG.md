@@ -546,11 +546,11 @@ Upgrading from v0.16.0 changes nothing for them; upgrading from an earlier relea
   passes. Two costs change. In the worst case, the visited set can hold N times the
   setting in memory, where each walk used to peak at the setting. A single runaway cone
   now fails closed with `ERR_UTXO_WALK_LIMIT_EXCEEDED` after N times the setting in
-  reads, rather than after the setting. Two smaller changes come with it. On the cached
-  path, a counter-conflicting record missing from the store no longer skips that
-  transaction's whole check: the record counts as not mined and the rest is still
-  checked. On the fresh path, a missing record deep in a cone is no longer a retryable
-  error: it is treated the same way.
+  reads, rather than after the setting. One smaller change comes with it, on the cached
+  path only. A counter-conflicting record missing from the store no longer skips that
+  transaction's whole check: the record counts as not mined, and the rest is still
+  checked. The fresh path is unchanged: a missing record still fails the check with a
+  retryable `TX_NOT_FOUND`, as blessing a missing transaction does.
 
   The conflicting-walk histograms change meaning on these two paths:
   `teranode_utxo_conflicting_walk_nodes`, `teranode_utxo_conflicting_walk_depth` and
