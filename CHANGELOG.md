@@ -699,17 +699,21 @@ Upgrading from v0.16.0 changes nothing for them; upgrading from an earlier relea
   (bsv-blockchain/teranode#2037)
 
 - **A proven conflict now rejects a block even when part of the conflict check
-  failed.** Affects `CheckBlockSubtrees`, on cached and fresh subtrees alike. When
-  a block's conflicting transactions are checked against the candidate chain, a
-  transaction that is provably invalid used to lose to any retryable failure
-  elsewhere in the same check: a pruned parent record, a store fault, the
-  `utxostore_conflictingChildrenMaxNodes` walk limit, or a frozen output. The
-  block was retried forever and never rejected. Now, if any counter-conflicting
-  transaction that was read is mined on the candidate chain, the block is marked
-  invalid (`TX_INVALID`) whatever else failed; the retryable error is returned
-  only when nothing is proven. A block that used to retry indefinitely on such a
-  failure may now be marked invalid on the first attempt. Nothing to configure.
-  (bsv-blockchain/teranode#2052)
+  failed.** Affects `CheckBlockSubtrees`: cached subtrees, fresh subtrees, and
+  missing transactions it fetches and blesses, alike. When a block's conflicting
+  transactions are checked against the candidate chain, a transaction that is
+  provably invalid used to lose to any retryable failure elsewhere in the same
+  check: a pruned parent record, a store fault, the
+  `utxostore_conflictingChildrenMaxNodes` walk limit, a frozen output, or another
+  input of the same transaction that could not be checked. On the fresh path the
+  verdict was also returned as a context cancellation, so block validation retried
+  it even when nothing else failed. Either way the block was retried, never
+  rejected, and the announcing peer was not scored for it. Now, if any
+  counter-conflicting transaction that was read is mined on the candidate chain,
+  the block is rejected with `TX_INVALID` whatever else failed, and scored as any
+  invalid transaction is; the retryable error is returned only when nothing is
+  proven. A block that used to retry indefinitely may now be rejected on the first
+  attempt. Nothing to configure. (bsv-blockchain/teranode#2052)
 
 ### Not breaking, but worth knowing
 
