@@ -34,7 +34,7 @@ func TestGetConflictingChildrenFromRoots_SharesVisitedAcrossRoots(t *testing.T) 
 	mockStore.On("Get", mock.Anything, &tip, mock.Anything).
 		Return(&meta.Data{}, nil).Once()
 
-	children, err := GetConflictingChildrenFromRoots(context.Background(), mockStore, [][]chainhash.Hash{{rootA, rootB}}, 0)
+	children, _, err := GetConflictingChildrenFromRoots(context.Background(), mockStore, [][]chainhash.Hash{{rootA, rootB}}, 0)
 	require.NoError(t, err)
 	require.Len(t, children, 1)
 
@@ -62,7 +62,7 @@ func TestGetConflictingChildrenFromRoots_PassesShareVisited(t *testing.T) {
 	mockStore.On("Get", mock.Anything, &childA, mock.Anything).Return(&meta.Data{}, nil).Once()
 	mockStore.On("Get", mock.Anything, &childB, mock.Anything).Return(&meta.Data{}, nil).Once()
 
-	children, err := GetConflictingChildrenFromRoots(context.Background(), mockStore, [][]chainhash.Hash{{rootA}, {rootA, rootB}}, 0)
+	children, _, err := GetConflictingChildrenFromRoots(context.Background(), mockStore, [][]chainhash.Hash{{rootA}, {rootA, rootB}}, 0)
 	require.NoError(t, err)
 	require.Equal(t, [][]chainhash.Hash{{childA}, {childB}}, children)
 
@@ -101,24 +101,24 @@ func TestGetConflictingChildrenFromRoots_BudgetScalesWithRoots(t *testing.T) {
 
 	t.Run("many small cones pass", func(t *testing.T) {
 		// 4 nodes, past maxNodes but within 2 roots x 2
-		_, err := GetConflictingChildrenFromRoots(context.Background(), newStore(false), [][]chainhash.Hash{{rootA, rootB}}, 2)
+		_, _, err := GetConflictingChildrenFromRoots(context.Background(), newStore(false), [][]chainhash.Hash{{rootA, rootB}}, 2)
 		require.NoError(t, err)
 	})
 
 	t.Run("a root in several passes counts once", func(t *testing.T) {
-		_, err := GetConflictingChildrenFromRoots(context.Background(), newStore(false), [][]chainhash.Hash{{rootA}, {rootA, rootB}}, 2)
+		_, _, err := GetConflictingChildrenFromRoots(context.Background(), newStore(false), [][]chainhash.Hash{{rootA}, {rootA, rootB}}, 2)
 		require.NoError(t, err)
 	})
 
 	t.Run("one oversized cone fails closed", func(t *testing.T) {
 		// rootA -> childA -> grandchildA is 3 nodes against 1 root x 2
-		_, err := GetConflictingChildrenFromRoots(context.Background(), newStore(true), [][]chainhash.Hash{{rootA}}, 2)
+		_, _, err := GetConflictingChildrenFromRoots(context.Background(), newStore(true), [][]chainhash.Hash{{rootA}}, 2)
 		require.ErrorIs(t, err, errors.ErrUtxoWalkLimitExceeded)
 		require.NotErrorIs(t, err, errors.ErrTxInvalid)
 	})
 
 	t.Run("no bound at zero", func(t *testing.T) {
-		_, err := GetConflictingChildrenFromRoots(context.Background(), newStore(true), [][]chainhash.Hash{{rootA}}, 0)
+		_, _, err := GetConflictingChildrenFromRoots(context.Background(), newStore(true), [][]chainhash.Hash{{rootA}}, 0)
 		require.NoError(t, err)
 	})
 }
@@ -146,9 +146,10 @@ func TestGetConflictingChildrenFromRoots_MissingRecordIsLeaf(t *testing.T) {
 	mockStore.On("Get", mock.Anything, &grandchild, mock.Anything).
 		Return(&meta.Data{}, nil)
 
-	children, err := GetConflictingChildrenFromRoots(context.Background(), mockStore, [][]chainhash.Hash{{root}}, 0)
+	children, missing, err := GetConflictingChildrenFromRoots(context.Background(), mockStore, [][]chainhash.Hash{{root}}, 0)
 	require.NoError(t, err)
 	require.ElementsMatch(t, []chainhash.Hash{goneErr, goneNil, sibling, grandchild}, children[0])
+	require.ElementsMatch(t, []chainhash.Hash{goneErr, goneNil}, missing, "the leaves the store does not hold are reported")
 
 	t.Run("any other read error aborts", func(t *testing.T) {
 		failing := &MockUtxostore{}
@@ -157,7 +158,7 @@ func TestGetConflictingChildrenFromRoots_MissingRecordIsLeaf(t *testing.T) {
 		failing.On("Get", mock.Anything, &sibling, mock.Anything).
 			Return(nil, errors.NewStorageError("store down"))
 
-		_, err := GetConflictingChildrenFromRoots(context.Background(), failing, [][]chainhash.Hash{{root}}, 0)
+		_, _, err := GetConflictingChildrenFromRoots(context.Background(), failing, [][]chainhash.Hash{{root}}, 0)
 		require.ErrorIs(t, err, errors.ErrStorageError)
 	})
 }
@@ -171,7 +172,7 @@ func TestGetConflictingChildrenFromRoots_FrozenSentinel(t *testing.T) {
 	mockStore.On("Get", mock.Anything, &root, mock.Anything).
 		Return(&meta.Data{SpendingDatas: []*spend.SpendingData{{TxID: &subtree.FrozenBytesTxHash}}}, nil)
 
-	children, err := GetConflictingChildrenFromRoots(context.Background(), mockStore,
+	children, _, err := GetConflictingChildrenFromRoots(context.Background(), mockStore,
 		[][]chainhash.Hash{{subtree.CoinbasePlaceholderHashValue, root}}, 0)
 	require.NoError(t, err)
 	require.Equal(t, [][]chainhash.Hash{{subtree.FrozenBytesTxHash}}, children)
@@ -202,7 +203,7 @@ func TestGetConflictingChildrenFromRoots_ObservesOnceForTheWholeWalk(t *testing.
 	depthBefore, depthSumBefore := histogramSample(t, prometheusUtxoConflictingWalkDepth)
 	durationBefore, _ := histogramSample(t, prometheusUtxoConflictingWalkDuration)
 
-	_, err := GetConflictingChildrenFromRoots(context.Background(), mockStore, [][]chainhash.Hash{{rootA}, {rootB}}, 0)
+	_, _, err := GetConflictingChildrenFromRoots(context.Background(), mockStore, [][]chainhash.Hash{{rootA}, {rootB}}, 0)
 	require.NoError(t, err)
 
 	nodesAfter, nodesSumAfter := histogramSample(t, prometheusUtxoConflictingWalkNodes)

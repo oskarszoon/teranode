@@ -267,28 +267,170 @@ func buildTx(t *testing.T, inputs []outpoint, nOutputs int, salt uint32) *bt.Tx 
 	return tx
 }
 
-// Test_checkCounterConflictingOnCurrentChainBatch_equivalence pins the batched
-// check to the per-transaction check it replaces. Each seed builds a random graph
-// in a real SQL store: recorded spenders and conflicting txs over shared outputs,
-// so conflicting txs have counter-spenders, counter-spender cones, own cones
-// through both spends and conflicting children, and members of one tx's sets in
-// another's. Some txs are mined on the candidate chain, some on another chain,
-// and some outputs are frozen. Every record is present and the walk is unbounded.
-//
-// The reference is checkCounterConflictingOnCurrentChain run on every conflicting
-// tx, reduced the way the batch defines its verdict: any processing error wins,
-// then any tx-invalid, else pass. Where the per-transaction results do not mix
-// classes, that is also exactly what the cached path's loop returned; where they
-// do mix, the loop's answer depended on trailer order.
-func Test_checkCounterConflictingOnCurrentChainBatch_equivalence(t *testing.T) {
-	const (
-		seeds          = 60
-		txsPerSeed     = 20
-		onChainBlockID = uint32(77)
-		offChainBlock  = uint32(99)
-	)
+const (
+	equivalenceOnChainBlockID  = uint32(77)
+	equivalenceOffChainBlockID = uint32(99)
+)
 
-	seen := map[verdict]int{}
+// buildRandomConflictGraph stores one seed's random graph: recorded spenders and
+// conflicting txs over shared outputs, so conflicting txs have counter-spenders,
+// counter-spender cones, own cones through both spends and conflicting children,
+// and members of one tx's sets in another's. Some conflicting txs are also the
+// recorded spender of their inputs. Some txs are mined on the candidate chain,
+// some on another chain, and at most one output is frozen. It returns the
+// conflicting txs and every tx it stored.
+func buildRandomConflictGraph(t *testing.T, ctx context.Context, store utxo.Store, tSettings *settings.Settings, rng *rand.Rand, seed uint64) (conflicting []chainhash.Hash, stored []*bt.Tx) {
+	t.Helper()
+
+	const txsPerSeed = 20
+
+	var unspent, spent []outpoint
+
+	for r := 0; r < 3; r++ {
+		fake := bt.NewTx()
+		require.NoError(t, fake.AddP2PKHOutputFromScript(parentTx1.Outputs[0].LockingScript, 1_000_000_000))
+		fake.LockTime = uint32(seed)*1000 + uint32(r)
+
+		root := buildTx(t, []outpoint{{tx: fake, vout: 0}}, 3, uint32(seed)*1000+uint32(r))
+		_, _, err := store.SpendAndCreate(ctx, root, 122, utxo.WithCreateOnly())
+		require.NoError(t, err)
+
+		stored = append(stored, root)
+
+		for v := range root.Outputs {
+			unspent = append(unspent, outpoint{tx: root, vout: uint32(v)})
+		}
+	}
+
+	for i := 0; i < txsPerSeed; i++ {
+		isConflicting := rng.IntN(2) == 0
+
+		pool, fromSpent := unspent, false
+		if isConflicting && len(spent) > 0 && rng.IntN(10) < 6 {
+			pool, fromSpent = spent, true
+		}
+
+		if len(pool) == 0 {
+			continue
+		}
+
+		nIn := 1 + rng.IntN(2)
+		picked := map[int]struct{}{}
+
+		var inputs []outpoint
+
+		for len(inputs) < nIn && len(picked) < len(pool) {
+			idx := rng.IntN(len(pool))
+			if _, ok := picked[idx]; ok {
+				continue
+			}
+
+			picked[idx] = struct{}{}
+			inputs = append(inputs, pool[idx])
+		}
+
+		tx := buildTx(t, inputs, 1+rng.IntN(3), uint32(seed)*1000+100+uint32(i))
+
+		var opts []utxo.CreateOption
+
+		switch roll := rng.IntN(40); {
+		case roll < 3:
+			opts = append(opts, utxo.WithMinedBlockInfo(utxo.MinedBlockInfo{BlockID: equivalenceOnChainBlockID, BlockHeight: 100}))
+		case roll < 6:
+			opts = append(opts, utxo.WithMinedBlockInfo(utxo.MinedBlockInfo{BlockID: equivalenceOffChainBlockID, BlockHeight: 100}))
+		}
+
+		// a conflicting tx over unspent outputs is sometimes also their
+		// recorded spender, which makes it its own counter-spender
+		recordsSpend := !isConflicting || !fromSpent && rng.IntN(2) == 0
+
+		if isConflicting {
+			if recordsSpend {
+				_, _, err := store.SpendAndCreate(ctx, tx, 123, utxo.WithSpendOnly(), utxo.WithIgnoreConflicting(true))
+				require.NoError(t, err)
+			}
+
+			_, _, err := store.SpendAndCreate(ctx, tx, 123, append(opts, utxo.WithConflicting(true), utxo.WithCreateOnly())...)
+			require.NoError(t, err)
+
+			conflicting = append(conflicting, *tx.TxIDChainHash())
+		} else {
+			spendAndCreate(t, ctx, store, tx, opts...)
+		}
+
+		stored = append(stored, tx)
+
+		if recordsSpend {
+			for idx := range picked {
+				spent = append(spent, pool[idx])
+			}
+
+			remaining := unspent[:0:0]
+
+			for idx, out := range unspent {
+				if _, ok := picked[idx]; !ok {
+					remaining = append(remaining, out)
+				}
+			}
+
+			unspent = remaining
+		}
+
+		for v := range tx.Outputs {
+			unspent = append(unspent, outpoint{tx: tx, vout: uint32(v)})
+		}
+	}
+
+	// at most one frozen output: the graph is dense enough that a frozen output
+	// anywhere tends to reach most cones
+	if len(unspent) > 0 && rng.IntN(3) == 0 {
+		out := unspent[rng.IntN(len(unspent))]
+		freezeOutput(t, ctx, store, out.tx, out.vout, tSettings)
+	}
+
+	return conflicting, stored
+}
+
+// perTxVerdict is the reference: checkCounterConflictingOnCurrentChain run on
+// every conflicting tx, reduced the way the batch defines its verdict: any
+// processing error wins, then any tx-invalid, else pass. Where the
+// per-transaction results do not mix classes, that is also exactly what a loop
+// returned; where they do mix, a loop's answer depended on its order. It also
+// reports whether any per-tx check failed on a missing record.
+func perTxVerdict(t *testing.T, ctx context.Context, s *Server, conflicting []chainhash.Hash, blockIds map[uint32]bool) (want verdict, sawNotFound bool) {
+	t.Helper()
+
+	want = verdictPass
+
+	for _, txHash := range conflicting {
+		err := s.checkCounterConflictingOnCurrentChain(ctx, txHash, blockIds)
+		sawNotFound = sawNotFound || errors.Is(err, errors.ErrTxNotFound)
+
+		switch verdictOf(err) {
+		case verdictProcessing:
+			want = verdictProcessing
+		case verdictTxInvalid:
+			if want == verdictPass {
+				want = verdictTxInvalid
+			}
+		}
+	}
+
+	return want, sawNotFound
+}
+
+// Test_checkCounterConflictingOnCurrentChainBatch_equivalence pins the batched
+// check to the per-transaction check it replaces, over seeded random graphs (see
+// buildRandomConflictGraph), with the walk unbounded.
+//
+//   - Cached path, every record present: the batched verdict through
+//     checkCachedSubtreesAgainstCandidateChain equals the per-tx reference.
+//   - Fresh path's failOnMissingRecords policy, with some records deleted: the
+//     batched verdict equals the per-tx reference, in which a missing record is a
+//     retryable ErrTxNotFound, so a gap anywhere either path looks yields the same
+//     class.
+func Test_checkCounterConflictingOnCurrentChainBatch_equivalence(t *testing.T) {
+	const seeds = 60
 
 	tSettings := test.CreateBaseTestSettings(t)
 	tSettings.UtxoStore.ConflictingChildrenMaxNodes = 0
@@ -298,149 +440,81 @@ func Test_checkCounterConflictingOnCurrentChainBatch_equivalence(t *testing.T) {
 	tSettings.UtxoStore.StoreBatcherDurationMillis = 1
 	tSettings.UtxoStore.GetBatcherDurationMillis = 1
 
-	for seed := uint64(1); seed <= seeds; seed++ {
-		ctx := context.Background()
-		rng := rand.New(rand.NewPCG(seed, 2037))
+	blockIds := map[uint32]bool{equivalenceOnChainBlockID: true}
 
-		store := newSQLUtxoStore(t, ctx, tSettings)
+	t.Run("cached path, every record present", func(t *testing.T) {
+		seen := map[verdict]int{}
 
-		var unspent, spent []outpoint
+		for seed := uint64(1); seed <= seeds; seed++ {
+			ctx := context.Background()
+			store := newSQLUtxoStore(t, ctx, tSettings)
 
-		for r := 0; r < 3; r++ {
-			fake := bt.NewTx()
-			require.NoError(t, fake.AddP2PKHOutputFromScript(parentTx1.Outputs[0].LockingScript, 1_000_000_000))
-			fake.LockTime = uint32(seed)*1000 + uint32(r)
-
-			root := buildTx(t, []outpoint{{tx: fake, vout: 0}}, 3, uint32(seed)*1000+uint32(r))
-			_, _, err := store.SpendAndCreate(ctx, root, 122, utxo.WithCreateOnly())
-			require.NoError(t, err)
-
-			for v := range root.Outputs {
-				unspent = append(unspent, outpoint{tx: root, vout: uint32(v)})
-			}
-		}
-
-		var conflicting []chainhash.Hash
-
-		for i := 0; i < txsPerSeed; i++ {
-			isConflicting := rng.IntN(2) == 0
-
-			pool, fromSpent := unspent, false
-			if isConflicting && len(spent) > 0 && rng.IntN(10) < 6 {
-				pool, fromSpent = spent, true
-			}
-
-			if len(pool) == 0 {
+			conflicting, _ := buildRandomConflictGraph(t, ctx, store, tSettings, rand.New(rand.NewPCG(seed, 2037)), seed)
+			if len(conflicting) == 0 {
 				continue
 			}
 
-			nIn := 1 + rng.IntN(2)
-			picked := map[int]struct{}{}
+			s, block, cachedSubtrees := newCachedCheckServer(t, store, tSettings, conflicting, []uint32{equivalenceOnChainBlockID})
 
-			var inputs []outpoint
+			want, sawNotFound := perTxVerdict(t, ctx, s, conflicting, blockIds)
+			require.Falsef(t, sawNotFound, "seed %d: every record is present", seed)
 
-			for len(inputs) < nIn && len(picked) < len(pool) {
-				idx := rng.IntN(len(pool))
-				if _, ok := picked[idx]; ok {
-					continue
-				}
+			got := verdictOf(s.checkCachedSubtreesAgainstCandidateChain(ctx, block, cachedSubtrees))
+			require.Equalf(t, want, got, "seed %d: batched verdict differs from the per-transaction check", seed)
 
-				picked[idx] = struct{}{}
-				inputs = append(inputs, pool[idx])
-			}
-
-			tx := buildTx(t, inputs, 1+rng.IntN(3), uint32(seed)*1000+100+uint32(i))
-
-			var opts []utxo.CreateOption
-
-			switch roll := rng.IntN(40); {
-			case roll < 3:
-				opts = append(opts, utxo.WithMinedBlockInfo(utxo.MinedBlockInfo{BlockID: onChainBlockID, BlockHeight: 100}))
-			case roll < 6:
-				opts = append(opts, utxo.WithMinedBlockInfo(utxo.MinedBlockInfo{BlockID: offChainBlock, BlockHeight: 100}))
-			}
-
-			// a conflicting tx over unspent outputs is sometimes also their
-			// recorded spender, which makes it its own counter-spender
-			recordsSpend := !isConflicting || !fromSpent && rng.IntN(2) == 0
-
-			if isConflicting {
-				if recordsSpend {
-					_, _, err := store.SpendAndCreate(ctx, tx, 123, utxo.WithSpendOnly(), utxo.WithIgnoreConflicting(true))
-					require.NoError(t, err)
-				}
-
-				_, _, err := store.SpendAndCreate(ctx, tx, 123, append(opts, utxo.WithConflicting(true), utxo.WithCreateOnly())...)
-				require.NoError(t, err)
-
-				conflicting = append(conflicting, *tx.TxIDChainHash())
-			} else {
-				spendAndCreate(t, ctx, store, tx, opts...)
-			}
-
-			if recordsSpend {
-				for idx := range picked {
-					spent = append(spent, pool[idx])
-				}
-
-				remaining := unspent[:0:0]
-
-				for idx, out := range unspent {
-					if _, ok := picked[idx]; !ok {
-						remaining = append(remaining, out)
-					}
-				}
-
-				unspent = remaining
-			}
-
-			for v := range tx.Outputs {
-				unspent = append(unspent, outpoint{tx: tx, vout: uint32(v)})
-			}
+			seen[want]++
 		}
 
-		// at most one frozen output: the graph is dense enough that a frozen
-		// output anywhere tends to reach most cones
-		if len(unspent) > 0 && rng.IntN(3) == 0 {
-			out := unspent[rng.IntN(len(unspent))]
-			freezeOutput(t, ctx, store, out.tx, out.vout, tSettings)
+		t.Logf("verdicts over %d seeds: %v", seeds, seen)
+
+		// the generator must exercise every verdict, or the comparison proves little
+		for _, v := range []verdict{verdictPass, verdictTxInvalid, verdictProcessing} {
+			require.Positivef(t, seen[v], "no seed produced verdict %q; retune the generator", v)
 		}
+	})
 
-		if len(conflicting) == 0 {
-			continue
-		}
+	t.Run("fresh-path policy, some records missing", func(t *testing.T) {
+		seen := map[verdict]int{}
+		notFoundSeeds := 0
 
-		s, block, cachedSubtrees := newCachedCheckServer(t, store, tSettings, conflicting, []uint32{onChainBlockID})
-		blockIds := map[uint32]bool{onChainBlockID: true}
+		for seed := uint64(1); seed <= seeds; seed++ {
+			ctx := context.Background()
+			rng := rand.New(rand.NewPCG(seed, 2038))
+			store := newSQLUtxoStore(t, ctx, tSettings)
 
-		want := verdictPass
-
-		for _, txHash := range conflicting {
-			err := s.checkCounterConflictingOnCurrentChain(ctx, txHash, blockIds)
-			require.NotErrorIs(t, err, errors.ErrTxNotFound, "seed %d: every record is present", seed)
-
-			switch verdictOf(err) {
-			case verdictProcessing:
-				want = verdictProcessing
-			case verdictTxInvalid:
-				if want == verdictPass {
-					want = verdictTxInvalid
-				}
+			conflicting, stored := buildRandomConflictGraph(t, ctx, store, tSettings, rng, seed)
+			if len(conflicting) == 0 {
+				continue
 			}
+
+			// prune at most one record, anywhere: a conflicting tx, a parent, a
+			// counter-spender or a cone member. The graph is dense enough that more
+			// reaches nearly every check.
+			if rng.IntN(2) == 0 {
+				require.NoError(t, store.Delete(ctx, stored[rng.IntN(len(stored))].TxIDChainHash()))
+			}
+
+			s := &Server{logger: ulogger.NewErrorTestLogger(t), settings: tSettings, utxoStore: store}
+
+			want, sawNotFound := perTxVerdict(t, ctx, s, conflicting, blockIds)
+			if sawNotFound {
+				notFoundSeeds++
+			}
+
+			_, err := s.checkCounterConflictingOnCurrentChainBatch(ctx, conflicting, blockIds, failOnMissingRecords)
+			require.Equalf(t, want, verdictOf(err), "seed %d: batched verdict differs from the per-transaction check (batch: %v)", seed, err)
+
+			seen[want]++
 		}
 
-		got := verdictOf(s.checkCachedSubtreesAgainstCandidateChain(ctx, block, cachedSubtrees))
-		require.Equalf(t, want, got, "seed %d: batched verdict differs from the per-transaction check", seed)
+		t.Logf("verdicts over %d seeds: %v, %d with a per-tx ErrTxNotFound", seeds, seen, notFoundSeeds)
 
-		seen[want]++
-	}
+		require.Positive(t, notFoundSeeds, "no seed pruned a record the check reads; retune the generator")
 
-	t.Logf("verdicts over %d seeds: %v", seeds, seen)
-
-	// the generator must exercise every verdict, or the comparison proves little
-	for _, v := range []verdict{verdictPass, verdictTxInvalid, verdictProcessing} {
-		require.Positivef(t, seen[v], "no seed produced verdict %q; retune the generator", v)
-	}
+		for _, v := range []verdict{verdictPass, verdictTxInvalid, verdictProcessing} {
+			require.Positivef(t, seen[v], "no seed produced verdict %q; retune the generator", v)
+		}
+	})
 }
 
 // buildIndependentConflicts stores n unrelated double spends. Each has its own
@@ -582,7 +656,7 @@ func Test_checkCounterConflictingOnCurrentChainBatch_notFoundDropped(t *testing.
 		store, conflictingTxs := newFixture(t)
 		s, block, cachedSubtrees := newCachedCheckServer(t, store, tSettings, conflictingTxs, []uint32{77})
 
-		notFound, err := s.checkCounterConflictingOnCurrentChainBatch(ctx, conflictingTxs, map[uint32]bool{77: true})
+		notFound, err := s.checkCounterConflictingOnCurrentChainBatch(ctx, conflictingTxs, map[uint32]bool{77: true}, skipMissingRecords)
 		require.NoError(t, err)
 		require.ElementsMatch(t, conflictingTxs[:2], notFound)
 

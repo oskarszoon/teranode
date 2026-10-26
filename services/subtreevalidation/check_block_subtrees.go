@@ -871,7 +871,7 @@ func (u *Server) checkCachedSubtreesAgainstCandidateChain(ctx context.Context, b
 	// ErrTxInvalid only for a genuine ancestry conflict, and errors.Is finds
 	// it through the chain. A walk-budget or store failure stays retryable
 	// instead of permanently marking the block invalid.
-	notFound, err := u.checkCounterConflictingOnCurrentChainBatch(ctx, conflictingTxHashes, blockIds)
+	notFound, err := u.checkCounterConflictingOnCurrentChainBatch(ctx, conflictingTxHashes, blockIds, skipMissingRecords)
 	if err != nil {
 		return errors.NewProcessingError("[CheckBlockSubtrees][%s] cached subtree conflicts with the candidate chain", block.Hash().String(), err)
 	}

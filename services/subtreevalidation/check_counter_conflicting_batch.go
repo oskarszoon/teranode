@@ -15,6 +15,25 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// missingRecordPolicy is how checkCounterConflictingOnCurrentChainBatch treats a
+// record the store does not hold.
+type missingRecordPolicy int
+
+const (
+	// skipMissingRecords is the cached path's policy. A conflicting tx whose own
+	// or parent record is gone is dropped and returned in notFound; a cone member
+	// that is gone is a leaf of the walk and counts as not mined. A trailer can
+	// outlive the records it names, so a gap there is housekeeping, not evidence.
+	skipMissingRecords missingRecordPolicy = iota
+
+	// failOnMissingRecords is the fresh path's policy, and the per-transaction
+	// check's: any record the check needs and cannot read — a conflicting tx, a
+	// parent, a counter-spender, a cone member, a member's GetMeta — fails the
+	// check with a retryable ErrTxNotFound, so the verdict matches what
+	// blessMissingTransaction reaches for the same store state.
+	failOnMissingRecords
+)
+
 // counterConflictingBatchFanOut caps the concurrent store reads of each phase of
 // checkCounterConflictingOnCurrentChainBatch, matching the GetMeta errgroup of
 // checkCounterConflictingOnCurrentChain and the walk's own per-level ceiling.
@@ -66,17 +85,18 @@ const counterConflictingBatchFanOut = 128
 //
 // # MISSING RECORDS
 //
-// A transaction whose own record or a parent's record is not in the store cannot
-// have its counter-spenders derived. It is dropped from phases 2 and 3 and
-// returned in notFound for the caller to decide on, which is what the
-// per-transaction check's ErrTxNotFound let each caller do.
+// The policy is the caller's, per path:
 //
-// A record missing further out is handled differently, and more strictly than
-// the per-transaction check, which abandoned a transaction's whole check on any
-// missing member. A cone member the store does not hold is a leaf of the walk,
-// and a counter-conflicting member whose GetMeta is not found counts as not
-// mined; the rest of the union is still checked. A missing record says nothing
-// about the chain, but it no longer hides the records that are present.
+//   - failOnMissingRecords (the fresh path) is the per-transaction check's
+//     behaviour: any record the check needs and the store does not hold returns
+//     a retryable processing error wrapping ErrTxNotFound, before any mined
+//     verdict.
+//   - skipMissingRecords (the cached path) drops a transaction whose own or
+//     parent record is gone, returning it in notFound. A cone member that is gone
+//     is a leaf of the walk, and a member whose GetMeta is not found counts as not
+//     mined; the rest of the union is still checked. That is stricter than the
+//     per-transaction loop the cached path used to run, which skipped a
+//     transaction's whole check on any missing member.
 //
 // # VERDICT
 //
@@ -84,7 +104,7 @@ const counterConflictingBatchFanOut = 128
 // over ErrTxInvalid, and every member is checked before ErrTxInvalid is returned,
 // so the verdict does not depend on the order of txHashes or on read timing. The
 // per-transaction loop returned whichever error its order reached first.
-func (u *Server) checkCounterConflictingOnCurrentChainBatch(ctx context.Context, txHashes []chainhash.Hash, blockIds map[uint32]bool) (notFound []chainhash.Hash, err error) {
+func (u *Server) checkCounterConflictingOnCurrentChainBatch(ctx context.Context, txHashes []chainhash.Hash, blockIds map[uint32]bool, missingPolicy missingRecordPolicy) (notFound []chainhash.Hash, err error) {
 	ctx, _, deferFn := tracing.Tracer("subtreevalidation").Start(ctx, "checkCounterConflictingOnCurrentChainBatch")
 	defer deferFn()
 
@@ -93,11 +113,15 @@ func (u *Server) checkCounterConflictingOnCurrentChainBatch(ctx context.Context,
 		return nil, err
 	}
 
+	if len(notFound) > 0 && missingPolicy == failOnMissingRecords {
+		return nil, missingRecordsError("tx or parent record", notFound)
+	}
+
 	if len(txs) == 0 {
 		return notFound, nil
 	}
 
-	cones, err := utxo.GetConflictingChildrenFromRoots(ctx, u.utxoStore, [][]chainhash.Hash{counterSpenders, txs}, u.settings.UtxoStore.ConflictingChildrenMaxNodes)
+	cones, missing, err := utxo.GetConflictingChildrenFromRoots(ctx, u.utxoStore, [][]chainhash.Hash{counterSpenders, txs}, u.settings.UtxoStore.ConflictingChildrenMaxNodes)
 	if err != nil {
 		return nil, errors.NewProcessingError("[checkCounterConflictingOnCurrentChainBatch] failed to walk the cones of %d transaction(s) and %d counter-spender(s)", len(txs), len(counterSpenders), err)
 	}
@@ -120,6 +144,10 @@ func (u *Server) checkCounterConflictingOnCurrentChainBatch(ctx context.Context,
 		}
 	}
 
+	if len(missing) > 0 && missingPolicy == failOnMissingRecords {
+		return nil, missingRecordsError("walked record", missing)
+	}
+
 	counterConflicting := make(map[chainhash.Hash]struct{}, len(txs)+len(counterSpenders)+len(counterCone))
 	for _, hashes := range [][]chainhash.Hash{txs, counterSpenders, counterCone} {
 		for _, hash := range hashes {
@@ -131,7 +159,7 @@ func (u *Server) checkCounterConflictingOnCurrentChainBatch(ctx context.Context,
 		u.logger.Warnf("[checkCounterConflictingOnCurrentChainBatch] counter-conflicting set of %d transaction(s) is %d transactions", len(txs), len(counterConflicting))
 	}
 
-	minedHash, err := u.firstMinedOnChain(ctx, counterConflicting, blockIds)
+	minedHash, err := u.firstMinedOnChain(ctx, counterConflicting, blockIds, missingPolicy)
 	if err != nil {
 		return nil, err
 	}
@@ -255,6 +283,13 @@ func (u *Server) counterSpendersBatch(ctx context.Context, txHashes []chainhash.
 	return txs, notFound, counterSpenders, spentAgainst, nil
 }
 
+// missingRecordsError is the failOnMissingRecords verdict: a processing error, so
+// it is retried, wrapping ErrTxNotFound, as the per-transaction check returns it.
+func missingRecordsError(what string, hashes []chainhash.Hash) error {
+	return errors.NewProcessingError("[checkCounterConflictingOnCurrentChainBatch] cannot check counter-conflicting transactions",
+		errors.NewTxNotFoundError("[checkCounterConflictingOnCurrentChainBatch][%s] %s not found, %d record(s) missing", hashes[0].String(), what, len(hashes)))
+}
+
 // getBatch reads hashes concurrently, index-aligned. A record the store does not
 // hold — ErrTxNotFound, or a nil record as aerospike returns — is a nil entry;
 // any other read error fails the batch.
@@ -290,10 +325,11 @@ func (u *Server) getBatch(ctx context.Context, hashes []chainhash.Hash, f ...fie
 
 // firstMinedOnChain is phase 3 of checkCounterConflictingOnCurrentChainBatch. It
 // reads every member's block IDs and returns a member mined in a block of
-// blockIds, or nil. A member the store does not hold counts as not mined. Every
-// read completes before a mined member is reported, so a store fault anywhere is
+// blockIds, or nil. A member the store does not hold counts as not mined under
+// skipMissingRecords, and fails the check under failOnMissingRecords. Every read
+// completes before a mined member is reported, so a store fault anywhere is
 // returned in preference to it.
-func (u *Server) firstMinedOnChain(ctx context.Context, members map[chainhash.Hash]struct{}, blockIds map[uint32]bool) (*chainhash.Hash, error) {
+func (u *Server) firstMinedOnChain(ctx context.Context, members map[chainhash.Hash]struct{}, blockIds map[uint32]bool, missingPolicy missingRecordPolicy) (*chainhash.Hash, error) {
 	var (
 		mu    sync.Mutex
 		mined *chainhash.Hash
@@ -307,6 +343,10 @@ func (u *Server) firstMinedOnChain(ctx context.Context, members map[chainhash.Ha
 			memberMeta := &meta.Data{}
 			if err := u.utxoStore.GetMeta(gCtx, &member, memberMeta); err != nil {
 				if errors.Is(err, errors.ErrTxNotFound) {
+					if missingPolicy == failOnMissingRecords {
+						return missingRecordsError("counter-conflicting record", []chainhash.Hash{member})
+					}
+
 					return nil
 				}
 
@@ -338,38 +378,56 @@ func (u *Server) firstMinedOnChain(ctx context.Context, members map[chainhash.Ha
 }
 
 // conflictingTxCollector gathers the conflicting transactions that concurrent
-// processTxMetaUsingStore batches decorate, so they can be checked in one batch.
+// processTxMetaUsingStore batches decorate, with their txMetaSlice index, so they
+// can be checked in one batch once every batch is done.
 type conflictingTxCollector struct {
-	mu     sync.Mutex
-	hashes []chainhash.Hash
+	mu      sync.Mutex
+	hashes  []chainhash.Hash
+	indexes []int
 }
 
-func (c *conflictingTxCollector) add(hash chainhash.Hash) {
+// add records the conflicting tx at txMetaSlice[idx]. Safe for concurrent use.
+func (c *conflictingTxCollector) add(hash chainhash.Hash, idx int) {
 	c.mu.Lock()
 	c.hashes = append(c.hashes, hash)
+	c.indexes = append(c.indexes, idx)
 	c.mu.Unlock()
 }
 
-// checkCollectedConflictingTxs runs checkCounterConflictingOnCurrentChainBatch
-// over everything collected, and nothing when nothing was. Unlike the cached
-// path, a transaction whose counter-spenders cannot be derived fails the check
-// here, retryably, as the per-transaction check did on this path: the record was
-// decorated moments ago, so a missing record is a transient gap, not a pruned
-// trailer entry.
-func (u *Server) checkCollectedConflictingTxs(ctx context.Context, conflicting *conflictingTxCollector, blockIds map[uint32]bool) error {
-	if len(conflicting.hashes) == 0 {
-		return nil
+// settleCollectedConflictingTxs ends processTxMetaUsingStore: given the error its
+// decorate batches returned, it returns the error the call must return.
+//
+// It upholds one invariant: an entry processTxMetaUsingStore leaves set has
+// passed the counter-conflicting check. A set entry is never decorated again, so
+// a conflicting tx left set without a verdict would be accepted on the retry.
+//
+//   - What was collected is checked even when a batch failed, on ctx rather than
+//     the batches' cancelled group context. An ErrTxInvalid verdict is final and
+//     stronger than any batch failure (a fail-fast threshold, say), so it is
+//     returned in preference; any other check failure only replaces a nil.
+//   - On any error, every collected entry is cleared, so the retry decorates and
+//     checks it again.
+//
+// Missing records fail the check (failOnMissingRecords), as the per-transaction
+// check did on this path and as blessMissingTransaction does.
+func (u *Server) settleCollectedConflictingTxs(ctx context.Context, batchErr error, conflicting *conflictingTxCollector, txMetaSlice []metaSliceItem, blockIds map[uint32]bool) error {
+	err := batchErr
+
+	if len(conflicting.hashes) > 0 {
+		if _, checkErr := u.checkCounterConflictingOnCurrentChainBatch(ctx, conflicting.hashes, blockIds, failOnMissingRecords); checkErr != nil {
+			checkErr = errors.NewProcessingError("[processTxMetaUsingStore] failed to check %d counter conflicting tx(s) on current chain", len(conflicting.hashes), checkErr)
+
+			if err == nil || errors.Is(checkErr, errors.ErrTxInvalid) {
+				err = checkErr
+			}
+		}
 	}
 
-	notFound, err := u.checkCounterConflictingOnCurrentChainBatch(ctx, conflicting.hashes, blockIds)
 	if err != nil {
-		return errors.NewProcessingError("[processTxMetaUsingStore] failed to check %d counter conflicting tx(s) on current chain", len(conflicting.hashes), err)
+		for _, idx := range conflicting.indexes {
+			txMetaSlice[idx] = metaSliceItem{}
+		}
 	}
 
-	if len(notFound) > 0 {
-		return errors.NewProcessingError("[processTxMetaUsingStore] failed to check %d counter conflicting tx(s) on current chain", len(conflicting.hashes),
-			errors.NewTxNotFoundError("[processTxMetaUsingStore][%s] tx or parent record not found, %d tx(s) affected", notFound[0].String(), len(notFound)))
-	}
-
-	return nil
+	return err
 }
