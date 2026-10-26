@@ -567,6 +567,19 @@ Upgrading from v0.16.0 changes nothing for them; upgrading from an earlier relea
 
   (bsv-blockchain/teranode#2037)
 
+- **A proven conflict now rejects a block even when part of the conflict check
+  failed.** Affects `CheckBlockSubtrees`, on cached and fresh subtrees alike. When
+  a block's conflicting transactions are checked against the candidate chain, a
+  transaction that is provably invalid used to lose to any retryable failure
+  elsewhere in the same check: a pruned parent record, a store fault, the
+  `utxostore_conflictingChildrenMaxNodes` walk limit, or a frozen output. The
+  block was retried forever and never rejected. Now, if any counter-conflicting
+  transaction that was read is mined on the candidate chain, the block is marked
+  invalid (`TX_INVALID`) whatever else failed; the retryable error is returned
+  only when nothing is proven. A block that used to retry indefinitely on such a
+  failure may now be marked invalid on the first attempt. Nothing to configure.
+  (bsv-blockchain/teranode#PR)
+
 ### Not breaking, but worth knowing
 
 - **Mining candidates no longer build on the old tip during a reorg.** While block

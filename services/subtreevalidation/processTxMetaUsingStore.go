@@ -239,7 +239,8 @@ func (u *Server) processTxMetaUsingStore(ctx context.Context, txHashes []chainha
 	// Conflicting transactions are collected by whichever batch decorates them
 	// and checked against the chain once, after every batch is done (issue 2037).
 	// settleCollectedConflictingTxs checks them even when a batch failed, and
-	// clears them on any error, so no entry is left set without a verdict.
+	// clears them when the check fails, so no entry is left set without passing
+	// it.
 	var conflicting conflictingTxCollector
 
 	if batched {
