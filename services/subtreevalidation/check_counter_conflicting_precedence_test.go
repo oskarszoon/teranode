@@ -275,6 +275,41 @@ func Test_checkCounterConflictingOnCurrentChainBatch_perInputCounterSpenders(t *
 		requireTxInvalid(t, s, *conflicting.TxIDChainHash(), *counter.TxIDChainHash())
 	})
 
+	t.Run("a pruned parent of input 0 does not hide a mined counter-spender on input 1", func(t *testing.T) {
+		tSettings := test.CreateBaseTestSettings(t)
+		tSettings.UtxoStore.SpendBatcherDurationMillis = 1
+
+		store := newSQLUtxoStore(t, ctx, tSettings)
+
+		pruned := buildTx(t, []outpoint{{tx: parentTx1, vout: 0}}, 1, 9150)
+		_, _, err := store.SpendAndCreate(ctx, pruned, 122, utxo.WithCreateOnly())
+		require.NoError(t, err)
+
+		parent := buildTx(t, []outpoint{{tx: parentTx1, vout: 1}}, 1, 9151)
+		_, _, err = store.SpendAndCreate(ctx, parent, 122, utxo.WithCreateOnly())
+		require.NoError(t, err)
+
+		counter := buildTx(t, []outpoint{{tx: parent, vout: 0}}, 1, 9152)
+		spendAndCreate(t, ctx, store, counter, mined)
+
+		conflicting := buildTx(t, []outpoint{{tx: pruned, vout: 0}, {tx: parent, vout: 0}}, 1, 9153)
+		createConflicting(t, ctx, store, conflicting)
+		require.NoError(t, store.Delete(ctx, pruned.TxIDChainHash()))
+
+		s := &Server{logger: ulogger.NewErrorTestLogger(t), settings: tSettings, utxoStore: store}
+
+		// alone, the pruned parent is a missing record: skipped on the cached
+		// path, a retryable failure on the fresh path
+		notFound, err := s.checkCounterConflictingOnCurrentChainBatch(ctx, []chainhash.Hash{*conflicting.TxIDChainHash()}, map[uint32]bool{}, skipMissingRecords)
+		require.NoError(t, err)
+		require.Equal(t, []chainhash.Hash{*conflicting.TxIDChainHash()}, notFound)
+
+		_, err = s.checkCounterConflictingOnCurrentChainBatch(ctx, []chainhash.Hash{*conflicting.TxIDChainHash()}, map[uint32]bool{}, failOnMissingRecords)
+		require.ErrorIs(t, err, errors.ErrTxNotFound)
+
+		requireTxInvalid(t, s, *conflicting.TxIDChainHash(), *counter.TxIDChainHash())
+	})
+
 	t.Run("an out-of-range input 0 does not hide a mined counter-spender on input 1", func(t *testing.T) {
 		tSettings := test.CreateBaseTestSettings(t)
 		tSettings.UtxoStore.SpendBatcherDurationMillis = 1
