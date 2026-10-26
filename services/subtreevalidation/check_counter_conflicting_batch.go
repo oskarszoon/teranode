@@ -511,7 +511,8 @@ func (c *conflictingTxCollector) add(hash chainhash.Hash, idx int) {
 //   - What was collected is checked even when a batch failed, on ctx rather than
 //     the batches' cancelled group context. An ErrTxInvalid verdict is final and
 //     stronger than any batch failure (a fail-fast threshold, say), so it is
-//     returned in preference; any other check failure only replaces a nil.
+//     returned in preference, with TX_INVALID on top (provenConflict); any other
+//     check failure only replaces a nil.
 //   - The collected entries are cleared only when the check failed, so the retry
 //     decorates and checks them again. When it passed they have passed and stay
 //     set, even if a batch failed: a fail-fast retry then decorates and checks
@@ -533,11 +534,27 @@ func (u *Server) settleCollectedConflictingTxs(ctx context.Context, batchErr err
 		txMetaSlice[idx] = metaSliceItem{}
 	}
 
+	// A proven conflict keeps TX_INVALID on top, which is how
+	// processTxMetaUsingStore tells it from every other failure.
+	if provenConflict(checkErr) {
+		return errors.NewTxInvalidError("[processTxMetaUsingStore] %d counter conflicting tx(s) conflict with the current chain", len(conflicting.hashes), checkErr)
+	}
+
 	checkErr = errors.NewProcessingError("[processTxMetaUsingStore] failed to check %d counter conflicting tx(s) on current chain", len(conflicting.hashes), checkErr)
 
-	if batchErr == nil || errors.Is(checkErr, errors.ErrTxInvalid) {
+	if batchErr == nil {
 		return checkErr
 	}
 
 	return batchErr
+}
+
+// provenConflict reports whether err is a verdict that a conflict is proven:
+// TX_INVALID at the top of the error, as checkCounterConflictingOnCurrentChainBatch
+// and settleCollectedConflictingTxs return one. A TX_INVALID deeper in a chain,
+// under another code, is not.
+func provenConflict(err error) bool {
+	var verdict *errors.Error
+
+	return errors.As(err, &verdict) && verdict.Code() == errors.ERR_TX_INVALID
 }

@@ -2,6 +2,7 @@ package subtreevalidation
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"testing"
 
@@ -217,6 +218,7 @@ func Test_processTxMetaUsingStore_passedConflictCheckKeepsEntries(t *testing.T) 
 
 	_, err := s.processTxMetaUsingStore(ctx, txHashes, txMetaSlice, map[uint32]bool{77: true}, true, true, true)
 	require.ErrorIs(t, err, errors.ErrThresholdExceeded)
+	require.ErrorIs(t, err, errors.ErrContextCanceled, "the threshold stays retryable")
 	require.NotErrorIs(t, err, errors.ErrTxInvalid)
 
 	require.True(t, txMetaSlice[0].isSet, "the conflicting tx passed the check, so the retry need not decorate and check it again")
@@ -369,4 +371,66 @@ func Test_blessMissingTransaction_provenTxInvalidWins(t *testing.T) {
 	require.ErrorIs(t, err, errors.ErrTxInvalid)
 	require.ErrorContains(t, err, "[blessMissingTransaction]", "bless keeps its own wrapping")
 	require.ErrorContains(t, err, counter.TxIDChainHash().String(), "the mined counter-spender is named")
+}
+
+// processTxMetaUsingStore wraps every failure in CONTEXT_CANCELED, and block
+// validation retries what carries that code. A proven conflict is the one
+// exception: it is the block's verdict and leaves with TX_INVALID on top and no
+// CONTEXT_CANCELED in its chain, from both the batched and the unbatched branch.
+// Every other failure keeps the wrap, and a proven conflict keeps it too once ctx
+// is done. TestValidateBlock_ProvenConflictIsNotACancellation in blockvalidation
+// checks how the callers classify the result.
+func Test_processTxMetaUsingStore_provenConflictIsNotACancellation(t *testing.T) {
+	ctx := context.Background()
+	mined := utxo.WithMinedBlockInfo(utxo.MinedBlockInfo{BlockID: 77, BlockHeight: 100})
+	blockIds := map[uint32]bool{77: true}
+
+	for _, batched := range []bool{true, false} {
+		t.Run(fmt.Sprintf("batched=%t", batched), func(t *testing.T) {
+			tSettings := test.CreateBaseTestSettings(t)
+
+			store := newSQLUtxoStore(t, ctx, tSettings)
+			_, chain := buildConflictingChain(t, ctx, store, 1, false, mined)
+
+			orphanParent := buildTx(t, []outpoint{{tx: parentTx1, vout: 0}}, 1, 9301)
+			_, _, err := store.SpendAndCreate(ctx, orphanParent, 122, utxo.WithCreateOnly())
+			require.NoError(t, err)
+
+			orphan := spendingChild(t, orphanParent, 0)
+			createConflicting(t, ctx, store, orphan)
+			require.NoError(t, store.Delete(ctx, orphanParent.TxIDChainHash()))
+
+			s := &Server{logger: ulogger.NewErrorTestLogger(t), settings: tSettings, utxoStore: store}
+
+			process := func(txHashes ...chainhash.Hash) error {
+				_, err := s.processTxMetaUsingStore(ctx, txHashes, make([]metaSliceItem, len(txHashes)), blockIds, batched, false, true)
+				return err
+			}
+
+			err = process(chain[0])
+			require.True(t, provenConflict(err), "TX_INVALID on top: %v", err)
+			require.NotErrorIs(t, err, errors.ErrContextCanceled)
+			require.False(t, errors.IsContextError(err))
+
+			err = process(*orphan.TxIDChainHash(), chain[0])
+			require.True(t, provenConflict(err), "a failure elsewhere does not bring the wrap back: %v", err)
+			require.NotErrorIs(t, err, errors.ErrContextCanceled)
+
+			err = process(*orphan.TxIDChainHash())
+			require.ErrorIs(t, err, errors.ErrTxNotFound)
+			require.ErrorIs(t, err, errors.ErrContextCanceled, "a missing record stays retryable")
+			require.False(t, provenConflict(err))
+		})
+	}
+
+	t.Run("once ctx is done a proven conflict keeps the wrap", func(t *testing.T) {
+		done, cancel := context.WithCancel(ctx)
+		cancel()
+
+		err := settledError(done, "[processTxMetaUsingStore]", errors.NewTxInvalidError("proven"))
+		require.ErrorIs(t, err, errors.ErrContextCanceled)
+
+		err = settledError(ctx, "[processTxMetaUsingStore]", errors.NewProcessingError("not proven", errors.NewTxInvalidError("deeper in the chain")))
+		require.ErrorIs(t, err, errors.ErrContextCanceled, "only TX_INVALID on top is a proven conflict")
+	})
 }

@@ -354,7 +354,7 @@ func (u *Server) processTxMetaUsingStoreAllowing(ctx context.Context, txHashes [
 		}
 
 		if err := u.settleCollectedConflictingTxs(ctx, g.Wait(), &conflicting, txMetaSlice, blockIds); err != nil {
-			return int(missed.Load()), errors.NewContextCanceledError("[processTxMetaUsingStore]", err)
+			return int(missed.Load()), settledError(ctx, "[processTxMetaUsingStore]", err)
 		}
 
 		return int(missed.Load()), nil
@@ -437,9 +437,25 @@ func (u *Server) processTxMetaUsingStoreAllowing(ctx context.Context, txHashes [
 		}
 
 		if err := u.settleCollectedConflictingTxs(ctx, g.Wait(), &conflicting, txMetaSlice, blockIds); err != nil {
-			return int(missed.Load()), errors.NewContextCanceledError(errProcessTxMetaContextDone, err)
+			return int(missed.Load()), settledError(ctx, errProcessTxMetaContextDone, err)
 		}
 
 		return int(missed.Load()), nil
 	}
+}
+
+// settledError is the error processTxMetaUsingStore returns for what
+// settleCollectedConflictingTxs returned. Every failure keeps the ContextCanceled
+// wrap it has always had, and so its class at every caller, except a proven
+// conflict: that is a verdict on the block, and under ContextCanceled block
+// validation took it for this node's own cancellation and retried the block
+// (blockvalidation's isRecoverableBlockMessageError, and catchup's
+// releaseCatchupLock). Once ctx is done the caller has given up, and even a
+// proven conflict keeps the wrap.
+func settledError(ctx context.Context, message string, err error) error {
+	if ctx.Err() == nil && provenConflict(err) {
+		return err
+	}
+
+	return errors.NewContextCanceledError(message, err)
 }
