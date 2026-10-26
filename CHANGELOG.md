@@ -578,7 +578,7 @@ Upgrading from v0.16.0 changes nothing for them; upgrading from an earlier relea
   invalid (`TX_INVALID`) whatever else failed; the retryable error is returned
   only when nothing is proven. A block that used to retry indefinitely on such a
   failure may now be marked invalid on the first attempt. Nothing to configure.
-  (bsv-blockchain/teranode#PR)
+  (bsv-blockchain/teranode#2052)
 
 ### Not breaking, but worth knowing
 
