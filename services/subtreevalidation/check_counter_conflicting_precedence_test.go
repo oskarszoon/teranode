@@ -2,8 +2,11 @@ package subtreevalidation
 
 import (
 	"context"
+	"slices"
 	"testing"
 
+	"github.com/bsv-blockchain/go-bt/v2"
+	"github.com/bsv-blockchain/go-bt/v2/bscript"
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	"github.com/bsv-blockchain/teranode/errors"
 	"github.com/bsv-blockchain/teranode/settings"
@@ -15,14 +18,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// faultyGetStore fails Get for one hash with a storage error.
+// faultyGetStore fails the batch's phase-1 read of one hash, the one asking for
+// its inpoints, with a storage error. The cached path reads the tx's body first
+// (checkStoredTxAtHeight), and that read is left alone, so the fault reaches the
+// batch.
 type faultyGetStore struct {
 	utxo.Store
 	fail chainhash.Hash
 }
 
 func (f *faultyGetStore) Get(ctx context.Context, hash *chainhash.Hash, fs ...fields.FieldName) (*meta.Data, error) {
-	if hash.Equal(f.fail) {
+	if hash.Equal(f.fail) && slices.Contains(fs, fields.TxInpoints) {
 		return nil, errors.NewStorageError("store down")
 	}
 
@@ -214,4 +220,94 @@ func Test_processTxMetaUsingStore_passedConflictCheckKeepsEntries(t *testing.T) 
 
 	require.True(t, txMetaSlice[0].isSet, "the conflicting tx passed the check, so the retry need not decorate and check it again")
 	require.True(t, txMetaSlice[0].conflicting)
+}
+
+// One input that cannot be checked does not hide the spender of another input
+// of the same tx: every readable input's counter-spender is collected, the
+// failure is recorded, and a mined counter-spender wins. Otherwise a block whose
+// one conflicting tx has a frozen or out-of-range input 0 and a mined
+// counter-spender on input 1 retries forever.
+func Test_checkCounterConflictingOnCurrentChainBatch_perInputCounterSpenders(t *testing.T) {
+	ctx := context.Background()
+	mined := utxo.WithMinedBlockInfo(utxo.MinedBlockInfo{BlockID: 77, BlockHeight: 100})
+	blockIds := map[uint32]bool{77: true}
+
+	// requireTxInvalid checks the batch under both missing-record policies: the
+	// failed input is a processing error under either, never a missing record.
+	requireTxInvalid := func(t *testing.T, s *Server, conflicting chainhash.Hash, counter chainhash.Hash) {
+		t.Helper()
+
+		for _, policy := range []missingRecordPolicy{skipMissingRecords, failOnMissingRecords} {
+			notFound, err := s.checkCounterConflictingOnCurrentChainBatch(ctx, []chainhash.Hash{conflicting}, blockIds, policy)
+			require.Nil(t, notFound)
+			require.ErrorIs(t, err, errors.ErrTxInvalid, "policy %d", policy)
+			require.ErrorContains(t, err, counter.String(), "the mined counter-spender on input 1 is named")
+		}
+	}
+
+	t.Run("a frozen input 0 does not hide a mined counter-spender on input 1", func(t *testing.T) {
+		tSettings := test.CreateBaseTestSettings(t)
+		tSettings.UtxoStore.SpendBatcherDurationMillis = 1
+
+		store := newSQLUtxoStore(t, ctx, tSettings)
+
+		parent := buildTx(t, []outpoint{{tx: parentTx1, vout: 0}}, 2, 9100)
+		_, _, err := store.SpendAndCreate(ctx, parent, 122, utxo.WithCreateOnly())
+		require.NoError(t, err)
+
+		freezeOutput(t, ctx, store, parent, 0, tSettings)
+
+		counter := buildTx(t, []outpoint{{tx: parent, vout: 1}}, 1, 9101)
+		spendAndCreate(t, ctx, store, counter, mined)
+
+		conflicting := buildTx(t, []outpoint{{tx: parent, vout: 0}, {tx: parent, vout: 1}}, 1, 9102)
+		createConflicting(t, ctx, store, conflicting)
+
+		s := &Server{logger: ulogger.NewErrorTestLogger(t), settings: tSettings, utxoStore: store}
+
+		// alone, input 0 is a processing error
+		_, err = s.checkCounterConflictingOnCurrentChainBatch(ctx, []chainhash.Hash{*conflicting.TxIDChainHash()}, map[uint32]bool{}, failOnMissingRecords)
+		require.ErrorContains(t, err, "counter conflicting tx is frozen")
+
+		requireTxInvalid(t, s, *conflicting.TxIDChainHash(), *counter.TxIDChainHash())
+	})
+
+	t.Run("an out-of-range input 0 does not hide a mined counter-spender on input 1", func(t *testing.T) {
+		tSettings := test.CreateBaseTestSettings(t)
+		tSettings.UtxoStore.SpendBatcherDurationMillis = 1
+
+		store := newSQLUtxoStore(t, ctx, tSettings)
+
+		// short has one output, and input 0 spends its output 5
+		short := buildTx(t, []outpoint{{tx: parentTx1, vout: 0}}, 1, 9200)
+		_, _, err := store.SpendAndCreate(ctx, short, 122, utxo.WithCreateOnly())
+		require.NoError(t, err)
+
+		parent := buildTx(t, []outpoint{{tx: parentTx1, vout: 1}}, 1, 9201)
+		_, _, err = store.SpendAndCreate(ctx, parent, 122, utxo.WithCreateOnly())
+		require.NoError(t, err)
+
+		counter := buildTx(t, []outpoint{{tx: parent, vout: 0}}, 1, 9202)
+		spendAndCreate(t, ctx, store, counter, mined)
+
+		conflicting := bt.NewTx()
+		conflicting.LockTime = 9203
+		require.NoError(t, conflicting.From(short.TxIDChainHash().String(), 5, short.Outputs[0].LockingScript.String(), short.Outputs[0].Satoshis))
+		require.NoError(t, conflicting.From(parent.TxIDChainHash().String(), 0, parent.Outputs[0].LockingScript.String(), parent.Outputs[0].Satoshis))
+
+		for _, in := range conflicting.Inputs {
+			in.UnlockingScript = bscript.NewFromBytes([]byte{})
+		}
+
+		require.NoError(t, conflicting.AddP2PKHOutputFromScript(parent.Outputs[0].LockingScript, 1))
+		createConflicting(t, ctx, store, conflicting)
+
+		s := &Server{logger: ulogger.NewErrorTestLogger(t), settings: tSettings, utxoStore: store}
+
+		// alone, input 0 is a processing error
+		_, err = s.checkCounterConflictingOnCurrentChainBatch(ctx, []chainhash.Hash{*conflicting.TxIDChainHash()}, map[uint32]bool{}, failOnMissingRecords)
+		require.ErrorContains(t, err, "out of range")
+
+		requireTxInvalid(t, s, *conflicting.TxIDChainHash(), *counter.TxIDChainHash())
+	})
 }

@@ -21,9 +21,10 @@ type missingRecordPolicy int
 
 const (
 	// skipMissingRecords is the cached path's policy. A conflicting tx whose own
-	// or parent record is gone is dropped and returned in notFound; a cone member
-	// that is gone is a leaf of the walk and counts as not mined. A trailer can
-	// outlive the records it names, so a gap there is housekeeping, not evidence.
+	// or parent record is gone is returned in notFound, and checked only through
+	// the records that are left; a cone member that is gone is a leaf of the walk
+	// and counts as not mined. A trailer can outlive the records it names, so a
+	// gap there is housekeeping, not evidence.
 	skipMissingRecords missingRecordPolicy = iota
 
 	// failOnMissingRecords is the fresh path's policy, and the per-transaction
@@ -61,7 +62,7 @@ const counterConflictingBatchFanOut = 128
 // # PHASES
 //
 //  1. Counter-spenders. Each transaction's inpoints and its parents' spenders are
-//     read, and its counter-spenders derived exactly as
+//     read, and its counter-spenders derived as
 //     utxo.GetCounterConflictingTxHashes derives them, including the out-of-range
 //     input error and the frozen sentinel.
 //  2. One walk. utxo.GetConflictingChildrenFromRoots walks two passes on one
@@ -92,12 +93,14 @@ const counterConflictingBatchFanOut = 128
 //     behaviour: any record the check needs and the store does not hold returns
 //     a retryable processing error wrapping ErrTxNotFound, unless a conflict is
 //     proven from the records that were read (see VERDICT).
-//   - skipMissingRecords (the cached path) drops a transaction whose own or
-//     parent record is gone, returning it in notFound. A cone member that is gone
-//     is a leaf of the walk, and a member whose GetMeta is not found counts as not
-//     mined; the rest of the union is still checked. That is stricter than the
-//     per-transaction loop the cached path used to run, which skipped a
-//     transaction's whole check on any missing member.
+//   - skipMissingRecords (the cached path) returns a transaction whose own or
+//     parent record is gone in notFound. A transaction whose own record is gone is
+//     dropped; one whose parent is gone is still checked through its other
+//     parents. A cone member that is gone is a leaf of the walk, and a member
+//     whose GetMeta is not found counts as not mined; the rest of the union is
+//     still checked. That is stricter than the per-transaction loop the cached
+//     path used to run, which skipped a transaction's whole check on any missing
+//     member.
 //
 // # VERDICT
 //
@@ -113,11 +116,10 @@ const counterConflictingBatchFanOut = 128
 //
 // So the check carries on past a failure as far as is cheap:
 //
-//   - Phase 1 fails per transaction. A transaction whose own or parent record
-//     cannot be read, or which has an out-of-range input or a frozen
-//     counter-spender, is dropped from phases 2 and 3 as a whole, and the rest
-//     carry on. Its readable counter-spenders are not kept: phase 1 is
-//     all-or-nothing per transaction.
+//   - Phase 1 fails per input. An input whose parent record cannot be read, which
+//     is out of range, or whose spender is the frozen sentinel is recorded, and
+//     the spenders of the transaction's other inputs are still collected. Only a
+//     transaction whose own record cannot be read is dropped from phases 2 and 3.
 //   - Phase 2 is one walk shared by every transaction, so a walk that stops (on
 //     the budget, or on a store fault in any cone) stops for all of them. What it
 //     reached before stopping is still mined-checked; what it did not reach is
@@ -236,17 +238,19 @@ func (u *Server) checkCounterConflictingOnCurrentChainBatch(ctx context.Context,
 }
 
 // counterSpendersBatch is phase 1 of checkCounterConflictingOnCurrentChainBatch.
-// It returns the deduplicated transactions whose records and parent records were
-// all found, those that were not, and the unique counter-spenders of the found
-// ones, each derived as utxo.GetCounterConflictingTxHashes derives them.
-// spentAgainst maps each counter-spender to the first transaction, in txHashes
-// order, that it is a counter-spender of.
+// It returns the deduplicated transactions whose own records were read, those
+// with a record not found (its own or a parent's), and the unique counter-spenders
+// of the read ones, each derived as utxo.GetCounterConflictingTxHashes derives
+// them. A transaction with a parent not found is in both lists: its spenders
+// through its other parents are still collected. spentAgainst maps each
+// counter-spender to the first transaction, in txHashes order, that it is a
+// counter-spender of.
 //
-// A transaction that fails otherwise — a store fault on its own or a parent's
-// record, an out-of-range input, a frozen counter-spender — is in neither list,
-// and txErr is the failure of the first such transaction in txHashes order. The
-// other results are complete either way: one transaction's failure does not stop
-// the rest.
+// txErr is the first other failure in txHashes order: a store fault on a
+// transaction's own record, which drops the transaction, or one of
+// counterSpendersOf's per-input failures, which does not. The other results are
+// complete either way: one transaction's or input's failure does not stop the
+// rest.
 func (u *Server) counterSpendersBatch(ctx context.Context, txHashes []chainhash.Hash) (txs, notFound, counterSpenders []chainhash.Hash, spentAgainst map[chainhash.Hash]chainhash.Hash, txErr error) {
 	unique := make([]chainhash.Hash, 0, len(txHashes))
 	seen := make(map[chainhash.Hash]struct{}, len(txHashes))
@@ -297,20 +301,18 @@ func (u *Server) counterSpendersBatch(ctx context.Context, txHashes []chainhash.
 			continue
 		}
 
+		// A failed input is recorded, not fatal: a spender on another input is
+		// still evidence, and the verdict rule decides between them.
 		txCounterSpenders, missingParent, err := counterSpendersOf(txHash, txMeta, parentIdx, parentMetas, parentReadErrs)
-		if err != nil {
-			if txErr == nil {
-				txErr = err
-			}
-
-			continue
+		if err != nil && txErr == nil {
+			txErr = err
 		}
 
 		// A parent the store does not hold says nothing about who spent its
-		// outputs, so the transaction's counter-spenders cannot be derived.
+		// outputs, so the counter-spenders through it cannot be derived. Those
+		// through the transaction's other parents still can.
 		if missingParent {
 			notFound = append(notFound, txHash)
-			continue
 		}
 
 		for _, counterSpender := range txCounterSpenders {
@@ -327,30 +329,36 @@ func (u *Server) counterSpendersBatch(ctx context.Context, txHashes []chainhash.
 }
 
 // counterSpendersOf derives one transaction's counter-spenders from its parents'
-// records, read by counterSpendersBatch. missingParent reports a parent the store
-// does not hold; err, a parent that could not be read or a spend that fails the
-// check.
+// records, read by counterSpendersBatch. It collects the spender of every input
+// it can, whatever happens to the others. missingParent reports a parent the store
+// does not hold; err, the first other input that could not be checked: a parent
+// that could not be read, an input out of range, or a frozen output.
 func counterSpendersOf(txHash chainhash.Hash, txMeta *meta.Data, parentIdx map[chainhash.Hash]int, parentMetas []*meta.Data, parentReadErrs []error) (counterSpenders []chainhash.Hash, missingParent bool, err error) {
-	for _, parentHash := range txMeta.TxInpoints.GetParentTxHashes() {
-		if readErr := parentReadErrs[parentIdx[parentHash]]; readErr != nil {
-			return nil, false, errors.NewProcessingError("[checkCounterConflictingOnCurrentChainBatch][%s] failed to get the spenders of parent %s", txHash.String(), parentHash.String(), readErr)
+	fail := func(inputErr error) {
+		if err == nil {
+			err = inputErr
 		}
-
-		if parentMetas[parentIdx[parentHash]] == nil {
-			missingParent = true
-		}
-	}
-
-	if missingParent {
-		return nil, true, nil
 	}
 
 	for _, inpoint := range txMeta.TxInpoints.GetTxInpoints() {
-		spendingDatas := parentMetas[parentIdx[inpoint.Hash]].SpendingDatas
+		idx := parentIdx[inpoint.Hash]
+
+		if readErr := parentReadErrs[idx]; readErr != nil {
+			fail(errors.NewProcessingError("[checkCounterConflictingOnCurrentChainBatch][%s] failed to get the spenders of parent %s", txHash.String(), inpoint.Hash.String(), readErr))
+			continue
+		}
+
+		if parentMetas[idx] == nil {
+			missingParent = true
+			continue
+		}
+
+		spendingDatas := parentMetas[idx].SpendingDatas
 
 		// check the length of the spending txs, if it's less than the index, then the input is not spent
 		if len(spendingDatas) <= int(inpoint.Index) {
-			return nil, false, errors.NewProcessingError("[checkCounterConflictingOnCurrentChainBatch][%s] cannot process counter conflicting, input %d of %s is out of range (len: %d)", txHash.String(), inpoint.Index, inpoint.Hash.String(), len(spendingDatas))
+			fail(errors.NewProcessingError("[checkCounterConflictingOnCurrentChainBatch][%s] cannot process counter conflicting, input %d of %s is out of range (len: %d)", txHash.String(), inpoint.Index, inpoint.Hash.String(), len(spendingDatas)))
+			continue
 		}
 
 		spendingData := spendingDatas[inpoint.Index]
@@ -360,13 +368,14 @@ func counterSpendersOf(txHash chainhash.Hash, txMeta *meta.Data, parentIdx map[c
 
 		// if a transaction is frozen, the counter-transaction will be the same as the coinbase placeholder
 		if spendingData.TxID.Equal(subtreepkg.CoinbasePlaceholderHashValue) {
-			return nil, false, errors.NewProcessingError("[checkCounterConflictingOnCurrentChainBatch][%s] counter conflicting tx is frozen", txHash.String())
+			fail(errors.NewProcessingError("[checkCounterConflictingOnCurrentChainBatch][%s] counter conflicting tx is frozen", txHash.String()))
+			continue
 		}
 
 		counterSpenders = append(counterSpenders, *spendingData.TxID)
 	}
 
-	return counterSpenders, false, nil
+	return counterSpenders, missingParent, err
 }
 
 // missingRecordsError is the failOnMissingRecords verdict: a processing error, so

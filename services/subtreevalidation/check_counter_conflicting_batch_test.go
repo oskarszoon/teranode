@@ -499,6 +499,11 @@ func lenientCounterConflicting(t *testing.T, ctx context.Context, store utxo.Sto
 
 	members[txHash] = struct{}{}
 
+	// walked is separate from members: a tx that is its own counter-spender is a
+	// member from the start, and its cone must still be walked, as
+	// utxo.GetCounterConflictingTxHashes walks it
+	walked := map[chainhash.Hash]struct{}{}
+
 	var queue []chainhash.Hash
 
 	visit := func(hash chainhash.Hash) {
@@ -506,8 +511,10 @@ func lenientCounterConflicting(t *testing.T, ctx context.Context, store utxo.Sto
 			return
 		}
 
-		if _, ok := members[hash]; !ok {
-			members[hash] = struct{}{}
+		members[hash] = struct{}{}
+
+		if _, ok := walked[hash]; !ok {
+			walked[hash] = struct{}{}
 			queue = append(queue, hash)
 		}
 	}
