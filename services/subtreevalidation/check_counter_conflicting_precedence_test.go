@@ -9,6 +9,7 @@ import (
 	"github.com/bsv-blockchain/go-bt/v2/bscript"
 	"github.com/bsv-blockchain/go-bt/v2/chainhash"
 	"github.com/bsv-blockchain/teranode/errors"
+	"github.com/bsv-blockchain/teranode/services/validator"
 	"github.com/bsv-blockchain/teranode/settings"
 	"github.com/bsv-blockchain/teranode/stores/utxo"
 	"github.com/bsv-blockchain/teranode/stores/utxo/fields"
@@ -310,4 +311,62 @@ func Test_checkCounterConflictingOnCurrentChainBatch_perInputCounterSpenders(t *
 
 		requireTxInvalid(t, s, *conflicting.TxIDChainHash(), *counter.TxIDChainHash())
 	})
+}
+
+// conflictingValidator accepts any tx and reports it stored as conflicting, as
+// the validator does for a block's tx that lost a double spend.
+type conflictingValidator struct {
+	validator.Interface
+}
+
+func (conflictingValidator) ValidateWithOptions(context.Context, *bt.Tx, uint32, *validator.Options) (*meta.Data, error) {
+	return &meta.Data{Conflicting: true}, nil
+}
+
+// blessMissingTransaction asks the batched check, so a tx it blesses gets the
+// verdict a block's cached or fresh subtree gets for it: a member of the
+// counter-conflicting set mined on the candidate chain rejects it even when
+// another member of the set was pruned. The per-transaction check it used to run
+// returned the pruned member's processing error before its mined check, so the
+// same block was rejected or retried depending on whether the tx was already in
+// the store.
+func Test_blessMissingTransaction_provenTxInvalidWins(t *testing.T) {
+	ctx := context.Background()
+	blockIds := map[uint32]bool{77: true}
+
+	tSettings := test.CreateBaseTestSettings(t)
+	tSettings.UtxoStore.SpendBatcherDurationMillis = 1
+
+	store := newSQLUtxoStore(t, ctx, tSettings)
+	counter, _ := buildConflictingChain(t, ctx, store, 1, false)
+
+	// the counter-spender's child is pruned: the walk reaches it and cannot read it
+	pruned := spendingChild(t, counter, 0)
+	spendAndCreate(t, ctx, store, pruned)
+	require.NoError(t, store.Delete(ctx, pruned.TxIDChainHash()))
+
+	s := &Server{
+		logger:          ulogger.NewErrorTestLogger(t),
+		settings:        tSettings,
+		utxoStore:       store,
+		validatorClient: conflictingValidator{},
+	}
+
+	bless := func() error {
+		_, err := s.blessMissingTransaction(ctx, chainhash.Hash{}, chainhash.Hash{}, tx1, 123, blockIds, validator.ProcessOptions())
+		return err
+	}
+
+	// alone, the pruned member is a retryable failure
+	err := bless()
+	require.ErrorIs(t, err, errors.ErrTxNotFound)
+	require.NotErrorIs(t, err, errors.ErrTxInvalid)
+
+	_, err = store.SetMinedMulti(ctx, []*chainhash.Hash{counter.TxIDChainHash()}, utxo.MinedBlockInfo{BlockID: 77, BlockHeight: 100})
+	require.NoError(t, err)
+
+	err = bless()
+	require.ErrorIs(t, err, errors.ErrTxInvalid)
+	require.ErrorContains(t, err, "[blessMissingTransaction]", "bless keeps its own wrapping")
+	require.ErrorContains(t, err, counter.TxIDChainHash().String(), "the mined counter-spender is named")
 }

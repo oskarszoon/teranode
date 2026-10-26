@@ -27,8 +27,8 @@ const (
 	// gap there is housekeeping, not evidence.
 	skipMissingRecords missingRecordPolicy = iota
 
-	// failOnMissingRecords is the fresh path's policy, and the per-transaction
-	// check's: any record the check needs and cannot read — a conflicting tx, a
+	// failOnMissingRecords is the policy of the fresh path and of
+	// blessMissingTransaction, as it was the per-transaction check's: any record the check needs and cannot read — a conflicting tx, a
 	// parent, a counter-spender, a cone member, a member's GetMeta — fails the
 	// check with a retryable ErrTxNotFound, unless a conflict is proven from the
 	// records that were read (see VERDICT on
@@ -38,12 +38,13 @@ const (
 
 // counterConflictingBatchFanOut caps the concurrent store reads of each phase of
 // checkCounterConflictingOnCurrentChainBatch, matching the GetMeta errgroup of
-// checkCounterConflictingOnCurrentChain and the walk's own per-level ceiling.
+// the per-transaction check it replaced and the walk's own per-level ceiling.
 const counterConflictingBatchFanOut = 128
 
-// checkCounterConflictingOnCurrentChainBatch asks the question of
-// checkCounterConflictingOnCurrentChain for a whole set of conflicting
-// transactions at once: has any of them, or any transaction that spent the same
+// checkCounterConflictingOnCurrentChainBatch asks, for a whole set of
+// conflicting transactions at once, the question the per-transaction check
+// (checkCounterConflictingOnCurrentChain, now kept only as a test reference)
+// asked of one: has any of them, or any transaction that spent the same
 // outputs (and that spender's descendants), been mined on the chain described by
 // blockIds? It returns ErrTxInvalid when one has.
 //
@@ -130,11 +131,10 @@ const counterConflictingBatchFanOut = 128
 // Every member is read before a verdict is given, and the reported member and
 // error do not depend on read timing.
 //
-// blessMissingTransaction still runs the per-transaction check, where any failure
-// comes before the mined check. For one transaction whose check fails part way
-// (a frozen output in its own cone, a missing cone member) but whose
-// counter-spender is mined, bless returns a processing error where this batch
-// returns ErrTxInvalid.
+// Every caller asks this one check: the cached path, the fresh path, and
+// blessMissingTransaction with a batch of one. The verdict rule is the same
+// whichever path reaches a transaction; only the missing-record policy differs
+// (see MISSING RECORDS).
 func (u *Server) checkCounterConflictingOnCurrentChainBatch(ctx context.Context, txHashes []chainhash.Hash, blockIds map[uint32]bool, missingPolicy missingRecordPolicy) (notFound []chainhash.Hash, err error) {
 	ctx, _, deferFn := tracing.Tracer("subtreevalidation").Start(ctx, "checkCounterConflictingOnCurrentChainBatch")
 	defer deferFn()
@@ -518,7 +518,7 @@ func (c *conflictingTxCollector) add(hash chainhash.Hash, idx int) {
 //     only what is still unset, not the whole batch again.
 //
 // Missing records fail the check (failOnMissingRecords), as the per-transaction
-// check did on this path and as blessMissingTransaction does.
+// check did on this path and as blessMissingTransaction's does.
 func (u *Server) settleCollectedConflictingTxs(ctx context.Context, batchErr error, conflicting *conflictingTxCollector, txMetaSlice []metaSliceItem, blockIds map[uint32]bool) error {
 	if len(conflicting.hashes) == 0 {
 		return batchErr
