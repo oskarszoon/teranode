@@ -72,9 +72,8 @@ const counterConflictingBatchFanOut = 128
 //     yields the union of their own cones less what the first pass already saw. A
 //     frozen sentinel in either union is a processing error.
 //  3. Mined check. The counter-conflicting union — the transactions, their
-//     counter-spenders and the counter-spender cones (only the first two after
-//     a walk over its budget, see BUDGET) — is read with GetMeta and checked
-//     against blockIds. Own-cone members are frozen-checked only, as in
+//     counter-spenders and the counter-spender cones — is read with GetMeta and
+//     checked against blockIds. Own-cone members are frozen-checked only, as in
 //     the per-transaction check.
 //
 // # BUDGET
@@ -84,13 +83,13 @@ const counterConflictingBatchFanOut = 128
 // distinct roots (transactions and counter-spenders): the aggregate bound of the
 // per-transaction walks, so any block whose every per-transaction walk fit still
 // passes, however many conflicting transactions it carries. Exceeding it stops
-// the walk. Phase 3 then reads only the transactions and their direct
-// counter-spenders, not the partial cones: if one of those is mined on the
-// candidate chain, the verdict is ErrTxInvalid on the first attempt, and raising
-// the budget does not change that (see VERDICT). Otherwise it fails closed with
+// the walk, in either pass. If the counter-conflicting members it reached
+// include one mined on the candidate chain, the verdict is ErrTxInvalid on the
+// first attempt, and raising the budget does not change that (see VERDICT).
+// Otherwise it fails closed with
 // ERR_UTXO_WALK_LIMIT_EXCEEDED, retryably, and raising the budget resumes
-// progress, even when the partial cone held a mined member. The price is that a
-// single runaway cone is stopped only after that many reads, not after maxNodes.
+// progress. The price is that a single runaway cone is stopped only after that
+// many reads, not after maxNodes.
 //
 // # MISSING RECORDS
 //
@@ -128,12 +127,11 @@ const counterConflictingBatchFanOut = 128
 //     the spenders of the transaction's other inputs are still collected. Only a
 //     transaction whose own record cannot be read is dropped from phases 2 and 3.
 //   - Phase 2 is one walk shared by every transaction, so a walk that stops (on
-//     the budget, or on a store fault in any cone) stops for all of them. After a
-//     store fault, what it reached before stopping is still mined-checked; what
-//     it did not reach is not. Carrying a walk on past a fault in one cone would
-//     need a walk per cone, which is what this batch replaced. After the budget,
-//     only the walk's roots are (see BUDGET).
-//   - Phase 3 reads every member it is given, whatever the others return.
+//     the budget, or on a store fault in any cone) stops for all of them. What it
+//     reached before stopping is still mined-checked; what it did not reach is
+//     not. Carrying a walk on past a fault in one cone would need a walk per
+//     cone, which is what this batch replaced.
+//   - Phase 3 reads every member, whatever the others return.
 //
 // Every member is read before a verdict is given, and the reported member and
 // error do not depend on read timing.
@@ -174,7 +172,7 @@ func (u *Server) checkCounterConflictingOnCurrentChainBatch(ctx context.Context,
 	}
 
 	// A walk that stops returns the cones it reached so far (see the VERDICT
-	// note above); after a store fault their members are still mined-checked.
+	// note above); their members are still mined-checked.
 	cones, missing, walkErr := utxo.GetConflictingChildrenFromRoots(ctx, u.utxoStore, [][]chainhash.Hash{counterSpenders, txs}, u.settings.UtxoStore.ConflictingChildrenMaxNodes)
 	if walkErr != nil {
 		fail(errors.NewProcessingError("[checkCounterConflictingOnCurrentChainBatch] failed to walk the cones of %d transaction(s) and %d counter-spender(s)", len(txs), len(counterSpenders), walkErr))
@@ -198,19 +196,11 @@ func (u *Server) checkCounterConflictingOnCurrentChainBatch(ctx context.Context,
 		fail(missingRecordsError("walked record", missing))
 	}
 
-	// A walk stopped by its budget has met a cone too large to check, and fails
-	// on the walk limit whatever its partial cone holds. Reading that cone would
-	// cost up to the budget again in store reads, on every retry of a runaway
-	// cone (issue 1391). So only the walk's roots, the transactions and their
-	// direct counter-spenders, are mined-checked then. A walk stopped by a store
-	// fault still has what it reached checked.
-	checked := [][]chainhash.Hash{txs, counterSpenders, counterCone}
-	if errors.Is(walkErr, errors.ErrUtxoWalkLimitExceeded) {
-		checked = checked[:2]
-	}
-
+	// A walk that stops, on its budget or on a store fault, still has the counter
+	// cone it reached mined-checked: every member of it descends from a
+	// counter-spender, so any mined one is proof.
 	counterConflicting := make(map[chainhash.Hash]struct{}, len(txs)+len(counterSpenders)+len(counterCone))
-	for _, hashes := range checked {
+	for _, hashes := range [][]chainhash.Hash{txs, counterSpenders, counterCone} {
 		for _, hash := range hashes {
 			// the frozen sentinel is not a record; it was dealt with above
 			if !hash.Equal(subtreepkg.FrozenBytesTxHash) {
@@ -444,9 +434,9 @@ func (u *Server) getBatch(ctx context.Context, hashes []chainhash.Hash, f ...fie
 //
 // A failed read does not stop the others, and both results can be set: a mined
 // member, and the error of a member that could not be read. The caller decides
-// which wins. Cancelling the other reads after a failure would lose a mined
-// member not read yet, and with it a proven conflict. Each is the one of the lowest member hash, so neither depends on
-// read timing.
+// which wins. Each is the one of the lowest member hash, so neither depends on
+// read timing. Cancelling the other reads after a failure would lose a mined
+// member not read yet, and with it a proven conflict.
 func (u *Server) firstMinedOnChain(ctx context.Context, members map[chainhash.Hash]struct{}, blockIds map[uint32]bool, missingPolicy missingRecordPolicy) (*chainhash.Hash, error) {
 	var (
 		mu        sync.Mutex

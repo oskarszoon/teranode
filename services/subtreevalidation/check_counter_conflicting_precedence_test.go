@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"slices"
-	"sync"
 	"testing"
 
 	"github.com/bsv-blockchain/go-bt/v2"
@@ -62,76 +61,71 @@ func buildCone(t *testing.T, ctx context.Context, store utxo.Store, root *bt.Tx,
 	return cone
 }
 
-// getMetaRecorder records the hashes the batch's mined check (phase 3) reads.
-type getMetaRecorder struct {
-	utxo.Store
-
-	mu   sync.Mutex
-	read []chainhash.Hash
-}
-
-func (r *getMetaRecorder) GetMeta(ctx context.Context, hash *chainhash.Hash, data *meta.Data) error {
-	r.mu.Lock()
-	r.read = append(r.read, *hash)
-	r.mu.Unlock()
-
-	return r.Store.GetMeta(ctx, hash, data)
-}
-
-// A walk stopped by its budget has met a cone too large to check, and its
-// verdict is the walk limit. Mined-checking the partial cone it reached cost up
-// to the budget again in store reads, on every retry of a runaway cone (the
-// issue 1391 shape). Only the roots of the walk, the conflicting txs and their
-// direct counter-spenders, are mined-checked then, and a mined one still wins.
-func Test_checkCounterConflictingOnCurrentChainBatch_overBudgetWalkChecksOnlyRoots(t *testing.T) {
-	const coneLength = 10
-
+// A walk that stops on its budget still has the counter cone it reached
+// mined-checked: every member of it descends from a counter-spender, so a mined
+// one is proof, whichever of the walk's two passes ran out. The walk runs the
+// counter-spenders' cone first and the conflicting txs' own cone second, on one
+// budget.
+func Test_checkCounterConflictingOnCurrentChainBatch_overBudgetWalkChecksTheCounterConeItReached(t *testing.T) {
 	ctx := context.Background()
-	mined := utxo.WithMinedBlockInfo(utxo.MinedBlockInfo{BlockID: 77, BlockHeight: 100})
+	minedInfo := utxo.MinedBlockInfo{BlockID: 77, BlockHeight: 100}
 	blockIds := map[uint32]bool{77: true}
 
-	// newBatch returns tx1, conflicting, whose counter-spender heads a cone of
-	// coneLength with its first member mined. Two roots (tx1 and its
-	// counter-spender) and a budget of 2 per root: the walk stops 4 members in,
-	// having reached the mined one.
-	newBatch := func(t *testing.T) (*Server, *getMetaRecorder, *bt.Tx, []chainhash.Hash) {
+	// requireProven checks the walk's premise, then that the batch names the
+	// mined counter-cone member.
+	requireProven := func(t *testing.T, store utxo.Store, tSettings *settings.Settings, counter *bt.Tx, txs []chainhash.Hash, cone []chainhash.Hash, minedMember chainhash.Hash, counterConeComplete bool) {
 		t.Helper()
 
+		cones, _, walkErr := utxo.GetConflictingChildrenFromRoots(ctx, store, [][]chainhash.Hash{{*counter.TxIDChainHash()}, txs}, tSettings.UtxoStore.ConflictingChildrenMaxNodes)
+		require.ErrorIs(t, walkErr, errors.ErrUtxoWalkLimitExceeded)
+		require.Contains(t, cones[0], minedMember, "the walk reached the mined member")
+
+		if counterConeComplete {
+			require.ElementsMatch(t, cone, cones[0], "the counter cone was walked in full")
+		} else {
+			require.Less(t, len(cones[0]), len(cone), "the counter cone was cut short")
+		}
+
+		s := &Server{logger: ulogger.NewErrorTestLogger(t), settings: tSettings, utxoStore: store}
+
+		_, err := s.checkCounterConflictingOnCurrentChainBatch(ctx, txs, blockIds, failOnMissingRecords)
+		require.ErrorIs(t, err, errors.ErrTxInvalid)
+		require.ErrorContains(t, err, minedMember.String(), "the mined counter-cone member is named")
+	}
+
+	t.Run("own cone overflows after a complete counter cone", func(t *testing.T) {
 		tSettings := test.CreateBaseTestSettings(t)
 		tSettings.UtxoStore.SpendBatcherDurationMillis = 1
+		// two roots (tx1 and its counter-spender): a budget of 8. The counter
+		// cone, the counter-spender and 3 below it, fits; tx1's own cone of 12
+		// does not.
+		tSettings.UtxoStore.ConflictingChildrenMaxNodes = 4
+
+		store := newSQLUtxoStore(t, ctx, tSettings)
+		counter, chain := buildConflictingChain(t, ctx, store, 12, false)
+		cone := buildCone(t, ctx, store, counter, 3)
+
+		// the third member: neither a root nor a direct counter-spender
+		_, err := store.SetMinedMulti(ctx, []*chainhash.Hash{&cone[2]}, minedInfo)
+		require.NoError(t, err)
+
+		requireProven(t, store, tSettings, counter, chain[:1], cone, cone[2], true)
+	})
+
+	t.Run("counter cone overflows after reaching a mined member", func(t *testing.T) {
+		tSettings := test.CreateBaseTestSettings(t)
+		tSettings.UtxoStore.SpendBatcherDurationMillis = 1
+		// two roots: a budget of 4, against a counter cone of 10
 		tSettings.UtxoStore.ConflictingChildrenMaxNodes = 2
 
 		store := newSQLUtxoStore(t, ctx, tSettings)
 		counter, chain := buildConflictingChain(t, ctx, store, 1, false)
-		buildCone(t, ctx, store, counter, coneLength, mined)
+		cone := buildCone(t, ctx, store, counter, 10)
 
-		recorder := &getMetaRecorder{Store: store}
-
-		return &Server{logger: ulogger.NewErrorTestLogger(t), settings: tSettings, utxoStore: recorder}, recorder, counter, chain
-	}
-
-	t.Run("the partial cone is not read", func(t *testing.T) {
-		s, recorder, counter, chain := newBatch(t)
-
-		_, err := s.checkCounterConflictingOnCurrentChainBatch(ctx, chain, blockIds, failOnMissingRecords)
-		require.ErrorIs(t, err, errors.ErrUtxoWalkLimitExceeded)
-		require.NotErrorIs(t, err, errors.ErrTxInvalid, "the mined member deep in the cone is not read")
-
-		require.ElementsMatch(t, []chainhash.Hash{chain[0], *counter.TxIDChainHash()}, recorder.read,
-			"only the conflicting tx and its direct counter-spender are mined-checked")
-	})
-
-	t.Run("a mined root still wins", func(t *testing.T) {
-		s, recorder, counter, chain := newBatch(t)
-
-		_, err := s.utxoStore.SetMinedMulti(ctx, []*chainhash.Hash{counter.TxIDChainHash()}, utxo.MinedBlockInfo{BlockID: 77, BlockHeight: 100})
+		_, err := store.SetMinedMulti(ctx, []*chainhash.Hash{&cone[1]}, minedInfo)
 		require.NoError(t, err)
 
-		_, err = s.checkCounterConflictingOnCurrentChainBatch(ctx, chain, blockIds, failOnMissingRecords)
-		require.ErrorIs(t, err, errors.ErrTxInvalid)
-		require.ErrorContains(t, err, counter.TxIDChainHash().String(), "the mined counter-spender is named")
-
-		require.ElementsMatch(t, []chainhash.Hash{chain[0], *counter.TxIDChainHash()}, recorder.read)
+		requireProven(t, store, tSettings, counter, chain, cone, cone[1], false)
 	})
 }
 
