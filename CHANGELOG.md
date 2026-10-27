@@ -739,6 +739,20 @@ Upgrading from v0.16.0 changes nothing for them; upgrading from an earlier relea
 
 ### Not breaking, but worth knowing
 
+- **Peer subtrees announced during a catchup are validated afterwards instead of
+  lost.** While catching up, the subtree validator used to drop every
+  peer-announced subtree, so the next block arrived with all of them unvalidated
+  and had to read their transactions from the UTXO store. Up to
+  `subtreevalidation_skippedSubtreeBackfillMax` (default 4096, newest kept) of them
+  are now validated through the normal peer-subtree path once the node is RUNNING
+  again, using at most half of `subtreevalidation_peerSubtreeConcurrency`, so
+  expect a burst of peer subtree validation right after a catchup. Subtrees
+  announced while IDLE, or more than 30 minutes before their replay, are still
+  dropped. New metric:
+  `teranode_subtreevalidation_skipped_peer_subtrees_total{outcome}` (recorded,
+  evicted, expired, requeued, dropped, replayed, replay_failed). Set the key to `0` for the previous
+  behaviour. (#2055)
+
 - **Mining candidates no longer build on the old tip during a reorg.** While block
   assembly is in the `reorging`, `reconciling` or `resetting` state, it can still
   hold the tip from before the reorg. `GetMiningCandidate` built candidates on that
