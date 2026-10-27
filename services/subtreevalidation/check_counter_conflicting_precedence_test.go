@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"sync"
 	"testing"
 
 	"github.com/bsv-blockchain/go-bt/v2"
@@ -20,21 +21,118 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// faultyGetStore fails the batch's phase-1 read of one hash, the one asking for
-// its inpoints, with a storage error. The cached path reads the tx's body first
-// (checkStoredTxAtHeight), and that read is left alone, so the fault reaches the
-// batch.
+// faultyGetStore fails the batch's reads of one hash with a storage error: its
+// phase-1 read, the one asking for its inpoints, and its read as a member of the
+// walk. The cached path reads the tx's body first (checkStoredTxAtHeight), and
+// that read is left alone, so the fault reaches the batch.
 type faultyGetStore struct {
 	utxo.Store
 	fail chainhash.Hash
 }
 
 func (f *faultyGetStore) Get(ctx context.Context, hash *chainhash.Hash, fs ...fields.FieldName) (*meta.Data, error) {
-	if hash.Equal(f.fail) && slices.Contains(fs, fields.TxInpoints) {
+	if hash.Equal(f.fail) && !slices.Contains(fs, fields.Tx) {
 		return nil, errors.NewStorageError("store down")
 	}
 
 	return f.Store.Get(ctx, hash, fs...)
+}
+
+// buildCone stores a chain of n spenders below root, each spending output 0 of
+// the one before, and returns it top first. The first is created with firstOpts.
+func buildCone(t *testing.T, ctx context.Context, store utxo.Store, root *bt.Tx, n int, firstOpts ...utxo.CreateOption) []chainhash.Hash {
+	t.Helper()
+
+	cone := make([]chainhash.Hash, 0, n)
+
+	prev := root
+	for i := 0; i < n; i++ {
+		child := spendingChild(t, prev, 0)
+
+		if i == 0 {
+			spendAndCreate(t, ctx, store, child, firstOpts...)
+		} else {
+			spendAndCreate(t, ctx, store, child)
+		}
+
+		cone = append(cone, *child.TxIDChainHash())
+		prev = child
+	}
+
+	return cone
+}
+
+// getMetaRecorder records the hashes the batch's mined check (phase 3) reads.
+type getMetaRecorder struct {
+	utxo.Store
+
+	mu   sync.Mutex
+	read []chainhash.Hash
+}
+
+func (r *getMetaRecorder) GetMeta(ctx context.Context, hash *chainhash.Hash, data *meta.Data) error {
+	r.mu.Lock()
+	r.read = append(r.read, *hash)
+	r.mu.Unlock()
+
+	return r.Store.GetMeta(ctx, hash, data)
+}
+
+// A walk stopped by its budget has met a cone too large to check, and its
+// verdict is the walk limit. Mined-checking the partial cone it reached cost up
+// to the budget again in store reads, on every retry of a runaway cone (the
+// issue 1391 shape). Only the roots of the walk, the conflicting txs and their
+// direct counter-spenders, are mined-checked then, and a mined one still wins.
+func Test_checkCounterConflictingOnCurrentChainBatch_overBudgetWalkChecksOnlyRoots(t *testing.T) {
+	const coneLength = 10
+
+	ctx := context.Background()
+	mined := utxo.WithMinedBlockInfo(utxo.MinedBlockInfo{BlockID: 77, BlockHeight: 100})
+	blockIds := map[uint32]bool{77: true}
+
+	// newBatch returns tx1, conflicting, whose counter-spender heads a cone of
+	// coneLength with its first member mined. Two roots (tx1 and its
+	// counter-spender) and a budget of 2 per root: the walk stops 4 members in,
+	// having reached the mined one.
+	newBatch := func(t *testing.T) (*Server, *getMetaRecorder, *bt.Tx, []chainhash.Hash) {
+		t.Helper()
+
+		tSettings := test.CreateBaseTestSettings(t)
+		tSettings.UtxoStore.SpendBatcherDurationMillis = 1
+		tSettings.UtxoStore.ConflictingChildrenMaxNodes = 2
+
+		store := newSQLUtxoStore(t, ctx, tSettings)
+		counter, chain := buildConflictingChain(t, ctx, store, 1, false)
+		buildCone(t, ctx, store, counter, coneLength, mined)
+
+		recorder := &getMetaRecorder{Store: store}
+
+		return &Server{logger: ulogger.NewErrorTestLogger(t), settings: tSettings, utxoStore: recorder}, recorder, counter, chain
+	}
+
+	t.Run("the partial cone is not read", func(t *testing.T) {
+		s, recorder, counter, chain := newBatch(t)
+
+		_, err := s.checkCounterConflictingOnCurrentChainBatch(ctx, chain, blockIds, failOnMissingRecords)
+		require.ErrorIs(t, err, errors.ErrUtxoWalkLimitExceeded)
+		require.NotErrorIs(t, err, errors.ErrTxInvalid, "the mined member deep in the cone is not read")
+
+		require.ElementsMatch(t, []chainhash.Hash{chain[0], *counter.TxIDChainHash()}, recorder.read,
+			"only the conflicting tx and its direct counter-spender are mined-checked")
+	})
+
+	t.Run("a mined root still wins", func(t *testing.T) {
+		s, recorder, counter, chain := newBatch(t)
+
+		_, err := s.utxoStore.SetMinedMulti(ctx, []*chainhash.Hash{counter.TxIDChainHash()}, utxo.MinedBlockInfo{BlockID: 77, BlockHeight: 100})
+		require.NoError(t, err)
+
+		_, err = s.checkCounterConflictingOnCurrentChainBatch(ctx, chain, blockIds, failOnMissingRecords)
+		require.ErrorIs(t, err, errors.ErrTxInvalid)
+		require.ErrorContains(t, err, counter.TxIDChainHash().String(), "the mined counter-spender is named")
+
+		require.ElementsMatch(t, []chainhash.Hash{chain[0], *counter.TxIDChainHash()}, recorder.read)
+	})
 }
 
 // A tx-invalid verdict proven from records that were read is final: the block
@@ -132,32 +230,21 @@ func Test_checkCounterConflictingOnCurrentChainBatch_provenTxInvalidWins(t *test
 		requireRejected(t, store, tSettings, []chainhash.Hash{chain[0], minedConflict})
 	})
 
-	t.Run("a mined member the walk reached before its budget ran out is proof", func(t *testing.T) {
+	t.Run("a mined member the walk reached before a store fault stopped it is proof", func(t *testing.T) {
 		const coneLength = 10
 
 		tSettings := test.CreateBaseTestSettings(t)
 		tSettings.UtxoStore.SpendBatcherDurationMillis = 1
-		// two roots (tx1 and its counter-spender): a budget of 4, against a
-		// counter-spender cone of 10 whose first member is mined
-		tSettings.UtxoStore.ConflictingChildrenMaxNodes = 2
 
 		store := newSQLUtxoStore(t, ctx, tSettings)
 		counter, chain := buildConflictingChain(t, ctx, store, 1, false)
 
-		prev := counter
-		for i := 0; i < coneLength; i++ {
-			child := spendingChild(t, prev, 0)
+		// a counter-spender cone whose first member is mined, and whose fourth
+		// cannot be read: the walk stops there
+		cone := buildCone(t, ctx, store, counter, coneLength, mined)
+		faulty := &faultyGetStore{Store: store, fail: cone[3]}
 
-			if i == 0 {
-				spendAndCreate(t, ctx, store, child, mined)
-			} else {
-				spendAndCreate(t, ctx, store, child)
-			}
-
-			prev = child
-		}
-
-		requireRejected(t, store, tSettings, chain)
+		requireRejected(t, faulty, tSettings, chain)
 	})
 
 	t.Run("a frozen counter-spender does not hide a mined counter-spender", func(t *testing.T) {
