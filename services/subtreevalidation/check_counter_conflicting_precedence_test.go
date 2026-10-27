@@ -412,8 +412,7 @@ func Test_blessMissingTransaction_provenTxInvalidWins(t *testing.T) {
 // validation retries what carries that code. A proven conflict is the one
 // exception: it is the block's verdict and leaves with TX_INVALID on top and no
 // CONTEXT_CANCELED in its chain, from both the batched and the unbatched branch.
-// Every other failure keeps the wrap, and a proven conflict keeps it too once ctx
-// is done. TestValidateBlock_ProvenConflictIsNotACancellation in blockvalidation
+// Every other failure keeps the wrap. TestValidateBlock_ProvenConflictIsNotACancellation in blockvalidation
 // checks how the callers classify the result.
 func Test_processTxMetaUsingStore_provenConflictIsNotACancellation(t *testing.T) {
 	ctx := context.Background()
@@ -458,14 +457,98 @@ func Test_processTxMetaUsingStore_provenConflictIsNotACancellation(t *testing.T)
 		})
 	}
 
-	t.Run("once ctx is done a proven conflict keeps the wrap", func(t *testing.T) {
-		done, cancel := context.WithCancel(ctx)
-		cancel()
-
-		err := settledError(done, "[processTxMetaUsingStore]", errors.NewTxInvalidError("proven"))
-		require.ErrorIs(t, err, errors.ErrContextCanceled)
-
-		err = settledError(ctx, "[processTxMetaUsingStore]", errors.NewProcessingError("not proven", errors.NewTxInvalidError("deeper in the chain")))
+	t.Run("a TX_INVALID under another code is not a proven conflict", func(t *testing.T) {
+		err := settledError(ctx, "[processTxMetaUsingStore]", errors.NewProcessingError("not proven", errors.NewTxInvalidError("deeper in the chain")))
 		require.ErrorIs(t, err, errors.ErrContextCanceled, "only TX_INVALID on top is a proven conflict")
+	})
+}
+
+// cancelOnCheckStore cancels the caller's ctx when the conflict check makes its
+// first read (phase 1 asks for the tx's inpoints), and serves that read and every
+// later one anyway: a store whose reads had already completed when the
+// cancellation arrived.
+type cancelOnCheckStore struct {
+	utxo.Store
+	cancel context.CancelFunc
+}
+
+func (c *cancelOnCheckStore) Get(_ context.Context, hash *chainhash.Hash, fs ...fields.FieldName) (*meta.Data, error) {
+	if slices.Contains(fs, fields.TxInpoints) {
+		c.cancel()
+	}
+
+	return c.Store.Get(context.Background(), hash, fs...)
+}
+
+func (c *cancelOnCheckStore) GetMeta(_ context.Context, hash *chainhash.Hash, data *meta.Data) error {
+	return c.Store.GetMeta(context.Background(), hash, data)
+}
+
+// A proven conflict is proven by records that were read, so it is TX_INVALID on
+// every path even when ctx is cancelled while the check runs. The fresh path
+// used to return it wrapped as a cancellation in that case, while the cached path
+// and blessMissingTransaction rejected: the same block was retried or rejected
+// depending on which path reached its tx.
+func Test_provenConflictWithCancelledCtxIsTxInvalidOnEveryPath(t *testing.T) {
+	mined := utxo.WithMinedBlockInfo(utxo.MinedBlockInfo{BlockID: 77, BlockHeight: 100})
+	blockIds := map[uint32]bool{77: true}
+
+	// newStore returns a store holding tx1, conflicting, whose counter-spender is
+	// mined on the candidate chain, and a ctx the store cancels once the check
+	// starts reading.
+	newStore := func(t *testing.T) (context.Context, *settings.Settings, *cancelOnCheckStore) {
+		t.Helper()
+
+		tSettings := test.CreateBaseTestSettings(t)
+		tSettings.UtxoStore.SpendBatcherDurationMillis = 1
+
+		store := newSQLUtxoStore(t, context.Background(), tSettings)
+		buildConflictingChain(t, context.Background(), store, 1, false, mined)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+
+		return ctx, tSettings, &cancelOnCheckStore{Store: store, cancel: cancel}
+	}
+
+	requireProvenAfterCancel := func(t *testing.T, ctx context.Context, err error) {
+		t.Helper()
+
+		require.Error(t, ctx.Err(), "ctx was cancelled during the check")
+		require.ErrorIs(t, err, errors.ErrTxInvalid)
+		require.NotErrorIs(t, err, errors.ErrContextCanceled)
+	}
+
+	for _, batched := range []bool{true, false} {
+		t.Run(fmt.Sprintf("fresh path, batched=%t", batched), func(t *testing.T) {
+			ctx, tSettings, store := newStore(t)
+			s := &Server{logger: ulogger.NewErrorTestLogger(t), settings: tSettings, utxoStore: store}
+
+			txHashes := []chainhash.Hash{*tx1.TxIDChainHash()}
+			_, err := s.processTxMetaUsingStore(ctx, txHashes, make([]metaSliceItem, len(txHashes)), blockIds, batched, false, true)
+
+			requireProvenAfterCancel(t, ctx, err)
+			require.True(t, provenConflict(err), "TX_INVALID on top: %v", err)
+		})
+	}
+
+	t.Run("cached path", func(t *testing.T) {
+		ctx, tSettings, store := newStore(t)
+		s, block, cachedSubtrees := newCachedCheckServer(t, store, tSettings, []chainhash.Hash{*tx1.TxIDChainHash()}, []uint32{77})
+
+		requireProvenAfterCancel(t, ctx, s.checkCachedSubtreesAgainstCandidateChain(ctx, block, cachedSubtrees))
+	})
+
+	t.Run("bless", func(t *testing.T) {
+		ctx, tSettings, store := newStore(t)
+		s := &Server{
+			logger:          ulogger.NewErrorTestLogger(t),
+			settings:        tSettings,
+			utxoStore:       store,
+			validatorClient: conflictingValidator{},
+		}
+
+		_, err := s.blessMissingTransaction(ctx, chainhash.Hash{}, chainhash.Hash{}, tx1, 123, blockIds, validator.ProcessOptions())
+		requireProvenAfterCancel(t, ctx, err)
 	})
 }

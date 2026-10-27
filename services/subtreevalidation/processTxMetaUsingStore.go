@@ -453,10 +453,14 @@ func (u *Server) processTxMetaUsingStoreAllowing(ctx context.Context, txHashes [
 // conflict: that is a verdict on the block, and under ContextCanceled block
 // validation took it for this node's own cancellation and retried the block
 // (blockvalidation's isRecoverableBlockMessageError, and catchup's
-// releaseCatchupLock). Once ctx is done the caller has given up, and even a
-// proven conflict keeps the wrap.
+// releaseCatchupLock).
+//
+// A proven conflict leaves as TX_INVALID even once ctx is done, as on the cached
+// path and in blessMissingTransaction. The verdict needs a member whose record was
+// read and lists a block of the candidate chain; a read that failed, cancelled or
+// not, is never counted as mined, so a cancellation can only take evidence away.
 func settledError(ctx context.Context, message string, err error) error {
-	if ctx.Err() == nil && provenConflict(err) {
+	if provenConflict(err) {
 		return err
 	}
 
