@@ -218,7 +218,7 @@ func Test_processTxMetaUsingStore_passedConflictCheckKeepsEntries(t *testing.T) 
 
 	_, err := s.processTxMetaUsingStore(ctx, txHashes, txMetaSlice, map[uint32]bool{77: true}, true, true, true)
 	require.ErrorIs(t, err, errors.ErrThresholdExceeded)
-	require.ErrorIs(t, err, errors.ErrContextCanceled, "the threshold stays retryable")
+	require.NotErrorIs(t, err, errors.ErrContextCanceled, "ValidateSubtreeInternal retries the threshold by its own code")
 	require.NotErrorIs(t, err, errors.ErrTxInvalid)
 
 	require.True(t, txMetaSlice[0].isSet, "the conflicting tx passed the check, so the retry need not decorate and check it again")
@@ -408,12 +408,12 @@ func Test_blessMissingTransaction_provenTxInvalidWins(t *testing.T) {
 	require.ErrorContains(t, err, counter.TxIDChainHash().String(), "the mined counter-spender is named")
 }
 
-// processTxMetaUsingStore wraps every failure in CONTEXT_CANCELED, and block
-// validation retries what carries that code. A proven conflict is the one
-// exception: it is the block's verdict and leaves with TX_INVALID on top and no
-// CONTEXT_CANCELED in its chain, from both the batched and the unbatched branch.
-// Every other failure keeps the wrap. TestValidateBlock_ProvenConflictIsNotACancellation in blockvalidation
-// checks how the callers classify the result.
+// A proven conflict is the block's verdict: processTxMetaUsingStore returns it
+// with TX_INVALID on top and no CONTEXT_CANCELED in its chain, from both the
+// batched and the unbatched branch. A missing record keeps the CONTEXT_CANCELED
+// wrap block validation needs to retry it as this node's own failure (see
+// keepsCancellation). TestValidateBlock_ProvenConflictIsNotACancellation in
+// blockvalidation checks how the callers classify every failure.
 func Test_processTxMetaUsingStore_provenConflictIsNotACancellation(t *testing.T) {
 	ctx := context.Background()
 	mined := utxo.WithMinedBlockInfo(utxo.MinedBlockInfo{BlockID: 77, BlockHeight: 100})

@@ -448,21 +448,52 @@ func (u *Server) processTxMetaUsingStoreAllowing(ctx context.Context, txHashes [
 }
 
 // settledError is the error processTxMetaUsingStore returns for what
-// settleCollectedConflictingTxs returned. Every failure keeps the ContextCanceled
-// wrap it has always had, and so its class at every caller, except a proven
-// conflict: that is a verdict on the block, and under ContextCanceled block
-// validation took it for this node's own cancellation and retried the block
-// (blockvalidation's isRecoverableBlockMessageError, and catchup's
-// releaseCatchupLock).
+// settleCollectedConflictingTxs returned.
 //
-// A proven conflict leaves as TX_INVALID even once ctx is done, as on the cached
-// path and in blessMissingTransaction. The verdict needs a member whose record was
-// read and lists a block of the candidate chain; a read that failed, cancelled or
-// not, is never counted as mined, so a cancellation can only take evidence away.
+// A proven conflict is a verdict on the block and leaves as TX_INVALID. Under a
+// ContextCanceled wrap block validation took it for this node's own cancellation
+// and retried the block (blockvalidation's isRecoverableBlockMessageError, and
+// catchup's releaseCatchupLock). It leaves as TX_INVALID even once ctx is done, as
+// on the cached path and in blessMissingTransaction: the verdict needs a member
+// whose record was read and lists a block of the candidate chain, and a read that
+// failed, cancelled or not, is never counted as mined.
+//
+// Any other failure is this node's own, and is wrapped as a cancellation only
+// where block validation needs the wrap to treat it as one (keepsCancellation).
 func settledError(ctx context.Context, message string, err error) error {
 	if provenConflict(err) {
 		return err
 	}
 
-	return errors.NewContextCanceledError(message, err)
+	if keepsCancellation(ctx, err) {
+		return errors.NewContextCanceledError(message, err)
+	}
+
+	return err
+}
+
+// keepsCancellation reports whether settledError wraps a failure that is not a
+// proven conflict as a cancellation.
+//
+// Without the wrap, block validation already retries a store fault
+// (ERR_STORAGE_ERROR, or a local service fault), the threshold
+// (ERR_THRESHOLD_EXCEEDED), and a processing error carrying no code it reads as
+// the peer's: the walk limit, a frozen output, an input out of range. The wrap only
+// mislabelled those as cancellations. Two failures still need it:
+//
+//   - A missing record (ERR_TX_NOT_FOUND). ValidateBlock turns it into a transient
+//     block-incomplete error, a code catch-up reads as the peer's, so without the
+//     wrap catch-up would signal a peer failure, which rotates the sync peer, and
+//     fetch the block from other peers, for a record this node pruned.
+//   - A TX_INVALID under another code, such as a record the aerospike store read
+//     but could not decode. Without the wrap the Kafka path would report the
+//     announcing peer, and catch-up would report it malicious.
+//
+// A cancelled ctx, or a failure that is itself a cancellation, keeps it too.
+func keepsCancellation(ctx context.Context, err error) bool {
+	return ctx.Err() != nil ||
+		errors.Is(err, errors.ErrContextCanceled) ||
+		errors.IsContextError(err) ||
+		errors.Is(err, errors.ErrTxNotFound) ||
+		errors.Is(err, errors.ErrTxInvalid)
 }
