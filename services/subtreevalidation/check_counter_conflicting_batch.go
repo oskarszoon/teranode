@@ -82,9 +82,13 @@ const counterConflictingBatchFanOut = 128
 // per-transaction walk. The phase 2 walk may visit it times the number of
 // distinct roots (transactions and counter-spenders): the aggregate bound of the
 // per-transaction walks, so any block whose every per-transaction walk fit still
-// passes, however many conflicting transactions it carries. Exceeding it fails
-// closed with ERR_UTXO_WALK_LIMIT_EXCEEDED. The price is that a single runaway
-// cone is stopped only after that many reads, not after maxNodes.
+// passes, however many conflicting transactions it carries. Exceeding it stops
+// the walk. If the members it reached include one mined on the candidate chain,
+// the verdict is ErrTxInvalid on the first attempt, and raising the budget does
+// not change that (see VERDICT). Otherwise it fails closed with
+// ERR_UTXO_WALK_LIMIT_EXCEEDED, retryably, and raising the budget resumes
+// progress. The price is that a single runaway cone is stopped only after that
+// many reads, not after maxNodes.
 //
 // # MISSING RECORDS
 //

@@ -713,7 +713,14 @@ Upgrading from v0.16.0 changes nothing for them; upgrading from an earlier relea
   the block is rejected with `TX_INVALID` whatever else failed, and scored as any
   invalid transaction is; the retryable error is returned only when nothing is
   proven. A block that used to retry indefinitely may now be rejected on the first
-  attempt. Nothing to configure. (bsv-blockchain/teranode#2052)
+  attempt. This includes a walk over the `utxostore_conflictingChildrenMaxNodes`
+  budget that already reached a mined member: raising the setting no longer
+  changes that verdict. The fresh-path change also reaches `ValidateSubtreeInternal`,
+  so `CheckSubtreeFromBlock` and live peer subtrees return a proven conflict as
+  `TX_INVALID` too. On the live path, `subtreeMessageHandler` now logs it at error
+  level ("error processing kafka message") where it logged a "Context canceled,
+  skipping" warning, so operators will see new error-level log lines for such
+  subtrees. Nothing to configure. (bsv-blockchain/teranode#2052)
 
 ### Not breaking, but worth knowing
 
