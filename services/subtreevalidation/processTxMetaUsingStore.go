@@ -486,8 +486,13 @@ func settledError(ctx context.Context, message string, err error) error {
 //     wrap catch-up would signal a peer failure, which rotates the sync peer, and
 //     fetch the block from other peers, for a record this node pruned.
 //   - A TX_INVALID under another code, such as a record the aerospike store read
-//     but could not decode. Without the wrap the Kafka path would report the
-//     announcing peer, and catch-up would report it malicious.
+//     but could not decode. The wrap keeps the Kafka path retrying the block and
+//     keeps catch-up from charging the peer or reporting it malicious. It does not
+//     keep the peer from being struck: ValidateBlock's infrastructure guard
+//     matches context.Canceled, not ERR_CONTEXT_CANCELED, so the decode fault
+//     still gets a corrupt verdict and penalizeCorruptBlockPeer, on the Kafka
+//     path and in catch-up alike. That is pre-existing, and
+//     TestValidateBlock_ProvenConflictIsNotACancellation pins it.
 //
 // A cancelled ctx, or a failure that is itself a cancellation, keeps it too.
 func keepsCancellation(ctx context.Context, err error) bool {
