@@ -748,8 +748,10 @@ Upgrading from v0.16.0 changes nothing for them; upgrading from an earlier relea
   invalid transaction is; the retryable error is returned only when nothing is
   proven. A block that used to retry indefinitely may now be rejected on the first
   attempt. This includes a walk over the `utxostore_conflictingChildrenMaxNodes`
-  budget that already reached a mined member: raising the setting no longer
-  changes that verdict. The fresh-path change also reaches `ValidateSubtreeInternal`,
+  budget that already reached a mined counter-conflicting transaction (a
+  conflicting transaction, a counter-spender or a counter-spender's descendant;
+  the conflicting transactions' own descendants are only checked for frozen
+  outputs): raising the setting no longer changes that verdict. The fresh-path change also reaches `ValidateSubtreeInternal`,
   so `CheckSubtreeFromBlock` and live peer subtrees return a proven conflict as
   `TX_INVALID` too. On the live path, `subtreeMessageHandler` now logs it at error
   level ("error processing kafka message") where it logged a "Context canceled,

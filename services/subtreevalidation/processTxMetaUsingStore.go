@@ -26,6 +26,11 @@ import (
 
 const errProcessTxMetaContextDone = "[processTxMetaUsingStore] context done"
 
+// errProcessTxMetaSettle prefixes a settle failure that settledError wraps, on
+// both branches. It does not say the context is done: the wrap also covers a
+// missing record or a decode fault while ctx is live (keepsCancellation).
+const errProcessTxMetaSettle = "[processTxMetaUsingStore]"
+
 var TxMetaFieldsForDecorate = []fields.FieldName{fields.Fee, fields.SizeInBytes, fields.TxInpoints, fields.Conflicting, fields.BlockIDs, fields.Creating}
 
 // txMetaFieldsForBlockValidation is TxMetaFieldsForDecorate without TxInpoints.
@@ -354,7 +359,7 @@ func (u *Server) processTxMetaUsingStoreAllowing(ctx context.Context, txHashes [
 		}
 
 		if err := u.settleCollectedConflictingTxs(ctx, g.Wait(), &conflicting, txMetaSlice, blockIds); err != nil {
-			return int(missed.Load()), settledError(ctx, "[processTxMetaUsingStore]", err)
+			return int(missed.Load()), settledError(ctx, errProcessTxMetaSettle, err)
 		}
 
 		return int(missed.Load()), nil
@@ -440,7 +445,7 @@ func (u *Server) processTxMetaUsingStoreAllowing(ctx context.Context, txHashes [
 		}
 
 		if err := u.settleCollectedConflictingTxs(ctx, g.Wait(), &conflicting, txMetaSlice, blockIds); err != nil {
-			return int(missed.Load()), settledError(ctx, errProcessTxMetaContextDone, err)
+			return int(missed.Load()), settledError(ctx, errProcessTxMetaSettle, err)
 		}
 
 		return int(missed.Load()), nil

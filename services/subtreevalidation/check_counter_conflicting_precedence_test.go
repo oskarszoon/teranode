@@ -539,7 +539,7 @@ func Test_processTxMetaUsingStore_provenConflictIsNotACancellation(t *testing.T)
 	}
 
 	t.Run("a TX_INVALID under another code is not a proven conflict", func(t *testing.T) {
-		err := settledError(ctx, "[processTxMetaUsingStore]", errors.NewProcessingError("not proven", errors.NewTxInvalidError("deeper in the chain")))
+		err := settledError(ctx, errProcessTxMetaSettle, errors.NewProcessingError("not proven", errors.NewTxInvalidError("deeper in the chain")))
 		require.ErrorIs(t, err, errors.ErrContextCanceled, "only TX_INVALID on top is a proven conflict")
 	})
 }
