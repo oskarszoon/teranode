@@ -282,6 +282,23 @@ func TestValidateBlock_ProvenConflictIsNotACancellation(t *testing.T) {
 			catchupLabel: "local_storage_fault",
 		},
 		{
+			// ctx is live: a store fault is not a cancellation for naming a deadline
+			name: "a store fault naming a deadline in the conflict check",
+			build: func(t *testing.T) *conflictBlockFixture {
+				return newFaultyConflictBlockFixture(t, errors.NewStorageError("store down", context.DeadlineExceeded), false)
+			},
+			code:         errors.ErrStorageError,
+			catchupLabel: "local_storage_fault",
+		},
+		{
+			name: "a store fault naming a deadline in a decorate batch",
+			build: func(t *testing.T) *conflictBlockFixture {
+				return newFaultyConflictBlockFixture(t, errors.NewStorageError("store down", context.DeadlineExceeded), true)
+			},
+			code:         errors.ErrStorageError,
+			catchupLabel: "local_storage_fault",
+		},
+		{
 			name: "a frozen output in a counter-spender's cone",
 			build: func(t *testing.T) *conflictBlockFixture {
 				f := newConflictBlockFixture(t, conflictFixtureOptions{})

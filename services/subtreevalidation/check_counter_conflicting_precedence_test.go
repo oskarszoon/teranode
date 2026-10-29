@@ -542,6 +542,32 @@ func Test_processTxMetaUsingStore_provenConflictIsNotACancellation(t *testing.T)
 		err := settledError(ctx, errProcessTxMetaSettle, errors.NewProcessingError("not proven", errors.NewTxInvalidError("deeper in the chain")))
 		require.ErrorIs(t, err, errors.ErrContextCanceled, "only TX_INVALID on top is a proven conflict")
 	})
+
+	t.Run("a store fault whose text names a deadline is not a cancellation while ctx is live", func(t *testing.T) {
+		err := settledError(ctx, errProcessTxMetaSettle, errors.NewStorageError("store read", context.DeadlineExceeded))
+		require.NotErrorIs(t, err, errors.ErrContextCanceled)
+		require.ErrorIs(t, err, errors.ErrStorageError)
+	})
+
+	// ValidateSubtreeInternal returns the error as it is, so a failure that is not
+	// wrapped as a cancellation still carries the prefix, under its own code.
+	t.Run("a failure that is not wrapped keeps the prefix and its code", func(t *testing.T) {
+		for _, failure := range []*errors.Error{
+			errors.NewTxInvalidError("proven"),
+			errors.NewStorageError("store down"),
+			errors.NewProcessingError("walk", errors.NewUtxoWalkLimitExceededError("over budget")),
+			errors.NewThresholdExceededError("threshold"),
+		} {
+			err := settledError(ctx, errProcessTxMetaSettle, failure)
+
+			var top *errors.Error
+			require.True(t, errors.As(err, &top))
+			require.Equal(t, failure.Code(), top.Code(), "%v", err)
+			require.Equal(t, errProcessTxMetaSettle, top.Message())
+			require.ErrorIs(t, err, failure)
+			require.NotErrorIs(t, err, errors.ErrContextCanceled)
+		}
+	})
 }
 
 // cancelOnCheckStore cancels the caller's ctx when the conflict check makes its
