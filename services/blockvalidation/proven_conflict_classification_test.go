@@ -196,7 +196,7 @@ func TestValidateBlock_ProvenConflictIsNotACancellation(t *testing.T) {
 	t.Run("a mined counter-spender rejects the block", func(t *testing.T) {
 		f := newConflictBlockFixture(t, conflictFixtureOptions{counterOpts: []utxostore.CreateOption{utxostore.WithMinedBlockInfo(utxostore.MinedBlockInfo{BlockID: 0, BlockHeight: 0})}})
 
-		subtreeErr := f.bv.validateBlockSubtrees(ctx, f.block, "", "http://localhost:8000")
+		subtreeErr := f.bv.validateBlockSubtrees(ctx, f.block, "", "http://localhost:8000", false)
 		require.ErrorIs(t, subtreeErr, errors.ErrTxInvalid)
 		require.NotErrorIs(t, subtreeErr, errors.ErrContextCanceled)
 		require.False(t, isRecoverableBlockMessageError(subtreeErr))
@@ -323,7 +323,7 @@ func TestValidateBlock_ProvenConflictIsNotACancellation(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := tc.build(t)
 
-			subtreeErr := f.bv.validateBlockSubtrees(ctx, f.block, "", "http://localhost:8000")
+			subtreeErr := f.bv.validateBlockSubtrees(ctx, f.block, "", "http://localhost:8000", false)
 			require.ErrorIs(t, subtreeErr, tc.code)
 			require.Equal(t, tc.cancelWrap, errors.Is(subtreeErr, errors.ErrContextCanceled), "CONTEXT_CANCELED: %v", subtreeErr)
 			require.True(t, isRecoverableBlockMessageError(subtreeErr))
